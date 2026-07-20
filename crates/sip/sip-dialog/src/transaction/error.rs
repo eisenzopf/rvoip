@@ -63,6 +63,14 @@ pub enum Error {
     #[error("Failed to create transaction: {message}")]
     TransactionCreationError { message: String },
 
+    /// Bounded protocol-retention admission was exhausted before any request
+    /// or response was accepted on the wire.
+    #[error("Transaction capacity exhausted for {resource} (limit: {limit})")]
+    TransactionCapacityExhausted {
+        resource: &'static str,
+        limit: usize,
+    },
+
     /// Transaction message processing error
     #[error("Failed to process message: {message} for transaction {transaction_id:?}")]
     MessageProcessingError {

@@ -9,6 +9,11 @@ use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
 use crate::api::unified::MediaMode;
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
+use crate::session_lifecycle::{
+    ManagedResourceReleaseError, ManagedSessionResource, OwnedOperation, OwnedOperationCompletion,
+    ResourceDescriptor, ResourceInstallationSink, ResourceSpec, SessionOperationKind,
+};
+use crate::session_registry::SessionRegistryHandle;
 use crate::session_store::SessionStore;
 use crate::state_table::types::SessionId;
 use dashmap::DashMap;
@@ -24,13 +29,19 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 const DIAG_OFF: u8 = 1;
 const DIAG_ON: u8 = 2;
 const AUDIO_RECEIVER_CHANNEL_FRAMES: usize = 128;
+const MEDIA_CREATE_ALLOCATION_TIMEOUT: Duration = Duration::from_secs(15);
+const MEDIA_CREATE_OWNED_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const MEDIA_RESOURCE_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
 
 static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
@@ -406,6 +417,224 @@ pub struct NegotiatedConfig {
     pub remote_direction: crate::types::MediaDirection,
 }
 
+#[derive(Clone)]
+struct MediaSessionBinding {
+    handle: SessionRegistryHandle,
+    dialog_id: DialogId,
+    resource: Weak<MediaSessionResource>,
+}
+
+impl MediaSessionBinding {
+    fn matches(&self, handle: &SessionRegistryHandle, dialog_id: &DialogId) -> bool {
+        self.handle == *handle && self.dialog_id == *dialog_id
+    }
+}
+
+struct MediaCreateReservationGuard {
+    reservations: Arc<DashMap<SessionId, SessionRegistryHandle>>,
+    handle: SessionRegistryHandle,
+}
+
+impl MediaCreateReservationGuard {
+    fn new(
+        reservations: Arc<DashMap<SessionId, SessionRegistryHandle>>,
+        handle: SessionRegistryHandle,
+    ) -> Self {
+        Self {
+            reservations,
+            handle,
+        }
+    }
+}
+
+impl Drop for MediaCreateReservationGuard {
+    fn drop(&mut self) {
+        self.reservations
+            .remove_if(self.handle.session_id(), |_, owner| owner == &self.handle);
+    }
+}
+
+/// Exact ownership of one media-core allocation and its compatibility maps.
+///
+/// The lifecycle authority retains this resource across caller cancellation.
+/// Explicit state-machine cleanup and authority teardown both enter the same
+/// `OnceCell`, so the lower dialog is stopped exactly once even when terminal
+/// events race each other.
+#[derive(Clone)]
+struct MediaSessionResource {
+    controller: Arc<MediaSessionController>,
+    store: Weak<SessionStore>,
+    handle: SessionRegistryHandle,
+    dialog_id: DialogId,
+    core_media_allocated: bool,
+    create_reservations: Arc<DashMap<SessionId, SessionRegistryHandle>>,
+    bindings: Arc<DashMap<SessionId, MediaSessionBinding>>,
+    session_to_dialog: Arc<DashMap<SessionId, DialogId>>,
+    dialog_to_session: Arc<DashMap<DialogId, SessionId>>,
+    media_sessions: Arc<DashMap<SessionId, MediaSessionInfo>>,
+    audio_receivers: Arc<DashMap<SessionId, mpsc::Sender<AudioFrame>>>,
+    cleanup_attempt_total: Arc<AtomicU64>,
+    cleanup_mapped_total: Arc<AtomicU64>,
+    cleanup_media_session_removed_total: Arc<AtomicU64>,
+    cleanup_audio_receiver_removed_total: Arc<AtomicU64>,
+    released: Arc<tokio::sync::OnceCell<()>>,
+}
+
+impl MediaSessionResource {
+    fn new(
+        adapter: &MediaAdapter,
+        handle: SessionRegistryHandle,
+        dialog_id: DialogId,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            controller: Arc::clone(&adapter.controller),
+            store: Arc::downgrade(&adapter.store),
+            handle,
+            dialog_id,
+            core_media_allocated: adapter.signaling_only_local_port().is_none(),
+            create_reservations: Arc::clone(&adapter.media_create_reservations),
+            bindings: Arc::clone(&adapter.media_resources),
+            session_to_dialog: Arc::clone(&adapter.session_to_dialog),
+            dialog_to_session: Arc::clone(&adapter.dialog_to_session),
+            media_sessions: Arc::clone(&adapter.media_sessions),
+            audio_receivers: Arc::clone(&adapter.audio_receivers),
+            cleanup_attempt_total: Arc::clone(&adapter.cleanup_attempt_total),
+            cleanup_mapped_total: Arc::clone(&adapter.cleanup_mapped_total),
+            cleanup_media_session_removed_total: Arc::clone(
+                &adapter.cleanup_media_session_removed_total,
+            ),
+            cleanup_audio_receiver_removed_total: Arc::clone(
+                &adapter.cleanup_audio_receiver_removed_total,
+            ),
+            released: Arc::new(tokio::sync::OnceCell::new()),
+        })
+    }
+
+    async fn release_once(&self) -> std::result::Result<(), ManagedResourceReleaseError> {
+        self.released
+            .get_or_try_init(|| async {
+                let session_id = self.handle.session_id();
+                let guard = cleanup_diag::stage_guard(CleanupStage::MediaCleanup, &session_id.0);
+                self.cleanup_attempt_total.fetch_add(1, Ordering::Relaxed);
+
+                let binding_matches = self
+                    .bindings
+                    .get(session_id)
+                    .is_some_and(|binding| binding.matches(&self.handle, &self.dialog_id));
+                let adapter_mapping_matches = self
+                    .session_to_dialog
+                    .get(session_id)
+                    .is_some_and(|mapped| mapped.value() == &self.dialog_id);
+                if self.core_media_allocated || binding_matches || adapter_mapping_matches {
+                    self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
+                }
+
+                if self.core_media_allocated {
+                    let _ = self
+                        .controller
+                        .remove_audio_frame_callback(&self.dialog_id)
+                        .await;
+                    self.controller
+                        .stop_media(&self.dialog_id)
+                        .await
+                        .map_err(|_| ManagedResourceReleaseError::new("media-stop-failed"))?;
+                }
+
+                self.session_to_dialog
+                    .remove_if(session_id, |_, mapped| mapped == &self.dialog_id);
+                self.dialog_to_session
+                    .remove_if(&self.dialog_id, |_, mapped| mapped == session_id);
+                if self
+                    .media_sessions
+                    .remove_if(session_id, |_, info| info.dialog_id == self.dialog_id)
+                    .is_some()
+                {
+                    self.cleanup_media_session_removed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if binding_matches && self.audio_receivers.remove(session_id).is_some() {
+                    self.cleanup_audio_receiver_removed_total
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(store) = self.store.upgrade() {
+                    store
+                        .clear_media_session_retained_exact(&self.handle, &self.dialog_id)
+                        .map_err(|_| {
+                            ManagedResourceReleaseError::new("media-state-release-failed")
+                        })?;
+                }
+                self.bindings.remove_if(session_id, |_, binding| {
+                    binding.matches(&self.handle, &self.dialog_id)
+                });
+                self.create_reservations
+                    .remove_if(session_id, |_, owner| owner == &self.handle);
+
+                cleanup_session_diag::record_cleanup();
+                tracing::debug!(
+                    session_id = %session_id,
+                    dialog_id = %self.dialog_id,
+                    "released exact media session resource"
+                );
+                guard.finish_success();
+                Ok(())
+            })
+            .await
+            .map(|_| ())
+    }
+}
+
+impl ManagedSessionResource for MediaSessionResource {
+    fn descriptor(&self) -> ResourceDescriptor {
+        ResourceDescriptor::new("sip-media-session", self.dialog_id.to_string())
+    }
+
+    fn cancel(&self) {
+        // The retained owned operation observes the lifecycle cancellation
+        // signal. Async socket/controller cleanup belongs to `release`.
+    }
+
+    fn release(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<(), ManagedResourceReleaseError>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let resource = self.clone();
+        Box::pin(async move { resource.release_once().await })
+    }
+}
+
+async fn rollback_owned_media<T>(
+    operation: OwnedOperation,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    operation
+        .rollback(value)
+        .await
+        .unwrap_or_else(|_| panic!("media allocation exact rollback failed"))
+}
+
+async fn rollback_uncommitted_media<T>(
+    operation: OwnedOperation,
+    installation_sink: ResourceInstallationSink,
+    resource: Arc<MediaSessionResource>,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    if resource.release_once().await.is_ok() {
+        installation_sink
+            .confirm_unused()
+            .unwrap_or_else(|_| panic!("media allocation unused confirmation failed"));
+    } else {
+        installation_sink
+            .capture_at_install(resource as Arc<dyn ManagedSessionResource>)
+            .unwrap_or_else(|_| panic!("failed media rollback could not retain exact ownership"));
+    }
+    rollback_owned_media(operation, value).await
+}
+
 /// Minimal media adapter - just translates between media-core and state machine
 pub struct MediaAdapter {
     /// Media-core controller
@@ -417,6 +646,15 @@ pub struct MediaAdapter {
     /// Simple mapping of session IDs to dialog IDs (media-core uses DialogId)
     pub(crate) session_to_dialog: Arc<DashMap<SessionId, DialogId>>,
     pub(crate) dialog_to_session: Arc<DashMap<DialogId, SessionId>>,
+
+    /// Private admission fence for media creation. This is not a published
+    /// routing map; it only prevents concurrent creates for one exact session
+    /// from allocating or rolling back each other's lower dialog.
+    media_create_reservations: Arc<DashMap<SessionId, SessionRegistryHandle>>,
+
+    /// Exact lifecycle binding for the managed media resource. Values retain
+    /// a weak reference because the authority is the resource owner.
+    media_resources: Arc<DashMap<SessionId, MediaSessionBinding>>,
 
     /// Store media session info for SDP generation
     media_sessions: Arc<DashMap<SessionId, MediaSessionInfo>>,
@@ -528,6 +766,13 @@ pub struct MediaAdapter {
     /// `a=fmtp:18 annexb=yes` when this is true and `annexb=no` when false.
     /// Answers disable Annex B when either side advertises `annexb=no`.
     g729_annex_b: bool,
+
+    #[cfg(test)]
+    pause_media_create_after_allocation: Arc<AtomicBool>,
+    #[cfg(test)]
+    media_create_allocated: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    resume_media_create: Arc<tokio::sync::Notify>,
 }
 
 impl MediaAdapter {
@@ -545,6 +790,8 @@ impl MediaAdapter {
             store,
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
+            media_create_reservations: Arc::new(DashMap::new()),
+            media_resources: Arc::new(DashMap::new()),
             media_sessions: Arc::new(DashMap::new()),
             audio_receivers: Arc::new(DashMap::new()),
             session_create_attempt_total: Arc::new(AtomicU64::new(0)),
@@ -579,6 +826,12 @@ impl MediaAdapter {
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
             g729_annex_b: true,
+            #[cfg(test)]
+            pause_media_create_after_allocation: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            media_create_allocated: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            resume_media_create: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -661,6 +914,8 @@ impl MediaAdapter {
         serde_json::json!({
             "session_to_dialog": self.session_to_dialog.len(),
             "dialog_to_session": self.dialog_to_session.len(),
+            "media_create_reservations": self.media_create_reservations.len(),
+            "media_resources": self.media_resources.len(),
             "media_sessions": self.media_sessions.len(),
             "audio_receivers": self.audio_receivers.len(),
             "audio_receiver_queue_frames": audio_receiver_queue_frames,
@@ -1304,23 +1559,28 @@ impl MediaAdapter {
             contexts_installed,
         };
 
-        match self.store.get_session(session_id).await {
-            Ok(mut session) => {
+        match self
+            .store
+            .update_session_with(session_id, |session| {
                 session.media_security = Some(state.clone());
-                if let Err(e) = self.store.update_session(session).await {
+            })
+            .await
+        {
+            Ok(()) => {}
+            Err(e) => {
+                if self.store.with_session(session_id, |_| ()).is_ok() {
                     tracing::warn!(
                         "Failed to persist media security state for session {}: {}",
                         session_id.0,
                         e
                     );
+                } else {
+                    tracing::debug!(
+                        "Session {} was gone before media security state could be persisted: {}",
+                        session_id.0,
+                        e
+                    );
                 }
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "Session {} was gone before media security state could be persisted: {}",
-                    session_id.0,
-                    e
-                );
             }
         }
 
@@ -1404,12 +1664,6 @@ impl MediaAdapter {
         // For now, just log the recording start
         tracing::debug!("Recording started at: {}", recording_path);
 
-        // Store recording path in session if needed
-        if let Ok(session) = self.store.get_session(session_id).await {
-            // Could add a recording_path field to SessionState if needed
-            let _ = self.store.update_session(session).await;
-        }
-
         Ok(recording_path)
     }
 
@@ -1439,15 +1693,19 @@ impl MediaAdapter {
 
         // In a real implementation, this would configure the media relay to bridge RTP streams
         // For now, we'll just update the session states
-        if let Ok(mut session1_state) = self.store.get_session(session1).await {
-            session1_state.bridged_to = Some(session2.clone());
-            let _ = self.store.update_session(session1_state).await;
-        }
+        let _ = self
+            .store
+            .update_session_with(session1, |session| {
+                session.bridged_to = Some(session2.clone());
+            })
+            .await;
 
-        if let Ok(mut session2_state) = self.store.get_session(session2).await {
-            session2_state.bridged_to = Some(session1.clone());
-            let _ = self.store.update_session(session2_state).await;
-        }
+        let _ = self
+            .store
+            .update_session_with(session2, |session| {
+                session.bridged_to = Some(session1.clone());
+            })
+            .await;
 
         // Log bridge creation
         tracing::debug!("Bridge created between {} and {}", session1.0, session2.0);
@@ -1509,14 +1767,18 @@ impl MediaAdapter {
 
         // Keep the legacy session-store `bridged_to` pointers in sync so
         // anything that queries session state sees the pairing.
-        if let Ok(mut a_state) = self.store.get_session(session_a).await {
-            a_state.bridged_to = Some(session_b.clone());
-            let _ = self.store.update_session(a_state).await;
-        }
-        if let Ok(mut b_state) = self.store.get_session(session_b).await {
-            b_state.bridged_to = Some(session_a.clone());
-            let _ = self.store.update_session(b_state).await;
-        }
+        let _ = self
+            .store
+            .update_session_with(session_a, |session| {
+                session.bridged_to = Some(session_b.clone());
+            })
+            .await;
+        let _ = self
+            .store
+            .update_session_with(session_b, |session| {
+                session.bridged_to = Some(session_a.clone());
+            })
+            .await;
 
         Ok(handle)
     }
@@ -1524,11 +1786,10 @@ impl MediaAdapter {
     /// Destroy a media bridge
     pub async fn destroy_bridge(&self, session_id: &SessionId) -> Result<()> {
         // Get the bridged session
-        let bridged_session = if let Ok(session) = self.store.get_session(session_id).await {
-            session.bridged_to.clone()
-        } else {
-            None
-        };
+        let bridged_session = self
+            .store
+            .with_session(session_id, |session| session.bridged_to.clone())
+            .unwrap_or(None);
 
         if let Some(other_session) = bridged_session {
             tracing::info!(
@@ -1538,15 +1799,15 @@ impl MediaAdapter {
             );
 
             // Clear bridge information from both sessions
-            if let Ok(mut session1_state) = self.store.get_session(session_id).await {
-                session1_state.bridged_to = None;
-                let _ = self.store.update_session(session1_state).await;
-            }
+            let _ = self
+                .store
+                .update_session_with(session_id, |session| session.bridged_to = None)
+                .await;
 
-            if let Ok(mut session2_state) = self.store.get_session(&other_session).await {
-                session2_state.bridged_to = None;
-                let _ = self.store.update_session(session2_state).await;
-            }
+            let _ = self
+                .store
+                .update_session_with(&other_session, |session| session.bridged_to = None)
+                .await;
 
             // Log bridge destruction
             tracing::debug!(
@@ -1635,8 +1896,49 @@ impl MediaAdapter {
     ) -> Result<crate::types::MediaSessionId> {
         self.session_create_attempt_total
             .fetch_add(1, Ordering::Relaxed);
-        // Create dialog ID for media-core
-        let dialog_id = DialogId::new(format!("media-{}", session_id.0));
+        let handle = self.store.lifecycle_handle(session_id).ok_or_else(|| {
+            SessionError::SessionNotFound(format!("Session {} is not live", session_id.0))
+        })?;
+        if let Some(existing) = self
+            .media_resources
+            .get(session_id)
+            .filter(|binding| binding.handle == handle && binding.resource.upgrade().is_some())
+            .map(|binding| binding.dialog_id.clone())
+        {
+            self.session_create_success_total
+                .fetch_add(1, Ordering::Relaxed);
+            return Ok(existing);
+        }
+        match self.media_create_reservations.entry(session_id.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(handle.clone());
+            }
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                self.session_create_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(SessionError::InternalError(
+                    "Media creation is already in progress for this session".to_string(),
+                ));
+            }
+        }
+        // The lower-layer identity is generation-qualified. A delayed cleanup
+        // can therefore stop only the allocation it created, even after the
+        // application reuses the raw SessionId beyond its anti-reuse horizon.
+        let dialog_id = DialogId::new(format!(
+            "media-{}-{}",
+            session_id.0,
+            handle.key().resource_generation_suffix()
+        ));
+        let resource = MediaSessionResource::new(self, handle.clone(), dialog_id.clone());
+        let authority = Arc::clone(self.store.authority());
+        let adapter = self.clone();
+        let operation_key = handle.key().clone();
+        let admission_reservations = Arc::clone(&self.media_create_reservations);
+        let admission_handle = handle.clone();
+        let owned_reservation_guard = MediaCreateReservationGuard::new(
+            Arc::clone(&self.media_create_reservations),
+            handle.clone(),
+        );
 
         tracing::info!(
             "🚀 Creating media session for session {} with dialog ID {}",
@@ -1644,78 +1946,272 @@ impl MediaAdapter {
             dialog_id
         );
 
-        // Store mappings
-        self.session_to_dialog
-            .insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session
-            .insert(dialog_id.clone(), session_id.clone());
+        let waiter = authority
+            .spawn_owned_exact(
+                &operation_key,
+                SessionOperationKind::Media,
+                MEDIA_CREATE_OWNED_OPERATION_TIMEOUT,
+                move |mut operation| async move {
+                    // Constructed before supervisor admission so even a task
+                    // that is dropped before its first poll owns cleanup of
+                    // the private raw-id creation fence.
+                    let _reservation_guard = owned_reservation_guard;
+                    let spec = match ResourceSpec::new(
+                        resource.descriptor(),
+                        Vec::new(),
+                        MEDIA_RESOURCE_RELEASE_TIMEOUT,
+                    ) {
+                        Ok(spec) => spec,
+                        Err(_) => {
+                            return rollback_owned_media(
+                                operation,
+                                Err(SessionError::InternalError(
+                                    "Media resource specification failed (class=lifecycle)"
+                                        .to_string(),
+                                )),
+                            )
+                            .await;
+                        }
+                    };
+                    let install_attempt = match operation.reserve_resource(spec) {
+                        Ok(attempt) => attempt,
+                        Err(_) => {
+                            return rollback_owned_media(
+                                operation,
+                                Err(SessionError::InternalError(
+                                    "Media resource admission failed (class=lifecycle)"
+                                        .to_string(),
+                                )),
+                            )
+                            .await;
+                        }
+                    };
+                    let installation_sink = match install_attempt.dispatch() {
+                        Ok(permit) => permit.into_installation_sink(),
+                        Err(_) => {
+                            return rollback_owned_media(
+                                operation,
+                                Err(SessionError::InternalError(
+                                    "Media resource dispatch failed (class=lifecycle)"
+                                        .to_string(),
+                                )),
+                            )
+                            .await;
+                        }
+                    };
 
-        if self.signaling_only_local_port().is_some() {
-            tracing::info!(
-                "signaling-only media mode: skipped media-core allocation for session {}",
-                session_id.0
-            );
-            self.session_create_success_total
-                .fetch_add(1, Ordering::Relaxed);
-            return Ok(dialog_id);
-        }
+                    let info = if resource.core_media_allocated {
+                        let media_config = MediaConfig {
+                            local_addr: SocketAddr::new(adapter.local_ip, 0),
+                            remote_addr: None,
+                            preferred_codec: Some("PCMU".to_string()),
+                            parameters: std::collections::HashMap::new(),
+                        };
+                        let allocation = tokio::time::timeout(
+                            MEDIA_CREATE_ALLOCATION_TIMEOUT,
+                            async {
+                                adapter
+                                    .controller
+                                    .start_media(dialog_id.clone(), media_config)
+                                    .await
+                                    .map_err(|_| {
+                                        SessionError::MediaError(
+                                            "Failed to start media session (class=media-core)"
+                                                .to_string(),
+                                        )
+                                    })?;
 
-        // Create media config with our settings
-        let media_config = MediaConfig {
-            local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
-            remote_addr: None,                             // Will be set when we get remote SDP
-            preferred_codec: Some("PCMU".to_string()),     // G.711 µ-law as default
-            parameters: std::collections::HashMap::new(),
-        };
+                                #[cfg(test)]
+                                if adapter
+                                    .pause_media_create_after_allocation
+                                    .load(Ordering::Acquire)
+                                {
+                                    adapter.media_create_allocated.notify_one();
+                                    adapter.resume_media_create.notified().await;
+                                }
 
-        // Start the media session in media-core
-        self.controller
-            .start_media(dialog_id.clone(), media_config)
-            .await
-            .map_err(|e| {
+                                adapter
+                                    .controller
+                                    .get_session_info(&dialog_id)
+                                    .await
+                                    .ok_or_else(|| {
+                                        SessionError::MediaError(
+                                            "Media session disappeared during allocation"
+                                                .to_string(),
+                                        )
+                                    })
+                            },
+                        );
+                        tokio::pin!(allocation);
+                        let mut cancellation = operation.cancellation();
+                        let allocation_result = if let Some(cancel) = cancellation.as_mut() {
+                            let cancelled = async {
+                                if *cancel.borrow() {
+                                    return;
+                                }
+                                let _ = cancel.changed().await;
+                            };
+                            tokio::pin!(cancelled);
+                            tokio::select! {
+                                result = &mut allocation => Some(result),
+                                () = &mut cancelled => None,
+                            }
+                        } else {
+                            Some(allocation.await)
+                        };
+
+                        match allocation_result {
+                            Some(Ok(Ok(info))) => Some(info),
+                            Some(Ok(Err(error))) => {
+                                return rollback_uncommitted_media(
+                                    operation,
+                                    installation_sink,
+                                    resource,
+                                    Err(error),
+                                )
+                                .await;
+                            }
+                            Some(Err(_)) => {
+                                return rollback_uncommitted_media(
+                                    operation,
+                                    installation_sink,
+                                    resource,
+                                    Err(SessionError::MediaError(
+                                        "Media allocation timed out".to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                            None => {
+                                return rollback_uncommitted_media(
+                                    operation,
+                                    installation_sink,
+                                    resource,
+                                    Err(SessionError::SessionNotFound(format!(
+                                        "Session {} retired during media allocation",
+                                        handle.session_id().0
+                                    ))),
+                                )
+                                .await;
+                            }
+                        }
+                    } else {
+                        tracing::info!(
+                            "signaling-only media mode: skipped media-core allocation for session {}",
+                            handle.session_id().0
+                        );
+                        None
+                    };
+
+                    if installation_sink
+                        .capture_at_install(
+                            Arc::clone(&resource) as Arc<dyn ManagedSessionResource>
+                        )
+                        .is_err()
+                    {
+                        let _ = resource.release_once().await;
+                        return rollback_owned_media(
+                            operation,
+                            Err(SessionError::InternalError(
+                                "Media lifecycle capture failed (class=lifecycle)".to_string(),
+                            )),
+                        )
+                        .await;
+                    }
+
+                    let committed = match operation.commit() {
+                        Ok(committed) => committed,
+                        Err(failure) => {
+                            return rollback_owned_media(
+                                failure.into_operation(),
+                                Err(SessionError::SessionNotFound(format!(
+                                    "Session {} retired before media commit",
+                                    handle.session_id().0
+                                ))),
+                            )
+                            .await;
+                        }
+                    };
+
+                    // Publish compatibility maps only after the exact Media
+                    // operation has committed. The operation registration is
+                    // retained until this block completes, so teardown cannot
+                    // release the managed resource halfway through publication.
+                    adapter
+                        .session_to_dialog
+                        .insert(handle.session_id().clone(), dialog_id.clone());
+                    adapter
+                        .dialog_to_session
+                        .insert(dialog_id.clone(), handle.session_id().clone());
+                    if let Some(info) = info {
+                        adapter
+                            .media_sessions
+                            .insert(handle.session_id().clone(), info);
+                        adapter.controller.store_session_mapping(
+                            handle.session_id().0.clone(),
+                            rvoip_media_core::MediaSessionId::from_dialog(&dialog_id),
+                        );
+                    }
+                    adapter.media_resources.insert(
+                        handle.session_id().clone(),
+                        MediaSessionBinding {
+                            handle: handle.clone(),
+                            dialog_id: dialog_id.clone(),
+                            resource: Arc::downgrade(&resource),
+                        },
+                    );
+
+                    if resource.core_media_allocated {
+                        adapter
+                            .install_dtmf_callback(
+                                handle.session_id().clone(),
+                                dialog_id.clone(),
+                            )
+                            .await;
+                    }
+
+                    tracing::info!(
+                        "✅ Media session created successfully for dialog {}",
+                        dialog_id
+                    );
+                    committed.complete(Ok(dialog_id))
+                },
+            )
+            .map_err(|_| {
+                admission_reservations.remove_if(admission_handle.session_id(), |_, owner| {
+                    owner == &admission_handle
+                });
                 self.session_create_failed_total
                     .fetch_add(1, Ordering::Relaxed);
-                SessionError::MediaError(format!("Failed to start media session: {}", e))
+                SessionError::InternalError(
+                    "Media owned operation admission failed (class=lifecycle)".to_string(),
+                )
             })?;
 
-        // Install RFC 4733 DTMF callback so incoming PT 101 frames
-        // surface as `Event::DtmfReceived` on the public API bus.
-        // Fires once per digit (media-core dedupes the three §2.5.1.3
-        // retransmits) so app consumers don't see duplicate digits.
-        self.install_dtmf_callback(session_id.clone(), dialog_id.clone())
-            .await;
-
-        // Get and store session info
-        if let Some(info) = self.controller.get_session_info(&dialog_id).await {
-            self.media_sessions.insert(session_id.clone(), info.clone());
-
-            // `MediaSessionId` is a type alias for
-            // `rvoip_media_core::DialogId` (P5), so the value we hand
-            // back to session-core is identical to the controller's
-            // dialog id — no `from_dialog` reconstruction needed.
-            // `store_session_mapping` separately wants media-core's
-            // **internal** `MediaSessionId` type (still distinct), so
-            // that conversion stays.
-            let media_id = dialog_id.clone();
-            self.controller.store_session_mapping(
-                session_id.0.clone(),
-                rvoip_media_core::MediaSessionId::from_dialog(&dialog_id),
-            );
-
-            tracing::info!(
-                "✅ Media session created successfully for dialog {}",
-                dialog_id
-            );
-            self.session_create_success_total
+        let result = waiter.await.map_err(|_| {
+            // `DeadlineExceeded` deliberately does not cancel retained owned
+            // work. Removing the fence here would let a second creator race
+            // that still-running operation. The closure-owned reservation
+            // guard clears it on every actual completion, panic, or abort;
+            // the managed resource also clears it on rollback/release.
+            self.session_create_failed_total
                 .fetch_add(1, Ordering::Relaxed);
-            return Ok(media_id);
+            SessionError::InternalError(
+                "Media owned operation failed (class=lifecycle)".to_string(),
+            )
+        })?;
+        match result {
+            Ok(media_id) => {
+                self.session_create_success_total
+                    .fetch_add(1, Ordering::Relaxed);
+                Ok(media_id)
+            }
+            Err(error) => {
+                self.session_create_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(error)
+            }
         }
-
-        self.session_create_failed_total
-            .fetch_add(1, Ordering::Relaxed);
-        Err(SessionError::MediaError(
-            "Failed to get session info after creation".to_string(),
-        ))
     }
 
     /// Generate the local SDP offer. **Sole** SDP-offer generator — this
@@ -2000,7 +2496,7 @@ impl MediaAdapter {
         audio_frame: rvoip_media_core::types::AudioFrame,
     ) -> Result<()> {
         if let Some(tx) = self.audio_receivers.get(session_id) {
-            if let Err(_) = tx.send(audio_frame).await {
+            if tx.send(audio_frame).await.is_err() {
                 // Receiver has been dropped, clean up
                 self.audio_receivers.remove(session_id);
                 self.audio_subscriber_disconnected_total
@@ -2114,24 +2610,27 @@ impl MediaAdapter {
     }
 
     async fn next_sdp_origin(&self, session_id: &SessionId) -> Result<(String, u64)> {
-        let mut session = self.store.get_session(session_id).await.map_err(|e| {
+        self.store.with_session(session_id, |_| ()).map_err(|e| {
             SessionError::SessionNotFound(format!(
                 "No session state for SDP origin {}: {}",
                 session_id.0, e
             ))
         })?;
-        if session.sdp_origin_session_id.is_empty() {
-            session.sdp_origin_session_id = sdp_origin_session_id(&session.session_id.0);
-        }
-        session.sdp_origin_version = session.sdp_origin_version.saturating_add(1);
-        let out = (
-            session.sdp_origin_session_id.clone(),
-            session.sdp_origin_version,
-        );
-        self.store.update_session(session).await.map_err(|e| {
-            SessionError::MediaError(format!("Failed to persist SDP origin version: {}", e))
-        })?;
-        Ok(out)
+        self.store
+            .update_session_with(session_id, |session| {
+                if session.sdp_origin_session_id.is_empty() {
+                    session.sdp_origin_session_id = sdp_origin_session_id(&session.session_id.0);
+                }
+                session.sdp_origin_version = session.sdp_origin_version.saturating_add(1);
+                (
+                    session.sdp_origin_session_id.clone(),
+                    session.sdp_origin_version,
+                )
+            })
+            .await
+            .map_err(|e| {
+                SessionError::MediaError(format!("Failed to persist SDP origin version: {}", e))
+            })
     }
 
     /// Send DTMF digit (legacy `media_id` signature used by the state
@@ -2181,6 +2680,41 @@ impl MediaAdapter {
             session_id.0,
             dialog_id,
             duration_ms
+        );
+        Ok(())
+    }
+
+    /// Send a fully validated RFC 4733 digit sequence with explicit timing.
+    ///
+    /// The media controller validates every digit, the duration, the sequence
+    /// count, and the total schedule before emitting the first RTP packet.
+    pub async fn send_dtmf_sequence_rfc4733(
+        &self,
+        session_id: &SessionId,
+        digits: &str,
+        duration_ms: u32,
+        inter_digit_ms: u32,
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!("No media session for {}", session_id.0))
+            })?
+            .clone();
+
+        self.controller
+            .send_dtmf_sequence_packets(&dialog_id, digits, duration_ms, inter_digit_ms)
+            .await
+            .map_err(|_error| {
+                SessionError::MediaError("RFC 4733 DTMF sequence dispatch failed".to_string())
+            })?;
+
+        tracing::info!(
+            digit_count = digits.chars().count(),
+            duration_ms,
+            inter_digit_ms,
+            "Queued bounded RFC 4733 DTMF sequence"
         );
         Ok(())
     }
@@ -2267,29 +2801,65 @@ impl MediaAdapter {
     /// return `None` and exit their loops) as long as the dialog mapping is
     /// still present.
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
+        let handle = self.store.lifecycle_handle(session_id).ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Session {} has no current lifecycle handle",
+                session_id.0
+            ))
+        })?;
+        self.cleanup_session_exact(&handle).await
+    }
+
+    /// Clean up only media owned by one retained session lifetime. This path
+    /// never synthesizes a deterministic raw-ID fallback; it uses mappings or
+    /// the exact retained state captured for this generation.
+    pub(crate) async fn cleanup_session_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        let retained = self
+            .store
+            .get_session_retained_exact(handle)
+            .await
+            .map_err(|_| {
+                SessionError::SessionNotFound(format!(
+                    "Session {} exact lifetime is unavailable",
+                    handle.session_id().0
+                ))
+            })?;
+        let session_id = handle.session_id();
+        let managed_resource = self
+            .media_resources
+            .get(session_id)
+            .filter(|binding| binding.handle == *handle)
+            .and_then(|binding| binding.resource.upgrade());
+        if let Some(resource) = managed_resource {
+            resource.release_once().await.map_err(|_| {
+                SessionError::MediaError(
+                    "Failed to release exact media resource (class=media-core)".to_string(),
+                )
+            })?;
+            return Ok(());
+        }
+        self.media_resources
+            .remove_if(session_id, |_, binding| binding.handle == *handle);
+        let has_live_adapter_resources = self.session_to_dialog.contains_key(session_id)
+            || self.media_sessions.contains_key(session_id)
+            || self.audio_receivers.contains_key(session_id);
+        if retained.media_session_id.is_none() && !has_live_adapter_resources {
+            tracing::debug!(
+                session_id = %session_id,
+                "exact media cleanup was already completed for this session lifetime"
+            );
+            return Ok(());
+        }
         let guard = cleanup_diag::stage_guard(CleanupStage::MediaCleanup, &session_id.0);
         self.cleanup_attempt_total.fetch_add(1, Ordering::Relaxed);
-        // Resolve dialog_id — prefer the mapping populated by create_session
-        // (which is authoritative once set) but fall back to the deterministic
-        // form `media-<session_id>` when the mapping has been lost (e.g. on a
-        // second CleanupMedia after a Dialog3xxRedirect transition's actions
-        // already cleared it). The fallback ensures media-core's sessions map
-        // is always freed so a subsequent CreateMediaSession can reuse the
-        // same dialog_id.
-        let removed = self.session_to_dialog.remove(session_id);
-        let dialog_id = match removed {
-            Some((_, d)) => {
-                self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
-                Some(d)
-            }
-            None => {
-                // Fallback to deterministic form used by create_session.
-                self.cleanup_fallback_total.fetch_add(1, Ordering::Relaxed);
-                Some(DialogId::new(format!("media-{}", session_id.0)))
-            }
-        };
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .or_else(|| retained.media_session_id.clone());
 
         if let Some(dialog_id) = dialog_id {
+            self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
             if self.signaling_only_local_port().is_none() {
                 let _ = self
                     .controller
@@ -2299,7 +2869,12 @@ impl MediaAdapter {
                 // (media-core already cleaned up) — expected; ignore.
                 let _ = self.controller.stop_media(&dialog_id).await;
             }
-            self.dialog_to_session.remove(&dialog_id);
+            self.session_to_dialog
+                .remove_if(session_id, |_, mapped| mapped == &dialog_id);
+            self.dialog_to_session
+                .remove_if(&dialog_id, |_, mapped| mapped == session_id);
+        } else {
+            self.cleanup_fallback_total.fetch_add(1, Ordering::Relaxed);
         }
 
         if self.media_sessions.remove(session_id).is_some() {
@@ -2657,6 +3232,8 @@ impl Clone for MediaAdapter {
             store: self.store.clone(),
             session_to_dialog: self.session_to_dialog.clone(),
             dialog_to_session: self.dialog_to_session.clone(),
+            media_create_reservations: self.media_create_reservations.clone(),
+            media_resources: self.media_resources.clone(),
             media_sessions: self.media_sessions.clone(),
             audio_receivers: self.audio_receivers.clone(),
             session_create_attempt_total: self.session_create_attempt_total.clone(),
@@ -2688,6 +3265,12 @@ impl Clone for MediaAdapter {
             strict_codec_matching: self.strict_codec_matching,
             offered_codecs: self.offered_codecs.clone(),
             g729_annex_b: self.g729_annex_b,
+            #[cfg(test)]
+            pause_media_create_after_allocation: self.pause_media_create_after_allocation.clone(),
+            #[cfg(test)]
+            media_create_allocated: self.media_create_allocated.clone(),
+            #[cfg(test)]
+            resume_media_create: self.resume_media_create.clone(),
         }
     }
 }
@@ -3933,5 +4516,165 @@ a=fmtp:101 0-15\r\n";
             .cleanup_session(&session_id)
             .await
             .expect("cleanup media session");
+    }
+
+    #[tokio::test]
+    async fn teardown_during_media_create_rolls_back_exact_allocated_dialog() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("teardown-during-media-create".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create exact session");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact lifecycle handle");
+        let expected_dialog = DialogId::new(format!(
+            "media-{}-{}",
+            session_id.0,
+            handle.key().resource_generation_suffix()
+        ));
+        let adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter
+            .pause_media_create_after_allocation
+            .store(true, Ordering::Release);
+
+        let create_adapter = adapter.clone();
+        let create_session_id = session_id.clone();
+        let create =
+            tokio::spawn(async move { create_adapter.create_session(&create_session_id).await });
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            adapter.media_create_allocated.notified(),
+        )
+        .await
+        .expect("media allocation pause was reached");
+        assert!(controller
+            .get_session_info(&expected_dialog)
+            .await
+            .is_some());
+        assert!(
+            adapter.session_to_dialog.is_empty(),
+            "adapter mapping must remain unpublished before owned commit"
+        );
+        assert!(
+            controller.get_media_id(&session_id.0).is_none(),
+            "media-core compatibility mapping must remain unpublished"
+        );
+
+        let remove_store = Arc::clone(&store);
+        let remove_session_id = session_id.clone();
+        let remove =
+            tokio::spawn(async move { remove_store.remove_session(&remove_session_id).await });
+        let create_result = tokio::time::timeout(Duration::from_secs(3), create)
+            .await
+            .expect("retained media creator should observe teardown")
+            .expect("media creator task");
+        assert!(create_result.is_err());
+        tokio::time::timeout(Duration::from_secs(3), remove)
+            .await
+            .expect("exact teardown should await and finish rollback")
+            .expect("remove task")
+            .expect("remove exact session");
+
+        assert!(controller
+            .get_session_info(&expected_dialog)
+            .await
+            .is_none());
+        assert!(adapter.session_to_dialog.is_empty());
+        assert!(adapter.dialog_to_session.is_empty());
+        assert!(adapter.media_create_reservations.is_empty());
+        assert!(adapter.media_resources.is_empty());
+        assert_eq!(
+            adapter.cleanup_attempt_total.load(Ordering::Relaxed),
+            1,
+            "allocation rollback must stop the exact dialog once"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_exact_media_cleanup_releases_managed_resource_once() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("managed-media-double-cleanup".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create exact session");
+        let adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        let media_id = adapter
+            .create_session(&session_id)
+            .await
+            .expect("create managed media");
+        let mut state = store.get_session(&session_id).await.expect("session state");
+        state.media_session_id = Some(media_id.clone());
+        state.media_session_ready = true;
+        store
+            .update_session(state)
+            .await
+            .expect("publish media identity to exact session state");
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("first exact cleanup");
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("second exact cleanup is a no-op");
+
+        assert_eq!(
+            adapter.cleanup_attempt_total.load(Ordering::Relaxed),
+            1,
+            "explicit cleanup and its retry must share one release cell"
+        );
+        assert!(controller.get_session_info(&media_id).await.is_none());
+        assert!(adapter.session_to_dialog.is_empty());
+        assert!(adapter.dialog_to_session.is_empty());
+        assert!(adapter.media_create_reservations.is_empty());
+        assert!(adapter.media_resources.is_empty());
+        assert!(adapter.media_sessions.is_empty());
+        assert_eq!(
+            store
+                .get_session(&session_id)
+                .await
+                .expect("retained state")
+                .media_session_id,
+            None,
+            "managed release must clear the exact retained media identity"
+        );
+
+        store
+            .remove_session(&session_id)
+            .await
+            .expect("retire exact session");
+        assert_eq!(
+            adapter.cleanup_attempt_total.load(Ordering::Relaxed),
+            1,
+            "authority teardown must reuse the completed release cell"
+        );
     }
 }

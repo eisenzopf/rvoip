@@ -58,6 +58,13 @@ async fn whip_patch_ice_restart_returns_new_answer() {
         .await
         .expect("whip post");
     assert_eq!(post_resp.status(), reqwest::StatusCode::CREATED);
+    let etag = post_resp
+        .headers()
+        .get("etag")
+        .expect("etag")
+        .to_str()
+        .expect("etag ascii")
+        .to_owned();
     let first_answer = post_resp.text().await.expect("answer body");
     assert!(first_answer.contains("m=audio"));
 
@@ -78,9 +85,7 @@ async fn whip_patch_ice_restart_returns_new_answer() {
         .await
         .expect("restart offer");
 
-    // G2: ICE restart PATCH now requires If-Match per RFC 9725 §4.4.1.
-    // The ETag is the quoted connection id (see build_session_headers).
-    let etag = format!("\"{conn_id}\"");
+    // ICE restart PATCH requires the exact current strong entity tag.
     let patch_resp = client
         .patch(format!("{base}/whip/{conn_id}"))
         .header("content-type", "application/sdp")
@@ -90,6 +95,14 @@ async fn whip_patch_ice_restart_returns_new_answer() {
         .await
         .expect("whip patch");
     assert_eq!(patch_resp.status(), reqwest::StatusCode::OK);
+    let rotated_etag = patch_resp
+        .headers()
+        .get("etag")
+        .expect("rotated etag")
+        .to_str()
+        .expect("etag ascii")
+        .to_owned();
+    assert_ne!(rotated_etag, etag);
     let restart_answer = patch_resp.text().await.expect("restart answer");
     assert!(restart_answer.contains("m=audio"));
 

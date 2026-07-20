@@ -125,6 +125,16 @@ struct IndexedAllocatorState {
     last_port: u16,
 }
 
+/// Aggregate allocator diagnostics safe for logs and health endpoints.
+/// Session identifiers, IP addresses, and exact port numbers are omitted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PortAllocatorDiagnostics {
+    pub capacity_ports: usize,
+    pub allocated_ports: usize,
+    pub active_sessions: usize,
+    pub recently_released_ports: usize,
+}
+
 /// Port allocation manager
 pub struct PortAllocator {
     /// Allocator configuration
@@ -203,6 +213,35 @@ impl PortAllocator {
     /// Set a custom platform socket strategy
     pub fn set_socket_strategy(&mut self, strategy: PlatformSocketStrategy) {
         self.socket_strategy = strategy;
+    }
+
+    /// Return aggregate-only allocator state without exposing tenant/session
+    /// identifiers or routable addresses.
+    pub async fn diagnostics(&self) -> Result<PortAllocatorDiagnostics> {
+        let capacity_ports = usize::from(
+            self.config
+                .port_range_end
+                .saturating_sub(self.config.port_range_start),
+        ) + 1;
+
+        if let Some(state) = &self.indexed_state {
+            let state = state
+                .lock()
+                .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+            return Ok(PortAllocatorDiagnostics {
+                capacity_ports,
+                allocated_ports: state.allocated_ports.len(),
+                active_sessions: state.session_ports.len(),
+                recently_released_ports: 0,
+            });
+        }
+
+        Ok(PortAllocatorDiagnostics {
+            capacity_ports,
+            allocated_ports: self.allocated_ports.lock().await.len(),
+            active_sessions: self.session_ports.lock().await.len(),
+            recently_released_ports: self.released_ports.lock().await.len(),
+        })
     }
 
     /// Allocate a pair of ports for RTP and RTCP
@@ -983,6 +1022,63 @@ mod tests {
                 .expect("released port should be available through the index");
 
             assert_eq!(reused, second);
+        });
+    }
+
+    #[test]
+    fn bounded_pool_exhaustion_release_and_diagnostics_are_deterministic() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let allocator = PortAllocator::with_config(PortAllocatorConfig {
+                port_range_start: 12_000,
+                port_range_end: 12_001,
+                allocation_strategy: AllocationStrategy::Incremental,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: false,
+                default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                allocation_retries: 2,
+                validate_ports: false,
+                capacity_hint: 2,
+            });
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+            let first = allocator
+                .allocate_port_pair("tenant-secret-call-a", Some(ip))
+                .await
+                .expect("first reservation")
+                .0;
+            allocator
+                .allocate_port_pair("tenant-secret-call-b", Some(ip))
+                .await
+                .expect("second reservation");
+            assert!(
+                allocator
+                    .allocate_port_pair("tenant-secret-call-c", Some(ip))
+                    .await
+                    .is_err(),
+                "a bounded pool must fail closed when exhausted"
+            );
+
+            let full = allocator.diagnostics().await.expect("diagnostics");
+            assert_eq!(full.capacity_ports, 2);
+            assert_eq!(full.allocated_ports, 2);
+            assert_eq!(full.active_sessions, 2);
+            let rendered = format!("{full:?}");
+            assert!(!rendered.contains("tenant-secret"));
+            assert!(!rendered.contains("127.0.0.1"));
+            assert!(!rendered.contains("12000"));
+
+            allocator
+                .release_session("tenant-secret-call-a")
+                .await
+                .expect("release first session");
+            let reused = allocator
+                .allocate_port_pair("replacement", Some(ip))
+                .await
+                .expect("released capacity is reusable")
+                .0;
+            assert_eq!(reused, first);
         });
     }
 

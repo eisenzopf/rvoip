@@ -2,7 +2,7 @@ use crate::capability::CapabilityDescriptor;
 use crate::connection::{Connection, Direction, Transport};
 use crate::data::DataMessage;
 use crate::identity::{AuthenticatedPrincipal, IdentityAssurance, Jwk, PrincipalOwnershipKey};
-use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId};
+use crate::ids::{ConnectionId, ParticipantId, PlaybackId, SessionId, TransferAttemptId};
 use crate::stream::QualitySnapshot;
 use std::any::Any;
 use std::fmt;
@@ -706,6 +706,61 @@ impl fmt::Debug for TransferTarget {
     }
 }
 
+/// Transport-neutral asynchronous transfer status.
+///
+/// Returning successfully from an adapter's `transfer` operation means only
+/// that it submitted the transfer request. Protocols such
+/// as SIP report authoritative progress and completion later (for example via
+/// REFER NOTIFY sipfrags); adapters surface those reports with
+/// [`AdapterEvent::TransferStatus`].
+#[derive(Clone, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TransferStatus {
+    /// The remote endpoint accepted responsibility for processing the transfer.
+    Accepted,
+    /// A provisional status was reported for the transfer target.
+    Progress { status_code: u16, reason: String },
+    /// A final successful status was reported.
+    Completed { status_code: u16, reason: String },
+    /// A final failure status was reported.
+    Failed { status_code: u16, reason: String },
+}
+
+impl fmt::Debug for TransferStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accepted => formatter.write_str("Accepted"),
+            Self::Progress {
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("Progress")
+                .field("status_code", status_code)
+                .field("reason", &"[redacted]")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Completed {
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("Completed")
+                .field("status_code", status_code)
+                .field("reason", &"[redacted]")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::Failed {
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("Failed")
+                .field("status_code", status_code)
+                .field("reason", &"[redacted]")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
+}
+
 /// Handle returned by adapter playback paths that lets callers stop an
 /// in-flight playback.
 pub struct PlaybackHandle {
@@ -777,6 +832,18 @@ pub enum AdapterEvent {
     Connected {
         connection_id: ConnectionId,
     },
+    /// Connection-scoped provisional signaling reported by an adapter.
+    ///
+    /// `early_media` is true only when the provisional response established
+    /// a usable media description (for SIP, a 183 response carrying SDP).
+    /// The raw transport description is intentionally not exposed through
+    /// this transport-neutral event.
+    Progress {
+        connection_id: ConnectionId,
+        status_code: u16,
+        reason: String,
+        early_media: bool,
+    },
     Authenticated {
         connection_id: ConnectionId,
         identity_id: String,
@@ -815,6 +882,15 @@ pub enum AdapterEvent {
         connection_id: ConnectionId,
         message: DataMessage,
     },
+    /// An asynchronous, protocol-authoritative transfer update.
+    TransferStatus {
+        connection_id: ConnectionId,
+        /// Correlates this update with the exact submitted transfer when the
+        /// adapter can provide transaction-safe correlation. Legacy adapters
+        /// report `None`.
+        attempt_id: Option<TransferAttemptId>,
+        status: TransferStatus,
+    },
     StepUpResponse {
         connection_id: ConnectionId,
         method: String,
@@ -831,6 +907,18 @@ impl fmt::Debug for AdapterEvent {
         match self {
             Self::InboundConnection { .. } => formatter.write_str("InboundConnection"),
             Self::Connected { .. } => formatter.write_str("Connected"),
+            Self::Progress {
+                status_code,
+                reason,
+                early_media,
+                ..
+            } => formatter
+                .debug_struct("Progress")
+                .field("status_code", status_code)
+                .field("reason_present", &!reason.is_empty())
+                .field("reason_bytes", &reason.len())
+                .field("early_media", early_media)
+                .finish(),
             Self::Authenticated { .. } => formatter.write_str("Authenticated"),
             Self::PrincipalAuthenticated { .. } => formatter.write_str("PrincipalAuthenticated"),
             Self::Ended { .. } => formatter.write_str("Ended"),
@@ -857,6 +945,13 @@ impl fmt::Debug for AdapterEvent {
             Self::DataMessage { message, .. } => formatter
                 .debug_struct("DataMessage")
                 .field("body_bytes", &message.bytes.len())
+                .finish(),
+            Self::TransferStatus {
+                attempt_id, status, ..
+            } => formatter
+                .debug_struct("TransferStatus")
+                .field("attempt_id_present", &attempt_id.is_some())
+                .field("status", status)
                 .finish(),
             Self::StepUpResponse {
                 method, credential, ..
@@ -1109,6 +1204,28 @@ mod tests {
             AdapterEvent::StepUpResponse { credential, .. } => assert_eq!(credential, CANARY),
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn transfer_status_debug_never_renders_peer_reason() {
+        const CANARY: &str = "transfer-reason-canary\r\nAuthorization: exposed";
+        let event = AdapterEvent::TransferStatus {
+            connection_id: ConnectionId::new(),
+            attempt_id: Some(TransferAttemptId::from_string(CANARY)),
+            status: TransferStatus::Failed {
+                status_code: 503,
+                reason: CANARY.into(),
+            },
+        };
+
+        let rendered = format!("{event:?}");
+        assert!(
+            !rendered.contains(CANARY),
+            "transfer reason leaked: {rendered}"
+        );
+        assert!(rendered.contains("503"));
+        assert!(rendered.contains("[redacted]"));
+        assert!(rendered.contains("attempt_id_present"));
     }
 
     #[test]

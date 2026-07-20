@@ -54,10 +54,7 @@ pub trait CommonClientTransaction {
 
         Box::pin(async move {
             // Store the response
-            {
-                let mut last_response = data.last_response.lock().await;
-                *last_response = Some(response.clone());
-            }
+            data.record_response(response.clone()).await;
 
             // Send a command to the transaction to process the response
             data.cmd_tx

@@ -7,28 +7,31 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use rvoip_auth_core::{BearerAuthError, BearerValidator, ValidatedBearer};
 use rvoip_core_traits::broadcast::{
     BroadcastLifecycleState, BroadcastPublisher, BroadcastSubstrate,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
+use rvoip_core_traits::ids::StreamId;
+use rvoip_core_traits::stream::{MediaFrame, StreamKind};
 use rvoip_core_traits::{AuthenticatedPrincipal, AuthenticationMethod};
 use rvoip_moq::{
-    BoundedMemoryMoqReplayStore, BoundedMemoryMoqSessionLeaseStore, MoqAction, MoqAuthorizer,
-    MoqBroadcastPublisher, MoqCatalogDeliveryMode, MoqCatalogSubscriber,
-    MoqCatalogSubscriberConfig, MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig,
-    MoqNamespace, MoqPeerIdentity, MoqPublisherConfig, MoqRelayAdmissionConfig,
-    MoqRelayAdmissionSubstrate, MoqRelayClient, MoqRelayConnectionPolicy, MoqRelayDeploymentMode,
-    MoqRelayPublisherBinding, MoqRelayRuntime, MoqRelayRuntimeConfig, MoqRelayRuntimeLimits,
-    MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig,
-    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqRelayTopology, MoqRelayTopologyLimits,
-    MoqRelayUpstreamHealth, MoqRelayUpstreamReconnectMode, MoqRelayUpstreamRoute,
-    MoqRelayUpstreamRouteError, MoqRelayUpstreamRoutes, MoqResource, MoqRevocationChecker,
-    MoqRevocationError, MoqRevocationStatus, MoqSessionLeaseLimits, MoqSubscriberCredential,
-    MoqSubscriberCredentialError, MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest,
-    MoqTokenBinding, MsfCatalogState, RvoipMoqRelayAdmission, SecureMoqAuthorizer,
-    MOQT_NEGOTIATED_PROTOCOL,
+    BoundedMemoryMoqReplayStore, BoundedMemoryMoqSessionLeaseStore, MoqAction, MoqAudioSubscriber,
+    MoqAudioSubscriberConfig, MoqAudioSubscriberLifecycle, MoqAuthorizer, MoqBroadcastPublisher,
+    MoqCatalogDeliveryMode, MoqCatalogSubscriber, MoqCatalogSubscriberConfig,
+    MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig, MoqNamespace, MoqPeerIdentity,
+    MoqPublisherConfig, MoqRelayAdmissionConfig, MoqRelayAdmissionSubstrate, MoqRelayClient,
+    MoqRelayConnectionPolicy, MoqRelayDeploymentMode, MoqRelayPublisherBinding, MoqRelayRuntime,
+    MoqRelayRuntimeConfig, MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity, MoqRelayRuntimeTimeouts,
+    MoqRelayServerTlsConfig, MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqRelayTopology,
+    MoqRelayTopologyLimits, MoqRelayUpstreamHealth, MoqRelayUpstreamReconnectMode,
+    MoqRelayUpstreamRoute, MoqRelayUpstreamRouteError, MoqRelayUpstreamRoutes, MoqResource,
+    MoqRevocationChecker, MoqRevocationError, MoqRevocationStatus, MoqSessionLeaseLimits,
+    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
+    MoqSubscriberCredentialRequest, MoqTokenBinding, MsfCatalogState, RvoipMoqRelayAdmission,
+    SecureMoqAuthorizer, MOQT_NEGOTIATED_PROTOCOL,
 };
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -310,6 +313,50 @@ async fn wait_for_live_catalog(
     }
 }
 
+async fn wait_for_live_audio_catalog(
+    subscriber: &MoqAudioSubscriber,
+) -> rvoip_moq::MoqCatalogSubscriptionSnapshot {
+    let mut updates = subscriber.updates();
+    tokio::time::timeout(NETWORK_TIMEOUT, async {
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.lifecycle == MoqCatalogSubscriberLifecycle::Live {
+                return snapshot;
+            }
+            assert!(!snapshot.lifecycle.is_terminal(), "{snapshot:?}");
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "managed audio catalog timed out: {:?}",
+            subscriber.snapshot()
+        )
+    })
+}
+
+async fn wait_for_live_audio_track(subscriber: &MoqAudioSubscriber) {
+    let mut updates = subscriber.audio_updates();
+    tokio::time::timeout(NETWORK_TIMEOUT, async {
+        loop {
+            let snapshot = updates.borrow_and_update().clone();
+            if snapshot.lifecycle == MoqAudioSubscriberLifecycle::Live {
+                return;
+            }
+            assert!(!snapshot.lifecycle.is_terminal(), "{snapshot:?}");
+            updates.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "managed audio track timed out: {:?}",
+            subscriber.audio_snapshot()
+        )
+    });
+}
+
 async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -417,18 +464,18 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
         subscriber_address.port()
     ))
     .unwrap();
-    let mut config = MoqCatalogSubscriberConfig::new(subscriber_target, namespace);
-    config.substrate = substrate;
-    config.attempt_timeout = Duration::from_secs(5);
-    config.max_reconnect_attempts = 1;
-    config.reconnect_initial_backoff = Duration::from_millis(20);
-    config.reconnect_max_backoff = Duration::from_millis(20);
-    config.reconnect_deadline = Duration::from_secs(5);
-    let warm_config = config.clone();
+    let mut config = MoqAudioSubscriberConfig::new(subscriber_target, namespace);
+    config.catalog.substrate = substrate;
+    config.catalog.attempt_timeout = Duration::from_secs(5);
+    config.catalog.max_reconnect_attempts = 1;
+    config.catalog.reconnect_initial_backoff = Duration::from_millis(20);
+    config.catalog.reconnect_max_backoff = Duration::from_millis(20);
+    config.catalog.reconnect_deadline = Duration::from_secs(5);
+    let warm_config = config.catalog.clone();
     let credentials: Arc<dyn MoqSubscriberCredentialProvider> = Arc::new(FreshCredentials {
         next: AtomicU64::new(1),
     });
-    let catalog_subscriber = MoqCatalogSubscriber::bind(
+    let catalog_subscriber = MoqAudioSubscriber::bind(
         "127.0.0.1:0".parse().unwrap(),
         config,
         MoqCatalogSubscriberTlsConfig {
@@ -437,8 +484,10 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
         credentials,
     )
     .unwrap();
+    let mut audio_objects = catalog_subscriber.audio_objects();
 
-    let snapshot = wait_for_live_catalog(&catalog_subscriber).await;
+    let snapshot = wait_for_live_audio_catalog(&catalog_subscriber).await;
+    wait_for_live_audio_track(&catalog_subscriber).await;
     assert_eq!(snapshot.substrate, Some(admission_substrate));
     assert_eq!(
         snapshot.negotiated_protocol.as_deref(),
@@ -455,6 +504,28 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
     let latest = snapshot.latest.expect("live catalog update missing");
     assert_eq!(latest.catalog.state(), MsfCatalogState::Live);
     assert_eq!(latest.catalog.tracks().len(), 1);
+
+    publisher
+        .frames_out()
+        .send(MediaFrame {
+            stream_id: StreamId::new(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from_static(&[0x78, 0x00]),
+            timestamp_rtp: 960,
+            captured_at: Utc::now(),
+            payload_type: Some(111),
+        })
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(NETWORK_TIMEOUT, audio_objects.recv())
+        .await
+        .expect("managed audio object timed out")
+        .expect("managed audio receiver closed");
+    assert_eq!(received.object.object_id, 0);
+    assert_eq!(received.object.timestamp, 960);
+    assert_eq!(received.object.timescale, 48_000);
+    assert_eq!(received.object.payload, Bytes::from_static(&[0x78, 0x00]));
+    assert_eq!(catalog_subscriber.audio_snapshot().received_objects, 1);
 
     // Keep the cold subscription active so the shared relay cache retains a
     // Largest Object. The next subscriber must use Relative Joining FETCH.
@@ -489,14 +560,26 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
         .await
         .expect("warm catalog subscriber close timed out")
         .expect("warm catalog subscriber close failed");
-    tokio::time::timeout(NETWORK_TIMEOUT, catalog_subscriber.close())
-        .await
-        .expect("catalog subscriber close timed out")
-        .expect("catalog subscriber close failed");
     tokio::time::timeout(NETWORK_TIMEOUT, Arc::clone(&publisher).close())
         .await
         .expect("publisher close timed out")
         .expect("publisher close failed");
+    tokio::time::timeout(NETWORK_TIMEOUT, catalog_subscriber.wait())
+        .await
+        .expect("audio subscriber terminal catalog timed out")
+        .expect("audio subscriber terminal catalog failed");
+    assert_eq!(
+        catalog_subscriber.snapshot().lifecycle,
+        MoqCatalogSubscriberLifecycle::PermanentlyCompleted
+    );
+    assert_eq!(
+        catalog_subscriber.audio_snapshot().lifecycle,
+        MoqAudioSubscriberLifecycle::Closed
+    );
+    tokio::time::timeout(NETWORK_TIMEOUT, catalog_subscriber.close())
+        .await
+        .expect("audio subscriber close timed out")
+        .expect("audio subscriber close failed");
     tokio::time::timeout(NETWORK_TIMEOUT, relay_publication.wait())
         .await
         .expect("publisher relay completion timed out")
@@ -837,11 +920,11 @@ async fn external_mtls_route_crosses_independent_relay_topologies_and_drains() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn publisher_to_managed_relay_to_catalog_subscriber_over_raw_quic() {
+async fn publisher_to_managed_relay_to_audio_subscriber_over_raw_quic() {
     assert_managed_relay_path(MoqRelaySubstratePolicy::RawQuic).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn publisher_to_managed_relay_to_catalog_subscriber_over_webtransport() {
+async fn publisher_to_managed_relay_to_audio_subscriber_over_webtransport() {
     assert_managed_relay_path(MoqRelaySubstratePolicy::WebTransport).await;
 }

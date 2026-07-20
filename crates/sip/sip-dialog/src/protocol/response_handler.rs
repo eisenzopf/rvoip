@@ -1110,18 +1110,26 @@ impl DialogManager {
                 if let Some(secs) = dlg.session_expires_secs {
                     let is_refresher = dlg.is_session_refresher;
                     drop(dlg);
-                    crate::manager::session_timer::spawn_refresh_task(
+                    if let Err(_error) = crate::manager::session_timer::spawn_refresh_task(
                         self.clone(),
                         dialog_id.clone(),
                         secs,
                         is_refresher,
-                    );
+                    )
+                    .await
+                    {
+                        warn!(dialog=%dialog_id, "Session refresh task was not started");
+                    }
                 }
             }
         }
 
         // Send appropriate session coordination event
-        let event = if response.status_code() >= 200 && response.status_code() < 300 {
+        let is_invite_response = _transaction_id.method() == &rvoip_sip_core::Method::Invite;
+        let event = if response.status_code() >= 200
+            && response.status_code() < 300
+            && is_invite_response
+        {
             SessionCoordinationEvent::CallAnswered {
                 dialog_id: dialog_id.clone(),
                 session_answer: response.body_string().unwrap_or_default(),
@@ -1131,6 +1139,14 @@ impl DialogManager {
                 dialog_id: dialog_id.clone(),
                 response: response.clone(),
                 transaction_id: _transaction_id.clone(),
+                request_uri: self.exact_outbound_request_uri(&_transaction_id).await,
+            }
+        } else if response.status_code() >= 200 && !is_invite_response {
+            SessionCoordinationEvent::ResponseReceived {
+                dialog_id: dialog_id.clone(),
+                response: response.clone(),
+                transaction_id: _transaction_id.clone(),
+                request_uri: None,
             }
         } else if response.status_code() >= 300 {
             // E5: RFC 3261 §21.3 Redirect responses (300/301/302/305/380) carry
@@ -1222,7 +1238,9 @@ impl DialogManager {
                 info!("Session progress for dialog {}", dialog_id);
 
                 // Check for early media (SDP in 183)
-                if !response.body().is_empty() {
+                if _transaction_id.method() == &rvoip_sip_core::Method::Invite
+                    && !response.body().is_empty()
+                {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.notify_session_layer(SessionCoordinationEvent::EarlyMedia {
                         dialog_id: dialog_id.clone(),
@@ -1329,6 +1347,7 @@ impl DialogManager {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
+            request_uri: None,
         })
         .await?;
 
@@ -1378,7 +1397,9 @@ impl DialogManager {
                 }
 
                 // Successful completion - could be call answered, request completed, etc.
-                if !response.body().is_empty() {
+                if transaction_id.method() == &rvoip_sip_core::Method::Invite
+                    && !response.body().is_empty()
+                {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.notify_session_layer(SessionCoordinationEvent::CallAnswered {
                         dialog_id: dialog_id.clone(),
@@ -1446,7 +1467,7 @@ impl DialogManager {
                     transaction_id: transaction_id.clone(),
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
-                    method: "Unknown".to_string(), // TODO: Extract from transaction context
+                    method: transaction_id.method().to_string(),
                 })
                 .await?;
             }
@@ -1471,7 +1492,7 @@ impl DialogManager {
                     transaction_id: transaction_id.clone(),
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
-                    method: "Unknown".to_string(), // TODO: Extract from transaction context
+                    method: transaction_id.method().to_string(),
                 })
                 .await?;
             }
@@ -1490,6 +1511,11 @@ impl DialogManager {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
+            request_uri: if response_has_auth_challenge(&response) {
+                self.exact_outbound_request_uri(&transaction_id).await
+            } else {
+                None
+            },
         })
         .await?;
 

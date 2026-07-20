@@ -32,6 +32,22 @@ cargo test -p rvoip-sip --features perf-tests --release \
     --test perf_call_setup_cps -- --nocapture
 ```
 
+For the fixed in-process 2,000-CPS beta control and its matching CPU, timing,
+and memory captures, use
+`scripts/perf_call_setup_2k_profile.sh <clean|cpu|timing|memory>`. The script
+resolves the exact executable from Cargo JSON, fixes the canonical runtime
+profile, isolates each run's report, and writes a provenance manifest. `clean`
+first conditions the same booted peers at `30,100,300,1000` CPS, then measures
+the 2,000-CPS point. This reproduces the reviewed beta sweep's allocator and
+retention state instead of comparing a cold process with a warmed fifth point.
+It samples for 95 seconds after the measured calls drain, without endpoint
+diagnostic scans in the active window. `clean` also verifies the exact
+workload/configuration, runs
+`scripts/perf_2k_acceptance.py` against the absolute beta limits, and gates
+`perf_audit.py --fail-on-regression` against the reviewed `20260706T181609Z`
+baseline. Only a `PASS` clean manifest is acceptance evidence; see
+[`PROFILING.md`](PROFILING.md#canonical-2000-cps-reproduction).
+
 Enable diagnostic features only for targeted investigation runs:
 
 | Feature | Adds |
@@ -276,6 +292,7 @@ blocks before attributing answer timeouts to Rust queue sizing.
 | `RVOIP_PERF_RAMP_SECS` | 1, 3 | 5 | Ramp from 0 → target CPS — applies to every sweep point too. |
 | `RVOIP_PERF_STEADY_SECS` | 1, 3 | 30 | Steady-state window. Publish only over a representative window — 5 s runs are dominated by ramp / cooldown noise. |
 | `RVOIP_PERF_COOLDOWN_SECS` | 1, 3 | 5 | Drain window before snapshotting. |
+| `RVOIP_PERF_POST_DRAIN_SAMPLE_SECS` | 1 | 0 | Continue resource sampling after the final sweep point drains. The canonical clean control fixes this at 95 seconds; ordinary sweeps leave it off. |
 | `RVOIP_PERF_CALL_TIMEOUT_SECS` | 1, 2 | 15 / 30 | Per-call deadline. Distinguishes "slow" from "stuck". |
 | `RVOIP_PERF_CONCURRENT_TARGET` | 2 | 500 | Single-point default for concurrent-call ceiling. |
 | `RVOIP_PERF_HOLD_SECS` | 2 | 10 | Steady-state hold before teardown. |
@@ -354,6 +371,45 @@ This is **per-process** memory, not per-call working-set in a
 production-shaped deployment. Treat it as an upper bound: a real
 deployment running rvoip-sip alongside other workloads will share
 allocator overhead, OS page caches, and dynamic libs.
+
+Resource reports distinguish the configured request from what was actually
+observed. `rss_tail_window_requested_secs` is the requested tail length;
+`rss_tail_window_secs`, `rss_tail_sample_count`, and
+`rss_tail_window_complete` describe actual coverage. A 35-second run therefore
+cannot silently label its all-run slope as a 60-second tail. Named windows make
+the same distinction: `requested_coverage_secs` comes from configuration, while
+`actual_coverage_secs` comes only from the first and last observed samples.
+Scheduler overshoot at sampler shutdown never changes the configured request.
+
+The fixed beta threshold of `2378.44 MB/min` applies to
+`rss_active_growth_mb_per_min`, selected from `point_start` through
+`calls_drained`. That is the window represented by the reviewed historical
+sweep. It is not an idle leak threshold. The 95-second cleanup window still
+reports `rss_cleanup_growth_mb_per_hour`, but that hour-projected least-squares
+slope is diagnostic: on a multi-gigabyte process, roughly one megabyte of
+allocator or RSS sampling movement can appear as tens of MB/hour.
+
+The short cleanup gate instead uses
+`rss_cleanup_endpoint_growth_mb_per_hour`. It first calculates
+`rss_cleanup_retained_growth_mb`, the signed difference between median RSS in
+the first and last sixth of the observed window (each endpoint band is capped
+at 15 seconds), then divides that delta by the actual separation between the
+two bands' median sample timestamps. This preserves the 10 MB/hour limit
+without treating the unobserved outer edges of the 95-second window as growth
+time and without an additive allowance.
+
+A compact structural snapshot is taken only after resource sampling stops and
+must independently report zero retained call structures. The 30-minute
+monolithic and one-hour split soaks enforce the same unadjusted 10 MB/hour slope
+and remain authoritative for sustained-growth claims.
+
+`diagnostics.measurement_identity` records the ordered conditioning points,
+their offered/succeeded calls, shared-peer lifetime, resource phase names, and
+sampling cadence. `perf_audit.py` refuses the scalar comparison as
+`NON_COMPARABLE` when either conditioning or window identity differs. For the
+reviewed pre-schema baseline only, the auditor reconstructs this identity from
+its complete `_sweep.json` and per-point reports; it reports that inference and
+the available sample-count evidence explicitly.
 
 ### 3.4 What the numbers don't tell you
 
@@ -445,7 +501,12 @@ extra keys is fine, removing a canonical one is a breaking change.
     "build_profile": "release",
     "global_allocator": "mimalloc",
     "rvoip_sip_version": "0.2.2",
-    "git_rev": "a9a3383c"
+    "git_rev": "a9a3383c",
+    "git_commit": "a9a3383c...",
+    "git_dirty": false,
+    "source_fingerprint_sha256": "...",
+    "cargo_features": ["perf-tests"],
+    "requested_cargo_features": "perf-tests"
   },
   "load": {
     "target_cps": 200.0,
@@ -490,6 +551,11 @@ Latency values are in **nanoseconds**. Consumers should convert as
 needed for display. Resource fields are `null` when the scenario
 doesn't populate them.
 
+Call-setup reports additionally place the performance-recipe SHA-256, an
+allowlisted runtime-switch snapshot, complete effective endpoint configuration,
+and workload phase markers under `diagnostics`. These fields make a dirty-tree
+profile reproducible without adding provenance to headline result keys.
+
 ### 4.1 New result keys (Phase 1.5)
 
 Every scenario emits these on top of the headline number:
@@ -503,6 +569,22 @@ Every scenario emits these on top of the headline number:
 - `resources.rss_growth_mb_per_min` — least-squares slope of RSS over
   time. Near zero on a healthy run; positive growth is the leak
   indicator that backs the "no leaks" Rust pitch.
+- `resources.rss_tail_window_requested_secs` and
+  `resources.rss_tail_window_secs` — configured versus actually observed tail
+  coverage; completeness and sample count are reported alongside them.
+- `resources.rss_windows.<name>` — phase names, requested/actual boundaries,
+  sample count, completeness, slope, and robust endpoint medians for explicit
+  windows. The canonical names are `active_load` and `post_drain_cleanup`.
+- `resources.rss_active_growth_mb_per_min` and
+  `resources.rss_cleanup_growth_mb_per_hour` — convenient scalar slope
+  projections of those two named windows. The cleanup slope is diagnostic for
+  the 95-second control.
+- `resources.rss_cleanup_retained_growth_mb` — robust absolute cleanup delta;
+  the nested window also records endpoint medians, representative timestamps,
+  their separation, band duration, and sample counts.
+- `resources.rss_cleanup_endpoint_growth_mb_per_hour` — the robust delta
+  normalized by the representative timestamp separation and used by the
+  10 MB/hour short-window gate.
 - `resources.avg_cpu_pct` — process-level CPU% averaged across the
   steady window (excludes the first sysinfo sample, which is always 0).
 - `resources.rss_samples_mb` — the raw `(t_secs, rss_mb, cpu_pct)`

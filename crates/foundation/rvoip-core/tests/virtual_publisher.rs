@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,20 +27,61 @@ fn opus() -> CodecInfo {
     }
 }
 
+fn g711(name: &str) -> CodecInfo {
+    CodecInfo {
+        name: name.to_owned(),
+        clock_rate_hz: 8_000,
+        channels: 1,
+        fmtp: None,
+    }
+}
+
+#[test]
+fn virtual_publisher_setup_future_is_send() {
+    fn assert_send<T: Send>(_: T) {}
+
+    let orchestrator = Orchestrator::new(Config::default());
+    assert_send(orchestrator.register_virtual_publisher(
+        ConnectionId::new(),
+        VirtualPublisherDescriptor::new(
+            SessionId::new(),
+            StreamId::from_string("audio/main"),
+            "send-regression",
+        ),
+    ));
+    assert_send(orchestrator.register_virtual_publisher_with_codec(
+        ConnectionId::new(),
+        VirtualPublisherDescriptor::new(
+            SessionId::new(),
+            StreamId::from_string("audio/main"),
+            "explicit-codec-send-regression",
+        ),
+        opus(),
+    ));
+}
+
 struct TestMediaStream {
     id: StreamId,
+    codec: CodecInfo,
     inbound: Mutex<Option<mpsc::Receiver<MediaFrame>>>,
+    inbound_acquisitions: AtomicUsize,
     outbound: mpsc::Sender<MediaFrame>,
 }
 
 impl TestMediaStream {
     fn source() -> (Arc<Self>, mpsc::Sender<MediaFrame>) {
+        Self::source_with_codec(opus())
+    }
+
+    fn source_with_codec(codec: CodecInfo) -> (Arc<Self>, mpsc::Sender<MediaFrame>) {
         let (inbound_tx, inbound_rx) = mpsc::channel(32);
         let (outbound, _outbound_rx) = mpsc::channel(1);
         (
             Arc::new(Self {
                 id: StreamId::new(),
+                codec,
                 inbound: Mutex::new(Some(inbound_rx)),
+                inbound_acquisitions: AtomicUsize::new(0),
                 outbound,
             }),
             inbound_tx,
@@ -52,11 +94,17 @@ impl TestMediaStream {
         (
             Arc::new(Self {
                 id: StreamId::new(),
+                codec: opus(),
                 inbound: Mutex::new(Some(inbound_rx)),
+                inbound_acquisitions: AtomicUsize::new(0),
                 outbound,
             }),
             outbound_rx,
         )
+    }
+
+    fn inbound_acquisitions(&self) -> usize {
+        self.inbound_acquisitions.load(Ordering::Acquire)
     }
 }
 
@@ -71,7 +119,7 @@ impl MediaStream for TestMediaStream {
     }
 
     fn codec(&self) -> CodecInfo {
-        opus()
+        self.codec.clone()
     }
 
     fn direction(&self) -> Direction {
@@ -79,21 +127,27 @@ impl MediaStream for TestMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        self.inbound
+        let receiver = self
+            .inbound
             .lock()
             .expect("inbound lock")
             .take()
-            .unwrap_or_else(|| mpsc::channel(1).1)
+            .unwrap_or_else(|| mpsc::channel(1).1);
+        self.inbound_acquisitions.fetch_add(1, Ordering::AcqRel);
+        receiver
     }
 
     fn try_frames_in(&self) -> Result<mpsc::Receiver<MediaFrame>> {
-        self.inbound
-            .lock()
-            .expect("inbound lock")
-            .take()
-            .ok_or(RvoipError::InvalidState(
-                "test stream receiver already acquired",
-            ))
+        let receiver =
+            self.inbound
+                .lock()
+                .expect("inbound lock")
+                .take()
+                .ok_or(RvoipError::InvalidState(
+                    "test stream receiver already acquired",
+                ))?;
+        self.inbound_acquisitions.fetch_add(1, Ordering::AcqRel);
+        Ok(receiver)
     }
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
@@ -253,6 +307,154 @@ fn frame(stream_id: StreamId, payload: &'static [u8]) -> MediaFrame {
     }
 }
 
+fn encoded_frame(
+    stream_id: StreamId,
+    payload: Vec<u8>,
+    timestamp_rtp: u32,
+    payload_type: u8,
+) -> MediaFrame {
+    MediaFrame {
+        stream_id,
+        kind: StreamKind::Audio,
+        payload: Bytes::from(payload),
+        timestamp_rtp,
+        captured_at: Utc::now(),
+        payload_type: Some(payload_type),
+    }
+}
+
+async fn assert_g711_source_publishes_canonical_opus(source_codec: CodecInfo, source_pt: u8) {
+    let orchestrator = Orchestrator::new(Config::default());
+    let (adapter, events) = TestAdapter::new();
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register adapter");
+
+    let source_id = ConnectionId::new();
+    let subscriber_id = ConnectionId::new();
+    let (source, source_tx) = TestMediaStream::source_with_codec(source_codec);
+    let source_stream_id = source.id();
+    let (subscriber, mut subscriber_rx) = TestMediaStream::sink();
+    adapter.add_stream(source_id.clone(), source.clone());
+    adapter.add_stream(subscriber_id.clone(), subscriber);
+    register_connection(&events, source_id.clone()).await;
+    register_connection(&events, subscriber_id.clone()).await;
+
+    let descriptor = VirtualPublisherDescriptor::new(
+        SessionId::new(),
+        StreamId::from_string("audio/main"),
+        "canonical-opus-origin",
+    );
+    let publisher = orchestrator
+        .register_virtual_publisher_with_codec(source_id.clone(), descriptor.clone(), opus())
+        .await
+        .expect("register canonical Opus publisher");
+    orchestrator
+        .try_add_direct_subscriptions(
+            &descriptor.session_id,
+            &subscriber_id,
+            &[(source_id.clone(), descriptor.stream_id.clone())],
+        )
+        .expect("admit direct subscriber");
+
+    // A second Opus sink must share the publisher's codec group rather than
+    // taking or decoding the source receiver again.
+    let (observer_tx, mut observer_rx) = mpsc::channel(4);
+    let observer_route = orchestrator
+        .attach_media_sink(source_id.clone(), opus(), observer_tx)
+        .await
+        .expect("attach canonical Opus observer");
+    let graph = orchestrator
+        .media_graph_for_connection(source_id.clone())
+        .await
+        .expect("source graph");
+    let installed = graph.snapshot().await;
+    assert_eq!(source.inbound_acquisitions(), 1);
+    assert_eq!(installed.codec_groups.len(), 1);
+    assert_eq!(installed.codec_groups[0].target_payload_type, 111);
+    assert_eq!(installed.codec_groups[0].sink_routes.len(), 2);
+
+    let first_timestamp = u32::MAX - 159;
+    for (value, timestamp) in [(0xff, first_timestamp), (0x7f, 0)] {
+        source_tx
+            .send(encoded_frame(
+                source_stream_id.clone(),
+                vec![value; 160],
+                timestamp,
+                source_pt,
+            ))
+            .await
+            .expect("send G.711 frame");
+    }
+
+    let subscriber_first = tokio::time::timeout(Duration::from_secs(2), subscriber_rx.recv())
+        .await
+        .expect("first subscriber frame deadline")
+        .expect("first subscriber frame");
+    let subscriber_second = tokio::time::timeout(Duration::from_secs(2), subscriber_rx.recv())
+        .await
+        .expect("second subscriber frame deadline")
+        .expect("second subscriber frame");
+    let observer_first = tokio::time::timeout(Duration::from_secs(2), observer_rx.recv())
+        .await
+        .expect("first observer frame deadline")
+        .expect("first observer frame");
+    let observer_second = tokio::time::timeout(Duration::from_secs(2), observer_rx.recv())
+        .await
+        .expect("second observer frame deadline")
+        .expect("second observer frame");
+
+    for received in [
+        &subscriber_first,
+        &subscriber_second,
+        &observer_first,
+        &observer_second,
+    ] {
+        assert_eq!(received.payload_type, Some(111));
+        assert!(!received.payload.is_empty());
+    }
+    assert_eq!(subscriber_first.stream_id, descriptor.stream_id);
+    assert_eq!(subscriber_second.stream_id, descriptor.stream_id);
+    assert_eq!(
+        subscriber_second
+            .timestamp_rtp
+            .wrapping_sub(subscriber_first.timestamp_rtp),
+        960
+    );
+    assert_eq!(
+        observer_second
+            .timestamp_rtp
+            .wrapping_sub(observer_first.timestamp_rtp),
+        960
+    );
+    assert_eq!(subscriber_first.payload, observer_first.payload);
+    assert_eq!(subscriber_second.payload, observer_second.payload);
+
+    let registry_entry = orchestrator
+        .publisher_registry()
+        .entry(&descriptor.session_id, descriptor.stream_id.as_str())
+        .expect("publisher registry row");
+    assert_eq!(registry_entry.codec, Some(opus()));
+    let completed = graph.snapshot().await;
+    assert_eq!(completed.source_frames, 2);
+    assert_eq!(completed.transcode_operations, 2);
+    assert_eq!(completed.codec_groups[0].transcode_operations, 2);
+    assert_eq!(source.inbound_acquisitions(), 1);
+
+    publisher.close().await.expect("close publisher");
+    assert!(orchestrator.detach_media_sink(&source_id, observer_route));
+}
+
+#[tokio::test]
+async fn pcmu_virtual_publisher_transcodes_once_to_canonical_opus() {
+    assert_g711_source_publishes_canonical_opus(g711("pcmu"), 0).await;
+}
+
+#[tokio::test]
+async fn pcma_virtual_publisher_transcodes_once_to_canonical_opus() {
+    assert_g711_source_publishes_canonical_opus(g711("pcma"), 8).await;
+}
+
 #[tokio::test]
 async fn virtual_publisher_shares_one_media_graph_and_fans_canonical_stream() {
     let orchestrator = Orchestrator::new(Config::default());
@@ -275,16 +477,18 @@ async fn virtual_publisher_shares_one_media_graph_and_fans_canonical_stream() {
         StreamId::from_string("audio/main"),
         "bridgefu-origin",
     );
-    orchestrator.add_subscription(
-        descriptor.session_id.clone(),
-        subscriber_id,
-        source_id.clone(),
-        descriptor.stream_id.clone(),
-    );
     let publisher = orchestrator
         .register_virtual_publisher(source_id.clone(), descriptor.clone())
         .await
         .expect("register virtual publisher");
+    orchestrator
+        .try_add_direct_subscriptions(
+            &descriptor.session_id,
+            &subscriber_id,
+            &[(source_id.clone(), descriptor.stream_id.clone())],
+        )
+        .expect("admit direct subscriber");
+    assert_eq!(orchestrator.active_direct_listener_count(), 1);
 
     let registry = orchestrator.publisher_registry();
     let entry = registry
@@ -323,6 +527,10 @@ async fn virtual_publisher_shares_one_media_graph_and_fans_canonical_stream() {
 
     let route_status = publisher.route_status();
     publisher.close().await.expect("close publisher");
+    assert_eq!(orchestrator.active_direct_listener_count(), 0);
+    assert!(orchestrator
+        .subscribers_for(&descriptor.session_id, &source_id, &descriptor.stream_id,)
+        .is_empty());
     assert!(registry
         .entry(&descriptor.session_id, descriptor.stream_id.as_str())
         .is_none());

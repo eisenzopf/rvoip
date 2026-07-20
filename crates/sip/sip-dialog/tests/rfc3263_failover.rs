@@ -10,7 +10,7 @@
 //!    returns the FULL candidate list (not just the first) so callers
 //!    can do §4.3 failover.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
@@ -19,8 +19,11 @@ use async_trait::async_trait;
 use rvoip_sip_core::types::headers::HeaderAccess;
 use rvoip_sip_core::{Message, Method, Request, Uri};
 use rvoip_sip_dialog::manager::transaction_integration::CandidateWirePlan;
+use rvoip_sip_dialog::transaction::timer::TimerSettings;
 use rvoip_sip_dialog::transaction::transport::multiplexed::MultiplexedTransport;
-use rvoip_sip_dialog::transaction::TransactionManager;
+use rvoip_sip_dialog::transaction::{
+    ClientTransactionFailure, ClientTransactionOutcome, TransactionKey, TransactionManager,
+};
 use rvoip_sip_dialog::DialogManager;
 use rvoip_sip_transport::error::Error as TransportError;
 use rvoip_sip_transport::resolver::{ResolvedTarget, Resolver, ResolverError};
@@ -399,13 +402,27 @@ async fn build_event_manager_with_transport() -> (
     Arc<ProgrammableTransport>,
     mpsc::Sender<TransportEvent>,
 ) {
+    build_event_manager_with_transport_and_timers(None).await
+}
+
+async fn build_event_manager_with_transport_and_timers(
+    timer_settings: Option<TimerSettings>,
+) -> (
+    Arc<DialogManager>,
+    Arc<ProgrammableTransport>,
+    mpsc::Sender<TransportEvent>,
+) {
     let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
     let transport = Arc::new(ProgrammableTransport::new(local_addr));
     let (transport_tx, transport_rx) = mpsc::channel(64);
-    let (transaction_manager, event_rx) =
-        TransactionManager::new(transport.clone(), transport_rx, Some(64))
-            .await
-            .expect("TransactionManager::new");
+    let (transaction_manager, event_rx) = TransactionManager::new_with_config(
+        transport.clone(),
+        transport_rx,
+        Some(64),
+        timer_settings,
+    )
+    .await
+    .expect("TransactionManager::new_with_config");
     let manager = Arc::new(
         DialogManager::with_global_events(Arc::new(transaction_manager), event_rx, local_addr)
             .await
@@ -446,6 +463,54 @@ async fn wait_for_request_count(
     .unwrap_or_else(|_| {
         panic!(
             "timed out waiting for {count} {} request(s); messages={:?}",
+            method,
+            transport.messages()
+        )
+    })
+}
+
+fn client_transaction_key_for_request(request: &Request) -> TransactionKey {
+    let branch = request
+        .first_via()
+        .and_then(|via| via.branch().map(str::to_owned))
+        .expect("client request Via branch");
+    TransactionKey::new(branch, request.method().clone(), false)
+}
+
+fn unique_requests_sent_as(
+    transport: &ProgrammableTransport,
+    method: Method,
+) -> Vec<(Request, SocketAddr)> {
+    let mut branches = HashSet::new();
+    requests_sent_as(transport, method)
+        .into_iter()
+        .filter(|(request, _)| {
+            request
+                .first_via()
+                .and_then(|via| via.branch().map(str::to_owned))
+                .is_some_and(|branch| branches.insert(branch))
+        })
+        .collect()
+}
+
+async fn wait_for_unique_request_count(
+    transport: &ProgrammableTransport,
+    method: Method,
+    count: usize,
+) -> Vec<(Request, SocketAddr)> {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let requests = unique_requests_sent_as(transport, method.clone());
+            if requests.len() >= count {
+                return requests;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for {count} unique {} request(s); messages={:?}",
             method,
             transport.messages()
         )
@@ -516,6 +581,15 @@ fn response_for_invite(
         builder = builder.contact(contact, None);
     }
     builder.build()
+}
+
+fn response_for_request(
+    request: &Request,
+    status: rvoip_sip_core::StatusCode,
+) -> rvoip_sip_core::Response {
+    use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+    SimpleResponseBuilder::response_from_request(request, status, None).build()
 }
 
 async fn inject_response(
@@ -795,6 +869,25 @@ async fn late_success_from_superseded_invite_is_reacked_and_byeed_once() {
         wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 1).await;
     assert_eq!(byes[0].1, first);
     assert_eq!(byes[0].0.to().and_then(|to| to.tag()), Some("late-fork"));
+    let bye_transaction = client_transaction_key_for_request(&byes[0].0);
+    inject_response(
+        &transport_tx,
+        response_for_request(&byes[0].0, StatusCode::Ok),
+        first,
+    )
+    .await;
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &bye_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for late-fork BYE completion"),
+        Some(ClientTransactionOutcome::FinalResponse(response))
+            if response.status().as_u16() == 200
+    ));
 
     inject_response(&transport_tx, late_success, first).await;
     wait_for_request_count(&transport, Method::Ack, acknowledgements.len() + 1).await;
@@ -803,6 +896,317 @@ async fn late_success_from_superseded_invite_is_reacked_and_byeed_once() {
         requests_sent_as(&transport, Method::Bye).len(),
         1,
         "duplicate late 2xx must be ACKed again without emitting a second BYE"
+    );
+    assert_eq!(
+        manager
+            .transaction_manager()
+            .retention_counts()
+            .event_subscribers,
+        0,
+        "late-fork cleanup must use exact completion, not a global event subscription"
+    );
+}
+
+#[tokio::test]
+async fn retransmitted_late_2xx_while_fork_bye_is_pending_is_reacked_without_parallel_bye() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.41:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.42:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-pending-bye",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+
+    let late_success = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "late-fork-pending-bye",
+        Some("sip:bob@10.0.3.41:5060"),
+    );
+    let acknowledgements_before = requests_sent_as(&transport, Method::Ack).len();
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    let byes = wait_for_unique_request_count(&transport, Method::Bye, 1).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 1).await;
+
+    // The fork BYE has crossed the wire but has no final response. A
+    // retransmitted INVITE 2xx still needs an immediate ACK; it must not race
+    // a second BYE against the pending authoritative transaction.
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(unique_requests_sent_as(&transport, Method::Bye).len(), 1);
+
+    inject_response(
+        &transport_tx,
+        response_for_request(&byes[0].0, StatusCode::Ok),
+        first,
+    )
+    .await;
+    let bye_transaction = client_transaction_key_for_request(&byes[0].0);
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &bye_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for pending late-fork BYE"),
+        Some(ClientTransactionOutcome::FinalResponse(response))
+            if response.status().as_u16() == 200
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    inject_response(&transport_tx, late_success, first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 3).await;
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(
+        unique_requests_sent_as(&transport, Method::Bye).len(),
+        1,
+        "confirmed cleanup must suppress any later BYE while preserving re-ACK"
+    );
+    assert_eq!(
+        manager
+            .transaction_manager()
+            .retention_counts()
+            .event_subscribers,
+        0
+    );
+}
+
+#[tokio::test]
+async fn rejected_late_fork_bye_remains_retryable_until_a_bye_2xx() {
+    use rvoip_sip_core::StatusCode;
+
+    let (manager, transport, transport_tx) = build_event_manager_with_transport().await;
+    let first: SocketAddr = "10.0.3.51:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.52:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-bye-rejection",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+
+    let late_success = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "late-fork-bye-rejection",
+        Some("sip:bob@10.0.3.51:5060"),
+    );
+    let acknowledgements_before = requests_sent_as(&transport, Method::Ack).len();
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    let first_byes = wait_for_unique_request_count(&transport, Method::Bye, 1).await;
+    let first_bye_transaction = client_transaction_key_for_request(&first_byes[0].0);
+    inject_response(
+        &transport_tx,
+        response_for_request(&first_byes[0].0, StatusCode::ServerInternalError),
+        first,
+    )
+    .await;
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &first_bye_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for rejected late-fork BYE"),
+        Some(ClientTransactionOutcome::FinalResponse(response))
+            if response.status().as_u16() == 500
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 2).await;
+    let retry_byes = wait_for_unique_request_count(&transport, Method::Bye, 2).await;
+    assert_ne!(
+        retry_byes[0]
+            .0
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned)),
+        retry_byes[1]
+            .0
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned)),
+        "a rejected cleanup must retry with a new BYE transaction"
+    );
+    inject_response(
+        &transport_tx,
+        response_for_request(&retry_byes[1].0, StatusCode::Ok),
+        first,
+    )
+    .await;
+    let retry_transaction = client_transaction_key_for_request(&retry_byes[1].0);
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &retry_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for successful retry BYE"),
+        Some(ClientTransactionOutcome::FinalResponse(response))
+            if response.status().as_u16() == 200
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    inject_response(&transport_tx, late_success, first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 3).await;
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    assert_eq!(unique_requests_sent_as(&transport, Method::Bye).len(), 2);
+    assert_eq!(
+        manager
+            .transaction_manager()
+            .retention_counts()
+            .event_subscribers,
+        0
+    );
+}
+
+#[tokio::test]
+async fn timed_out_late_fork_bye_remains_retryable() {
+    use rvoip_sip_core::StatusCode;
+
+    let timer_settings = TimerSettings {
+        t1: std::time::Duration::from_millis(25),
+        t2: std::time::Duration::from_millis(50),
+        t4: std::time::Duration::from_millis(25),
+        transaction_timeout: std::time::Duration::from_millis(250),
+        wait_time_k: std::time::Duration::from_millis(25),
+        ..TimerSettings::default()
+    };
+    let (manager, transport, transport_tx) =
+        build_event_manager_with_transport_and_timers(Some(timer_settings)).await;
+    let first: SocketAddr = "10.0.3.61:5060".parse().unwrap();
+    let second: SocketAddr = "10.0.3.62:5060".parse().unwrap();
+    send_test_initial_invite(
+        &manager,
+        vec![
+            ResolvedTarget::immediate(first, TransportType::Udp),
+            ResolvedTarget::immediate(second, TransportType::Udp),
+        ],
+        "retained-plan-late-fork-bye-timeout",
+    )
+    .await;
+    let first_invite = wait_for_request_count(&transport, Method::Invite, 1).await[0]
+        .0
+        .clone();
+    inject_response(
+        &transport_tx,
+        response_for_invite(
+            &first_invite,
+            StatusCode::ServiceUnavailable,
+            "first-503",
+            None,
+        ),
+        first,
+    )
+    .await;
+    wait_for_request_count(&transport, Method::Invite, 2).await;
+
+    let late_success = response_for_invite(
+        &first_invite,
+        StatusCode::Ok,
+        "late-fork-bye-timeout",
+        Some("sip:bob@10.0.3.61:5060"),
+    );
+    let acknowledgements_before = requests_sent_as(&transport, Method::Ack).len();
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    let first_byes = wait_for_unique_request_count(&transport, Method::Bye, 1).await;
+    let first_bye_transaction = client_transaction_key_for_request(&first_byes[0].0);
+
+    // Exercise the response-versus-timeout race: the duplicate 2xx arrives
+    // while the first BYE is pending. It is ACKed without creating BYE #2
+    // until the exact timeout has released the cleanup claim.
+    inject_response(&transport_tx, late_success.clone(), first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 2).await;
+    assert_eq!(unique_requests_sent_as(&transport, Method::Bye).len(), 1);
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &first_bye_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for late-fork BYE timeout"),
+        Some(ClientTransactionOutcome::Failure(
+            ClientTransactionFailure::Timeout
+        ))
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+    inject_response(&transport_tx, late_success, first).await;
+    wait_for_request_count(&transport, Method::Ack, acknowledgements_before + 3).await;
+    let retry_byes = wait_for_unique_request_count(&transport, Method::Bye, 2).await;
+    inject_response(
+        &transport_tx,
+        response_for_request(&retry_byes[1].0, StatusCode::Ok),
+        first,
+    )
+    .await;
+    let retry_transaction = client_transaction_key_for_request(&retry_byes[1].0);
+    assert!(matches!(
+        manager
+            .transaction_manager()
+            .wait_for_client_transaction_outcome(
+                &retry_transaction,
+                std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("wait for timeout retry BYE"),
+        Some(ClientTransactionOutcome::FinalResponse(response))
+            if response.status().as_u16() == 200
+    ));
+    assert_eq!(
+        manager
+            .transaction_manager()
+            .retention_counts()
+            .event_subscribers,
+        0
     );
 }
 
@@ -860,6 +1264,12 @@ async fn late_fork_bye_resolves_a_contact_with_a_different_dns_authority() {
         byes[0].0.uri().to_string(),
         "sip:bob@late-fork.example.com:5090"
     );
+    inject_response(
+        &transport_tx,
+        response_for_request(&byes[0].0, StatusCode::Ok),
+        contact_target,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -980,6 +1390,12 @@ async fn failed_late_fork_ack_blocks_bye_until_retransmitted_success_retries_cle
         byes[0].0.to().and_then(|to| to.tag()),
         Some("late-fork-ack-retry")
     );
+    inject_response(
+        &transport_tx,
+        response_for_request(&byes[0].0, StatusCode::Ok),
+        first,
+    )
+    .await;
 }
 
 #[tokio::test]

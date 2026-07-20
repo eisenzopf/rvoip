@@ -158,6 +158,7 @@ pub fn require_bound_wire_connection(
 
 pub async fn send_data_message_via_envelope(
     out_tx: &mpsc::Sender<UctpEnvelope>,
+    cid: &str,
     sid: &str,
     conn: &ConnectionId,
     message: &DataMessage,
@@ -177,11 +178,17 @@ pub async fn send_data_message_via_envelope(
         }
         other => RvoipError::Adapter(format!("invalid data message: {other}")),
     })?;
+    if cid.is_empty() {
+        return Err(RvoipError::Adapter(
+            "UCTP data route has no authenticated conversation binding".into(),
+        ));
+    }
     let env = UctpEnvelope::new(
         MessageType::MessageSend,
         serde_json::to_value(payload)
             .map_err(|error| RvoipError::Adapter(format!("encode message.send: {error}")))?,
     )
+    .with_cid(cid.to_string())
     .with_sid(sid.to_string())
     .with_connid(conn.to_string());
     out_tx
@@ -332,5 +339,49 @@ mod tests {
             binding.bind_wire_connection(&owner, ConnectionId::from_string("conn_wire_b")),
             Err(ConnectionBindingError::AlreadyBound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn data_messages_retain_the_exact_conversation_for_each_session() {
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let routes = [
+            ("conv-a", "session-a", "connection-a"),
+            ("conv-b", "session-b", "connection-b"),
+        ];
+        for (cid, sid, connid) in routes {
+            send_data_message_via_envelope(
+                &out_tx,
+                cid,
+                sid,
+                &ConnectionId::from_string(connid),
+                &DataMessage::reliable("route.test", "text/plain", cid),
+            )
+            .await
+            .expect("send exact route message");
+        }
+
+        for (cid, sid, connid) in routes {
+            let envelope = out_rx.recv().await.expect("data envelope");
+            assert_eq!(envelope.msg_type, MessageType::MessageSend);
+            assert_eq!(envelope.cid.as_deref(), Some(cid));
+            assert_eq!(envelope.sid.as_deref(), Some(sid));
+            assert_eq!(envelope.connid.as_deref(), Some(connid));
+        }
+    }
+
+    #[tokio::test]
+    async fn data_message_without_conversation_binding_is_rejected() {
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let error = send_data_message_via_envelope(
+            &out_tx,
+            "",
+            "session-a",
+            &ConnectionId::from_string("connection-a"),
+            &DataMessage::reliable("route.test", "text/plain", "payload"),
+        )
+        .await
+        .expect_err("missing cid must fail closed");
+        assert!(matches!(error, RvoipError::Adapter(_)));
+        assert!(out_rx.try_recv().is_err());
     }
 }

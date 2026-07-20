@@ -9,7 +9,8 @@
 //! and the registered RTCP-NACK feedback (see `peer/builder.rs`) round-
 //! trips: the sender records non-zero NACK + retransmit counts.
 //!
-//! Skips gracefully when Docker isn't reachable.
+//! Uses a hermetic in-process TURN server, so relay setup failures are test
+//! failures rather than skips.
 
 mod support {
     pub mod coturn_fixture;
@@ -23,19 +24,22 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::MediaStream;
 use rvoip_webrtc::config::IceTransportPolicy;
-use rvoip_webrtc::media::{from_tracks, silent_rtp_payload_for_ssrc};
+use rvoip_webrtc::media::{from_tracks, silent_opus_payload};
 use rvoip_webrtc::peer::{connect_loopback, RvoipPeerConnection};
 use rvoip_webrtc::WebRtcConfig;
 use support::lossy_turn_fixture::LossyTurnFixture;
 use tokio::sync::Notify;
 
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "turn-fork-candidate"),
+    ignore = "requires the owner-reviewed UDP TURN/NACK alpha-fork candidate"
+)]
 async fn nack_round_trip_through_lossy_turn() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let Some(fixture) = LossyTurnFixture::start(0.05, 0xCAFE).await else {
-        eprintln!("skipped: docker / coturn unavailable");
-        return;
-    };
+    let fixture = LossyTurnFixture::start(0.05, 0xCAFE)
+        .await
+        .expect("start lossy TURN fixture");
 
     let mut config = WebRtcConfig::loopback();
     config.ice_servers = vec![fixture.ice_config()];
@@ -44,17 +48,10 @@ async fn nack_round_trip_through_lossy_turn() {
     config.gather_timeout_secs = 20;
 
     let (offerer, answerer) =
-        match tokio::time::timeout(Duration::from_secs(60), connect_loopback(&config)).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => {
-                eprintln!("skipped: lossy relay handshake failed ({e})");
-                return;
-            }
-            Err(_) => {
-                eprintln!("skipped: lossy relay handshake timed out");
-                return;
-            }
-        };
+        tokio::time::timeout(Duration::from_secs(60), connect_loopback(&config))
+            .await
+            .expect("lossy relay handshake timed out")
+            .expect("lossy relay handshake failed");
 
     let codec = CodecInfo {
         name: "opus".into(),
@@ -101,12 +98,14 @@ async fn nack_round_trip_through_lossy_turn() {
     answerer_stream.attach_remote(remote);
 
     let mut inbound = answerer_stream.frames_in();
+    let loss_before_media = fixture.snapshot();
+    fixture.enable_loss();
 
     // Pump 200 frames over ~4 s. At 5 % loss → ~10 lost on each direction.
     let pump_offerer = offerer_stream.clone();
     let pump = tokio::spawn(async move {
         for seq in 1..=200u16 {
-            let payload = silent_rtp_payload_for_ssrc(offerer_ssrc, seq, seq as u32 * 960);
+            let payload = silent_opus_payload();
             if pump_offerer
                 .frames_out()
                 .send(rvoip_core::stream::MediaFrame {
@@ -128,28 +127,41 @@ async fn nack_round_trip_through_lossy_turn() {
 
     // Drain inbound concurrently so SCTP/RTP back-pressure doesn't stall.
     let drain = tokio::spawn(async move {
+        let mut received_timestamps = Vec::new();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         while tokio::time::Instant::now() < deadline {
-            if tokio::time::timeout(Duration::from_millis(100), inbound.recv())
-                .await
-                .is_err()
-            {
-                continue;
+            match tokio::time::timeout(Duration::from_millis(100), inbound.recv()).await {
+                Ok(Some(frame)) => received_timestamps.push(frame.timestamp_rtp),
+                Ok(None) => break,
+                Err(_) => continue,
             }
         }
+        received_timestamps
     });
 
     let _ = pump.await;
-    let _ = drain.await;
+    let received_timestamps = drain.await.expect("inbound drain task");
+    let timestamp_gaps = received_timestamps
+        .windows(2)
+        .filter(|pair| pair[1].wrapping_sub(pair[0]) > 960)
+        .count();
 
     // Let stats poller observe at least one cycle after the pump completes.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let inbound_stats = answerer_stream.webrtc_stats_snapshot();
     let outbound_stats = offerer_stream.webrtc_stats_snapshot();
+    let loss_after_media = fixture.snapshot();
+    let media_phase_drops = loss_after_media
+        .client_packets_dropped
+        .saturating_sub(loss_before_media.client_packets_dropped)
+        + loss_after_media
+            .server_packets_dropped
+            .saturating_sub(loss_before_media.server_packets_dropped);
 
     eprintln!(
-        "lossy_turn_nack: inbound packets_lost={} jitter_ms={}, outbound nack_count={} retransmits={}",
+        "lossy_turn_nack: proxy={loss_after_media:?}, media_phase_drops={media_phase_drops}, received_frames={}, timestamp_gaps={timestamp_gaps}, inbound packets_lost={} jitter_ms={}, outbound nack_count={} retransmits={}",
+        received_timestamps.len(),
         inbound_stats.packets_lost,
         inbound_stats.jitter_ms,
         outbound_stats.outbound.nack_count,
@@ -157,16 +169,30 @@ async fn nack_round_trip_through_lossy_turn() {
     );
 
     assert!(
-        inbound_stats.packets_lost > 0,
-        "expected inbound packets_lost > 0 over a 5% lossy relay (got {})",
-        inbound_stats.packets_lost
+        media_phase_drops > 0,
+        "the deterministic TURN proxy did not drop any media-phase datagrams"
+    );
+
+    // W3C cumulative packetsLost may return to zero when every initially
+    // missing RTP packet arrives through retransmission. Prove recovery from
+    // the application-facing stream and prove the feedback/retransmission
+    // path directly below instead of treating the final loss gauge as a
+    // monotonic counter.
+    assert_eq!(
+        received_timestamps.len(),
+        200,
+        "NACK retransmission should recover every deterministically dropped media frame"
     );
     assert!(
         outbound_stats.outbound.nack_count > 0,
         "expected outbound NACK count > 0 — RTCP feedback should have round-tripped"
     );
+    assert!(
+        outbound_stats.outbound.retransmitted_packets > 0,
+        "expected retransmitted packets > 0 after receiving NACK feedback"
+    );
 
     offerer.close().await.ok();
     answerer.close().await.ok();
-    drop(fixture);
+    fixture.close().await.expect("close TURN fixture");
 }

@@ -1,5 +1,6 @@
 //! `RvoipPeerConnection` — offer/answer lifecycle on webrtc-rs 0.20.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,13 +22,20 @@ use webrtc::rtp_transceiver::RTCRtpTransceiverDirection;
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
+use crate::media::dtmf::{DtmfSenderState, OutboundDtmfNegotiation, TelephoneEventCodec};
+use crate::media::outbound::OutboundAudioRtpWriter;
 use crate::peer::builder::{
     self, audio_track_rtcp_feedback, video_track_rtcp_feedback, MIME_TYPE_OPUS,
-    MIME_TYPE_TELEPHONE_EVENT, MIME_TYPE_VP8,
+    MIME_TYPE_TELEPHONE_EVENT, MIME_TYPE_VP8, TELEPHONE_EVENT_MAPPINGS,
 };
-use crate::peer::handler::{ConnectionHandler, HandlerChannels, HandlerDropCounters};
+use crate::peer::handler::{
+    ConnectionHandler, HandlerChannels, HandlerDropCounters, LocalIceEvent,
+};
 use crate::peer::ice::IceCandidateLog;
-use crate::sdp::inspect::{sdp_advertises_telephone_event, sdp_has_media_line};
+use crate::sdp::inspect::{
+    negotiated_sdes_mid_for_outbound_audio, negotiated_telephone_event_codec,
+    preferred_telephone_event_codec_in_sdp, sdp_has_media_line, NegotiatedAudioMid,
+};
 use crate::sdp::session::{parse_sdp, sdp_to_string};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,11 +67,20 @@ pub struct RvoipPeerConnection {
     remote_track_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn TrackRemote>>>>,
     data_channel_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn DataChannel>>>>,
     data_channels_seen: Arc<SyncMutex<Vec<Arc<dyn DataChannel>>>>,
-    local_ice_rx: Arc<AsyncMutex<mpsc::Receiver<RTCIceCandidate>>>,
+    local_ice_rx: Arc<AsyncMutex<mpsc::Receiver<LocalIceEvent>>>,
+    local_ice_complete_pending: Arc<AtomicBool>,
+    local_ice_overflowed: Arc<AtomicBool>,
+    local_ice_overflow_reported: AtomicBool,
     local_audio: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_audio_ssrc: SyncMutex<Option<u32>>,
+    outbound_audio_writer: SyncMutex<Option<Arc<OutboundAudioRtpWriter>>>,
     local_dtmf: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
-    local_dtmf_ssrc: SyncMutex<Option<u32>>,
+    local_dtmf_ssrcs_by_clock: SyncMutex<HashMap<u32, u32>>,
+    local_dtmf_codec: SyncMutex<Option<TelephoneEventCodec>>,
+    outbound_dtmf_negotiation: SyncMutex<OutboundDtmfNegotiation>,
+    outbound_audio_mid: SyncMutex<Option<NegotiatedAudioMid>>,
+    outbound_dtmf_send_capable: AtomicBool,
+    dtmf_sender_states: AsyncMutex<HashMap<u32, DtmfSenderState>>,
     local_video: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_video_ssrc: SyncMutex<Option<u32>>,
     gather_timeout: Duration,
@@ -92,10 +109,19 @@ impl RvoipPeerConnection {
             data_channel_rx: Arc::new(AsyncMutex::new(receivers.data_channel)),
             data_channels_seen: receivers.data_channels_seen,
             local_ice_rx: Arc::new(AsyncMutex::new(receivers.local_ice)),
+            local_ice_complete_pending: receivers.local_ice_complete_pending,
+            local_ice_overflowed: receivers.local_ice_overflowed,
+            local_ice_overflow_reported: AtomicBool::new(false),
             local_audio: SyncMutex::new(None),
             local_audio_ssrc: SyncMutex::new(None),
+            outbound_audio_writer: SyncMutex::new(None),
             local_dtmf: SyncMutex::new(None),
-            local_dtmf_ssrc: SyncMutex::new(None),
+            local_dtmf_ssrcs_by_clock: SyncMutex::new(HashMap::new()),
+            local_dtmf_codec: SyncMutex::new(None),
+            outbound_dtmf_negotiation: SyncMutex::new(OutboundDtmfNegotiation::Pending),
+            outbound_audio_mid: SyncMutex::new(None),
+            outbound_dtmf_send_capable: AtomicBool::new(true),
+            dtmf_sender_states: AsyncMutex::new(HashMap::new()),
             local_video: SyncMutex::new(None),
             local_video_ssrc: SyncMutex::new(None),
             gather_timeout,
@@ -140,20 +166,20 @@ impl RvoipPeerConnection {
 
     /// Add local tracks on an answerer to mirror the remote offer's `m=` sections.
     ///
-    /// D1 — also attaches the dedicated PT 101 track when the offer
-    /// advertises `telephone-event`, so the answerer can send DTMF back to
-    /// the offerer. When the offer is Opus-only (typical Firefox / Chrome
-    /// audio-only offer) we skip the DTMF attach to keep the local
-    /// transceiver count matched to the offer's m-lines.
+    /// Also attaches a supplemental RFC 4733 encoding on the same negotiated
+    /// audio sender using the remote offer's preferred telephone-event clock
+    /// rate. The dynamic payload type is not
+    /// committed until it appears unchanged in the completed answer. When the
+    /// offer has no telephone-event mapping, no DTMF track is attached and
+    /// outbound DTMF fails closed after negotiation.
     pub async fn prepare_answerer_media_for_offer(
         self: &Arc<Self>,
         remote_sdp: &str,
     ) -> Result<()> {
+        let offered_dtmf = preferred_telephone_event_codec_in_sdp(remote_sdp);
         if sdp_has_media_line(remote_sdp, "audio") {
-            self.add_local_audio_track().await?;
-            if sdp_advertises_telephone_event(remote_sdp) {
-                self.add_local_dtmf_track().await?;
-            }
+            self.add_local_audio_track_with_dtmf(offered_dtmf.into_iter().collect())
+                .await?;
         }
         if sdp_has_media_line(remote_sdp, "video") {
             self.add_local_video_track().await?;
@@ -172,28 +198,102 @@ impl RvoipPeerConnection {
             .map_err(|e| WebRtcError::Webrtc(format!("add_ice_candidate: {e}")))
     }
 
-    /// Try to receive the next locally-gathered ICE candidate (non-blocking).
-    /// Used by trickle signalers to forward outbound candidates to the remote.
-    pub async fn try_recv_local_ice(&self) -> Option<RTCIceCandidate> {
-        self.local_ice_rx.lock().await.try_recv().ok()
+    /// Try to receive the next route-owned local ICE event without blocking.
+    pub async fn try_recv_local_ice_event(&self) -> Option<LocalIceEvent> {
+        if self.local_ice_overflowed.load(Ordering::Acquire)
+            && !self
+                .local_ice_overflow_reported
+                .swap(true, Ordering::AcqRel)
+        {
+            return Some(LocalIceEvent::Overflow);
+        }
+        let event = self.local_ice_rx.lock().await.try_recv().ok();
+        if event.is_some() {
+            return event;
+        }
+        self.local_ice_complete_pending
+            .swap(false, Ordering::AcqRel)
+            .then_some(LocalIceEvent::Complete)
     }
 
-    /// Receive the next locally-gathered ICE candidate; awaits until one
-    /// arrives or the channel closes (peer dropped).
-    pub async fn recv_local_ice(&self) -> Option<RTCIceCandidate> {
-        self.local_ice_rx.lock().await.recv().await
+    /// Receive the next route-owned local ICE event. Completion and overflow
+    /// remain observable even when the bounded candidate channel was full.
+    pub async fn recv_local_ice_event(&self) -> Option<LocalIceEvent> {
+        loop {
+            if self.local_ice_overflowed.load(Ordering::Acquire)
+                && !self
+                    .local_ice_overflow_reported
+                    .swap(true, Ordering::AcqRel)
+            {
+                return Some(LocalIceEvent::Overflow);
+            }
+            let mut receiver = self.local_ice_rx.lock().await;
+            if let Ok(event) = receiver.try_recv() {
+                return Some(event);
+            }
+            if self
+                .local_ice_complete_pending
+                .swap(false, Ordering::AcqRel)
+            {
+                return Some(LocalIceEvent::Complete);
+            }
+            let event = receiver.recv().await;
+            drop(receiver);
+            if event.is_some() {
+                return event;
+            }
+            if !(self.local_ice_overflowed.load(Ordering::Acquire)
+                && !self.local_ice_overflow_reported.load(Ordering::Acquire))
+                && !self.local_ice_complete_pending.load(Ordering::Acquire)
+            {
+                return None;
+            }
+        }
     }
 
-    /// Drain all currently-buffered local ICE candidates without blocking.
-    /// Helpful right after `create_offer_and_gather` in trickle mode for the
-    /// first batch.
-    pub async fn drain_local_ice(&self) -> Vec<RTCIceCandidate> {
+    /// Drain all currently-buffered local ICE events without blocking.
+    pub async fn drain_local_ice_events(&self) -> Vec<LocalIceEvent> {
         let mut out = Vec::new();
+        if self.local_ice_overflowed.load(Ordering::Acquire)
+            && !self
+                .local_ice_overflow_reported
+                .swap(true, Ordering::AcqRel)
+        {
+            out.push(LocalIceEvent::Overflow);
+        }
         let mut rx = self.local_ice_rx.lock().await;
-        while let Ok(c) = rx.try_recv() {
-            out.push(c);
+        while let Ok(event) = rx.try_recv() {
+            out.push(event);
+        }
+        if self
+            .local_ice_complete_pending
+            .swap(false, Ordering::AcqRel)
+        {
+            out.push(LocalIceEvent::Complete);
         }
         out
+    }
+
+    /// Compatibility wrapper returning candidates only. New signalers should
+    /// consume [`Self::recv_local_ice_event`] so completion/overflow cannot be
+    /// lost.
+    pub async fn recv_local_ice(&self) -> Option<RTCIceCandidate> {
+        match self.recv_local_ice_event().await? {
+            LocalIceEvent::Candidate(candidate) => Some(candidate),
+            LocalIceEvent::Complete | LocalIceEvent::Overflow => None,
+        }
+    }
+
+    /// Compatibility wrapper returning currently buffered candidates only.
+    pub async fn drain_local_ice(&self) -> Vec<RTCIceCandidate> {
+        self.drain_local_ice_events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                LocalIceEvent::Candidate(candidate) => Some(candidate),
+                LocalIceEvent::Complete | LocalIceEvent::Overflow => None,
+            })
+            .collect()
     }
 
     /// Ask webrtc-rs to restart ICE (fresh ufrag/pwd on the next offer).
@@ -207,7 +307,7 @@ impl RvoipPeerConnection {
     async fn wait_gather(&self) -> Result<()> {
         if self.trickle_ice {
             // Trickle mode: return immediately; candidates will arrive via
-            // [`Self::recv_local_ice`] for the signaler to forward.
+            // [`Self::recv_local_ice_event`] for the signaler to forward.
             return Ok(());
         }
         let mut rx = self.gather_rx.lock().await;
@@ -223,18 +323,31 @@ impl RvoipPeerConnection {
         self.trickle_ice
     }
 
-    /// Add a local Opus audio track (required before offer/answer for media).
+    /// Add one local audio sender with Opus plus a supplemental RFC 4733
+    /// encoding when outbound DTMF is allowed.
     ///
-    /// D1 — this attaches **only the Opus** track. The dedicated RFC 4733
-    /// telephone-event track (PT 101, separate SSRC) is opt-in via
-    /// [`Self::add_local_dtmf_track`] — it's auto-attached on the offerer's
-    /// `create_offer_and_gather` (so outbound DTMF works by default) and on
-    /// the answerer when the remote offer advertises `telephone-event`.
-    /// Splitting these keeps the local-transceiver count matched to the
-    /// remote m-lines when the peer offers Opus-only (typical browser).
+    /// Opus and telephone-event use distinct SSRC encodings on one negotiated
+    /// audio transceiver. RFC 4733 is a supplemental payload within the audio
+    /// media section, not a second `MediaStreamTrack`; creating a second track
+    /// for a one-m-line browser offer leaves that sender MID-less and its
+    /// interceptor stream unbound.
     pub async fn add_local_audio_track(self: &Arc<Self>) -> Result<()> {
+        let dtmf_codecs = if self.outbound_dtmf_send_capable.load(Ordering::Acquire) {
+            unique_telephone_event_clock_mappings()
+        } else {
+            Vec::new()
+        };
+        self.add_local_audio_track_with_dtmf(dtmf_codecs).await
+    }
+
+    async fn add_local_audio_track_with_dtmf(
+        self: &Arc<Self>,
+        dtmf_codecs: Vec<TelephoneEventCodec>,
+    ) -> Result<()> {
         if self.local_audio.lock().is_some() {
-            return Ok(());
+            return dtmf_codecs
+                .into_iter()
+                .try_for_each(|codec| self.validate_existing_dtmf_clock(codec));
         }
 
         let opus = RTCRtpCodec {
@@ -245,77 +358,137 @@ impl RvoipPeerConnection {
             rtcp_feedback: audio_track_rtcp_feedback(),
         };
         let ssrc = rand_ssrc();
+        let mut encodings = vec![RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: opus,
+            ..Default::default()
+        }];
+        let mut dtmf_ssrcs_by_clock = HashMap::new();
+        for codec in dtmf_codecs.iter().copied() {
+            if codec.clock_rate_hz == 0 {
+                return Err(WebRtcError::Sdp(
+                    "telephone-event clock rate must be non-zero".into(),
+                ));
+            }
+            if dtmf_ssrcs_by_clock.contains_key(&codec.clock_rate_hz) {
+                continue;
+            }
+            let dtmf_ssrc = loop {
+                let candidate = rand_ssrc();
+                if candidate != ssrc && !dtmf_ssrcs_by_clock.values().any(|ssrc| *ssrc == candidate)
+                {
+                    break candidate;
+                }
+            };
+            encodings.push(RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(dtmf_ssrc),
+                    ..Default::default()
+                },
+                codec: RTCRtpCodec {
+                    mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+                    clock_rate: codec.clock_rate_hz,
+                    channels: 1,
+                    sdp_fmtp_line: "0-15".into(),
+                    rtcp_feedback: vec![],
+                },
+                ..Default::default()
+            });
+            dtmf_ssrcs_by_clock.insert(codec.clock_rate_hz, dtmf_ssrc);
+        }
         let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
             format!("rvoip-stream-{ssrc}"),
             format!("rvoip-track-{ssrc}"),
             "rvoip-audio".into(),
             RtpCodecKind::Audio,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
-                    ..Default::default()
-                },
-                codec: opus,
-                ..Default::default()
-            }],
+            encodings,
         )));
 
         self.pc
             .add_track(track.clone() as Arc<dyn TrackLocal>)
             .await?;
 
-        *self.local_audio.lock() = Some(track);
+        *self.local_audio.lock() = Some(Arc::clone(&track));
         *self.local_audio_ssrc.lock() = Some(ssrc);
+        *self.outbound_audio_writer.lock() = Some(OutboundAudioRtpWriter::new(
+            Arc::clone(&track),
+            ssrc,
+            48_000,
+        ));
+        if let Some(codec) = dtmf_codecs.first().copied() {
+            // Both handles deliberately point at the same TrackLocal: distinct
+            // SSRC encodings share one negotiated sender/transceiver.
+            *self.local_dtmf.lock() = Some(track);
+            *self.local_dtmf_ssrcs_by_clock.lock() = dtmf_ssrcs_by_clock;
+            *self.local_dtmf_codec.lock() = Some(codec);
+        }
         Ok(())
     }
 
-    /// D1 — attach a dedicated RFC 4733 telephone-event track (PT 101) on
-    /// its own SSRC, bound to the peer connection via a second `add_track`
-    /// call. This is what [`crate::media::dtmf::send_dtmf`] writes to, so
-    /// PT 101 packets carry their negotiated codec on the wire and survive
-    /// SRTP filtering on the remote side.
+    /// Attach one RFC 4733 encoding per unique clock that an offer may
+    /// advertise (currently 8 kHz and 48 kHz).
     ///
-    /// The naive two-encoding-per-track approach broke the inbound
-    /// round-trip because webrtc-rs 0.20-alpha dispatches inbound packets
-    /// by encoding order, not payload type; using separate tracks keeps
-    /// receive-side demux one-PT-per-encoding.
+    /// This compatibility entry point is used by offerers before remote SDP
+    /// exists. Answerers use [`Self::add_local_dtmf_track_for_codec`] so the
+    /// sender binding has the clock rate selected from the remote offer.
     ///
     /// Idempotent — safe to call multiple times.
     pub async fn add_local_dtmf_track(self: &Arc<Self>) -> Result<()> {
         if self.local_dtmf.lock().is_some() {
+            return unique_telephone_event_clock_mappings()
+                .into_iter()
+                .try_for_each(|codec| self.validate_existing_dtmf_clock(codec));
+        }
+        if self.local_audio.lock().is_some() {
+            return Err(WebRtcError::InvalidState(
+                "telephone-event must be configured before adding the audio sender",
+            ));
+        }
+        self.add_local_audio_track_with_dtmf(unique_telephone_event_clock_mappings())
+            .await
+    }
+
+    /// Attach an RFC 4733 encoding whose codec clock matches the negotiated
+    /// remote telephone-event mapping.
+    ///
+    /// Dynamic payload type is written per RTP packet; sender encoding carries
+    /// MIME type and clock rate. Reusing an encoding across a payload-type remap
+    /// at the same rate is safe, while silently retaining a differently
+    /// clocked track would make SRTP/transceiver filtering nondeterministic.
+    pub async fn add_local_dtmf_track_for_codec(
+        self: &Arc<Self>,
+        codec: TelephoneEventCodec,
+    ) -> Result<()> {
+        if codec.clock_rate_hz == 0 {
+            return Err(WebRtcError::Sdp(
+                "telephone-event clock rate must be non-zero".into(),
+            ));
+        }
+        if self.local_dtmf.lock().is_some() {
+            return self.validate_existing_dtmf_clock(codec);
+        }
+        if self.local_audio.lock().is_some() {
+            return Err(WebRtcError::InvalidState(
+                "telephone-event must be configured before adding the audio sender",
+            ));
+        }
+        self.add_local_audio_track_with_dtmf(vec![codec]).await
+    }
+
+    fn validate_existing_dtmf_clock(&self, codec: TelephoneEventCodec) -> Result<()> {
+        let clocks = self.local_dtmf_ssrcs_by_clock.lock();
+        if clocks.contains_key(&codec.clock_rate_hz) {
             return Ok(());
         }
-
-        let telephone_event = RTCRtpCodec {
-            mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
-            clock_rate: 8000,
-            channels: 1,
-            sdp_fmtp_line: "0-15".into(),
-            rtcp_feedback: vec![],
-        };
-        let dtmf_ssrc = rand_ssrc();
-        let dtmf_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
-            format!("rvoip-dtmf-stream-{dtmf_ssrc}"),
-            format!("rvoip-dtmf-track-{dtmf_ssrc}"),
-            "rvoip-audio".into(),
-            RtpCodecKind::Audio,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(dtmf_ssrc),
-                    ..Default::default()
-                },
-                codec: telephone_event,
-                ..Default::default()
-            }],
-        )));
-
-        self.pc
-            .add_track(dtmf_track.clone() as Arc<dyn TrackLocal>)
-            .await?;
-
-        *self.local_dtmf.lock() = Some(dtmf_track);
-        *self.local_dtmf_ssrc.lock() = Some(dtmf_ssrc);
-        Ok(())
+        let mut bound = clocks.keys().copied().collect::<Vec<_>>();
+        bound.sort_unstable();
+        Err(WebRtcError::Sdp(format!(
+            "telephone-event encoding for {} Hz is unavailable; bound clocks: {bound:?}",
+            codec.clock_rate_hz,
+        )))
     }
 
     pub fn local_audio_track(&self) -> Option<Arc<TrackLocalStaticRTP>> {
@@ -327,16 +500,143 @@ impl RvoipPeerConnection {
         *self.local_audio_ssrc.lock()
     }
 
-    /// D1 — the dedicated RFC 4733 telephone-event track (PT 101). Returns
-    /// `None` when no audio has been negotiated yet, or when the underlying
-    /// `add_track` for the secondary track was rejected by webrtc-rs.
+    pub(crate) fn outbound_audio_writer(&self) -> Option<Arc<OutboundAudioRtpWriter>> {
+        self.outbound_audio_writer.lock().clone()
+    }
+
+    /// D1 — the shared audio track containing the RFC 4733 SSRC encoding.
+    /// Returns `None` when that supplemental encoding was not attached.
     pub fn local_dtmf_track(&self) -> Option<Arc<TrackLocalStaticRTP>> {
         self.local_dtmf.lock().clone()
     }
 
-    /// D1 — SSRC of the dedicated RFC 4733 track.
+    /// D1 — SSRC of the supplemental RFC 4733 encoding.
     pub fn local_dtmf_ssrc(&self) -> Option<u32> {
-        *self.local_dtmf_ssrc.lock()
+        self.local_dtmf_codec()
+            .and_then(|codec| self.local_dtmf_ssrc_for_codec(codec))
+    }
+
+    pub(crate) fn local_dtmf_ssrc_for_codec(&self, codec: TelephoneEventCodec) -> Option<u32> {
+        self.local_dtmf_ssrcs_by_clock
+            .lock()
+            .get(&codec.clock_rate_hz)
+            .copied()
+    }
+
+    /// Codec descriptor selected for DTMF diagnostics and sending.
+    ///
+    /// This is a binding diagnostic, not proof that the current final SDP
+    /// negotiated outbound DTMF. Call [`Self::negotiated_outbound_dtmf_codec`]
+    /// for the active mapping; it returns `None` after a rejected remap even
+    /// though the existing physical clock encodings remain attached.
+    #[must_use]
+    pub fn local_dtmf_codec(&self) -> Option<TelephoneEventCodec> {
+        *self.local_dtmf_codec.lock()
+    }
+
+    /// Exact outbound telephone-event mapping selected from remote SDP.
+    ///
+    /// `None` means final SDP is either pending or explicitly unsupported.
+    /// Use [`Self::outbound_dtmf_negotiation`] when that distinction matters.
+    #[must_use]
+    pub fn negotiated_outbound_dtmf_codec(&self) -> Option<TelephoneEventCodec> {
+        match self.outbound_dtmf_negotiation() {
+            OutboundDtmfNegotiation::Negotiated(codec) => Some(codec),
+            OutboundDtmfNegotiation::Pending | OutboundDtmfNegotiation::Unsupported => None,
+        }
+    }
+
+    /// Final-SDP state used by the outbound DTMF sender.
+    #[must_use]
+    pub fn outbound_dtmf_negotiation(&self) -> OutboundDtmfNegotiation {
+        *self.outbound_dtmf_negotiation.lock()
+    }
+
+    /// Exact SDES MID value negotiated for locally-originated audio RTP.
+    ///
+    /// Supplemental SSRCs are intentionally absent from SDP, so RFC 4733
+    /// packets require this header-extension value for browser demux. `None`
+    /// means negotiation is pending, absent, or ambiguous and callers must not
+    /// write supplemental RTP.
+    #[must_use]
+    pub fn negotiated_outbound_audio_mid(&self) -> Option<String> {
+        self.outbound_audio_mid
+            .lock()
+            .as_ref()
+            .map(|binding| binding.value.clone())
+    }
+
+    /// Negotiated RFC 8285 one-byte extension ID for the outbound audio MID.
+    #[must_use]
+    pub fn negotiated_outbound_audio_mid_extension_id(&self) -> Option<u8> {
+        self.outbound_audio_mid
+            .lock()
+            .as_ref()
+            .map(|binding| binding.extension_id)
+    }
+
+    pub(crate) fn dtmf_sender_states(&self) -> &AsyncMutex<HashMap<u32, DtmfSenderState>> {
+        &self.dtmf_sender_states
+    }
+
+    fn disable_outbound_dtmf(&self) {
+        self.outbound_dtmf_send_capable
+            .store(false, Ordering::Release);
+        *self.outbound_dtmf_negotiation.lock() = OutboundDtmfNegotiation::Unsupported;
+        *self.outbound_audio_mid.lock() = None;
+    }
+
+    fn begin_outbound_dtmf_renegotiation(&self) {
+        if self.outbound_dtmf_send_capable.load(Ordering::Acquire) {
+            *self.outbound_dtmf_negotiation.lock() = OutboundDtmfNegotiation::Pending;
+            *self.outbound_audio_mid.lock() = None;
+        }
+    }
+
+    fn final_outbound_dtmf_state(
+        &self,
+        offer_sdp: &str,
+        answer_sdp: &str,
+    ) -> Result<OutboundDtmfNegotiation> {
+        if !self.outbound_dtmf_send_capable.load(Ordering::Acquire) {
+            return Ok(OutboundDtmfNegotiation::Unsupported);
+        }
+        let Some(codec) = negotiated_telephone_event_codec(offer_sdp, answer_sdp) else {
+            return Ok(OutboundDtmfNegotiation::Unsupported);
+        };
+        if self.local_dtmf.lock().is_none() || self.local_dtmf_ssrc_for_codec(codec).is_none() {
+            return Err(WebRtcError::IncompatibleCapabilities);
+        }
+        Ok(OutboundDtmfNegotiation::Negotiated(codec))
+    }
+
+    fn commit_outbound_dtmf_state(
+        &self,
+        state: OutboundDtmfNegotiation,
+        audio_mid: Option<NegotiatedAudioMid>,
+    ) {
+        if let OutboundDtmfNegotiation::Negotiated(codec) = state {
+            // Payload type is a final SDP result, not part of the alpha
+            // track's codec binding. Update diagnostics only at this commit
+            // boundary; a failed same-clock PT remap retains the old value.
+            *self.local_dtmf_codec.lock() = Some(codec);
+        }
+        *self.outbound_dtmf_negotiation.lock() = state;
+        *self.outbound_audio_mid.lock() = audio_mid;
+    }
+
+    async fn prepare_send_capable_dtmf_for_offer(self: &Arc<Self>) -> Result<()> {
+        // A supplemental SSRC encoding must exist for every clock advertised
+        // by a send-capable audio offer. This covers both initial and
+        // subsequent offers, including callers that attached primary audio
+        // directly.
+        if self.outbound_dtmf_send_capable.load(Ordering::Acquire)
+            && self.local_audio.lock().is_some()
+            && self.local_dtmf.lock().is_none()
+        {
+            self.add_local_dtmf_track().await?;
+        }
+        Ok(())
     }
 
     /// Add a local VP8 video track (call before offer/answer when video is requested).
@@ -568,17 +868,19 @@ impl RvoipPeerConnection {
 
         if self.local_audio.lock().is_none() && self.local_video.lock().is_none() {
             self.add_local_audio_track().await?;
-            // D1 — auto-attach the DTMF track on the offerer so outbound
-            // PT 101 telephone-event packets are advertised in the offer.
-            // Best-effort: a webrtc-rs build that rejects the second audio
-            // track must still ship Opus, so we log + carry on.
-            if let Err(e) = self.add_local_dtmf_track().await {
-                tracing::warn!(target: "rvoip_webrtc", error = %e, "failed to attach DTMF track; outbound DTMF will use the Opus track and may not survive SRTP filtering");
-            }
         }
+        // Any send-capable offerer with audio must own a dedicated RFC 4733
+        // SSRC before SDP generation. This also covers clients/video routes
+        // that pre-attached audio; there is no unsafe audio-track fallback.
+        self.prepare_send_capable_dtmf_for_offer().await?;
 
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
+        // Setting a new local offer invalidates the final mapping used by the
+        // supplemental SSRC until an answer accepts both telephone-event and
+        // SDES MID. Do not write using the previous exchange's binding while
+        // this offer is pending.
+        self.begin_outbound_dtmf_renegotiation();
         self.wait_gather().await?;
 
         let desc = self
@@ -588,6 +890,42 @@ impl RvoipPeerConnection {
             .ok_or_else(|| WebRtcError::Sdp("no local description after gather".into()))?;
 
         sdp_to_string(&desc)
+    }
+
+    /// Prepare an offerer for a playback-only exchange such as WHEP.
+    ///
+    /// A local audio track is retained so the alpha WebRTC engine creates the
+    /// corresponding transceiver, but every audio/video transceiver is marked
+    /// `recvonly` before SDP generation. The track therefore never authorizes
+    /// outbound media while the peer can still receive RTP from the origin.
+    pub async fn prepare_receive_only_offer(self: &Arc<Self>) -> Result<()> {
+        self.require_role(PeerRole::Offerer)?;
+        self.disable_outbound_dtmf();
+        if self.local_audio.lock().is_none() {
+            self.add_local_audio_track().await?;
+        }
+        self.set_media_direction(RTCRtpTransceiverDirection::Recvonly, None)
+            .await
+    }
+
+    /// Prepare an offerer for the WHEP draft-04 server counter-offer path.
+    ///
+    /// The retained local track is the media source and every media
+    /// transceiver is constrained to `sendonly` before the offer is created.
+    /// This is deliberately separate from the player-side `recvonly` helper
+    /// so signaling role never gets inferred from an application's media
+    /// direction.
+    pub async fn prepare_send_only_offer(self: &Arc<Self>) -> Result<()> {
+        self.require_role(PeerRole::Offerer)?;
+        // This path is reserved for WHEP counter-offer playback. Although its
+        // media direction is sendonly, application DTMF is not part of WHEP's
+        // playback contract and must fail closed.
+        self.disable_outbound_dtmf();
+        if self.local_audio.lock().is_none() {
+            self.add_local_audio_track().await?;
+        }
+        self.set_media_direction(RTCRtpTransceiverDirection::Sendonly, None)
+            .await
     }
 
     /// Answerer: apply remote offer SDP without creating the answer yet.
@@ -605,7 +943,17 @@ impl RvoipPeerConnection {
     pub async fn create_answer_and_gather(self: &Arc<Self>) -> Result<String> {
         self.require_role(PeerRole::Answerer)?;
 
+        let remote = self
+            .pc
+            .remote_description()
+            .await
+            .ok_or_else(|| WebRtcError::Sdp("no remote offer before answer".into()))?;
+        let offer_sdp = sdp_to_string(&remote)?;
         let answer = self.pc.create_answer(None).await?;
+        let provisional_answer_sdp = sdp_to_string(&answer)?;
+        // Validate track binding against the actual offer/answer intersection
+        // before mutating local signaling state.
+        self.final_outbound_dtmf_state(&offer_sdp, &provisional_answer_sdp)?;
         self.pc.set_local_description(answer).await?;
         self.wait_gather().await?;
 
@@ -614,8 +962,11 @@ impl RvoipPeerConnection {
             .local_description()
             .await
             .ok_or_else(|| WebRtcError::Sdp("no local description after gather".into()))?;
-
-        sdp_to_string(&desc)
+        let answer_sdp = sdp_to_string(&desc)?;
+        let final_dtmf = self.final_outbound_dtmf_state(&offer_sdp, &answer_sdp)?;
+        let audio_mid = negotiated_sdes_mid_for_outbound_audio(&offer_sdp, &answer_sdp, false);
+        self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
+        Ok(answer_sdp)
     }
 
     /// Answerer: apply remote offer, create answer, gather, return local SDP.
@@ -628,27 +979,20 @@ impl RvoipPeerConnection {
     pub async fn renegotiate_as_answerer(self: &Arc<Self>, remote_sdp: &str) -> Result<String> {
         self.require_role(PeerRole::Answerer)?;
 
+        self.prepare_answerer_media_for_offer(remote_sdp).await?;
         let remote = parse_sdp(remote_sdp, RTCSdpType::Offer)?;
         self.pc.set_remote_description(remote).await?;
-        let answer = self.pc.create_answer(None).await?;
-        self.pc.set_local_description(answer).await?;
-        self.wait_gather().await?;
-
-        let desc = self
-            .pc
-            .local_description()
-            .await
-            .ok_or_else(|| WebRtcError::Sdp("no local description after gather".into()))?;
-
-        sdp_to_string(&desc)
+        self.create_answer_and_gather().await
     }
 
     /// Offerer: ICE restart — create a fresh offer SDP after the session is up.
     pub async fn renegotiate_as_offerer(self: &Arc<Self>) -> Result<String> {
         self.require_role(PeerRole::Offerer)?;
+        self.prepare_send_capable_dtmf_for_offer().await?;
 
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
+        self.begin_outbound_dtmf_renegotiation();
         self.wait_gather().await?;
 
         let desc = self
@@ -662,9 +1006,50 @@ impl RvoipPeerConnection {
 
     /// Offerer: apply remote answer after signaling exchange.
     pub async fn set_remote_answer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
+        let local = self
+            .pc
+            .local_description()
+            .await
+            .ok_or_else(|| WebRtcError::Sdp("no local offer before remote answer".into()))?;
+        let offer_sdp = sdp_to_string(&local)?;
+        let final_dtmf = self.final_outbound_dtmf_state(&offer_sdp, remote_sdp)?;
+        let audio_mid = negotiated_sdes_mid_for_outbound_audio(&offer_sdp, remote_sdp, true);
         let remote = parse_sdp(remote_sdp, RTCSdpType::Answer)?;
         self.pc.set_remote_description(remote).await?;
+        self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
         Ok(())
+    }
+
+    /// Complete the WHEP draft-04 server counter-offer flow on the same peer.
+    ///
+    /// The player starts as JSEP offerer, rolls that pending offer back, then
+    /// answers the server's offer as `recvonly`. `PeerRole` remains the stable
+    /// application ownership role; this method is the one deliberate JSEP role
+    /// transition supported on an outbound player connection.
+    pub async fn answer_counter_offer_after_rollback(
+        self: &Arc<Self>,
+        remote_sdp: &str,
+    ) -> Result<String> {
+        self.require_role(PeerRole::Offerer)?;
+        let remote = parse_sdp(remote_sdp, RTCSdpType::Offer)?;
+        self.rollback_local().await?;
+        self.pc.set_remote_description(remote).await?;
+        self.set_media_direction(RTCRtpTransceiverDirection::Recvonly, None)
+            .await?;
+        let answer = self.pc.create_answer(None).await?;
+        let provisional_answer_sdp = sdp_to_string(&answer)?;
+        self.final_outbound_dtmf_state(remote_sdp, &provisional_answer_sdp)?;
+        self.pc.set_local_description(answer).await?;
+        self.wait_gather().await?;
+        let description =
+            self.pc.local_description().await.ok_or_else(|| {
+                WebRtcError::Sdp("no local counter-offer answer after gather".into())
+            })?;
+        let answer_sdp = sdp_to_string(&description)?;
+        let final_dtmf = self.final_outbound_dtmf_state(remote_sdp, &answer_sdp)?;
+        let audio_mid = negotiated_sdes_mid_for_outbound_audio(remote_sdp, &answer_sdp, false);
+        self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
+        Ok(answer_sdp)
     }
 
     /// G3 — true when the underlying peer connection has no pending local or
@@ -965,16 +1350,43 @@ impl RvoipPeerConnection {
     }
 
     async fn set_audio_direction(&self, direction: RTCRtpTransceiverDirection) -> Result<()> {
+        self.set_media_direction(direction, Some(RtpCodecKind::Audio))
+            .await
+    }
+
+    async fn set_media_direction(
+        &self,
+        direction: RTCRtpTransceiverDirection,
+        kind: Option<RtpCodecKind>,
+    ) -> Result<()> {
         for tx in self.pc.get_transceivers().await {
-            let Some(sender) = tx.sender().await? else {
-                continue;
+            let transceiver_kind = if let Some(sender) = tx.sender().await? {
+                Some(sender.track().kind().await)
+            } else if let Some(receiver) = tx.receiver().await? {
+                Some(receiver.track().kind().await)
+            } else {
+                None
             };
-            if sender.track().kind().await == RtpCodecKind::Audio {
+            if kind.is_none() || transceiver_kind == kind {
                 tx.set_direction(direction).await?;
             }
         }
         Ok(())
     }
+}
+
+fn unique_telephone_event_clock_mappings() -> Vec<TelephoneEventCodec> {
+    let mut mappings = Vec::new();
+    for (payload_type, clock_rate_hz) in TELEPHONE_EVENT_MAPPINGS {
+        if mappings
+            .iter()
+            .any(|codec: &TelephoneEventCodec| codec.clock_rate_hz == clock_rate_hz)
+        {
+            continue;
+        }
+        mappings.push(TelephoneEventCodec::new(payload_type, clock_rate_hz));
+    }
+    mappings
 }
 
 fn rand_ssrc() -> u32 {
@@ -998,7 +1410,7 @@ pub async fn connect_loopback(
     let answer_sdp = answerer.accept_offer_and_gather(&offer_sdp).await?;
     offerer.set_remote_answer(&answer_sdp).await?;
 
-    let timeout = Duration::from_secs(config.gather_timeout_secs + 10);
+    let timeout = Duration::from_secs(config.connection_timeout_secs);
     tokio::try_join!(
         offerer.wait_connected(timeout),
         answerer.wait_connected(timeout)

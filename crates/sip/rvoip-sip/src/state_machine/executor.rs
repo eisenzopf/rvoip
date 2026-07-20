@@ -1,10 +1,11 @@
 use crate::state_table::SessionId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info};
 
 use crate::{
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
     cleanup_diag::{self, CleanupStage},
+    session_registry::SessionRegistryHandle,
     session_store::{SessionState, SessionStore},
     state_table::{Action, EventTemplate, EventType, StateKey, Transition, MASTER_TABLE},
     types::CallState,
@@ -92,6 +93,274 @@ impl PendingOptionsSlot {
             Self::Options(_) => Method::Options,
         }
     }
+
+    pub(crate) fn is_exact_staged_on(&self, session: &SessionState) -> bool {
+        match self {
+            Self::Invite(options) => session
+                .pending_invite_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::ReInvite(options) => session
+                .pending_reinvite_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Register(options) => session
+                .pending_register_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Refer(options) => session
+                .pending_refer_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Bye(options) => session
+                .pending_bye_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Cancel(options) => session
+                .pending_cancel_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Notify(options) => session
+                .pending_notify_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Subscribe(options) => session
+                .pending_subscribe_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Info(options) => session
+                .pending_info_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Update(options) => session
+                .pending_update_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Message(options) => session
+                .pending_message_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+            Self::Options(options) => session
+                .pending_options_options
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, options)),
+        }
+    }
+
+    pub(crate) fn clear_if_exact(&self, session: &mut SessionState) -> bool {
+        if !self.is_exact_staged_on(session) {
+            return false;
+        }
+        match self {
+            Self::Invite(_) => session.pending_invite_options = None,
+            Self::ReInvite(_) => session.pending_reinvite_options = None,
+            Self::Register(_) => session.pending_register_options = None,
+            Self::Refer(_) => session.pending_refer_options = None,
+            Self::Bye(_) => session.pending_bye_options = None,
+            Self::Cancel(_) => session.pending_cancel_options = None,
+            Self::Notify(_) => session.pending_notify_options = None,
+            Self::Subscribe(_) => session.pending_subscribe_options = None,
+            Self::Info(_) => session.pending_info_options = None,
+            Self::Update(_) => session.pending_update_options = None,
+            Self::Message(_) => session.pending_message_options = None,
+            Self::Options(_) => session.pending_options_options = None,
+        }
+        true
+    }
+
+    fn stage_if_vacant(self, session: &mut SessionState) -> crate::errors::Result<()> {
+        let method = self.method();
+        let occupied = match &self {
+            Self::Invite(_) => session.pending_invite_options.is_some(),
+            Self::ReInvite(_) => session.pending_reinvite_options.is_some(),
+            Self::Register(_) => session.pending_register_options.is_some(),
+            Self::Refer(_) => session.pending_refer_options.is_some(),
+            Self::Bye(_) => session.pending_bye_options.is_some(),
+            Self::Cancel(_) => session.pending_cancel_options.is_some(),
+            Self::Notify(_) => session.pending_notify_options.is_some(),
+            Self::Subscribe(_) => session.pending_subscribe_options.is_some(),
+            Self::Info(_) => session.pending_info_options.is_some(),
+            Self::Update(_) => session.pending_update_options.is_some(),
+            Self::Message(_) => session.pending_message_options.is_some(),
+            Self::Options(_) => session.pending_options_options.is_some(),
+        };
+        if occupied {
+            return Err(crate::errors::SessionError::Conflict { method });
+        }
+
+        match self {
+            Self::Invite(options) => session.pending_invite_options = Some(options),
+            Self::ReInvite(options) => session.pending_reinvite_options = Some(options),
+            Self::Register(options) => session.pending_register_options = Some(options),
+            Self::Refer(options) => session.pending_refer_options = Some(options),
+            Self::Bye(options) => session.pending_bye_options = Some(options),
+            Self::Cancel(options) => session.pending_cancel_options = Some(options),
+            Self::Notify(options) => session.pending_notify_options = Some(options),
+            Self::Subscribe(options) => session.pending_subscribe_options = Some(options),
+            Self::Info(options) => session.pending_info_options = Some(options),
+            Self::Update(options) => session.pending_update_options = Some(options),
+            Self::Message(options) => session.pending_message_options = Some(options),
+            Self::Options(options) => session.pending_options_options = Some(options),
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum StageDispatchClaimState {
+    Unclaimed,
+    Claimed,
+    Cancelled,
+}
+
+/// Coordinates cancellation with the exact transfer of a builder's staged
+/// request options into the authoritative outbound-request tracker.
+///
+/// The state mutex is deliberately acquired while the session cell is locked
+/// by `SessionStore::update_session_exact_with`. This makes cancellation-before-
+/// claim and claim-before-cancellation mutually exclusive: before claim the
+/// dispatch task is aborted and no request reaches the wire; after claim the
+/// task is detached on caller cancellation so it can finish transaction
+/// activation and preserve the exact completion owner.
+pub(crate) struct StageDispatchClaim {
+    slot: PendingOptionsSlot,
+    state: Mutex<StageDispatchClaimState>,
+}
+
+impl StageDispatchClaim {
+    pub(crate) fn new(slot: PendingOptionsSlot) -> Self {
+        Self {
+            slot,
+            state: Mutex::new(StageDispatchClaimState::Unclaimed),
+        }
+    }
+
+    pub(crate) fn method(&self) -> rvoip_sip_core::Method {
+        self.slot.method()
+    }
+
+    /// Claim and remove the exact staged Arc from the current session
+    /// revision. Callers must invoke this from inside an exact session-cell
+    /// update so the slot and cancellation state change atomically.
+    pub(crate) fn claim_exact(
+        &self,
+        session: &mut SessionState,
+    ) -> crate::errors::Result<PendingOptionsSlot> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *state {
+            StageDispatchClaimState::Cancelled => {
+                return Err(crate::errors::SessionError::InvalidTransition(format!(
+                    "outbound {} dispatch was cancelled before claiming staged options",
+                    self.slot.method()
+                )));
+            }
+            StageDispatchClaimState::Claimed => {
+                return Err(crate::errors::SessionError::InvalidTransition(format!(
+                    "outbound {} dispatch already claimed staged options",
+                    self.slot.method()
+                )));
+            }
+            StageDispatchClaimState::Unclaimed => {}
+        }
+        if !self.slot.clear_if_exact(session) {
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "outbound {} dispatch no longer owns its exact staged options",
+                self.slot.method()
+            )));
+        }
+        *state = StageDispatchClaimState::Claimed;
+        Ok(self.slot.clone())
+    }
+
+    /// Return true when the dispatch task must be aborted. Once the exact
+    /// stage has been claimed, dropping the caller instead detaches the task.
+    pub(crate) fn cancel_before_claim(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *state {
+            StageDispatchClaimState::Unclaimed => {
+                *state = StageDispatchClaimState::Cancelled;
+                true
+            }
+            StageDispatchClaimState::Cancelled => true,
+            StageDispatchClaimState::Claimed => false,
+        }
+    }
+
+    fn is_claimed(&self) -> bool {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            == StageDispatchClaimState::Claimed
+    }
+}
+
+/// Cancellation-safe ownership of one exact builder staging Arc.
+pub(crate) struct PendingOptionsStageGuard {
+    store: Arc<SessionStore>,
+    handle: SessionRegistryHandle,
+    slot: PendingOptionsSlot,
+    dispatch_claim: Arc<StageDispatchClaim>,
+    armed: bool,
+}
+
+impl PendingOptionsStageGuard {
+    fn new(
+        store: Arc<SessionStore>,
+        handle: SessionRegistryHandle,
+        slot: PendingOptionsSlot,
+    ) -> Self {
+        let dispatch_claim = Arc::new(StageDispatchClaim::new(slot.clone()));
+        Self {
+            store,
+            handle,
+            slot,
+            dispatch_claim,
+            armed: true,
+        }
+    }
+
+    pub(crate) fn dispatch_claim(&self) -> Arc<StageDispatchClaim> {
+        Arc::clone(&self.dispatch_claim)
+    }
+
+    pub(crate) async fn confirm_consumed(mut self) -> crate::errors::Result<()> {
+        if !self.dispatch_claim.is_claimed() {
+            self.dispatch_claim.cancel_before_claim();
+            let _ = self
+                .store
+                .clear_staged_options_exact(&self.handle, |session| {
+                    self.slot.clear_if_exact(session)
+                });
+            self.armed = false;
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "outbound {} dispatch did not consume its exact staged options",
+                self.slot.method()
+            )));
+        }
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for PendingOptionsStageGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if !self.dispatch_claim.cancel_before_claim() {
+            return;
+        }
+        let _ = self
+            .store
+            .clear_staged_options_exact(&self.handle, |session| self.slot.clear_if_exact(session));
+    }
 }
 
 fn state_machine_stage_for_event(event: &EventType) -> CleanupStage {
@@ -155,6 +424,47 @@ fn action_error_diagnostic_class(
         "session-error"
     } else {
         "action-error"
+    }
+}
+
+fn is_local_teardown_dispatch_only_transition(transition: &Transition) -> bool {
+    transition.publish_events.is_empty()
+        && transition.actions.iter().any(|action| {
+            matches!(
+                action,
+                Action::SendBYE | Action::SendBYEWithOptions | Action::SendCANCELWithOptions
+            )
+        })
+}
+
+fn is_refer_dispatch_only_transition(transition: &Transition) -> bool {
+    transition.next_state.is_none()
+        && transition.condition_updates.dialog_established.is_none()
+        && transition.condition_updates.media_session_ready.is_none()
+        && transition.condition_updates.sdp_negotiated.is_none()
+        && transition.publish_events.is_empty()
+        && matches!(
+            transition.actions.as_slice(),
+            [Action::SendREFERWithOptions]
+        )
+}
+
+fn is_exact_retirement_safe_dispatch_only_transition(transition: &Transition) -> bool {
+    is_local_teardown_dispatch_only_transition(transition)
+        || is_refer_dispatch_only_transition(transition)
+}
+
+fn completed_transition_result(
+    old_state: CallState,
+    transition: &Transition,
+    actions_executed: Vec<Action>,
+) -> ProcessEventResult {
+    ProcessEventResult {
+        old_state,
+        next_state: transition.next_state,
+        transition: Some(transition.clone()),
+        actions_executed,
+        events_published: transition.publish_events.clone(),
     }
 }
 
@@ -293,69 +603,80 @@ impl StateMachine {
     }
 
     /// SIP_API_DESIGN_2 §7.3 invariants #1 + #5 — atomically check the
-    /// matching `pending_<method>_options` slot on the session, and if
-    /// it is `None` write the provided `Arc<XxxRequestOptions>`. If the
-    /// slot is already `Some` (a prior `.send()` is still in flight for
-    /// the same method on this session) return
+    /// matching `pending_<method>_options` staging slot and the authoritative
+    /// in-flight request tracker. If both are empty, write the provided
+    /// `Arc<XxxRequestOptions>`. If either is occupied (a prior `.send()` is
+    /// still staging or in flight for the same method on this session) return
     /// `Err(SessionError::Conflict { method })` without mutating
     /// anything.
     ///
     /// Builders call this *before* queuing the matching
     /// `EventType::SendOutbound<METHOD>` event so the state-table
-    /// transition's `Action::Send<METHOD>WithOptions` handler can read
-    /// from a populated stash. The set-once / consumed-once invariant
-    /// is enforced here (and cleared by
-    /// `Action::ClearPending<METHOD>Options` on final response or by
-    /// the executor's `Terminated` backstop).
+    /// transition's `Action::Send<METHOD>WithOptions` handler can transfer
+    /// the immutable snapshot into the tracker before the request reaches the
+    /// wire. INFO/REFER/NOTIFY/UPDATE staging slots are then cleared; their
+    /// same-method conflict remains enforced by the tracker until the exact
+    /// terminal transaction event. Other methods retain their legacy stash
+    /// lifecycle.
     pub async fn stage_outbound_options(
         &self,
         session_id: &SessionId,
         slot: PendingOptionsSlot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let mut session = self.store.get_session(session_id).await.map_err(|e| {
-            Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                "stage_outbound_options: session {} not found: {}",
-                session_id, e
-            ))
-        })?;
+        let handle = self
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| format!("Session {session_id} not found"))?;
+        self.stage_outbound_options_exact(&handle, slot)
+    }
 
+    fn stage_outbound_options_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        slot: PendingOptionsSlot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let session_id = handle.session_id();
         let method = slot.method();
-        let occupied = match &slot {
-            PendingOptionsSlot::Invite(_) => session.pending_invite_options.is_some(),
-            PendingOptionsSlot::ReInvite(_) => session.pending_reinvite_options.is_some(),
-            PendingOptionsSlot::Register(_) => session.pending_register_options.is_some(),
-            PendingOptionsSlot::Refer(_) => session.pending_refer_options.is_some(),
-            PendingOptionsSlot::Bye(_) => session.pending_bye_options.is_some(),
-            PendingOptionsSlot::Cancel(_) => session.pending_cancel_options.is_some(),
-            PendingOptionsSlot::Notify(_) => session.pending_notify_options.is_some(),
-            PendingOptionsSlot::Subscribe(_) => session.pending_subscribe_options.is_some(),
-            PendingOptionsSlot::Info(_) => session.pending_info_options.is_some(),
-            PendingOptionsSlot::Update(_) => session.pending_update_options.is_some(),
-            PendingOptionsSlot::Message(_) => session.pending_message_options.is_some(),
-            PendingOptionsSlot::Options(_) => session.pending_options_options.is_some(),
-        };
-
-        if occupied {
-            return Err(crate::errors::SessionError::Conflict { method }.into());
-        }
-
-        match slot {
-            PendingOptionsSlot::Invite(a) => session.pending_invite_options = Some(a),
-            PendingOptionsSlot::ReInvite(a) => session.pending_reinvite_options = Some(a),
-            PendingOptionsSlot::Register(a) => session.pending_register_options = Some(a),
-            PendingOptionsSlot::Refer(a) => session.pending_refer_options = Some(a),
-            PendingOptionsSlot::Bye(a) => session.pending_bye_options = Some(a),
-            PendingOptionsSlot::Cancel(a) => session.pending_cancel_options = Some(a),
-            PendingOptionsSlot::Notify(a) => session.pending_notify_options = Some(a),
-            PendingOptionsSlot::Subscribe(a) => session.pending_subscribe_options = Some(a),
-            PendingOptionsSlot::Info(a) => session.pending_info_options = Some(a),
-            PendingOptionsSlot::Update(a) => session.pending_update_options = Some(a),
-            PendingOptionsSlot::Message(a) => session.pending_message_options = Some(a),
-            PendingOptionsSlot::Options(a) => session.pending_options_options = Some(a),
-        }
-
-        self.store.update_session(session).await?;
+        let tracked_method =
+            crate::adapters::outbound_request_tracker::TrackedInDialogMethod::from_sip_method(
+                &method,
+            );
+        let outbound_request_tracker = self.dialog_adapter.outbound_request_tracker.clone();
+        self.store
+            .update_session_exact_with(handle, None, |session| {
+                if tracked_method.is_some_and(|tracked_method| {
+                    outbound_request_tracker.has_request(session_id, tracked_method)
+                }) {
+                    return Err(crate::errors::SessionError::Conflict {
+                        method: method.clone(),
+                    });
+                }
+                slot.stage_if_vacant(session)
+            })
+            .map_err(|e| {
+                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "stage_outbound_options: session {} not found: {}",
+                    session_id, e
+                ))
+            })??;
         Ok(())
+    }
+
+    pub(crate) async fn stage_outbound_options_guarded(
+        &self,
+        session_id: &SessionId,
+        slot: PendingOptionsSlot,
+    ) -> Result<PendingOptionsStageGuard, Box<dyn std::error::Error + Send + Sync>> {
+        let handle = self
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| format!("Session {session_id} not found"))?;
+        self.stage_outbound_options_exact(&handle, slot.clone())?;
+        Ok(PendingOptionsStageGuard::new(
+            Arc::clone(&self.store),
+            handle,
+            slot,
+        ))
     }
 
     /// Process an event for a session
@@ -368,7 +689,28 @@ impl StateMachine {
             state_machine_stage_for_event(&event),
             format!("{}:{}", session_id, state_machine_event_name(&event)),
         );
-        let result = self.process_event_inner(session_id, event).await;
+        // `process_event_inner` contains the complete queued-event executor.
+        // Keep its generated state behind a heap boundary so callers do not
+        // combine that large future with their own protocol task stack.
+        let result = Box::pin(self.process_event_inner(session_id, event, None)).await;
+        match &result {
+            Ok(_) => guard.finish_success(),
+            Err(_) => guard.finish_failure(),
+        }
+        result
+    }
+
+    pub(crate) async fn process_event_with_stage_claim(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+        stage_claim: Arc<StageDispatchClaim>,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let guard = cleanup_diag::stage_guard(
+            state_machine_stage_for_event(&event),
+            format!("{}:{}", session_id, state_machine_event_name(&event)),
+        );
+        let result = Box::pin(self.process_event_inner(session_id, event, Some(stage_claim))).await;
         match &result {
             Ok(_) => guard.finish_success(),
             Err(_) => guard.finish_failure(),
@@ -380,6 +722,7 @@ impl StateMachine {
         &self,
         session_id: &SessionId,
         event: EventType,
+        mut initial_stage_claim: Option<Arc<StageDispatchClaim>>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use std::collections::VecDeque;
 
@@ -400,9 +743,21 @@ impl StateMachine {
                 .into());
             }
 
-            let result = self
-                .process_one_event(session_id, event, &mut queue)
-                .await?;
+            // `process_one_event` owns the transition table and every action
+            // variant. Boxing this boundary keeps its large debug-build poll
+            // state out of the queue executor's stack frame.
+            let stage_claim = if processed == 1 {
+                initial_stage_claim.take()
+            } else {
+                None
+            };
+            let result = Box::pin(self.process_one_event(
+                session_id,
+                event,
+                &mut queue,
+                stage_claim.as_ref(),
+            ))
+            .await?;
             if first_result.is_none() {
                 first_result = Some(result);
             }
@@ -422,6 +777,7 @@ impl StateMachine {
         session_id: &SessionId,
         event: EventType,
         queued_follow_up_events: &mut std::collections::VecDeque<EventType>,
+        stage_claim: Option<&Arc<StageDispatchClaim>>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use crate::session_store::history::history_event_snapshot;
         use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
@@ -434,6 +790,7 @@ impl StateMachine {
         );
         let transition_start = Instant::now();
         let history_event = history_event_snapshot(&event);
+        let auth_required_event = matches!(&event, EventType::AuthRequired { .. });
 
         // 1. Get current session state
         let mut session = match self.store.get_session(session_id).await {
@@ -478,10 +835,10 @@ impl StateMachine {
                 session.redirect_response_status = Some(*status);
                 session.redirect_response_contacts = contacts.clone();
             }
-            EventType::SendEarlyMedia { sdp } => {
-                if let Some(sdp_data) = sdp {
-                    session.early_media_sdp = Some(sdp_data.clone());
-                }
+            EventType::SendEarlyMedia {
+                sdp: Some(sdp_data),
+            } => {
+                session.early_media_sdp = Some(sdp_data.clone());
             }
             EventType::AuthRequired {
                 status_code,
@@ -522,7 +879,7 @@ impl StateMachine {
                 transaction_id,
             } => {
                 session.transfer_target = Some(refer_to.clone());
-                session.transfer_notify_dialog = session.dialog_id.clone();
+                session.transfer_notify_dialog = session.dialog_id;
                 session.refer_transaction_id = Some(transaction_id.clone());
                 debug!(
                     target_present = !refer_to.is_empty(),
@@ -580,15 +937,15 @@ impl StateMachine {
                     session.sdp_negotiated = false;
                 }
             }
-            EventType::UpdateReceived { sdp } => {
+            EventType::UpdateReceived {
+                sdp: Some(sdp_data),
+            } => {
                 // RFC 4028 UPDATE for session-timer refresh carries no SDP,
                 // but if a peer sends an UPDATE body (RFC 3311 session
                 // modification), record it so a future transition with
                 // NegotiateSDPAsUAS can act on it.
-                if let Some(sdp_data) = sdp {
-                    session.remote_sdp = Some(sdp_data.clone());
-                    session.sdp_negotiated = false;
-                }
+                session.remote_sdp = Some(sdp_data.clone());
+                session.sdp_negotiated = false;
             }
             _ => {}
         }
@@ -633,7 +990,8 @@ impl StateMachine {
                         events_published: vec![],
                     };
                     session.record_transition(record);
-                    self.store.update_session(session).await?;
+                    self.store
+                        .update_state_machine_session_and_snapshot(session, auth_required_event)?;
                 }
 
                 return Ok(ProcessEventResult {
@@ -681,7 +1039,8 @@ impl StateMachine {
                         events_published: vec![],
                     };
                     session.record_transition(record);
-                    self.store.update_session(session).await?;
+                    self.store
+                        .update_state_machine_session_and_snapshot(session, auth_required_event)?;
                 }
 
                 return Ok(ProcessEventResult {
@@ -706,6 +1065,7 @@ impl StateMachine {
         // committed — mirrors how most state machines handle partial
         // side-effect failures (caller sees the error and decides how to
         // recover).
+        let mut transition_state_published_before_actions = false;
         if let Some(new_state) = transition.next_state {
             info!("State transition: {:?} -> {:?}", old_state, new_state);
             session.call_state = new_state;
@@ -719,23 +1079,23 @@ impl StateMachine {
             // emitted on final-response transitions are the primary
             // mechanism; this is the safety net.
             if new_state.is_final() {
-                session.pending_invite_options = None;
-                session.invite_authorization_credentials.clear();
-                session.invite_auth_retry_count = 0;
-                session.pending_reinvite_options = None;
-                session.pending_register_options = None;
-                session.pending_refer_options = None;
-                session.pending_bye_options = None;
-                session.pending_cancel_options = None;
-                session.pending_notify_options = None;
-                session.pending_subscribe_options = None;
-                session.pending_info_options = None;
-                session.pending_update_options = None;
-                session.pending_message_options = None;
-                session.pending_options_options = None;
+                session.clear_pending_request_state_for_final_transition();
             }
 
-            self.store.update_session(session.clone()).await?;
+            // Only actions can expose the transition to concurrent protocol
+            // work before the final publication below.  State-only rows do
+            // not need an intermediate full-state clone and revision.
+            if transition
+                .actions
+                .iter()
+                .any(|action| !self.should_skip_action(action))
+            {
+                self.store.update_state_machine_session_and_snapshot(
+                    session.clone(),
+                    auth_required_event,
+                )?;
+                transition_state_published_before_actions = true;
+            }
         }
 
         // 5. Execute actions
@@ -747,12 +1107,14 @@ impl StateMachine {
             let action_start = Instant::now();
             let result = Box::pin(actions::execute_action(
                 action,
+                &event,
                 &mut session,
                 &self.dialog_adapter,
                 &self.media_adapter,
                 &self.store,
                 self.auto_180_ringing,
                 &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
+                stage_claim.map(Arc::as_ref),
             ))
             .await;
             let action_duration = action_start.elapsed().as_millis() as u64;
@@ -812,11 +1174,35 @@ impl StateMachine {
                         events_published: vec![],
                     };
                     session.record_transition(record);
-                    self.store.update_session(session).await?;
+                    self.store
+                        .update_state_machine_session_and_snapshot(session, auth_required_event)?;
                 }
 
                 return Err(exec_error.unwrap());
             }
+        }
+
+        // A successful BYE or CANCEL can synchronously receive the peer's
+        // terminal response, and a successful REFER can synchronously complete
+        // the replacement and terminate the original dialog. Dialog-core then
+        // publishes the terminal event while this dispatch transition is still
+        // unwinding; that path may quiesce and remove the exact session before
+        // the ordinary save/reload steps below. Never resurrect the stale local
+        // snapshot. Keep the REFER exception narrower than teardown: its sole
+        // action must have succeeded and its row must be state-, condition-,
+        // and event-neutral.
+        if is_exact_retirement_safe_dispatch_only_transition(transition)
+            && self.exact_lifetime_is_no_longer_current(&session)
+        {
+            debug!(
+                session_id = %session_id,
+                "terminal confirmation retired the exact session during outbound dispatch"
+            );
+            return Ok(completed_transition_result(
+                old_state,
+                transition,
+                actions_executed,
+            ));
         }
 
         // 6. Record successful transition in history (state already applied
@@ -851,26 +1237,68 @@ impl StateMachine {
         // await) has since committed a different `call_state`. If so,
         // preserve its commit — overwriting would race-clobber the
         // response-driven transition (e.g. HoldPending → OnHold).
-        if let Ok(current) = self.store.get_session(session_id).await {
-            if current.call_state != session.call_state {
+        if let Ok((
+            current_call_state,
+            current_entered_state_at,
+            current_sdp_origin_session_id,
+            current_sdp_origin_version,
+            current_media_security,
+        )) = self.store.with_session(session_id, |current| {
+            (
+                current.call_state.clone(),
+                current.entered_state_at,
+                current.sdp_origin_session_id.clone(),
+                current.sdp_origin_version,
+                current.media_security.clone(),
+            )
+        }) {
+            if current_call_state != session.call_state
+                && (transition_state_published_before_actions || current_call_state != old_state)
+            {
                 debug!(
                     "session {} call_state changed during action phase ({:?} -> {:?}); preserving store value",
-                    session_id, session.call_state, current.call_state
+                    session_id, session.call_state, current_call_state
                 );
-                session.call_state = current.call_state;
-                session.entered_state_at = current.entered_state_at;
+                session.call_state = current_call_state;
+                session.entered_state_at = current_entered_state_at;
             }
-            if current.sdp_origin_version > session.sdp_origin_version {
-                session.sdp_origin_session_id = current.sdp_origin_session_id;
-                session.sdp_origin_version = current.sdp_origin_version;
+            if current_sdp_origin_version > session.sdp_origin_version {
+                session.sdp_origin_session_id = current_sdp_origin_session_id;
+                session.sdp_origin_version = current_sdp_origin_version;
             }
             if session.media_security.is_none() {
-                session.media_security = current.media_security;
+                session.media_security = current_media_security;
             }
         }
 
-        // 8. Save updated session state
-        self.store.update_session(session.clone()).await?;
+        // 8. Move the event-local state into the store and retain the exact
+        // immutable revision that was published.  The old path cloned the
+        // complete state here and then loaded the cell again below; both are
+        // on every successful transition's hot path.
+        let lifecycle_handle = session.lifecycle_handle.clone();
+        let published = match self
+            .store
+            .update_state_machine_session_and_snapshot(session, auth_required_event)
+        {
+            Ok(published) => published,
+            Err(error) => {
+                if is_exact_retirement_safe_dispatch_only_transition(transition)
+                    && self.exact_handle_is_no_longer_current(lifecycle_handle.as_ref())
+                {
+                    debug!(
+                        session_id = %session_id,
+                        "terminal confirmation won the outbound-dispatch exact-session save race"
+                    );
+                    return Ok(completed_transition_result(
+                        old_state,
+                        transition,
+                        actions_executed,
+                    ));
+                }
+                return Err(error);
+            }
+        };
+        let session = published.state();
 
         // 9. Publish events (if channel is available)
         if let Some(ref event_tx) = self.event_tx {
@@ -892,25 +1320,12 @@ impl StateMachine {
             }
         }
 
-        // 10. Reload session to pick up any changes made by actions
-        // Actions like send_register may have updated the session (e.g., is_registered flag)
-        let session = self
-            .store
-            .get_session(session_id)
-            .await
-            .map_err(|e| format!("Failed to reload session after actions: {}", e))?;
-
-        // 11. Check if conditions trigger internal events
+        // 10. The returned publication is the exact state just committed, so
+        // readiness checks need neither a map lookup nor an owned reload.
         let all_conditions_met = session.all_conditions_met();
         let call_established_triggered = session.call_established_triggered;
 
-        // 12. Save the updated session state back to the store
-        // CRITICAL: Session changes during process_event must be persisted!
-        self.store
-            .update_session(session)
-            .await
-            .map_err(|e| format!("Failed to save session state: {}", e))?;
-
+        // 11. Check if conditions trigger internal events
         // 12. Trigger internal events after saving
         if all_conditions_met && !call_established_triggered {
             debug!("All conditions met, triggering InternalCheckReady");
@@ -928,6 +1343,20 @@ impl StateMachine {
 
     fn should_skip_action(&self, action: &Action) -> bool {
         matches!(action, Action::SendSIPResponse(180, _)) && !self.auto_180_ringing
+    }
+
+    fn exact_lifetime_is_no_longer_current(&self, session: &SessionState) -> bool {
+        self.exact_handle_is_no_longer_current(session.lifecycle_handle.as_ref())
+    }
+
+    fn exact_handle_is_no_longer_current(
+        &self,
+        handle: Option<&crate::session_registry::SessionRegistryHandle>,
+    ) -> bool {
+        let Some(handle) = handle else {
+            return false;
+        };
+        !self.store.authority().is_current(handle.key())
     }
 
     /// Convert event template to concrete event
@@ -980,5 +1409,232 @@ impl StateMachine {
                 event: format!("{:?}", template),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state_table::ConditionUpdates;
+
+    async fn staged_info_guard(
+        name: &str,
+    ) -> (
+        Arc<SessionStore>,
+        SessionId,
+        SessionRegistryHandle,
+        PendingOptionsStageGuard,
+        Arc<rvoip_sip_dialog::api::unified::InfoRequestOptions>,
+    ) {
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId(name.to_string());
+        store
+            .create_session(session_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create exact session lifetime");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("current exact session handle");
+        let options = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let slot = PendingOptionsSlot::Info(Arc::clone(&options));
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                slot.clone().stage_if_vacant(session)
+            })
+            .expect("stage exact session revision")
+            .expect("INFO staging slot is vacant");
+        let guard = PendingOptionsStageGuard::new(Arc::clone(&store), handle.clone(), slot);
+        (store, session_id, handle, guard, options)
+    }
+
+    fn refer_dispatch_transition() -> Transition {
+        Transition {
+            guards: Vec::new(),
+            actions: vec![Action::SendREFERWithOptions],
+            next_state: None,
+            condition_updates: ConditionUpdates::none(),
+            publish_events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn exact_retirement_accepts_only_neutral_refer_dispatch_rows() {
+        assert!(is_exact_retirement_safe_dispatch_only_transition(
+            &refer_dispatch_transition()
+        ));
+
+        let mut state_changing = refer_dispatch_transition();
+        state_changing.next_state = Some(CallState::Active);
+        assert!(!is_exact_retirement_safe_dispatch_only_transition(
+            &state_changing
+        ));
+
+        let mut condition_changing = refer_dispatch_transition();
+        condition_changing.condition_updates = ConditionUpdates::set_dialog_established(true);
+        assert!(!is_exact_retirement_safe_dispatch_only_transition(
+            &condition_changing
+        ));
+
+        let mut event_publishing = refer_dispatch_transition();
+        event_publishing
+            .publish_events
+            .push(EventTemplate::CallTerminated);
+        assert!(!is_exact_retirement_safe_dispatch_only_transition(
+            &event_publishing
+        ));
+
+        let mut extra_action = refer_dispatch_transition();
+        extra_action.actions.push(Action::SendINFOWithOptions);
+        assert!(!is_exact_retirement_safe_dispatch_only_transition(
+            &extra_action
+        ));
+    }
+
+    #[test]
+    fn exact_retirement_preserves_local_teardown_compatibility() {
+        let transition = Transition {
+            guards: Vec::new(),
+            actions: vec![Action::SendBYEWithOptions],
+            next_state: None,
+            condition_updates: ConditionUpdates::none(),
+            publish_events: Vec::new(),
+        };
+        assert!(is_exact_retirement_safe_dispatch_only_transition(
+            &transition
+        ));
+    }
+
+    #[test]
+    fn cancelled_stage_cleanup_cannot_clear_newer_arc() {
+        let session_id = SessionId("exact-stage-cleanup".to_string());
+        let mut session = SessionState::new(session_id, crate::state_table::Role::UAC);
+        let old = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let newer = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let old_slot = PendingOptionsSlot::Info(Arc::clone(&old));
+        session.pending_info_options = Some(Arc::clone(&newer));
+
+        assert!(!old_slot.clear_if_exact(&mut session));
+        assert!(session
+            .pending_info_options
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &newer)));
+
+        let newer_slot = PendingOptionsSlot::Info(newer);
+        assert!(newer_slot.clear_if_exact(&mut session));
+        assert!(session.pending_info_options.is_none());
+    }
+
+    #[tokio::test]
+    async fn dropping_unclaimed_stage_allows_immediate_same_method_restage() {
+        let (store, _session_id, handle, guard, _old) =
+            staged_info_guard("drop-then-immediate-restage").await;
+
+        drop(guard);
+
+        // There is intentionally no yield or await between dropping the
+        // guard and attempting the replacement. Drop must synchronously make
+        // the slot vacant instead of scheduling eventual cleanup.
+        let replacement = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let replacement_slot = PendingOptionsSlot::Info(Arc::clone(&replacement));
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                replacement_slot.stage_if_vacant(session)
+            })
+            .expect("restage exact session revision")
+            .expect("same-method restage must not observe a stale stage");
+
+        store
+            .with_session(handle.session_id(), |session| {
+                assert!(session
+                    .pending_info_options
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &replacement)));
+            })
+            .expect("read restaged session");
+    }
+
+    #[tokio::test]
+    async fn stale_unclaimed_guard_cannot_clear_replacement_stage() {
+        let (store, _session_id, handle, guard, old) =
+            staged_info_guard("stale-guard-preserves-replacement").await;
+        let replacement = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let replacement_slot = PendingOptionsSlot::Info(Arc::clone(&replacement));
+
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                assert!(PendingOptionsSlot::Info(Arc::clone(&old)).clear_if_exact(session));
+                replacement_slot.stage_if_vacant(session)
+            })
+            .expect("replace exact session staging revision")
+            .expect("replacement INFO stage is vacant");
+
+        drop(guard);
+
+        store
+            .with_session(handle.session_id(), |session| {
+                assert!(session
+                    .pending_info_options
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &replacement)));
+            })
+            .expect("read replacement session");
+    }
+
+    #[test]
+    fn unclaimed_stage_cleanup_does_not_require_tokio_runtime() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build fixture runtime");
+        let (store, _session_id, handle, guard, _old) =
+            runtime.block_on(staged_info_guard("drop-after-runtime"));
+        drop(runtime);
+
+        // This destructor runs with no entered or live Tokio runtime. The
+        // exact slot still must be gone when Drop returns.
+        drop(guard);
+
+        store
+            .with_session(handle.session_id(), |session| {
+                assert!(session.pending_info_options.is_none());
+            })
+            .expect("read session after runtime shutdown");
+    }
+
+    #[test]
+    fn cancellation_before_exact_claim_prevents_dispatch_ownership() {
+        let session_id = SessionId("cancel-before-stage-claim".to_string());
+        let mut session = SessionState::new(session_id, crate::state_table::Role::UAC);
+        let options = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let slot = PendingOptionsSlot::Info(Arc::clone(&options));
+        session.pending_info_options = Some(options);
+        let claim = StageDispatchClaim::new(slot);
+
+        assert!(
+            claim.cancel_before_claim(),
+            "dispatch must abort before claim"
+        );
+        assert!(claim.claim_exact(&mut session).is_err());
+        assert!(
+            session.pending_info_options.is_some(),
+            "cancelled action must not consume the stage"
+        );
+    }
+
+    #[test]
+    fn cancellation_after_exact_claim_detaches_dispatch() {
+        let session_id = SessionId("cancel-after-stage-claim".to_string());
+        let mut session = SessionState::new(session_id, crate::state_table::Role::UAC);
+        let options = Arc::new(rvoip_sip_dialog::api::unified::InfoRequestOptions::default());
+        let slot = PendingOptionsSlot::Info(Arc::clone(&options));
+        session.pending_info_options = Some(options);
+        let claim = StageDispatchClaim::new(slot);
+
+        assert!(claim.claim_exact(&mut session).is_ok());
+        assert!(session.pending_info_options.is_none());
+        assert!(
+            !claim.cancel_before_claim(),
+            "claimed/wire-started dispatch must detach rather than abort"
+        );
     }
 }

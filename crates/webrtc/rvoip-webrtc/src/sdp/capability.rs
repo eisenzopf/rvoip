@@ -1,6 +1,7 @@
 //! `CapabilityDescriptor` ↔ codec preferences (INTERFACE_DESIGN §9.2).
 
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
+use std::collections::BTreeSet;
 
 use crate::errors::{Result, WebRtcError};
 use crate::peer::builder::{MIME_TYPE_OPUS, MIME_TYPE_PCMA, MIME_TYPE_PCMU};
@@ -77,4 +78,21 @@ pub fn mime_to_codec_name(mime: &str) -> Option<&'static str> {
         MIME_TYPE_PCMA => Some("g.711-a"),
         _ => None,
     }
+}
+
+/// Count distinct primary audio codecs that the rvoip WebRTC media engine can
+/// register for this descriptor. Supplemental codecs such as
+/// `telephone-event` are intentionally not represented in
+/// `CapabilityDescriptor::audio_codecs`.
+pub(crate) fn supported_primary_audio_codec_count(caps: &CapabilityDescriptor) -> usize {
+    caps.audio_codecs
+        .iter()
+        .filter_map(|codec| match codec.name.to_ascii_lowercase().as_str() {
+            "opus" => Some("opus"),
+            "g.711-mu" | "pcmu" => Some("g.711-mu"),
+            "g.711-a" | "pcma" => Some("g.711-a"),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>()
+        .len()
 }

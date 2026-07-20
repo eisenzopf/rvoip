@@ -31,8 +31,8 @@ enum CrossBridgeBackend {
         swap_b_to_a: Option<mpsc::Sender<TranscoderSwap>>,
     },
     ManagedMediaGraphs {
-        a_graph: MediaGraphHandle,
-        b_graph: MediaGraphHandle,
+        a_graph: Option<MediaGraphHandle>,
+        b_graph: Option<MediaGraphHandle>,
         a_to_b: Option<ManagedMediaRoute>,
         b_to_a: Option<ManagedMediaRoute>,
     },
@@ -54,10 +54,8 @@ pub(crate) enum CrossBridgeSwapController {
         b_to_a: mpsc::Sender<TranscoderSwap>,
     },
     MediaGraphs {
-        a_graph: MediaGraphHandle,
-        b_graph: MediaGraphHandle,
-        a_to_b: MediaRouteId,
-        b_to_a: MediaRouteId,
+        a_to_b: Option<(MediaGraphHandle, MediaRouteId)>,
+        b_to_a: Option<(MediaGraphHandle, MediaRouteId)>,
     },
 }
 
@@ -68,18 +66,17 @@ impl CrossBridgeSwapController {
         mut b_to_a_swap: TranscoderSwap,
     ) -> Result<()> {
         match self {
-            Self::MediaGraphs {
-                a_graph,
-                b_graph,
-                a_to_b,
-                b_to_a,
-            } => {
-                a_graph
-                    .update_route(a_to_b, a_to_b_swap.new_from_pt, a_to_b_swap.new_to_pt)
-                    .await?;
-                b_graph
-                    .update_route(b_to_a, b_to_a_swap.new_from_pt, b_to_a_swap.new_to_pt)
-                    .await?;
+            Self::MediaGraphs { a_to_b, b_to_a } => {
+                if let Some((graph, route)) = a_to_b {
+                    graph
+                        .update_route(route, a_to_b_swap.new_from_pt, a_to_b_swap.new_to_pt)
+                        .await?;
+                }
+                if let Some((graph, route)) = b_to_a {
+                    graph
+                        .update_route(route, b_to_a_swap.new_from_pt, b_to_a_swap.new_to_pt)
+                        .await?;
+                }
                 Ok(())
             }
             Self::Pumps { a_to_b, b_to_a } => {
@@ -208,10 +205,43 @@ impl CrossBridgeHandle {
             b,
             created_at: Utc::now(),
             backend: CrossBridgeBackend::ManagedMediaGraphs {
-                a_graph,
-                b_graph,
+                a_graph: Some(a_graph),
+                b_graph: Some(b_graph),
                 a_to_b: Some(a_to_b),
                 b_to_a: Some(b_to_a),
+            },
+        }
+    }
+
+    /// Managed-route variant in which either media direction may be absent.
+    /// A graph is retained only for an enabled source direction. Construction
+    /// is crate-private because the Orchestrator validates the complete plan
+    /// and transport sinks before it transfers source-receiver ownership.
+    pub(crate) fn with_directional_managed_media_graphs(
+        id: BridgeId,
+        a: ConnectionId,
+        b: ConnectionId,
+        a_to_b: Option<(MediaGraphHandle, ManagedMediaRoute)>,
+        b_to_a: Option<(MediaGraphHandle, ManagedMediaRoute)>,
+    ) -> Self {
+        let (a_graph, a_to_b) = match a_to_b {
+            Some((graph, route)) => (Some(graph), Some(route)),
+            None => (None, None),
+        };
+        let (b_graph, b_to_a) = match b_to_a {
+            Some((graph, route)) => (Some(graph), Some(route)),
+            None => (None, None),
+        };
+        Self {
+            id,
+            a,
+            b,
+            created_at: Utc::now(),
+            backend: CrossBridgeBackend::ManagedMediaGraphs {
+                a_graph,
+                b_graph,
+                a_to_b,
+                b_to_a,
             },
         }
     }
@@ -221,6 +251,16 @@ impl CrossBridgeHandle {
             return None;
         };
         Some((a_to_b.as_ref()?.status(), b_to_a.as_ref()?.status()))
+    }
+
+    pub(crate) fn managed_media_route_statuses(&self) -> Vec<MediaGraphRouteStatus> {
+        let CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } = &self.backend else {
+            return Vec::new();
+        };
+        [a_to_b, b_to_a]
+            .into_iter()
+            .filter_map(|route| route.as_ref().map(ManagedMediaRoute::status))
+            .collect()
     }
 
     /// Capture the swap channels or graph route IDs without retaining a
@@ -245,34 +285,48 @@ impl CrossBridgeHandle {
                 b_graph,
                 a_to_b,
                 b_to_a,
-            } => Ok(CrossBridgeSwapController::MediaGraphs {
-                a_graph: a_graph.clone(),
-                b_graph: b_graph.clone(),
-                a_to_b: a_to_b
-                    .as_ref()
-                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?
-                    .id()
-                    .clone(),
-                b_to_a: b_to_a
-                    .as_ref()
-                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?
-                    .id()
-                    .clone(),
-            }),
+            } => {
+                let a_to_b = match (a_graph, a_to_b) {
+                    (Some(graph), Some(route)) => Some((graph.clone(), route.id().clone())),
+                    (None, None) => None,
+                    _ => {
+                        return Err(RvoipError::InvalidState(
+                            "A-to-B graph and route ownership diverged",
+                        ));
+                    }
+                };
+                let b_to_a = match (b_graph, b_to_a) {
+                    (Some(graph), Some(route)) => Some((graph.clone(), route.id().clone())),
+                    (None, None) => None,
+                    _ => {
+                        return Err(RvoipError::InvalidState(
+                            "B-to-A graph and route ownership diverged",
+                        ));
+                    }
+                };
+                if a_to_b.is_none() && b_to_a.is_none() {
+                    return Err(RvoipError::InvalidState("bridge routes are stopped"));
+                }
+                Ok(CrossBridgeSwapController::MediaGraphs { a_to_b, b_to_a })
+            }
             CrossBridgeBackend::LegacyMediaGraphs {
                 a_graph,
                 b_graph,
                 a_to_b,
                 b_to_a,
             } => Ok(CrossBridgeSwapController::MediaGraphs {
-                a_graph: a_graph.clone(),
-                b_graph: b_graph.clone(),
-                a_to_b: a_to_b
-                    .clone()
-                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
-                b_to_a: b_to_a
-                    .clone()
-                    .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
+                a_to_b: Some((
+                    a_graph.clone(),
+                    a_to_b
+                        .clone()
+                        .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
+                )),
+                b_to_a: Some((
+                    b_graph.clone(),
+                    b_to_a
+                        .clone()
+                        .ok_or(RvoipError::InvalidState("bridge route is stopped"))?,
+                )),
             }),
         }
     }
@@ -353,20 +407,18 @@ impl CrossBridgeHandle {
         }
     }
 
-    /// Atomically swap the transcoders on both directions. Used by
+    /// Swap the transcoder on every enabled media direction. Used by
     /// `Orchestrator::renegotiate_media` after a successful
     /// adapter-level renegotiation: the new (from_pt, to_pt) pairs
     /// reflect the post-renegotiation codecs on each leg.
     ///
-    /// The swap is best-effort: if the swap channel for a direction
-    /// is full or closed (pump exited), that direction is skipped
-    /// and the call still returns `Ok(())` for the directions that
-    /// did swap. A complete failure (no swap channels wired) returns
-    /// [`RvoipError::NotImplemented`].
-    /// A3 — sends the swap and awaits the per-pump ack so the caller
-    /// knows the new codec is live before this returns. Per-direction
-    /// ack timeout is 1 second; on timeout the swap is logged but not
-    /// retried (the bridge is in degraded state). When `ack` is left
+    /// Disabled graph directions are intentionally absent and skipped. An
+    /// enabled direction that cannot be updated returns an error so the
+    /// caller cannot report a successful renegotiation with stale media.
+    /// Pump-backed bridges send the swap and await each per-pump ack so the
+    /// caller knows the new codec is live before this returns. Per-direction
+    /// ack timeout is 1 second; on timeout the swap is not retried because
+    /// the bridge may already be in a degraded state. When `ack` is left
     /// `None` on the inputs, the call returns immediately after the
     /// send (legacy fire-and-forget).
     pub async fn swap_transcoders(
@@ -404,6 +456,73 @@ impl Drop for CrossBridgeHandle {
                     b_graph.remove_sink(route);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::CodecInfo;
+    use crate::media_graph::{start_media_graph, MediaGraphPolicy};
+
+    fn codec(name: &str, clock_rate_hz: u32) -> CodecInfo {
+        CodecInfo {
+            name: name.into(),
+            clock_rate_hz,
+            channels: 1,
+            fmtp: None,
+        }
+    }
+
+    fn swap(from: u8, to: u8) -> TranscoderSwap {
+        TranscoderSwap {
+            new_transcoder: None,
+            new_from_pt: from,
+            new_to_pt: to,
+            ack: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn directional_media_graph_swap_updates_only_the_enabled_route() {
+        for a_to_b_enabled in [true, false] {
+            let (_source_tx, source_rx) = mpsc::channel(4);
+            let (source_codec, target_codec, expected_source_pt, expected_target_pt) =
+                if a_to_b_enabled {
+                    (codec("PCMU", 8_000), codec("opus", 48_000), 8, 111)
+                } else {
+                    (codec("opus", 48_000), codec("PCMU", 8_000), 111, 8)
+                };
+            let graph = start_media_graph(source_rx, source_codec, MediaGraphPolicy::default())
+                .expect("start graph");
+            let (sink_tx, _sink_rx) = mpsc::channel(4);
+            let route = graph
+                .add_managed_sink(target_codec, sink_tx)
+                .expect("add managed route");
+            route.wait_active().await.expect("route active");
+
+            let (a_to_b, b_to_a) = if a_to_b_enabled {
+                (Some((graph.clone(), route)), None)
+            } else {
+                (None, Some((graph.clone(), route)))
+            };
+            let handle = CrossBridgeHandle::with_directional_managed_media_graphs(
+                BridgeId::new(),
+                ConnectionId::new(),
+                ConnectionId::new(),
+                a_to_b,
+                b_to_a,
+            );
+            handle
+                .swap_transcoders(swap(8, 111), swap(111, 8))
+                .await
+                .expect("directional swap succeeds");
+
+            let snapshot = graph.snapshot().await;
+            assert_eq!(snapshot.source_payload_type, expected_source_pt);
+            assert_eq!(snapshot.sinks.len(), 1);
+            assert_eq!(snapshot.sinks[0].target_payload_type, expected_target_pt);
         }
     }
 }

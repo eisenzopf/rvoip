@@ -58,7 +58,7 @@ tracing-subscriber = "0.3"
 
 # Benchmarks
 criterion = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 rvoip-sip-core = { workspace = true }
 dashmap = { workspace = true }
 

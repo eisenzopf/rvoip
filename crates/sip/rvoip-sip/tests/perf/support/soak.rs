@@ -1911,8 +1911,11 @@ pub fn endpoint_bounded_tombstone_total(snapshot: &serde_json::Value) -> u64 {
         "/transaction_manager/invite_2xx_response_due_queue",
         "/transaction_manager/retired_client_transactions",
         "/dialog_manager/terminated_bye_lookup",
+        "/dialog_manager/terminated_bye_deadlines",
         "/dialog_manager/invite_failover_plans",
+        "/dialog_manager/invite_failover_plans_by_dialog",
         "/dialog_manager/invite_failover_attempts",
+        "/dialog_manager/invite_failover_attempts_by_dialog",
     ];
 
     endpoint_metrics_total(snapshot, POINTERS)

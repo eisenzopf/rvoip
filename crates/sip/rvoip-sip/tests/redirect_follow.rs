@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
 use rvoip_sip::api::unified::Config;
+use rvoip_sip::types::Credentials;
 use rvoip_sip::{CallHandlerDecision, CallbackPeer, StreamPeer};
 
 use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -41,6 +42,14 @@ struct RedirectProxyInvite {
     request_uri: String,
     has_route: bool,
     has_authorization: bool,
+}
+
+#[derive(Debug)]
+struct RedirectAuthChainInvite {
+    request_uri: String,
+    authorization_scheme: Option<String>,
+    has_route: bool,
+    body: Vec<u8>,
 }
 
 #[test]
@@ -139,6 +148,120 @@ fn redirect_keeps_structural_proxy_but_drops_origin_authorization() {
         .await
         .expect("redirect scenario task");
     })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redirect_then_new_origin_digest_auth_uses_normal_stack_and_fresh_credentials() {
+    const EXACT_SDP: &str = "v=0\r\no=redirect-auth 7 9 IN IP4 192.0.2.50\r\ns=exact\r\nt=0 0\r\n";
+
+    let socket = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("redirect/auth proxy bind"),
+    );
+    let proxy_port = socket.local_addr().expect("proxy address").port();
+    let client_port = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("reserve client port")
+        .local_addr()
+        .expect("client address")
+        .port();
+    let seen = Arc::new(Mutex::new(Vec::<RedirectAuthChainInvite>::new()));
+    let socket_task = Arc::clone(&socket);
+    let seen_task = Arc::clone(&seen);
+    let server = tokio::spawn(async move {
+        let mut buffer = vec![0_u8; 16 * 1024];
+        loop {
+            let (length, peer) = match socket_task.recv_from(&mut buffer).await {
+                Ok(received) => received,
+                Err(_) => return,
+            };
+            let request = match parse_message(&buffer[..length]) {
+                Ok(Message::Request(request)) if request.method() == Method::Invite => request,
+                _ => continue,
+            };
+            let authorization_scheme = request
+                .raw_header_value(&HeaderName::Authorization)
+                .and_then(|value| value.split_ascii_whitespace().next().map(str::to_owned));
+            let attempt = {
+                let mut captured = seen_task.lock().await;
+                let attempt = captured.len();
+                captured.push(RedirectAuthChainInvite {
+                    request_uri: request.uri().to_string(),
+                    authorization_scheme,
+                    has_route: request.raw_header_value(&HeaderName::Route).is_some(),
+                    body: request.body().to_vec(),
+                });
+                attempt
+            };
+            let response = match attempt {
+                0 => {
+                    let mut response = create_response(&request, StatusCode::MovedTemporarily);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(b"<sip:bob@new-origin.invalid>".to_vec()),
+                    ));
+                    response
+                }
+                1 => {
+                    let mut response = create_response(&request, StatusCode::Unauthorized);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::WwwAuthenticate,
+                        HeaderValue::Raw(
+                            br#"Digest realm="new-origin", nonce="new-origin-nonce", algorithm=MD5, qop="auth-int""#
+                                .to_vec(),
+                        ),
+                    ));
+                    response
+                }
+                _ => create_response(&request, StatusCode::BusyHere),
+            };
+            socket_task
+                .send_to(&Message::Response(response).to_bytes(), peer)
+                .await
+                .expect("redirect/auth response");
+        }
+    });
+
+    let peer = StreamPeer::with_config(
+        Config::local("redirect-auth-client", client_port).with_signaling_only_media(9),
+    )
+    .await
+    .expect("redirect/auth client");
+    peer.invite("sip:bob@old-origin.invalid")
+        .with_outbound_proxy(format!("sip:127.0.0.1:{proxy_port};lr"))
+        .with_precomputed_authorization("Bearer old-origin-canary")
+        .with_credentials(Credentials::new("alice", "new-origin-secret"))
+        .with_sdp(EXACT_SDP)
+        .send()
+        .await
+        .expect("redirect/auth initial INVITE");
+
+    timeout(Duration::from_secs(10), async {
+        while seen.lock().await.len() < 3 {
+            sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("redirect followed by fresh-origin authentication");
+
+    let captured = seen.lock().await;
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0].request_uri, "sip:bob@old-origin.invalid");
+    assert_eq!(captured[1].request_uri, "sip:bob@new-origin.invalid");
+    assert_eq!(captured[2].request_uri, "sip:bob@new-origin.invalid");
+    assert_eq!(captured[0].authorization_scheme.as_deref(), Some("Bearer"));
+    assert_eq!(captured[1].authorization_scheme, None);
+    assert_eq!(captured[2].authorization_scheme.as_deref(), Some("Digest"));
+    assert!(captured.iter().all(|invite| invite.has_route));
+    assert!(captured
+        .iter()
+        .all(|invite| invite.body.as_slice() == EXACT_SDP.as_bytes()));
+
+    server.abort();
+    peer.shutdown()
+        .await
+        .expect("redirect/auth client shutdown");
 }
 
 #[tokio::test]

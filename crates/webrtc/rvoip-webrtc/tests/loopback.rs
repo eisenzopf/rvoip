@@ -7,7 +7,7 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::MediaStream;
 use rvoip_webrtc::config::WebRtcConfig;
-use rvoip_webrtc::media::{from_tracks, silent_rtp_payload_for_ssrc};
+use rvoip_webrtc::media::{from_tracks, silent_opus_payload};
 use rvoip_webrtc::peer::{connect_loopback, RvoipPeerConnection};
 use tokio::sync::Notify;
 
@@ -73,7 +73,7 @@ async fn loopback_rtp_inbound_round_trip() {
     let mut inbound = answerer_stream.frames_in();
 
     for seq in 1..=5u16 {
-        let payload = silent_rtp_payload_for_ssrc(offerer_ssrc, seq, seq as u32 * 960);
+        let payload = silent_opus_payload();
         offerer_stream
             .frames_out()
             .send(rvoip_core::stream::MediaFrame {

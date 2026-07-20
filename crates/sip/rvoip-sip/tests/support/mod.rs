@@ -18,10 +18,11 @@ pub mod traces;
 
 pub use auth_uas::{boot_auth_uas, AuthUas, CapturedAuthRequest, ChallengeReply};
 pub use established::{
-    boot_callback_receiver, boot_unified_caller, boot_unified_caller_with_config, establish_call,
+    boot_callback_receiver, boot_callback_receiver_with_handler, boot_unified_caller,
+    boot_unified_caller_with_config, establish_call, establish_call_with_handler,
     wait_for_call_answered, CallbackReceiver, EstablishedCall,
 };
-pub use handlers::{AutoAccept, B2buaCarryThrough};
+pub use handlers::{AutoAccept, AutoAcceptUnsupportedInfo, B2buaCarryThrough};
 #[cfg(feature = "perf-tests")]
 pub use invariants::{
     assert_no_watchdog_fallback, assert_pair_released, assert_single_endpoint_released,

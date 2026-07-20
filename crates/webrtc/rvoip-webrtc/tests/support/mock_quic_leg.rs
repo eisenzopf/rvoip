@@ -4,6 +4,8 @@
 //! UCTP stack — frames injected on the mock's external side appear on the
 //! bridged WebRTC leg and vice versa.
 
+#![allow(dead_code)]
+
 use std::sync::Mutex as StdMutex;
 
 use async_trait::async_trait;

@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -28,17 +28,25 @@ pub struct TaskHandle {
     id: usize,
     name: String,
     handle: JoinHandle<()>,
+    completed: Arc<AtomicBool>,
     priority: TaskPriority,
     started_at: Instant,
 }
 
 impl TaskHandle {
     /// Create a new task handle
-    fn new(id: usize, name: String, handle: JoinHandle<()>, priority: TaskPriority) -> Self {
+    fn new(
+        id: usize,
+        name: String,
+        handle: JoinHandle<()>,
+        completed: Arc<AtomicBool>,
+        priority: TaskPriority,
+    ) -> Self {
         Self {
             id,
             name,
             handle,
+            completed,
             priority,
             started_at: Instant::now(),
         }
@@ -56,7 +64,7 @@ impl TaskHandle {
 
     /// Check if task is finished
     pub fn is_finished(&self) -> bool {
-        self.handle.is_finished()
+        self.completed.load(Ordering::Acquire) || self.handle.is_finished()
     }
 
     /// Abort the task
@@ -99,17 +107,26 @@ pub struct LayerTaskManager {
 
 struct ActiveTaskGuard {
     active_count: Arc<AtomicUsize>,
+    completed: Arc<AtomicBool>,
 }
 
 impl ActiveTaskGuard {
-    fn new(active_count: Arc<AtomicUsize>) -> Self {
-        Self { active_count }
+    fn new(active_count: Arc<AtomicUsize>, completed: Arc<AtomicBool>) -> Self {
+        Self {
+            active_count,
+            completed,
+        }
     }
 }
 
 impl Drop for ActiveTaskGuard {
     fn drop(&mut self) {
-        self.active_count.fetch_sub(1, Ordering::Relaxed);
+        // Publish completion before decrementing active_count. Once an
+        // observer sees active_count == 0, cleanup_finished can therefore
+        // reap every corresponding handle without depending on Tokio's
+        // separate JoinHandle completion publication.
+        self.completed.store(true, Ordering::Release);
+        self.active_count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -154,11 +171,16 @@ impl LayerTaskManager {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        // Completed handles have no shutdown value and must not accumulate
+        // across repeated short-lived tasks (for example event-subscription
+        // compatibility bridges). Reap them at the next admission boundary.
+        self.cleanup_finished().await;
+
         let task_name = name.into();
         let task_id = self.next_task_id.fetch_add(1, Ordering::SeqCst);
 
         // Check if we've hit the task limit
-        let active = self.active_count.load(Ordering::Relaxed);
+        let active = self.active_count.load(Ordering::Acquire);
         if active >= self.max_tasks {
             anyhow::bail!(
                 "Task limit reached for {}: {} active tasks",
@@ -172,7 +194,9 @@ impl LayerTaskManager {
         let layer_name = self.layer_name.clone();
         let task_name_clone = task_name.clone();
 
-        let active_guard = ActiveTaskGuard::new(Arc::clone(&self.active_count));
+        let completed = Arc::new(AtomicBool::new(false));
+        let active_guard =
+            ActiveTaskGuard::new(Arc::clone(&self.active_count), Arc::clone(&completed));
 
         let wrapped_future = async move {
             let _active_guard = active_guard;
@@ -198,12 +222,12 @@ impl LayerTaskManager {
         };
 
         // Update the main counter
-        self.active_count.fetch_add(1, Ordering::Relaxed);
+        self.active_count.fetch_add(1, Ordering::AcqRel);
 
         let handle = tokio::spawn(wrapped_future);
 
         // Store the task handle
-        let task_handle = TaskHandle::new(task_id, task_name, handle, priority);
+        let task_handle = TaskHandle::new(task_id, task_name, handle, completed, priority);
         self.tasks.lock().await.push(task_handle);
 
         Ok(task_id)
@@ -237,7 +261,7 @@ impl LayerTaskManager {
 
     /// Get number of active tasks
     pub fn active_task_count(&self) -> usize {
-        self.active_count.load(Ordering::Relaxed)
+        self.active_count.load(Ordering::Acquire)
     }
 
     /// Cancel all tasks gracefully
@@ -290,7 +314,7 @@ impl LayerTaskManager {
 
     /// Wait for all tasks to complete
     async fn wait_for_completion(&self) {
-        while self.active_count.load(Ordering::Relaxed) > 0 {
+        while self.active_count.load(Ordering::Acquire) > 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -329,7 +353,7 @@ impl LayerTaskManager {
         let tasks = self.tasks.lock().await;
 
         let total_tasks = tasks.len();
-        let active_tasks = self.active_count.load(Ordering::Relaxed);
+        let active_tasks = self.active_count.load(Ordering::Acquire);
         let finished_tasks = tasks.iter().filter(|t| t.is_finished()).count();
 
         let task_breakdown = tasks
@@ -476,6 +500,35 @@ mod tests {
         // Wait a bit for cancellation to take effect
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(manager.active_task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_handles_are_reaped_on_subsequent_spawn() {
+        let manager = LayerTaskManager::new("test-reaping");
+
+        for iteration in 0..128 {
+            manager
+                .spawn_tracked(
+                    format!("short-task-{iteration}"),
+                    TaskPriority::Normal,
+                    async {},
+                )
+                .await
+                .unwrap();
+            while manager.active_task_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+            let stats = manager.stats().await;
+            assert!(
+                stats.total_tasks <= 1,
+                "completed task handles accumulated: {stats:?}"
+            );
+        }
+
+        manager.cleanup_finished().await;
+        let stats = manager.stats().await;
+        assert_eq!(stats.total_tasks, 0);
+        assert_eq!(stats.finished_tasks, 0);
     }
 
     #[tokio::test]

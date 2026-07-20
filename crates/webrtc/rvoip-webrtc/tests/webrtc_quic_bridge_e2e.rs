@@ -8,7 +8,6 @@ mod quic_leg;
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use chrono::Utc;
 use quic_leg::{install_crypto_provider, QuicLegHarness};
 use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest};
@@ -23,7 +22,7 @@ use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
 use rvoip_quic::{spawn_datagram_reader, QuicDatagramMediaStream};
-use rvoip_webrtc::media::silent_rtp_payload_for_ssrc;
+use rvoip_webrtc::media::silent_opus_payload;
 use rvoip_webrtc::peer::RvoipPeerConnection;
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig, WebRtcServerBuilder};
 
@@ -217,10 +216,8 @@ async fn whip_webrtc_bridged_to_real_quic_leg() {
         .await
         .expect("pub streams");
     let pub_stream = pub_streams.first().expect("publisher stream");
-    let pub_ssrc = offerer_peer.local_audio_ssrc().expect("publisher ssrc");
-
     for seq in 1..=3u16 {
-        let payload = silent_rtp_payload_for_ssrc(pub_ssrc, seq, seq as u32 * 960);
+        let payload = silent_opus_payload();
         pub_stream
             .frames_out()
             .send(MediaFrame {

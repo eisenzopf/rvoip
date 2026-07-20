@@ -15,8 +15,8 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU8, Ordering},
+    Arc, OnceLock, Weak,
 };
 use std::time::{Duration, Instant};
 
@@ -1059,6 +1059,11 @@ pub struct IncomingRequest {
     pub(crate) request: Option<Arc<Request>>,
     /// Transport context for auth policy decisions.
     pub(crate) transport: crate::auth::SipTransportSecurityContext,
+    /// Exact inbound server transaction used for an application-authored
+    /// response. Legacy/synthetic events may not carry one.
+    pub(crate) response_transaction: Option<rvoip_sip_dialog::transaction::TransactionKey>,
+    /// Shared single-writer obligation for the exact final response.
+    pub(crate) response_obligation: Option<Arc<ExactResponseObligation>>,
     /// Coordinator for sending responses. `None` for bus-constructed
     /// instances; the surface consumer (CallbackPeer / StreamPeer)
     /// repopulates this on dispatch so response builders can resolve
@@ -1066,7 +1071,114 @@ pub struct IncomingRequest {
     pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
 }
 
-fn safe_incoming_method_debug_label(method: &rvoip_sip_core::types::Method) -> &'static str {
+const EXACT_RESPONSE_AVAILABLE: u8 = 0;
+const EXACT_RESPONSE_IN_FLIGHT: u8 = 1;
+const EXACT_RESPONSE_COMPLETE: u8 = 2;
+
+pub(crate) struct ExactResponseObligation {
+    state: AtomicU8,
+    coordinator: OnceLock<Weak<UnifiedCoordinator>>,
+    call_id: CallId,
+    transaction: rvoip_sip_dialog::transaction::TransactionKey,
+}
+
+impl ExactResponseObligation {
+    pub(crate) fn new(
+        call_id: CallId,
+        transaction: rvoip_sip_dialog::transaction::TransactionKey,
+    ) -> Self {
+        Self {
+            state: AtomicU8::new(EXACT_RESPONSE_AVAILABLE),
+            coordinator: OnceLock::new(),
+            call_id,
+            transaction,
+        }
+    }
+
+    fn attach_coordinator(&self, coordinator: &Arc<UnifiedCoordinator>) {
+        let _ = self.coordinator.set(Arc::downgrade(coordinator));
+    }
+
+    pub(crate) fn call_id(&self) -> &CallId {
+        &self.call_id
+    }
+
+    pub(crate) fn transaction(&self) -> &rvoip_sip_dialog::transaction::TransactionKey {
+        &self.transaction
+    }
+
+    pub(crate) fn claim(self: &Arc<Self>) -> Result<ExactResponseClaim> {
+        self.state
+            .compare_exchange(
+                EXACT_RESPONSE_AVAILABLE,
+                EXACT_RESPONSE_IN_FLIGHT,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| ExactResponseClaim {
+                obligation: Arc::clone(self),
+                armed: true,
+            })
+            .map_err(|_| {
+                SessionError::InvalidInput(
+                    "exact inbound response has already been claimed".to_string(),
+                )
+            })
+    }
+
+    fn complete(&self) {
+        self.state.store(EXACT_RESPONSE_COMPLETE, Ordering::Release);
+        if let Some(coordinator) = self.coordinator.get().and_then(Weak::upgrade) {
+            coordinator.complete_exact_response_obligation(&self.transaction);
+        }
+    }
+
+    fn release_after_failure(&self) {
+        let _ = self.state.compare_exchange(
+            EXACT_RESPONSE_IN_FLIGHT,
+            EXACT_RESPONSE_AVAILABLE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Cancellation-safe ownership of one exact final-response attempt.
+///
+/// A successful write completes the obligation. An ordinary write error may
+/// release it for an explicit retry. If the send future is cancelled or
+/// panics, dropping the still-armed guard releases the claim. The
+/// coordinator-owned deadline registry retains the obligation and authors the
+/// stack-owned fallback without requiring a task spawn from `Drop`.
+pub(crate) struct ExactResponseClaim {
+    obligation: Arc<ExactResponseObligation>,
+    armed: bool,
+}
+
+impl ExactResponseClaim {
+    pub(crate) fn complete(mut self) {
+        self.obligation.complete();
+        self.armed = false;
+    }
+
+    pub(crate) fn release_after_failure(mut self) {
+        self.obligation.release_after_failure();
+        self.armed = false;
+    }
+}
+
+impl Drop for ExactResponseClaim {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.obligation.release_after_failure();
+    }
+}
+
+pub(crate) fn safe_incoming_method_debug_label(
+    method: &rvoip_sip_core::types::Method,
+) -> &'static str {
     use rvoip_sip_core::types::Method;
 
     match method {
@@ -1108,6 +1220,10 @@ impl std::fmt::Debug for IncomingRequest {
                     .map_or(0, |request| request.body().len()),
             )
             .field("coordinator_present", &self.coordinator.is_some())
+            .field(
+                "response_transaction_present",
+                &self.response_transaction.is_some(),
+            )
             .finish()
     }
 }
@@ -1150,6 +1266,36 @@ impl IncomingRequest {
         &self,
         status: u16,
     ) -> Result<crate::api::respond::GenericResponseBuilder> {
+        if self.response_transaction.is_some() {
+            let transaction_id = self.exact_response_transaction()?;
+            let coord = self.coordinator.clone().ok_or_else(|| {
+                SessionError::InvalidInput(
+                    "IncomingRequest.respond_builder() requires a coordinator hook; the bus \
+                     path has not yet rehydrated it"
+                        .to_string(),
+                )
+            })?;
+            return crate::api::respond::GenericResponseBuilder::new_in_dialog(
+                coord,
+                self.call_id.clone(),
+                self.method.clone(),
+                transaction_id,
+                status,
+                self.exact_response_obligation()?,
+            );
+        }
+        if matches!(
+            self.method,
+            rvoip_sip_core::Method::Info
+                | rvoip_sip_core::Method::Notify
+                | rvoip_sip_core::Method::Update
+                | rvoip_sip_core::Method::Refer
+        ) {
+            return Err(SessionError::InvalidInput(
+                "IncomingRequest.respond_builder() requires an exact inbound transaction for this in-dialog method"
+                    .to_string(),
+            ));
+        }
         let coord = self.coordinator.clone().ok_or_else(|| {
             SessionError::InvalidInput(
                 "IncomingRequest.respond_builder() requires a coordinator hook; the bus \
@@ -1163,6 +1309,64 @@ impl IncomingRequest {
             self.method.clone(),
             status,
         )
+    }
+
+    /// Begin a final 2xx–6xx response for this exact inbound in-dialog
+    /// transaction.
+    ///
+    /// This does not run INVITE accept/reject call-state transitions. It is
+    /// therefore the response API for inbound INFO and similar application
+    /// requests. Legacy events that lack exact transaction correlation return
+    /// `InvalidInput` rather than guessing from dialog state.
+    pub fn respond(&self, status: u16) -> Result<crate::api::respond::InDialogResponseBuilder> {
+        let transaction_id = self.exact_response_transaction()?;
+        let coord = self.coordinator.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.respond() requires a coordinator hook; the bus path has not yet rehydrated it"
+                    .to_string(),
+            )
+        })?;
+        crate::api::respond::InDialogResponseBuilder::new(
+            coord,
+            self.call_id.clone(),
+            transaction_id,
+            status,
+            self.exact_response_obligation()?,
+        )
+    }
+
+    fn exact_response_obligation(&self) -> Result<Arc<ExactResponseObligation>> {
+        self.response_obligation.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest response requires an exact response obligation".to_string(),
+            )
+        })
+    }
+
+    fn exact_response_transaction(&self) -> Result<rvoip_sip_dialog::transaction::TransactionKey> {
+        let transaction = self.response_transaction.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest response requires an exact inbound server transaction".to_string(),
+            )
+        })?;
+        let wire_transaction = self
+            .request
+            .as_ref()
+            .and_then(|request| {
+                rvoip_sip_dialog::transaction::TransactionKey::from_request(request)
+            })
+            .ok_or_else(|| {
+                SessionError::InvalidInput(
+                    "IncomingRequest response requires an exact transaction on the wire request"
+                        .to_string(),
+                )
+            })?;
+        if transaction != wire_transaction || transaction.method() != &self.method {
+            return Err(SessionError::InvalidInput(
+                "IncomingRequest response transaction does not match the wire request".to_string(),
+            ));
+        }
+        Ok(transaction)
     }
 
     /// Begin an `AuthChallengeBuilder` for 401/407 on the inbound request.
@@ -1224,8 +1428,41 @@ impl IncomingRequest {
     /// dispatch. Called by the surface consumer (CallbackPeer /
     /// StreamPeer) on every inbound event before exposing the
     /// `IncomingRequest` to application code.
-    pub(crate) fn set_coordinator(&mut self, coord: Arc<UnifiedCoordinator>) {
-        self.coordinator = Some(coord);
+    pub(crate) fn set_coordinator(
+        &mut self,
+        coord: Arc<UnifiedCoordinator>,
+    ) -> crate::api::unified::ExactResponseRegistration {
+        if let Some(obligation) = &self.response_obligation {
+            obligation.attach_coordinator(&coord);
+            let registration = coord.register_exact_response_obligation(Arc::clone(obligation));
+            self.coordinator = Some(coord);
+            if !matches!(
+                registration,
+                crate::api::unified::ExactResponseRegistration::Registered
+            ) {
+                return registration;
+            }
+        } else {
+            self.coordinator = Some(coord);
+        }
+        crate::api::unified::ExactResponseRegistration::Registered
+    }
+
+    pub(crate) fn set_response_transaction(
+        &mut self,
+        transaction: rvoip_sip_dialog::transaction::TransactionKey,
+    ) {
+        self.response_obligation = Some(Arc::new(ExactResponseObligation::new(
+            self.call_id.clone(),
+            transaction.clone(),
+        )));
+        self.response_transaction = Some(transaction);
+    }
+
+    pub(crate) fn clear_response_capability(&mut self) {
+        self.response_transaction = None;
+        self.response_obligation = None;
+        self.coordinator = None;
     }
 
     /// SIP_API_DESIGN_2 Phase E — construct an `IncomingRequest` from
@@ -1247,6 +1484,8 @@ impl IncomingRequest {
             received_at: Instant::now(),
             request: Some(request),
             transport: crate::auth::SipTransportSecurityContext::unknown(),
+            response_transaction: None,
+            response_obligation: None,
             coordinator: None,
         }
     }
@@ -1442,14 +1681,13 @@ impl IncomingResponse {
         let mut has_rseq = false;
         for h in &resp.headers {
             match h {
-                TypedHeader::Require(req) => {
+                TypedHeader::Require(req)
                     if req
                         .option_tags
                         .iter()
-                        .any(|s| s.eq_ignore_ascii_case("100rel"))
-                    {
-                        has_require_100rel = true;
-                    }
+                        .any(|s| s.eq_ignore_ascii_case("100rel")) =>
+                {
+                    has_require_100rel = true;
                 }
                 TypedHeader::RSeq(_) => has_rseq = true,
                 _ => {}
@@ -1924,6 +2162,58 @@ mod tests {
                 "debug leaked method: {rendered}"
             );
         }
+    }
+
+    #[test]
+    fn incoming_response_rejects_wrong_branch_before_dispatch() {
+        let raw = b"INFO sip:bob@example.test SIP/2.0\r\n\
+                    Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-wire-branch\r\n\
+                    From: <sip:alice@example.test>;tag=from-tag\r\n\
+                    To: <sip:bob@example.test>;tag=to-tag\r\n\
+                    Call-ID: response-correlation\r\n\
+                    CSeq: 2 INFO\r\n\
+                    Content-Length: 0\r\n\r\n";
+        let request = match rvoip_sip_core::parse_message(raw).expect("parse INFO") {
+            rvoip_sip_core::Message::Request(request) => request,
+            other => panic!("expected request, got {other:?}"),
+        };
+        let mut incoming = IncomingRequest::from_bus_request(
+            crate::state_table::types::SessionId("response-correlation".into()),
+            "sip:alice@example.test".into(),
+            "sip:bob@example.test".into(),
+            rvoip_sip_core::types::Method::Info,
+            Arc::new(request),
+        );
+        incoming.set_response_transaction(rvoip_sip_dialog::transaction::TransactionKey::new(
+            "z9hG4bK-wrong-branch".into(),
+            rvoip_sip_core::types::Method::Info,
+            true,
+        ));
+
+        assert!(matches!(
+            incoming.respond(200),
+            Err(SessionError::InvalidInput(message))
+                if message.contains("does not match the wire request")
+        ));
+    }
+
+    #[test]
+    fn cancelled_exact_response_claim_returns_to_retryable_state() {
+        let obligation = Arc::new(ExactResponseObligation::new(
+            CallId::new(),
+            rvoip_sip_dialog::transaction::TransactionKey::new(
+                "z9hG4bK-cancelled-exact-response".into(),
+                rvoip_sip_core::types::Method::Info,
+                true,
+            ),
+        ));
+
+        let cancelled = obligation.claim().expect("first exact response claim");
+        drop(cancelled);
+        let retry = obligation
+            .claim()
+            .expect("cancelled exact response claim was released by RAII");
+        retry.release_after_failure();
     }
 
     #[test]

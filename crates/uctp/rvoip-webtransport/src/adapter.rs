@@ -39,6 +39,8 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 
 #[derive(Clone)]
 pub(crate) struct Route {
+    /// Exact peer-selected Conversation ID from the authenticated invite.
+    pub cid: Option<String>,
     pub sid: String,
     pub core_session_id: SessionId,
     pub core_connection_id: ConnectionId,
@@ -609,8 +611,12 @@ impl ConnectionAdapter for UctpWtAdapter {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let wire_connection_id =
             rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
+        let wire_conversation_id = route.cid.as_deref().ok_or_else(|| {
+            RvoipError::Adapter("UCTP data route has no conversation binding".into())
+        })?;
         rvoip_uctp::adapter_helpers::send_data_message_via_envelope(
             &route.out_tx,
+            wire_conversation_id,
             &route.sid,
             &wire_connection_id,
             &message,

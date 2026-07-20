@@ -156,6 +156,35 @@ use crate::config::DialogManagerConfig;
 use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::manager::unified::UnifiedDialogManager;
+pub use crate::manager::unified::{
+    InitialInviteDispatch, InitialInviteDispatchCompletion, InitialInviteDispatchError,
+    InitialInviteOwner, InitialInviteWireOutcome, InstalledInitialInvite, PlannedInitialInvite,
+};
+pub use crate::transaction::server::FinalResponseCompletionDisposition;
+
+/// A failed exact final-response operation together with the transaction
+/// layer's authoritative wire disposition.
+#[derive(Debug)]
+pub struct ExactResponseSendError {
+    pub source: ApiError,
+    pub disposition: FinalResponseCompletionDisposition,
+}
+
+impl fmt::Display for ExactResponseSendError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "exact SIP response failed ({:?}): {}",
+            self.disposition, self.source
+        )
+    }
+}
+
+impl std::error::Error for ExactResponseSendError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
 
 /// Unified Dialog API
 ///
@@ -1122,6 +1151,45 @@ impl UnifiedDialogApi {
         Ok(Self { manager, config })
     }
 
+    /// Canonical integrated constructor using pointer-sized authoritative
+    /// transaction-event queues end to end.
+    pub async fn with_shared_global_events_and_coordinator(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        config: DialogManagerConfig,
+        global_coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
+    ) -> ApiResult<Self> {
+        info!(
+            "Creating UnifiedDialogApi with shared global events and event coordination in {:?} mode",
+            Self::mode_name(&config)
+        );
+
+        let manager = Arc::new(
+            UnifiedDialogManager::with_shared_global_events(
+                transaction_manager,
+                transaction_events,
+                config.clone(),
+            )
+            .await
+            .map_err(ApiError::from)?,
+        );
+
+        let event_hub = crate::events::DialogEventHub::new(
+            global_coordinator,
+            Arc::new(manager.as_ref().inner_manager().clone()),
+        )
+        .await
+        .map_err(|_error| ApiError::internal("Failed to create event hub"))?;
+
+        manager
+            .as_ref()
+            .inner_manager()
+            .set_event_hub(event_hub)
+            .await;
+
+        Ok(Self { manager, config })
+    }
+
     /// Create a new unified dialog API with global events (RECOMMENDED)
     ///
     /// # Arguments
@@ -1165,6 +1233,31 @@ impl UnifiedDialogApi {
 
         let manager = Arc::new(
             UnifiedDialogManager::with_global_events(
+                transaction_manager,
+                transaction_events,
+                config.clone(),
+            )
+            .await
+            .map_err(ApiError::from)?,
+        );
+
+        Ok(Self { manager, config })
+    }
+
+    /// Create a unified dialog API using pointer-sized authoritative
+    /// transaction-event queues.
+    pub async fn with_shared_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        config: DialogManagerConfig,
+    ) -> ApiResult<Self> {
+        info!(
+            "Creating UnifiedDialogApi with shared global events in {:?} mode",
+            Self::mode_name(&config)
+        );
+
+        let manager = Arc::new(
+            UnifiedDialogManager::with_shared_global_events(
                 transaction_manager,
                 transaction_events,
                 config.clone(),
@@ -1400,6 +1493,67 @@ impl UnifiedDialogApi {
         self.manager
             .send_invite_with_options(Some(session_id.to_string()), opts)
             .await
+    }
+
+    /// Plan an outbound initial INVITE without installing or emitting it.
+    pub async fn plan_initial_invite(
+        &self,
+        session_id: Option<String>,
+        opts: InviteRequestOptions,
+    ) -> ApiResult<PlannedInitialInvite> {
+        self.manager.plan_initial_invite(session_id, opts).await
+    }
+
+    /// Atomically install a planned dialog and its optional session mapping.
+    pub fn install_initial_invite(
+        &self,
+        plan: PlannedInitialInvite,
+    ) -> ApiResult<InstalledInitialInvite> {
+        self.manager.install_initial_invite(plan)
+    }
+
+    /// Install while synchronously handing exact ownership to a lifecycle
+    /// registry before any dialog/session mapping is published.
+    pub fn install_initial_invite_with_sink<F>(
+        &self,
+        plan: PlannedInitialInvite,
+        sink: F,
+    ) -> ApiResult<InstalledInitialInvite>
+    where
+        F: FnOnce(&InstalledInitialInvite) -> ApiResult<()>,
+    {
+        self.manager.install_initial_invite_with_sink(plan, sink)
+    }
+
+    /// Start retained wire dispatch for an installed initial INVITE.
+    pub fn dispatch_initial_invite(
+        &self,
+        installed: InstalledInitialInvite,
+    ) -> InitialInviteDispatch {
+        self.manager.dispatch_initial_invite(installed)
+    }
+
+    /// Roll back an installed, never-dispatched INVITE by exact owner token.
+    /// Sent or wire-unknown owners require signaling teardown first.
+    pub async fn compensate_initial_invite(&self, owner: &InitialInviteOwner) -> bool {
+        self.manager.compensate_initial_invite(owner).await
+    }
+
+    /// Return whether the exact staged initial-INVITE owner remains retained.
+    pub fn initial_invite_owner_is_retained(&self, owner: &InitialInviteOwner) -> bool {
+        self.manager.initial_invite_owner_is_retained(owner)
+    }
+
+    /// Transfer a sent exact owner to dialog-core's retained CANCEL/BYE
+    /// supervisor. Stale or never-sent owners are refused.
+    pub fn supervise_initial_invite_teardown(&self, owner: &InitialInviteOwner) -> bool {
+        self.manager.supervise_initial_invite_teardown(owner)
+    }
+
+    /// Retire a sent exact owner after protocol teardown was already
+    /// dispatched or the dialog was observed terminal.
+    pub async fn finish_initial_invite_teardown(&self, owner: &InitialInviteOwner) -> bool {
+        self.manager.finish_initial_invite_teardown(owner).await
     }
 
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
@@ -1822,6 +1976,25 @@ impl UnifiedDialogApi {
             })?
             .clone();
 
+        // The caller supplies both a session and an exact transaction. Both
+        // must resolve to the same dialog; method/direction alone is not
+        // sufficient because a foreign server transaction could otherwise
+        // author a response on another tenant's call.
+        let transaction_dialog = self
+            .manager
+            .core()
+            .find_dialog_for_transaction(transaction_id)
+            .map_err(|_| ApiError::Dialog {
+                message: "Exact response transaction is not owned by the session dialog"
+                    .to_string(),
+            })?;
+        if transaction_dialog != dialog_id {
+            return Err(ApiError::Dialog {
+                message: "Exact response transaction is not owned by the session dialog"
+                    .to_string(),
+            });
+        }
+
         self.send_response_for_known_transaction(
             session_id,
             &dialog_id,
@@ -1829,6 +2002,115 @@ impl UnifiedDialogApi {
             status_code,
             body,
             extra_headers,
+        )
+        .await
+    }
+
+    /// Send an exact final response and classify the authoritative transport
+    /// completion. This is the cancellation-recovery surface for higher layers:
+    /// a replacement waiter can observe a response already owned by the runner
+    /// without authoring a duplicate final response.
+    pub async fn send_response_with_extras_for_session_transaction_classified(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        status_code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<FinalResponseCompletionDisposition, ExactResponseSendError> {
+        if !(200..=699).contains(&status_code) {
+            return Err(ExactResponseSendError {
+                source: ApiError::Protocol {
+                    message: "Classified exact-response completion requires a final SIP status"
+                        .to_string(),
+                },
+                disposition: FinalResponseCompletionDisposition::ZeroWireRetryable,
+            });
+        }
+
+        // Do not consult transport completion for a capability that fails the
+        // session/transaction ownership check. Otherwise a foreign caller
+        // could turn its authorization failure into apparent success merely
+        // because the target transaction had already written a final response.
+        let dialog_id = self
+            .manager
+            .core()
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| ExactResponseSendError {
+                source: ApiError::Dialog {
+                    message: format!("No dialog found for session {session_id}"),
+                },
+                disposition: FinalResponseCompletionDisposition::ZeroWireRetryable,
+            })?;
+        let transaction_dialog = self
+            .manager
+            .core()
+            .find_dialog_for_transaction(transaction_id)
+            .map_err(|_| ExactResponseSendError {
+                source: ApiError::Dialog {
+                    message: "Exact response transaction is not owned by the session dialog"
+                        .to_string(),
+                },
+                disposition: FinalResponseCompletionDisposition::ZeroWireRetryable,
+            })?;
+        if transaction_dialog != dialog_id {
+            return Err(ExactResponseSendError {
+                source: ApiError::Dialog {
+                    message: "Exact response transaction is not owned by the session dialog"
+                        .to_string(),
+                },
+                disposition: FinalResponseCompletionDisposition::ZeroWireRetryable,
+            });
+        }
+
+        match self
+            .send_response_with_extras_for_session_transaction(
+                session_id,
+                transaction_id,
+                status_code,
+                body,
+                extra_headers,
+            )
+            .await
+        {
+            Ok(()) => Ok(FinalResponseCompletionDisposition::WrittenSuccessTerminal),
+            Err(source) => {
+                let disposition = self
+                    .manager
+                    .core()
+                    .transaction_manager()
+                    .classify_final_response_completion(transaction_id)
+                    .await;
+                if disposition == FinalResponseCompletionDisposition::WrittenSuccessTerminal {
+                    // The caller may have replaced a cancelled waiter after the
+                    // runner accepted the original operation. Observing the
+                    // exact generation's successful write is idempotent success.
+                    Ok(disposition)
+                } else {
+                    Err(ExactResponseSendError {
+                        source,
+                        disposition,
+                    })
+                }
+            }
+        }
+    }
+
+    pub async fn send_response_for_session_transaction_classified(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        status_code: u16,
+        body: Option<String>,
+    ) -> Result<FinalResponseCompletionDisposition, ExactResponseSendError> {
+        self.send_response_with_extras_for_session_transaction_classified(
+            session_id,
+            transaction_id,
+            status_code,
+            body,
+            Vec::new(),
         )
         .await
     }
@@ -2695,6 +2977,14 @@ impl UnifiedDialogApi {
             extras_opt,
         )
         .map_err(|_error| ApiError::protocol("Failed to build NOTIFY request"))?;
+        // The quick builder is still String-shaped. Restore the exact public
+        // `Bytes` payload after it has populated NOTIFY headers so non-UTF8
+        // bodies, Content-Length, and Digest auth-int all describe the same
+        // wire entity.
+        let request = match opts.body {
+            Some(body) => request.with_body(body),
+            None => request,
+        };
 
         self.send_in_dialog_built_request(dialog_id, Method::Notify, request)
             .await
@@ -2763,6 +3053,9 @@ impl UnifiedDialogApi {
             extras_opt,
         )
         .map_err(|_error| ApiError::protocol("Failed to build INFO request"))?;
+        // Preserve the byte-oriented INFO contract rather than transmitting
+        // the quick builder's lossy UTF-8 projection.
+        let request = request.with_body(opts.body);
         drop(dialog);
 
         self.send_in_dialog_built_request(dialog_id, Method::Info, request)
@@ -3233,7 +3526,7 @@ impl UnifiedDialogApi {
 
         // Create transaction manager with global events automatically
         // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
-        let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
+        let (transaction_manager, global_rx) = TransactionManager::with_transport_manager_shared(
             transport,
             transport_rx,
             Some(10000), // Increased from 100 to handle high concurrent call volumes
@@ -3244,7 +3537,7 @@ impl UnifiedDialogApi {
         })?;
 
         // Create the unified dialog API with all components
-        Self::with_global_events(Arc::new(transaction_manager), global_rx, config).await
+        Self::with_shared_global_events(Arc::new(transaction_manager), global_rx, config).await
     }
 
     // ========================================

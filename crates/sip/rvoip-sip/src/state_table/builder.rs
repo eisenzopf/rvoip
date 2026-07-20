@@ -6,6 +6,12 @@ pub struct StateTableBuilder {
     table: MasterStateTable,
 }
 
+impl Default for StateTableBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StateTableBuilder {
     pub fn new() -> Self {
         Self {

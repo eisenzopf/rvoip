@@ -111,6 +111,7 @@ async fn ws_ice_candidate_for_unknown_connection_id_errors() {
             connection_id: "conn-does-not-exist".into(),
             candidate: r#"{"candidate":"candidate:1 1 UDP 2130706431 127.0.0.1 9 typ host","sdpMid":"0","sdpMLineIndex":0}"#
                 .into(),
+            request_id: String::new(),
         })
         .unwrap()
         .into(),

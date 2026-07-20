@@ -119,6 +119,11 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
             return SubscriptionOutcome::Ok;
         }
 
+        // Validate and resolve the complete request before installing any
+        // route. This prevents a later invalid item from leaving an earlier
+        // item subscribed while the envelope itself is rejected.
+        let mut routes = HashSet::<(ConnectionId, StreamId)>::new();
+
         // Walk subscriptions. Three shapes are possible per
         // §7.7 — strm_id, from_participant, from_participant+kinds.
         for sub in &request.subscriptions {
@@ -149,12 +154,7 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
                             ),
                         );
                     }
-                    self.orch.add_subscription(
-                        sid.clone(),
-                        subscriber.clone(),
-                        entry.connection,
-                        StreamId::from_string(strm_id.clone()),
-                    );
+                    routes.insert((entry.connection, StreamId::from_string(strm_id.clone())));
                 }
                 (None, Some(participant)) => {
                     // MP2.5: resolve all of `participant`'s streams in
@@ -203,12 +203,7 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
                         if !self.codec_acceptable(&entry) {
                             continue;
                         }
-                        self.orch.add_subscription(
-                            sid.clone(),
-                            subscriber.clone(),
-                            entry.connection,
-                            StreamId::from_string(strm_id),
-                        );
+                        routes.insert((entry.connection, StreamId::from_string(strm_id)));
                         matched_any = true;
                     }
                     if !matched_any {
@@ -234,7 +229,22 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
             }
         }
 
-        SubscriptionOutcome::Ok
+        let routes = routes.into_iter().collect::<Vec<_>>();
+        let Some(admission) = self.publishers.with_current_routes(sid, &routes, || {
+            self.orch
+                .try_add_direct_subscriptions(sid, subscriber, &routes)
+        }) else {
+            return SubscriptionOutcome::reject(404, "publisher-changed-during-admission");
+        };
+        match admission {
+            Ok(()) => SubscriptionOutcome::Ok,
+            Err(rvoip_core::subscriptions::DirectSubscriptionAdmissionError::CapacityExhausted) => {
+                SubscriptionOutcome::reject(429, "direct-listener-capacity")
+            }
+            Err(rvoip_core::subscriptions::DirectSubscriptionAdmissionError::Disabled) => {
+                SubscriptionOutcome::reject(503, "direct-listeners-disabled")
+            }
+        }
     }
 
     fn unsubscribe(
@@ -271,20 +281,71 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
     }
 
     fn unregister_publisher(&self, sid: &SessionId, strm_id: &str, publisher: &ConnectionId) {
-        self.publishers
-            .remove_stream_if_publisher(sid, strm_id, publisher);
+        if self
+            .publishers
+            .remove_stream_if_publisher(sid, strm_id, publisher)
+        {
+            self.orch.drop_publisher_stream_subscriptions(
+                sid,
+                publisher,
+                &StreamId::from_string(strm_id),
+            );
+        }
     }
 
     fn unregister_connection(&self, _sid: &SessionId, connid: &ConnectionId) {
-        self.orch.drop_connection_subscriptions(connid);
+        // Keep the global lock order publisher-registry → subscription-registry.
         self.publishers.drop_publisher(connid);
+        self.orch.drop_connection_subscriptions(connid);
     }
 }
 
 #[cfg(test)]
 mod cleanup_tests {
     use super::*;
+    use crate::payloads::stream::StreamSubscription;
     use rvoip_core::Config;
+    use std::sync::Barrier;
+    use std::time::Duration;
+
+    fn orchestrator_with_limit(limit: usize) -> Arc<Orchestrator> {
+        let mut config = Config::default();
+        config.max_direct_subscribers = limit;
+        Orchestrator::new(config)
+    }
+
+    fn register_audio(
+        publishers: &PublisherRegistry,
+        sid: &SessionId,
+        stream: &str,
+        publisher: &str,
+    ) -> ConnectionId {
+        let publisher = ConnectionId::from_string(publisher);
+        publishers.register(
+            sid.clone(),
+            stream.to_owned(),
+            PublisherEntry {
+                connection: publisher.clone(),
+                participant: publisher.to_string(),
+                kind: "audio".to_string(),
+                codec: None,
+            },
+        );
+        publisher
+    }
+
+    fn subscribe_request(streams: &[&str]) -> StreamSubscribe {
+        StreamSubscribe {
+            by_participant: "listener".to_string(),
+            subscriptions: streams
+                .iter()
+                .map(|stream| StreamSubscription {
+                    strm_id: Some((*stream).to_string()),
+                    ..StreamSubscription::default()
+                })
+                .collect(),
+        }
+    }
 
     #[test]
     fn unregister_connection_clears_publishers_and_subscription_rows() {
@@ -353,5 +414,272 @@ mod cleanup_tests {
         handler.unregister_publisher(&sid, "audio/main", &old_publisher);
 
         assert_eq!(publishers.publisher(&sid, "audio/main"), Some(replacement));
+    }
+
+    #[test]
+    fn orchestrator_wide_limit_is_atomic_across_handlers_and_released_exactly() {
+        let orchestrator = orchestrator_with_limit(1);
+        let publishers = orchestrator.publisher_registry();
+        let sid = SessionId::from_string("atomic-session");
+        let publisher = register_audio(&publishers, &sid, "audio/main", "publisher");
+        let handler_a = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let handler_b = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let barrier = Arc::new(Barrier::new(3));
+        let request = subscribe_request(&["audio/main"]);
+        let mut joins = Vec::new();
+        for (handler, subscriber) in [
+            (handler_a.clone(), ConnectionId::from_string("listener-a")),
+            (handler_b.clone(), ConnectionId::from_string("listener-b")),
+        ] {
+            let barrier = Arc::clone(&barrier);
+            let sid = sid.clone();
+            let request = request.clone();
+            joins.push(std::thread::spawn(move || {
+                barrier.wait();
+                let outcome = handler.subscribe(&sid, &subscriber, &request);
+                (subscriber, outcome)
+            }));
+        }
+        barrier.wait();
+        let results = joins
+            .into_iter()
+            .map(|join| join.join().expect("subscriber thread must not panic"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, outcome)| *outcome == SubscriptionOutcome::Ok)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|(_, outcome)| matches!(
+                    outcome,
+                    SubscriptionOutcome::Reject { code: 429, .. }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 1);
+
+        let winner = results
+            .iter()
+            .find(|(_, outcome)| *outcome == SubscriptionOutcome::Ok)
+            .map(|(subscriber, _)| subscriber.clone())
+            .unwrap();
+        let loser = results
+            .iter()
+            .find(|(_, outcome)| *outcome != SubscriptionOutcome::Ok)
+            .map(|(subscriber, _)| subscriber.clone())
+            .unwrap();
+        handler_a.unregister_connection(&sid, &winner);
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+        assert_eq!(
+            handler_b.subscribe(&sid, &loser, &request),
+            SubscriptionOutcome::Ok
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 1);
+        assert_eq!(
+            orchestrator.subscribers_for(&sid, &publisher, &StreamId::from_string("audio/main")),
+            vec![loser.clone()]
+        );
+        handler_b.unregister_connection(&sid, &loser);
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+    }
+
+    #[test]
+    fn listener_1001_is_rejected_without_installing_a_route() {
+        let orchestrator = orchestrator_with_limit(1_000);
+        let publishers = orchestrator.publisher_registry();
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("thousand-listener-cap");
+        let publisher = register_audio(&publishers, &sid, "audio/main", "publisher");
+        let request = subscribe_request(&["audio/main"]);
+
+        for index in 0..1_000 {
+            let subscriber = ConnectionId::from_string(format!("listener-{index}"));
+            assert_eq!(
+                handler.subscribe(&sid, &subscriber, &request),
+                SubscriptionOutcome::Ok
+            );
+        }
+        let overflow = ConnectionId::from_string("listener-1000");
+        assert!(matches!(
+            handler.subscribe(&sid, &overflow, &request),
+            SubscriptionOutcome::Reject { code: 429, .. }
+        ));
+        assert_eq!(orchestrator.active_direct_listener_count(), 1_000);
+        assert!(!orchestrator
+            .subscribers_for(&sid, &publisher, &StreamId::from_string("audio/main"))
+            .contains(&overflow));
+
+        orchestrator.drop_session_subscriptions(&sid);
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+    }
+
+    #[test]
+    fn invalid_batch_never_leaves_a_partial_route_or_permit() {
+        let orchestrator = orchestrator_with_limit(1);
+        let publishers = orchestrator.publisher_registry();
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("all-or-nothing");
+        let publisher = register_audio(&publishers, &sid, "audio/valid", "publisher");
+        let subscriber = ConnectionId::from_string("listener");
+        let outcome = handler.subscribe(
+            &sid,
+            &subscriber,
+            &subscribe_request(&["audio/valid", "audio/missing"]),
+        );
+        assert!(matches!(
+            outcome,
+            SubscriptionOutcome::Reject { code: 404, .. }
+        ));
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+        assert!(orchestrator
+            .subscribers_for(&sid, &publisher, &StreamId::from_string("audio/valid"))
+            .is_empty());
+    }
+
+    #[test]
+    fn one_listener_with_multiple_routes_holds_one_permit_until_final_route() {
+        let orchestrator = orchestrator_with_limit(1);
+        let publishers = orchestrator.publisher_registry();
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("multi-route");
+        register_audio(&publishers, &sid, "audio/a", "publisher-a");
+        register_audio(&publishers, &sid, "audio/b", "publisher-b");
+        let subscriber = ConnectionId::from_string("listener");
+        assert_eq!(
+            handler.subscribe(
+                &sid,
+                &subscriber,
+                &subscribe_request(&["audio/a", "audio/b"])
+            ),
+            SubscriptionOutcome::Ok
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 1);
+        assert_eq!(
+            handler.unsubscribe(
+                &sid,
+                &subscriber,
+                &StreamUnsubscribe {
+                    strm_ids: vec!["audio/a".to_string()]
+                }
+            ),
+            SubscriptionOutcome::Ok
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 1);
+        handler.unsubscribe(
+            &sid,
+            &subscriber,
+            &StreamUnsubscribe {
+                strm_ids: vec!["audio/b".to_string()],
+            },
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+    }
+
+    #[test]
+    fn publisher_and_session_cleanup_release_exact_direct_permits() {
+        let orchestrator = orchestrator_with_limit(2);
+        let publishers = orchestrator.publisher_registry();
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid_a = SessionId::from_string("cleanup-a");
+        let sid_b = SessionId::from_string("cleanup-b");
+        let publisher_a = register_audio(&publishers, &sid_a, "audio/a", "publisher-a");
+        register_audio(&publishers, &sid_b, "audio/b", "publisher-b");
+        handler.subscribe(
+            &sid_a,
+            &ConnectionId::from_string("listener-a"),
+            &subscribe_request(&["audio/a"]),
+        );
+        handler.subscribe(
+            &sid_b,
+            &ConnectionId::from_string("listener-b"),
+            &subscribe_request(&["audio/b"]),
+        );
+        assert_eq!(orchestrator.active_direct_listener_count(), 2);
+        handler.unregister_connection(&sid_a, &publisher_a);
+        assert_eq!(orchestrator.active_direct_listener_count(), 1);
+        orchestrator.drop_session_subscriptions(&sid_b);
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+    }
+
+    #[test]
+    fn publisher_close_serializes_with_inflight_admission_and_releases_its_permit() {
+        let orchestrator = orchestrator_with_limit(1);
+        let publishers = orchestrator.publisher_registry();
+        let handler = OrchestratorSubscriptionHandler::new(
+            Arc::clone(&orchestrator),
+            Arc::clone(&publishers),
+        );
+        let sid = SessionId::from_string("publisher-race");
+        let publisher = register_audio(&publishers, &sid, "audio/main", "publisher");
+        let subscriber = ConnectionId::from_string("listener");
+        let routes = vec![(publisher.clone(), StreamId::from_string("audio/main"))];
+        let (admission_entered_tx, admission_entered_rx) = std::sync::mpsc::channel();
+        let (release_admission_tx, release_admission_rx) = std::sync::mpsc::channel();
+        let admission_orchestrator = Arc::clone(&orchestrator);
+        let admission_publishers = Arc::clone(&publishers);
+        let admission_sid = sid.clone();
+        let admission_subscriber = subscriber.clone();
+        let admission_routes = routes.clone();
+        let admission = std::thread::spawn(move || {
+            admission_publishers.with_current_routes(&admission_sid, &admission_routes, || {
+                admission_entered_tx.send(()).unwrap();
+                release_admission_rx.recv().unwrap();
+                admission_orchestrator.try_add_direct_subscriptions(
+                    &admission_sid,
+                    &admission_subscriber,
+                    &admission_routes,
+                )
+            })
+        });
+        admission_entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("admission holds the publisher mutation boundary");
+
+        let (cleanup_done_tx, cleanup_done_rx) = std::sync::mpsc::channel();
+        let cleanup_handler = handler.clone();
+        let cleanup_sid = sid.clone();
+        let cleanup_publisher = publisher.clone();
+        let cleanup = std::thread::spawn(move || {
+            cleanup_handler.unregister_publisher(&cleanup_sid, "audio/main", &cleanup_publisher);
+            cleanup_done_tx.send(()).unwrap();
+        });
+        assert!(cleanup_done_rx
+            .recv_timeout(Duration::from_millis(20))
+            .is_err());
+        release_admission_tx.send(()).unwrap();
+        assert!(admission.join().unwrap().unwrap().is_ok());
+        cleanup.join().unwrap();
+        cleanup_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("publisher cleanup completes after admission");
+
+        assert_eq!(orchestrator.active_direct_listener_count(), 0);
+        assert!(orchestrator
+            .subscribers_for(&sid, &publisher, &StreamId::from_string("audio/main"))
+            .is_empty());
     }
 }

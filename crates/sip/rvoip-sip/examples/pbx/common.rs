@@ -2034,6 +2034,20 @@ async fn run_basic_caller(
         assert_srtp_media_security(handle, Duration::from_secs(5)).await?;
     }
     let recorder = start_tone_recorder(handle, tone_for_caller(transport)).await?;
+    if let Err(error) = recorder
+        .wait_for_received_samples(TONE_ANALYSIS_WINDOW_SAMPLES, Duration::from_secs(6))
+        .await
+    {
+        handle
+            .hangup_and_wait(Some(Duration::from_secs(8)))
+            .await
+            .ok();
+        recorder
+            .stop_and_save(&cfg.output_dir, g711_caller_wav(transport))
+            .await
+            .ok();
+        return Err(error);
+    }
     sleep(Duration::from_secs(4)).await;
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
@@ -2076,6 +2090,20 @@ async fn run_g729_caller(
     let recorder =
         start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), G729_FRAME_SIZE)
             .await?;
+    if let Err(error) = recorder
+        .wait_for_received_samples(TONE_ANALYSIS_WINDOW_SAMPLES, Duration::from_secs(6))
+        .await
+    {
+        handle
+            .hangup_and_wait(Some(Duration::from_secs(8)))
+            .await
+            .ok();
+        recorder
+            .stop_and_save(&cfg.output_dir, g729_caller_wav(transport))
+            .await
+            .ok();
+        return Err(error);
+    }
     sleep(Duration::from_secs(4)).await;
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
@@ -2934,12 +2962,11 @@ fn scan_tone_windows(
     let mut current_passing_run = 0usize;
     let mut longest_passing_run = 0usize;
     loop {
-        let analysis = analyze_samples(
+        let analysis = analyze_tapered_samples(
             &samples[start..start + analysis_window],
             expected_hz,
             rejected_hz,
-        )
-        .map_err(|error| error.to_string())?;
+        );
         let passes = analysis.ratio >= DOMINANCE_RATIO;
         let is_best = best
             .as_ref()
@@ -3133,6 +3160,33 @@ pub async fn start_tone_recorder_with_frame_size(
 }
 
 impl ToneRecorder {
+    async fn wait_for_received_samples(
+        &self,
+        minimum_samples: usize,
+        timeout_duration: Duration,
+    ) -> ExampleResult<()> {
+        let wait = async {
+            loop {
+                let received_samples = self.counters.rx_samples.load(Ordering::Relaxed);
+                if received_samples >= minimum_samples {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        };
+
+        timeout(timeout_duration, wait).await.map_err(|_| {
+            format!(
+                "timed out after {:?} waiting for {} to receive {} samples (received {})",
+                timeout_duration,
+                self.diag_name,
+                minimum_samples,
+                self.counters.rx_samples.load(Ordering::Relaxed)
+            )
+        })?;
+        Ok(())
+    }
+
     pub async fn stop_and_save(
         self,
         output_dir: &Path,
@@ -3817,11 +3871,7 @@ pub fn analyze_samples(
 ) -> ExampleResult<ToneAnalysis> {
     let expected_magnitude = goertzel_magnitude(samples, SAMPLE_RATE as f32, expected_hz);
     let rejected_magnitude = goertzel_magnitude(samples, SAMPLE_RATE as f32, rejected_hz);
-    let ratio = if rejected_magnitude > 1.0 {
-        expected_magnitude / rejected_magnitude
-    } else {
-        f32::INFINITY
-    };
+    let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
     Ok(ToneAnalysis {
         samples: samples.len(),
         expected_hz,
@@ -3949,6 +3999,45 @@ pub fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> 
         q1 = q0;
     }
     (q1 * q1 + q2 * q2 - q1 * q2 * coeff).sqrt()
+}
+
+fn goertzel_magnitude_hann(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
+    if samples.len() < 3 {
+        return goertzel_magnitude(samples, sample_rate, target_hz);
+    }
+
+    let n = samples.len() as f32;
+    let k = (0.5 + (n * target_hz) / sample_rate).floor();
+    let omega = (2.0 * std::f32::consts::PI * k) / n;
+    let coeff = 2.0 * omega.cos();
+    let hann_denominator = (samples.len() - 1) as f32;
+    let (mut q1, mut q2) = (0.0f32, 0.0f32);
+    for (index, &sample) in samples.iter().enumerate() {
+        let phase = (2.0 * std::f32::consts::PI * index as f32) / hann_denominator;
+        let weight = 0.5 - 0.5 * phase.cos();
+        let q0 = coeff * q1 - q2 + f32::from(sample) * weight;
+        q2 = q1;
+        q1 = q0;
+    }
+    (q1 * q1 + q2 * q2 - q1 * q2 * coeff).max(0.0).sqrt()
+}
+
+fn analyze_tapered_samples(samples: &[i16], expected_hz: f32, rejected_hz: f32) -> ToneAnalysis {
+    let expected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, expected_hz);
+    let rejected_magnitude = goertzel_magnitude_hann(samples, SAMPLE_RATE as f32, rejected_hz);
+    let ratio = dominance_ratio(expected_magnitude, rejected_magnitude);
+    ToneAnalysis {
+        samples: samples.len(),
+        expected_hz,
+        rejected_hz,
+        expected_magnitude,
+        rejected_magnitude,
+        ratio,
+    }
+}
+
+fn dominance_ratio(expected_magnitude: f32, rejected_magnitude: f32) -> f32 {
+    expected_magnitude / rejected_magnitude.max(1.0)
 }
 
 fn endpoint_defaults(
@@ -4404,6 +4493,32 @@ fn transport_suffix(transport: TransportMode) -> &'static str {
 mod tests {
     use super::*;
 
+    fn tone_samples(segments: &[(usize, f64, f64)]) -> Vec<i16> {
+        let mut sample_offset = 0usize;
+        let mut samples = Vec::new();
+        for &(sample_count, expected_amplitude, expected_hz) in segments {
+            samples.extend((0..sample_count).map(|index| {
+                let absolute_index = sample_offset + index;
+                let phase = 2.0 * std::f64::consts::PI * expected_hz * absolute_index as f64
+                    / f64::from(SAMPLE_RATE);
+                (expected_amplitude * phase.sin()).round() as i16
+            }));
+            sample_offset += sample_count;
+        }
+        samples
+    }
+
+    fn codec_like_near_bin_tone(sample_count: usize) -> Vec<i16> {
+        (0..sample_count)
+            .map(|index| {
+                let time = index as f64 / f64::from(SAMPLE_RATE);
+                let nominal = 8_000.0 * (2.0 * std::f64::consts::PI * 875.0 * time).sin();
+                let rejected = 100.0 * (2.0 * std::f64::consts::PI * 440.0 * time).sin();
+                (nominal + rejected).round() as i16
+            })
+            .collect()
+    }
+
     #[test]
     fn freeswitch_defaults_use_local_high_ports() {
         let udp = endpoint_defaults(PbxProvider::FreeSwitch, "2001", TransportMode::Udp);
@@ -4470,5 +4585,58 @@ mod tests {
             select_auth_username("2001", Some("auth2001"), Some("1001"), Some("1001")),
             "auth2001"
         );
+    }
+
+    #[test]
+    fn hann_taper_recovers_near_bin_codec_tone_without_lowering_threshold() {
+        let samples = codec_like_near_bin_tone(TONE_ANALYSIS_WINDOW_SAMPLES);
+        let rectangular = analyze_samples(&samples, 880.0, 440.0).unwrap();
+        let tapered = analyze_tapered_samples(&samples, 880.0, 440.0);
+
+        assert!(rectangular.ratio < DOMINANCE_RATIO);
+        assert!(tapered.ratio >= DOMINANCE_RATIO);
+    }
+
+    #[test]
+    fn hann_taper_rejects_true_rejected_tone() {
+        let samples = tone_samples(&[(SAMPLE_RATE as usize, 8_000.0, 440.0)]);
+        let scan =
+            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+
+        assert_eq!(scan.longest_passing_run, 0);
+        assert!(scan.longest_passing_run < scan.required_passing_run);
+    }
+
+    #[test]
+    fn tone_scanner_rejects_silence() {
+        let samples = vec![0; SAMPLE_RATE as usize];
+        let scan =
+            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+
+        assert_eq!(scan.passing_windows, 0);
+        assert_eq!(scan.longest_passing_run, 0);
+    }
+
+    #[test]
+    fn hann_taper_accepts_one_continuous_second_of_near_bin_tone() {
+        let samples = codec_like_near_bin_tone(SAMPLE_RATE as usize);
+        let scan =
+            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+
+        assert!(scan.longest_passing_run >= scan.required_passing_run);
+    }
+
+    #[test]
+    fn hann_taper_does_not_join_short_tone_islands() {
+        let samples = tone_samples(&[
+            (3_200, 8_000.0, 875.0),
+            (1_600, 8_000.0, 440.0),
+            (3_200, 8_000.0, 875.0),
+        ]);
+        let scan =
+            scan_tone_windows(&samples, SAMPLE_RATE as usize, FRAME_SIZE, 880.0, 440.0).unwrap();
+
+        assert!(scan.passing_windows > 0);
+        assert!(scan.longest_passing_run < scan.required_passing_run);
     }
 }

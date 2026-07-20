@@ -1103,8 +1103,13 @@ run_matrix_cell() {
     basic_call)
       if transport_selected UDP; then
         run_two_party "$provider" "$example" basic_call UDP || rc=$?
-      elif transport_selected TLS; then
-        run_two_party "$provider" "$example" basic_call TLS || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      fi
+      if transport_selected TLS; then
+        run_two_party "$provider" "$example" basic_call TLS || {
+          tls_rc=$?
+          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+        }
       fi
       ;;
     g729_call)
@@ -1116,12 +1121,23 @@ run_matrix_cell() {
       fi
       for profile in $(g729_profile_list); do
         export PBX_CODEC_PROFILE="$profile"
+        profile_rc=0
         if transport_selected UDP; then
-          run_two_party "$provider" "$example" g729_call UDP || rc=$?
-        elif transport_selected TLS; then
-          run_two_party "$provider" "$example" g729_call TLS || rc=$?
+          run_two_party "$provider" "$example" g729_call UDP || {
+            profile_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+          }
+          if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
+            break
+          fi
         fi
-        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
+        if transport_selected TLS; then
+          run_two_party "$provider" "$example" g729_call TLS || {
+            profile_rc=$?
+            if [ "$rc" -eq 0 ]; then rc=$profile_rc; fi
+          }
+        fi
+        if [ "$profile_rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then
           break
         fi
       done

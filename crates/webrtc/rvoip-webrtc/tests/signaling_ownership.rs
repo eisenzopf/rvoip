@@ -108,6 +108,18 @@ async fn fresh_offer() -> String {
     peer.create_offer_and_gather().await.expect("offer")
 }
 
+async fn fresh_whep_offer() -> String {
+    let peer = Arc::new(
+        RvoipPeerConnection::new(&WebRtcConfig::loopback(), PeerRole::Offerer)
+            .await
+            .expect("WHEP offerer"),
+    );
+    peer.prepare_receive_only_offer()
+        .await
+        .expect("receive-only WHEP media");
+    peer.create_offer_and_gather().await.expect("WHEP offer")
+}
+
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -122,7 +134,10 @@ async fn next_event(events: &mut tokio::sync::mpsc::Receiver<AdapterEvent>) -> A
         .expect("adapter event channel closed")
 }
 
-async fn create_owned_whip_route(server: &WebRtcServer, offer: &str) -> (String, ConnectionId) {
+async fn create_owned_whip_route(
+    server: &WebRtcServer,
+    offer: &str,
+) -> (String, ConnectionId, String) {
     let address = server.whip_addr().expect("WHIP address");
     let response = http()
         .post(format!("http://{address}/whip/ownership"))
@@ -140,6 +155,13 @@ async fn create_owned_whip_route(server: &WebRtcServer, offer: &str) -> (String,
         .to_str()
         .expect("location text")
         .to_owned();
+    let etag = response
+        .headers()
+        .get("etag")
+        .expect("etag")
+        .to_str()
+        .expect("etag text")
+        .to_owned();
     let id = ConnectionId::from_string(
         location
             .rsplit('/')
@@ -147,7 +169,7 @@ async fn create_owned_whip_route(server: &WebRtcServer, offer: &str) -> (String,
             .expect("connection id")
             .to_owned(),
     );
-    (format!("http://{address}{location}"), id)
+    (format!("http://{address}{location}"), id, etag)
 }
 
 #[tokio::test]
@@ -182,7 +204,7 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
     assert_eq!(tenantless.status(), reqwest::StatusCode::UNAUTHORIZED);
     assert!(server.adapter().routes().is_empty());
 
-    let (route_url, connection_id) = create_owned_whip_route(&server, &offer).await;
+    let (route_url, connection_id, etag) = create_owned_whip_route(&server, &offer).await;
     match next_event(&mut events).await {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.id, connection_id)
@@ -251,15 +273,24 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
         .patch(&route_url)
         .header("authorization", "Bearer owner")
         .header("content-type", "application/trickle-ice-sdpfrag")
+        .header("if-match", etag)
         .body(fragment)
         .send()
         .await
         .expect("owner PATCH");
     assert_eq!(owner_update.status(), reqwest::StatusCode::NO_CONTENT);
+    let rotated_etag = owner_update
+        .headers()
+        .get("etag")
+        .expect("rotated ETag")
+        .to_str()
+        .expect("ETag text")
+        .to_owned();
 
     let owner_delete = http()
         .delete(&route_url)
         .header("authorization", "Bearer owner")
+        .header("if-match", rotated_etag)
         .send()
         .await
         .expect("owner DELETE");
@@ -270,11 +301,14 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
         .authenticated_principal(&connection_id)
         .is_err());
 
-    // WHEP uses an outbound/originate route, but it is bound to the same
-    // adapter-owned principal boundary before the Location id is exposed.
+    // Canonical WHEP-04 uses a player offer and crosses the same authenticated
+    // inbound publication boundary as WHIP before Location is exposed.
+    let whep_offer = fresh_whep_offer().await;
     let whep = http()
         .post(format!("http://{address}/whep/ownership"))
         .header("authorization", "Bearer owner")
+        .header("content-type", "application/sdp")
+        .body(whep_offer)
         .send()
         .await
         .expect("WHEP POST");
@@ -285,6 +319,13 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
         .expect("WHEP location")
         .to_str()
         .expect("WHEP location text")
+        .to_owned();
+    let whep_etag = whep
+        .headers()
+        .get("etag")
+        .expect("WHEP ETag")
+        .to_str()
+        .expect("WHEP ETag text")
         .to_owned();
     let whep_url = format!("http://{address}{whep_location}");
     let whep_id = ConnectionId::from_string(
@@ -300,6 +341,12 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
             ..
         } => assert_eq!(event_connection, connection_id),
         other => panic!("expected WHIP ended event, got {other:?}"),
+    }
+    match next_event(&mut events).await {
+        AdapterEvent::InboundConnection { connection } => {
+            assert_eq!(connection.id, whep_id);
+        }
+        other => panic!("expected WHEP inbound event, got {other:?}"),
     }
     match next_event(&mut events).await {
         AdapterEvent::PrincipalAuthenticated {
@@ -345,6 +392,7 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
     let whep_owner_delete = http()
         .delete(&whep_url)
         .header("authorization", "Bearer owner")
+        .header("if-match", whep_etag)
         .send()
         .await
         .expect("owner WHEP DELETE");
@@ -358,7 +406,7 @@ async fn issuer_tenant_and_subject_all_participate_in_update_delete_ownership() 
 async fn websocket_cannot_mutate_whip_route_owned_by_another_principal() {
     let server = start_server().await;
     let offer = fresh_offer().await;
-    let (_route_url, connection_id) = create_owned_whip_route(&server, &offer).await;
+    let (_route_url, connection_id, _etag) = create_owned_whip_route(&server, &offer).await;
     let ws_address = server.ws_addr().expect("WS address");
 
     let (mut attacker, _) =

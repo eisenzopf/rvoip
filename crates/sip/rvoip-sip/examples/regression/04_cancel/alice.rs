@@ -12,8 +12,8 @@
 //! surfaces that as a distinct `CallCancelled` event (not `CallFailed`)
 //! so UIs can render "missed call" differently.
 
-use rvoip_sip::{Config, StreamPeer};
-use tokio::time::{sleep, Duration};
+use rvoip_sip::{Config, Event, StreamPeer};
+use tokio::time::{sleep, timeout, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
     std::env::var(key)
@@ -67,13 +67,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("[ALICE] Reached Ringing state — sending CANCEL via handle.hangup_and_wait()…");
 
+    let mut events = alice.coordinator().events_for_session(&call_id).await?;
+
     // `hangup_and_wait()` from Ringing routes to the CANCEL wire path and
     // waits for the terminal CallCancelled event.
     match handle.hangup_and_wait(Some(Duration::from_secs(8))).await {
-        Ok(reason) if reason == "Cancelled" => {
-            println!("[ALICE] Got CallCancelled — expected outcome.");
-            std::process::exit(0);
-        }
+        Ok(reason) if reason == "Cancelled" => {}
         Ok(other) => {
             eprintln!("[ALICE] expected CallCancelled, got terminal reason {other:?}");
             std::process::exit(1);
@@ -83,4 +82,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     }
+
+    let first_terminal = timeout(Duration::from_secs(5), async {
+        loop {
+            match events.next().await {
+                Some(event @ Event::CallEnded { .. })
+                | Some(event @ Event::CallFailed { .. })
+                | Some(event @ Event::CallCancelled { .. }) => return event,
+                Some(_) => {}
+                None => panic!("terminal event stream closed"),
+            }
+        }
+    })
+    .await?;
+    if !matches!(first_terminal, Event::CallCancelled { .. }) {
+        eprintln!("[ALICE] expected CallCancelled, got {first_terminal:?}");
+        std::process::exit(1);
+    }
+
+    let duplicate = timeout(Duration::from_millis(500), async {
+        loop {
+            match events.next().await {
+                Some(event @ Event::CallEnded { .. })
+                | Some(event @ Event::CallFailed { .. })
+                | Some(event @ Event::CallCancelled { .. }) => return event,
+                Some(_) => {}
+                None => panic!("terminal event stream closed while checking duplicates"),
+            }
+        }
+    })
+    .await;
+    if let Ok(event) = duplicate {
+        eprintln!("[ALICE] duplicate terminal event: {event:?}");
+        std::process::exit(1);
+    }
+
+    println!("[ALICE] Got exactly one CallCancelled — expected outcome.");
+    Ok(())
 }

@@ -83,18 +83,21 @@ impl ReferBuilder {
             target_dialog: self.target_dialog,
             extra_headers,
         });
-        self.coord
-            .stage_outbound_options(
+        let staging = self
+            .coord
+            .stage_outbound_options_guarded(
                 &self.session_id,
                 crate::state_machine::executor::PendingOptionsSlot::Refer(opts),
             )
             .await?;
         self.coord
-            .dispatch_outbound(
+            .dispatch_outbound_guarded(
                 &self.session_id,
                 crate::state_table::EventType::SendOutboundRefer,
+                &staging,
             )
             .await?;
+        staging.confirm_consumed().await?;
         Ok(())
     }
 }

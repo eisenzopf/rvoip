@@ -167,16 +167,17 @@ pub use handlers::*;
 pub use types::*;
 pub use utils::*;
 
-use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use futures::StreamExt;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, trace, warn};
@@ -195,7 +196,14 @@ use crate::diagnostics;
 use crate::transaction::client::{
     ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
 };
+use crate::transaction::completion::{
+    ClientTransactionCompletion, ClientTransactionCompletionEntry,
+    RetainedClientTransactionCompletion,
+};
 use crate::transaction::error::{Error, Result};
+use crate::transaction::event_sender::{
+    EventSubscriber, TransactionEventSender, TransactionObserverFanout,
+};
 use crate::transaction::method::{cancel, update};
 use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::{
@@ -249,6 +257,8 @@ pub struct TransactionManagerRetentionCounts {
     pub invite_2xx_response_cache: usize,
     pub invite_2xx_response_due_queue: usize,
     pub transaction_destinations: usize,
+    pub compact_non_invite_tombstones: usize,
+    pub compact_non_invite_deadlines: usize,
     pub event_subscribers: usize,
     pub subscriber_to_transactions: usize,
     pub transaction_to_subscribers: usize,
@@ -258,43 +268,640 @@ pub struct TransactionManagerRetentionCounts {
     pub pending_inbound_principals: usize,
 }
 
+/// Exact client-completion retention diagnostics. Kept separate from the
+/// compatibility retention-count struct so downstream exhaustive literals do
+/// not break when this authority gains new internal representations.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientCompletionRetentionCounts {
+    pub active: usize,
+    pub retained: usize,
+    pub compact: usize,
+    pub parsed_responses: usize,
+    pub wire_responses: usize,
+    /// Serialized response bytes owned by compact completion records.
+    pub wire_response_bytes: usize,
+    pub deadlines: usize,
+}
+
+/// Aggregate-safe diagnostics for compact retired INVITE client state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RetiredClientRetentionCounts {
+    /// Unexpired retired INVITE route/request records.
+    pub transactions: usize,
+    /// Total serialized request bytes retained by those records.
+    pub request_wire_bytes: usize,
+    /// Eager parsed ACK templates retained in steady state. This is always
+    /// zero: late-2xx handling reconstructs the template from `request_wire`.
+    pub ack_template_allocations: usize,
+    /// Exact ordered expiry records.
+    pub deadlines: usize,
+}
+
 /// Minimal UAC state retained after an INVITE client transaction leaves the
 /// active transaction set. RFC 3261 requires the UAC core to accept and ACK
 /// additional 2xx responses after the INVITE transaction itself has
-/// terminated. Keeping the immutable request and its authenticated transport
-/// route lets us do that without keeping the transaction runner alive.
-#[derive(Clone)]
-struct RetiredClientTransaction {
-    request: Request,
+/// terminated.
+///
+/// A parsed [`Request`] owns a tree of headers, parameters, URI components,
+/// and strings. Retaining that active representation for the complete late
+/// 2xx horizon made every completed INVITE unnecessarily expensive. Keep one
+/// immutable wire image and reconstruct parsed compatibility/ACK state only
+/// when an uncommon caller observes a late 2xx or asks for `original_request`.
+#[allow(dead_code)]
+struct LegacyRetiredClientTransactionLayout {
+    request_wire: bytes::Bytes,
     route: TransportRoute,
     expires_at: Instant,
+    deadline_version: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct RetiredClientTransaction {
+    request_wire: bytes::Bytes,
+    completion: RetainedClientTransactionCompletion,
+    route: TransportRoute,
+    expires_at: Instant,
+    deadline_version: u64,
+}
+
+impl RetiredClientTransaction {
+    fn new(
+        request: &Request,
+        completion: &ClientTransactionCompletion,
+        route: TransportRoute,
+        expires_at: Instant,
+        deadline_version: u64,
+        admission_owner: Option<TransactionAdmissionOwner>,
+    ) -> Self {
+        // Serialize while the active request is still available, then drop
+        // the parsed header tree with the transaction. `Request::to_bytes`
+        // borrows the request and preserves arbitrary binary bodies, avoiding
+        // a transient clone of every parsed header and parameter.
+        // `Bytes::from(Vec)` takes ownership of the serializer allocation;
+        // unlike `Arc<[u8]>::from(Vec)`, it does not require a second
+        // allocation and payload copy before retirement can publish.
+        let (request_wire, completion) = completion.retained_with_shared_prefix(
+            request.to_bytes(),
+            expires_at,
+            deadline_version,
+        );
+        let completion = completion.with_admission_owner(admission_owner);
+        Self {
+            request_wire,
+            completion,
+            route,
+            expires_at,
+            deadline_version,
+        }
+    }
+
+    fn original_request_from_wire(request_wire: &[u8]) -> Result<Request> {
+        match parse_message(request_wire)? {
+            Message::Request(request) => Ok(request),
+            Message::Response(_) => Err(Error::Other(
+                "retired client request wire image parsed as a response".into(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    fn original_request(&self) -> Result<Request> {
+        Self::original_request_from_wire(self.request_wire.as_ref())
+    }
+
+    #[cfg(test)]
+    fn request_wire_len(&self) -> usize {
+        self.request_wire.len()
+    }
+
+    fn completion_wire_len(&self) -> usize {
+        self.completion.diagnostics().wire_response_bytes
+    }
+
+    fn has_completion_wire(&self) -> bool {
+        self.completion.wire_response().is_some()
+    }
+
+    fn shares_wire_allocation(&self) -> bool {
+        let Some(response) = self.completion.wire_response() else {
+            return true;
+        };
+        response.as_ptr()
+            == self
+                .request_wire
+                .as_ptr()
+                .wrapping_add(self.request_wire.len())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RetiredClientDeadlineEntry {
+    transaction_id: Arc<TransactionKey>,
+    expires_at: Instant,
+    version: u64,
+}
+
+/// Exact, bounded deadline index for retained client INVITE tombstones.
+///
+/// The ordered map makes the next expiry and oldest capacity victim O(log n).
+/// The authoritative retired record already stores `(expires_at, version)`,
+/// so retaining a second transaction-keyed map would duplicate every key and
+/// deadline. Replacement removes the exact old ordered key before publishing
+/// the new generation.
+#[derive(Debug, Default)]
+struct RetiredClientDeadlineScheduler {
+    by_deadline: BTreeMap<(Instant, u64), Arc<TransactionKey>>,
+    next_version: u64,
+}
+
+/// Lean exact deadline index for immutable completion records.
+///
+/// Unlike retired INVITE routes, a completion generation already stores its
+/// own `(expires_at, version)` in the authoritative DashMap value.  A reverse
+/// HashMap would therefore duplicate every key and deadline at high CPS.  The
+/// ordered index can remove a replaced generation directly by its exact tuple.
+#[derive(Debug, Default)]
+struct ClientCompletionDeadlineScheduler {
+    by_deadline: BTreeMap<(Instant, u64), Arc<TransactionKey>>,
+    next_version: u64,
+}
+
+impl ClientCompletionDeadlineScheduler {
+    fn next_version(&mut self, expires_at: Instant) -> u64 {
+        loop {
+            let version = self.next_version;
+            self.next_version = self.next_version.wrapping_add(1);
+            if !self.by_deadline.contains_key(&(expires_at, version)) {
+                return version;
+            }
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        transaction_id: impl Into<Arc<TransactionKey>>,
+        expires_at: Instant,
+        version: u64,
+    ) {
+        self.by_deadline
+            .insert((expires_at, version), transaction_id.into());
+    }
+
+    fn unschedule(
+        &mut self,
+        transaction_id: &TransactionKey,
+        expires_at: Instant,
+        version: u64,
+    ) -> bool {
+        if !self
+            .by_deadline
+            .get(&(expires_at, version))
+            .is_some_and(|scheduled| scheduled.as_ref() == transaction_id)
+        {
+            return false;
+        }
+        self.by_deadline.remove(&(expires_at, version));
+        true
+    }
+
+    fn take_due_and_overflow(
+        &mut self,
+        now: Instant,
+        capacity: usize,
+        max_records: usize,
+    ) -> Vec<RetiredClientDeadlineEntry> {
+        let mut removals = Vec::with_capacity(max_records.min(self.by_deadline.len()));
+        while removals.len() < max_records {
+            let Some((&(expires_at, version), transaction_id)) = self.by_deadline.first_key_value()
+            else {
+                break;
+            };
+            if expires_at > now && self.by_deadline.len() <= capacity {
+                break;
+            }
+            let transaction_id = Arc::clone(transaction_id);
+            self.by_deadline.pop_first();
+            removals.push(RetiredClientDeadlineEntry {
+                transaction_id,
+                expires_at,
+                version,
+            });
+        }
+        removals
+    }
+
+    fn next_wake_at(&self, now: Instant, capacity: usize) -> Option<Instant> {
+        if self.by_deadline.len() > capacity {
+            return Some(now);
+        }
+        self.by_deadline
+            .first_key_value()
+            .map(|(&(expires_at, _), _)| expires_at)
+    }
+
+    fn has_due_or_overflow(&self, now: Instant, capacity: usize) -> bool {
+        self.next_wake_at(now, capacity)
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    fn len(&self) -> usize {
+        self.by_deadline.len()
+    }
+
+    fn clear(&mut self) {
+        self.by_deadline.clear();
+    }
+}
+
+impl RetiredClientDeadlineScheduler {
+    fn next_version(&mut self, expires_at: Instant) -> u64 {
+        loop {
+            let version = self.next_version;
+            self.next_version = self.next_version.wrapping_add(1);
+            if !self.by_deadline.contains_key(&(expires_at, version)) {
+                return version;
+            }
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        transaction_id: impl Into<Arc<TransactionKey>>,
+        expires_at: Instant,
+        version: u64,
+    ) {
+        self.by_deadline
+            .insert((expires_at, version), transaction_id.into());
+    }
+
+    fn unschedule(
+        &mut self,
+        transaction_id: &TransactionKey,
+        expires_at: Instant,
+        version: u64,
+    ) -> bool {
+        if !self
+            .by_deadline
+            .get(&(expires_at, version))
+            .is_some_and(|scheduled| scheduled.as_ref() == transaction_id)
+        {
+            return false;
+        }
+        self.by_deadline.remove(&(expires_at, version));
+        true
+    }
+
+    fn take_due_and_overflow(
+        &mut self,
+        now: Instant,
+        capacity: usize,
+        max_records: usize,
+    ) -> Vec<RetiredClientDeadlineEntry> {
+        let mut removals = Vec::with_capacity(max_records.min(self.by_deadline.len()));
+        while removals.len() < max_records {
+            let Some((&(expires_at, version), transaction_id)) = self.by_deadline.first_key_value()
+            else {
+                break;
+            };
+            if expires_at > now && self.by_deadline.len() <= capacity {
+                break;
+            }
+
+            let transaction_id = Arc::clone(transaction_id);
+            self.by_deadline.pop_first();
+            removals.push(RetiredClientDeadlineEntry {
+                transaction_id,
+                expires_at,
+                version,
+            });
+        }
+        removals
+    }
+
+    fn next_wake_at(&self, now: Instant, capacity: usize) -> Option<Instant> {
+        if self.by_deadline.len() > capacity {
+            return Some(now);
+        }
+        self.by_deadline
+            .first_key_value()
+            .map(|(&(expires_at, _), _)| expires_at)
+    }
+
+    fn has_due_or_overflow(&self, now: Instant, capacity: usize) -> bool {
+        self.next_wake_at(now, capacity)
+            .is_some_and(|deadline| deadline <= now)
+    }
+
+    fn len(&self) -> usize {
+        self.by_deadline.len()
+    }
+
+    fn clear(&mut self) {
+        self.by_deadline.clear();
+    }
+}
+
+/// Retained INVITE routes and exact completion cells share one wakeable,
+/// manager-owned deadline worker. A synchronized high-CPS retention horizon
+/// must never turn into one unbounded maintenance pass, so each turn removes
+/// at most this many records from each compact deadline index before yielding.
+const RETAINED_CLIENT_DEADLINE_BATCH_MAX: usize = 1_024;
+
+#[derive(Default)]
+struct RetainedClientDeadlineWorkerCounters {
+    wakeups: AtomicU64,
+    batches: AtomicU64,
+    records: AtomicU64,
+    yields: AtomicU64,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RetainedClientDeadlineWorkerSnapshot {
+    wakeups: u64,
+    batches: u64,
+    records: u64,
+    yields: u64,
+}
+
+struct RetainedClientDeadlineWorkerInner {
+    wake: Arc<tokio::sync::Notify>,
+    stopping: Arc<AtomicBool>,
+    task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    counters: Arc<RetainedClientDeadlineWorkerCounters>,
+}
+
+impl Drop for RetainedClientDeadlineWorkerInner {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.wake.notify_one();
+        if let Some(task) = self
+            .task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RetainedClientDeadlineWorker {
+    inner: Arc<RetainedClientDeadlineWorkerInner>,
+}
+
+impl RetainedClientDeadlineWorker {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(RetainedClientDeadlineWorkerInner {
+                wake: Arc::new(tokio::sync::Notify::new()),
+                stopping: Arc::new(AtomicBool::new(false)),
+                task: std::sync::Mutex::new(None),
+                counters: Arc::new(RetainedClientDeadlineWorkerCounters::default()),
+            }),
+        }
+    }
+
+    fn start(&self, context: RetainedClientDeadlineContext) {
+        let mut task = self
+            .inner
+            .task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if task.is_some() {
+            return;
+        }
+        let wake = Arc::clone(&self.inner.wake);
+        let stopping = Arc::clone(&self.inner.stopping);
+        let counters = Arc::clone(&self.inner.counters);
+        *task = Some(tokio::spawn(run_retained_client_deadline_worker(
+            context, wake, stopping, counters,
+        )));
+    }
+
+    fn wake(&self) {
+        self.inner.counters.wakeups.fetch_add(1, Ordering::Relaxed);
+        self.inner.wake.notify_one();
+    }
+
+    async fn shutdown(&self) {
+        self.inner.stopping.store(true, Ordering::Release);
+        self.inner.wake.notify_one();
+        let task = self
+            .inner
+            .task
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn snapshot(&self) -> RetainedClientDeadlineWorkerSnapshot {
+        RetainedClientDeadlineWorkerSnapshot {
+            wakeups: self.inner.counters.wakeups.load(Ordering::Relaxed),
+            batches: self.inner.counters.batches.load(Ordering::Relaxed),
+            records: self.inner.counters.records.load(Ordering::Relaxed),
+            yields: self.inner.counters.yields.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct RetainedClientDeadlineContext {
+    client_completions:
+        std::sync::Weak<DashMap<Arc<TransactionKey>, ClientTransactionCompletionEntry>>,
+    client_completion_deadlines:
+        std::sync::Weak<std::sync::Mutex<ClientCompletionDeadlineScheduler>>,
+    client_completion_capacity: usize,
+    transaction_destinations:
+        std::sync::Weak<DashMap<Arc<TransactionKey>, ClientResponseRouteState>>,
+    retired_client_deadlines: std::sync::Weak<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
+    retired_client_transaction_capacity: Arc<AtomicUsize>,
+    retired_client_transaction_count: std::sync::Weak<AtomicUsize>,
+}
+
+struct RetainedClientDeadlineBatch {
+    processed: usize,
+    more_due: bool,
+    next_wake_at: Option<Instant>,
+    context_alive: bool,
+}
+
+fn process_retained_client_deadline_batch(
+    context: &RetainedClientDeadlineContext,
+    now: Instant,
+) -> RetainedClientDeadlineBatch {
+    let (
+        Some(client_completions),
+        Some(client_completion_deadlines),
+        Some(transaction_destinations),
+        Some(retired_client_deadlines),
+        Some(retired_client_transaction_count),
+    ) = (
+        context.client_completions.upgrade(),
+        context.client_completion_deadlines.upgrade(),
+        context.transaction_destinations.upgrade(),
+        context.retired_client_deadlines.upgrade(),
+        context.retired_client_transaction_count.upgrade(),
+    )
+    else {
+        return RetainedClientDeadlineBatch {
+            processed: 0,
+            more_due: false,
+            next_wake_at: None,
+            context_alive: false,
+        };
+    };
+
+    let (completion_removals, completion_more_due, completion_next) = {
+        let mut deadlines = client_completion_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let removals = deadlines.take_due_and_overflow(
+            now,
+            context.client_completion_capacity,
+            RETAINED_CLIENT_DEADLINE_BATCH_MAX,
+        );
+        let more_due = deadlines.has_due_or_overflow(now, context.client_completion_capacity);
+        let next = deadlines.next_wake_at(now, context.client_completion_capacity);
+        (removals, more_due, next)
+    };
+    let completion_processed = completion_removals.len();
+    for deadline in completion_removals {
+        client_completions.remove_if(deadline.transaction_id.as_ref(), |_, completion| {
+            completion.retained_deadline() == Some((deadline.expires_at, deadline.version))
+        });
+    }
+
+    let retired_client_transaction_capacity = context
+        .retired_client_transaction_capacity
+        .load(Ordering::Acquire);
+    let (retired_removals, retired_more_due, retired_next) = {
+        let mut deadlines = retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let removals = deadlines.take_due_and_overflow(
+            now,
+            retired_client_transaction_capacity,
+            RETAINED_CLIENT_DEADLINE_BATCH_MAX,
+        );
+        let more_due = deadlines.has_due_or_overflow(now, retired_client_transaction_capacity);
+        let next = deadlines.next_wake_at(now, retired_client_transaction_capacity);
+        (removals, more_due, next)
+    };
+    let retired_processed = retired_removals.len();
+    for deadline in retired_removals {
+        if transaction_destinations
+            .remove_if(deadline.transaction_id.as_ref(), |_, state| {
+                state.retired().is_some_and(|retired| {
+                    retired.deadline_version == deadline.version
+                        && retired.expires_at == deadline.expires_at
+                })
+            })
+            .is_some()
+        {
+            let _ = retired_client_transaction_count.fetch_update(
+                Ordering::AcqRel,
+                Ordering::Acquire,
+                |count| Some(count.saturating_sub(1)),
+            );
+        }
+    }
+
+    RetainedClientDeadlineBatch {
+        processed: completion_processed + retired_processed,
+        more_due: completion_more_due || retired_more_due,
+        next_wake_at: completion_next.into_iter().chain(retired_next).min(),
+        context_alive: true,
+    }
+}
+
+async fn run_retained_client_deadline_worker(
+    context: RetainedClientDeadlineContext,
+    wake: Arc<tokio::sync::Notify>,
+    stopping: Arc<AtomicBool>,
+    counters: Arc<RetainedClientDeadlineWorkerCounters>,
+) {
+    loop {
+        if stopping.load(Ordering::Acquire) {
+            break;
+        }
+
+        let now = Instant::now();
+        let batch = process_retained_client_deadline_batch(&context, now);
+        if !batch.context_alive {
+            break;
+        }
+        if batch.processed != 0 {
+            counters.batches.fetch_add(1, Ordering::Relaxed);
+            counters
+                .records
+                .fetch_add(batch.processed as u64, Ordering::Relaxed);
+        }
+        if batch.more_due {
+            counters.yields.fetch_add(1, Ordering::Relaxed);
+            tokio::task::yield_now().await;
+            continue;
+        }
+
+        // Notify stores a permit, so a deadline scheduled between computing
+        // `next_wake_at` and polling this future cannot be lost.
+        let notified = wake.notified();
+        if stopping.load(Ordering::Acquire) {
+            break;
+        }
+        match batch.next_wake_at {
+            Some(deadline) if deadline <= Instant::now() => {
+                tokio::task::yield_now().await;
+            }
+            Some(deadline) => {
+                tokio::select! {
+                    _ = notified => {}
+                    _ = tokio::time::sleep_until(deadline.into()) => {}
+                }
+            }
+            None => notified.await,
+        }
+    }
 }
 
 /// One linearizable response-route record for the complete lifetime of a
 /// client transaction. Keeping active and retained routes in the same DashMap
 /// entry prevents cleanup from exposing a transient "unknown transaction"
 /// window between removing the live route and publishing its tombstone.
-#[derive(Clone)]
-enum ClientResponseRouteState {
-    Active(TransportRoute),
+pub(crate) enum ClientResponseRouteState {
+    Active {
+        route: TransportRoute,
+        /// Allocation identity of the client transaction data that installed
+        /// this route. Compact Timer K cleanup retains this word-sized proof
+        /// rather than a second complete `TransportRoute`.
+        owner: usize,
+    },
     Retired(RetiredClientTransaction),
 }
 
 impl ClientResponseRouteState {
+    pub(crate) fn active(route: TransportRoute, owner: usize) -> Self {
+        Self::Active { route, owner }
+    }
+
     fn route(&self) -> &TransportRoute {
         match self {
-            Self::Active(route) => route,
+            Self::Active { route, .. } => route,
             Self::Retired(retired) => &retired.route,
         }
     }
 
-    fn is_active(&self) -> bool {
-        matches!(self, Self::Active(_))
+    pub(crate) fn is_active(&self) -> bool {
+        matches!(self, Self::Active { .. })
     }
 
     fn retired(&self) -> Option<&RetiredClientTransaction> {
         match self {
-            Self::Active(_) => None,
+            Self::Active { .. } => None,
             Self::Retired(retired) => Some(retired),
         }
     }
@@ -313,13 +920,32 @@ static RETIRED_CLIENT_TRANSITION_TEST_GATE: std::sync::LazyLock<
     std::sync::Mutex<Option<RetiredClientTransitionTestGate>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
+#[cfg(test)]
 #[derive(Clone)]
-struct InboundPrincipalBinding {
+struct TerminationTakeoverTestGate {
+    transaction_id: TransactionKey,
+    runner_joined: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static TERMINATION_TAKEOVER_TEST_GATE: std::sync::LazyLock<
+    std::sync::Mutex<Option<TerminationTakeoverTestGate>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[derive(Clone)]
+pub(crate) struct InboundPrincipalBinding {
     principal: AuthenticatedPrincipal,
     source: SocketAddr,
     transport_type: rvoip_sip_transport::transport::TransportType,
     flow_id: Option<rvoip_sip_transport::TransportFlowId>,
     tls_leaf_sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InboundPrincipalLease {
+    pub(crate) inserted_at: Instant,
+    pub(crate) generation: u64,
 }
 
 impl InboundPrincipalBinding {
@@ -352,14 +978,15 @@ impl InboundPrincipalBinding {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct EventSubscriber {
-    id: usize,
-    sender: mpsc::Sender<TransactionEvent>,
-    global: bool,
-}
-
 const MIN_TRANSACTION_INDEX_CAPACITY: usize = 1024;
+/// Maximum number of entries eagerly reserved in each transaction index.
+///
+/// The configured index capacity is a logical admission/retention limit and
+/// can be large (128,000 in the canonical PBX profile). Reserving that full
+/// amount independently in every DashMap multiplies idle memory without
+/// changing the maps' ability to grow. Keep a modest hot working set and let
+/// each sharded table expand on demand.
+const MAX_EAGER_TRANSACTION_INDEX_CAPACITY: usize = 4096;
 const DEFAULT_TRANSACTION_DISPATCH_WORKERS: usize = 1;
 pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // Keep successful INVITE responses available long enough for high-load UAC
@@ -368,19 +995,39 @@ pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // retention period.
 const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
 const RETIRED_CLIENT_TRANSACTION_TTL: Duration = Duration::from_secs(90);
+const CLIENT_TRANSACTION_COMPLETION_TTL: Duration = Duration::from_secs(90);
+// Reliable non-INVITE transactions have a zero-second RFC Timer K, but the
+// async public API still needs a short scheduling grace between `send_request`
+// returning and the caller registering its exact waiter.
+const RELIABLE_CLIENT_COMPLETION_RACE_GRACE: Duration = Duration::from_secs(1);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT: Duration = Duration::from_millis(50);
 const PENDING_INBOUND_BYTES_TTL: Duration = Duration::from_secs(30);
 const PENDING_INBOUND_PRINCIPAL_TTL: Duration = Duration::from_secs(90);
-const INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
+/// Default bounded number of due INVITE 2xx retransmissions processed per
+/// maintenance tick.
+pub const DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
 const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
 const MIN_RETIRED_CLIENT_TRANSACTION_CAPACITY: usize = 65_536;
 const TERMINATED_CLEANUP_BATCH_MAX: usize = 1024;
-const TERMINATED_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
-const TERMINATED_CLEANUP_MAX_ATTEMPTS: u16 = 50;
-const TRANSACTION_DISPATCH_PRIORITY_BURST_MAX: usize = 64;
+const EXPLICIT_TERMINATION_CONCURRENCY_MAX: usize = 64;
+/// Maximum ACK-index deadlines consumed by one maintenance pass. Counting
+/// stale generations toward the budget keeps cleanup work bounded even when a
+/// dialog key is replaced repeatedly before its old retention windows expire.
+const SERVER_INVITE_ACK_EXPIRY_BATCH_MAX: usize = 2048;
+/// Default maximum consecutive ACK/BYE priority-lane events before a ready
+/// normal transaction event receives a turn.
+pub const DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX: usize = 64;
 
 fn transaction_index_capacity(capacity: Option<usize>) -> usize {
     capacity.unwrap_or(100).max(MIN_TRANSACTION_INDEX_CAPACITY)
+}
+
+fn transaction_index_initial_capacity(logical_capacity: usize) -> usize {
+    logical_capacity.min(MAX_EAGER_TRANSACTION_INDEX_CAPACITY)
 }
 
 fn invite_2xx_response_cache_capacity(index_capacity: usize) -> usize {
@@ -459,6 +1106,263 @@ fn sip_diagnostics_enabled() -> bool {
 ///
 /// Special methods (CANCEL, ACK for 2xx, UPDATE) are handled through utility
 /// functions that work with these four core transaction types.
+#[derive(Clone, Copy)]
+enum TransactionEventChannelMode {
+    Owned,
+    Shared,
+}
+
+enum TransactionManagerEventReceiver {
+    Owned(mpsc::Receiver<TransactionEvent>),
+    Shared(mpsc::Receiver<Arc<TransactionEvent>>),
+}
+
+struct TransactionAdmissionRegistry {
+    entries: DashMap<TransactionKey, u64>,
+    next_generation: AtomicU64,
+}
+
+const MANAGER_ADMISSION_RUNNING: u8 = 0;
+const MANAGER_ADMISSION_DRAINING: u8 = 1;
+const MANAGER_ADMISSION_STOPPING: u8 = 2;
+const MANAGER_ADMISSION_STOPPED: u8 = 3;
+
+pub(crate) struct TransactionManagerAdmissionLifecycle {
+    state: AtomicU8,
+    in_flight: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+struct TransactionManagerOperationCancellation {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl TransactionManagerOperationCancellation {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            cancelled: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    async fn cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+impl TransactionManagerAdmissionLifecycle {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(MANAGER_ADMISSION_RUNNING),
+            in_flight: AtomicUsize::new(0),
+            idle: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn try_enter(self: &Arc<Self>) -> Option<TransactionManagerAdmissionGuard> {
+        if self.state.load(Ordering::Acquire) != MANAGER_ADMISSION_RUNNING {
+            return None;
+        }
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if self.state.load(Ordering::Acquire) != MANAGER_ADMISSION_RUNNING {
+            if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.idle.notify_waiters();
+            }
+            return None;
+        }
+        Some(TransactionManagerAdmissionGuard {
+            lifecycle: Arc::clone(self),
+        })
+    }
+
+    /// Track cleanup of already-admitted work while fail-closed draining has
+    /// rejected all new transaction creation. Shutdown advances to Stopping
+    /// before its final idle wait, closing this second gate as well.
+    pub(crate) fn try_enter_existing(self: &Arc<Self>) -> Option<TransactionManagerAdmissionGuard> {
+        if self.state.load(Ordering::Acquire) > MANAGER_ADMISSION_DRAINING {
+            return None;
+        }
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        if self.state.load(Ordering::Acquire) > MANAGER_ADMISSION_DRAINING {
+            if self.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+                self.idle.notify_waiters();
+            }
+            return None;
+        }
+        Some(TransactionManagerAdmissionGuard {
+            lifecycle: Arc::clone(self),
+        })
+    }
+
+    fn begin_draining(&self) -> bool {
+        self.state
+            .compare_exchange(
+                MANAGER_ADMISSION_RUNNING,
+                MANAGER_ADMISSION_DRAINING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn begin_stopping(&self) {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+            if state >= MANAGER_ADMISSION_STOPPING {
+                return;
+            }
+            if self
+                .state
+                .compare_exchange(
+                    state,
+                    MANAGER_ADMISSION_STOPPING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.idle.notify_waiters();
+                return;
+            }
+        }
+    }
+
+    async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.in_flight.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    fn mark_stopped(&self) {
+        self.state
+            .store(MANAGER_ADMISSION_STOPPED, Ordering::Release);
+        self.idle.notify_waiters();
+    }
+
+    fn state(&self) -> u8 {
+        self.state.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) struct TransactionManagerAdmissionGuard {
+    lifecycle: Arc<TransactionManagerAdmissionLifecycle>,
+}
+
+impl Drop for TransactionManagerAdmissionGuard {
+    fn drop(&mut self) {
+        if self.lifecycle.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.lifecycle.idle.notify_waiters();
+        }
+    }
+}
+
+impl TransactionAdmissionRegistry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            entries: DashMap::new(),
+            next_generation: AtomicU64::new(1),
+        })
+    }
+
+    fn try_claim(self: &Arc<Self>, key: &TransactionKey) -> Option<TransactionAdmissionOwner> {
+        use dashmap::mapref::entry::Entry;
+
+        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+        match self.entries.entry(key.clone()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(entry) => {
+                entry.insert(generation);
+                Some(TransactionAdmissionOwner {
+                    _inner: Arc::new(TransactionAdmissionOwnerInner {
+                        registry: Arc::clone(self),
+                        key: key.clone(),
+                        generation,
+                    }),
+                })
+            }
+        }
+    }
+}
+
+struct TransactionAdmissionOwnerInner {
+    registry: Arc<TransactionAdmissionRegistry>,
+    key: TransactionKey,
+    generation: u64,
+}
+
+impl Drop for TransactionAdmissionOwnerInner {
+    fn drop(&mut self) {
+        self.registry
+            .entries
+            .remove_if(&self.key, |_, generation| *generation == self.generation);
+    }
+}
+
+/// Exact, cloneable ownership fence spanning transaction construction,
+/// active maps, compact Timer J/K state, terminal event delivery, and dialog
+/// acknowledgement. The registry itself stores only a compact generation;
+/// dropping the final owner exact-removes that generation.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct TransactionAdmissionOwner {
+    _inner: Arc<TransactionAdmissionOwnerInner>,
+}
+
+impl TransactionAdmissionOwner {
+    pub(crate) fn generation(&self) -> u64 {
+        self._inner.generation
+    }
+}
+
+impl fmt::Debug for TransactionAdmissionOwner {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransactionAdmissionOwner")
+            .field("generation", &self.generation())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+enum TransactionSubscriptionAuthority {
+    Client(ArcClientTransaction),
+    Server(Arc<dyn ServerTransaction>),
+    Compact(u64),
+}
+
+impl PartialEq for TransactionSubscriptionAuthority {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Client(left), Self::Client(right)) => Arc::ptr_eq(left, right),
+            (Self::Server(left), Self::Server(right)) => Arc::ptr_eq(left, right),
+            (Self::Compact(left), Self::Compact(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for TransactionSubscriptionAuthority {}
+
 #[derive(Clone)]
 pub struct TransactionManager {
     /// Transport to use for messages
@@ -470,12 +1374,36 @@ pub struct TransactionManager {
     /// Hot-path call sites clone the Arc out, drop the shard guard,
     /// then await — no map-wide serialization on transport I/O.
     client_transactions: Arc<DashMap<TransactionKey, ArcClientTransaction>>,
+    /// Atomic per-wire-key admission fence. Unlike the representation-specific
+    /// active/tombstone maps, this owner spans every lifecycle representation.
+    transaction_admissions: Arc<TransactionAdmissionRegistry>,
+    /// Independent of the transport receive-loop `running` flag: outbound-only
+    /// managers also start Running and must reject publication after drain.
+    admission_lifecycle: Arc<TransactionManagerAdmissionLifecycle>,
+    operation_cancellation: Arc<TransactionManagerOperationCancellation>,
+    shutdown_gate: Arc<Mutex<()>>,
+    /// Configured logical capacity used by admission and retained-state
+    /// bounds. This remains independent from the initial DashMap reserve.
+    transaction_index_logical_capacity: usize,
+    /// Per-map initial reserve. DashMaps grow past this value on demand up to
+    /// the logical limits enforced by their owning protocol paths.
+    transaction_index_initial_capacity: usize,
+    /// Exact state/final-response cells for client transactions. Entries are
+    /// retained briefly after transaction removal so response-before-wait and
+    /// response-during-cleanup races remain observable without subscriptions.
+    client_completions: Arc<DashMap<Arc<TransactionKey>, ClientTransactionCompletionEntry>>,
+    client_completion_deadlines: Arc<std::sync::Mutex<ClientCompletionDeadlineScheduler>>,
+    client_completion_capacity: usize,
+    /// One wakeable deadline owner for retained client completions and INVITE
+    /// route tombstones. It replaces one-second polling and unbounded expiry
+    /// sweeps with bounded, immediately re-queued batches.
+    retained_client_deadline_worker: Option<RetainedClientDeadlineWorker>,
     /// Active server transactions. Same pattern as `client_transactions`.
     server_transactions: Arc<DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
     /// Indexed queue of transactions that reached `Terminated`.
-    /// The periodic cleanup task drains this instead of scanning every active
-    /// transaction map on each tick; occasional full sweeps remain as a
-    /// defensive fallback.
+    /// Runtime cleanup drains this bounded index instead of scanning either
+    /// active transaction table. The public full-scan repair API is reserved
+    /// for explicit diagnostics and is never scheduled automatically.
     terminated_transactions: Arc<DashMap<TransactionKey, ()>>,
     /// Fast dialog-id lookup for 2xx ACKs targeting INVITE server transactions.
     /// Entries remain briefly after transaction removal so end-to-end ACKs
@@ -484,27 +1412,50 @@ pub struct TransactionManager {
     /// Reverse index used to retire only the ACK keys belonging to a
     /// transaction, avoiding full-map scans during transaction cleanup.
     server_invite_dialog_keys_by_tx: Arc<DashMap<TransactionKey, Vec<ServerInviteDialogKey>>>,
-    server_invite_dialog_index_capacity: usize,
-    server_invite_dialog_index_insert_count: Arc<AtomicUsize>,
+    /// Due-driven retirement queue for server INVITE ACK bindings. The heap is
+    /// allocated lazily and contains compact keys rather than another copy of
+    /// the server transaction.
+    server_invite_dialog_expiry_queue:
+        Arc<std::sync::Mutex<BinaryHeap<ServerInviteAckExpiryEntry>>>,
+    server_invite_dialog_deadline_generation: Arc<AtomicU64>,
     /// Cache of successful INVITE responses for retransmitted INVITEs after
     /// the INVITE server transaction has entered the RFC 3261 2xx path.
     invite_2xx_response_cache: Arc<DashMap<TransactionKey, Invite2xxResponseCacheEntry>>,
     invite_2xx_response_cache_capacity: usize,
-    invite_2xx_response_cache_insert_count: Arc<AtomicUsize>,
-    invite_2xx_response_due_queue: Arc<std::sync::Mutex<BinaryHeap<Invite2xxDueEntry>>>,
-    invite_2xx_response_due_sequence: Arc<AtomicU64>,
-    terminated_cleanup_tx: Option<mpsc::Sender<TerminatedCleanupItem>>,
+    /// Exact, deadline-ordered maintenance index. It contains one compact
+    /// record per cached response and removes superseded deadlines eagerly.
+    invite_2xx_response_due_queue: Arc<std::sync::Mutex<Invite2xxDeadlineScheduler>>,
+    /// Exact explicit-termination operations admitted before the shared
+    /// cleanup key is queued. Keeping these private to the manager preserves
+    /// the public `HasLifecycle` cleanup-sender contract while allowing the
+    /// one cleanup worker to own cancellation-safe API work.
+    explicit_termination_operations:
+        Arc<DashMap<TransactionKey, Vec<Arc<functions::ExplicitTerminationOperation>>>>,
+    terminated_cleanup_tx: Option<mpsc::Sender<TransactionKey>>,
+    /// Explicit stop signal for the cleanup worker. The worker clears its
+    /// cloned sender fields before spawning, so it never keeps its own input
+    /// channel (or the lifecycle scheduler) alive.
+    terminated_cleanup_shutdown: Option<Arc<tokio::sync::Notify>>,
+    /// One due-driven lifecycle worker per manager. Transactions receive a
+    /// clone of this handle when they are admitted; no process-global lookup
+    /// or lock is involved on the terminal hot path.
+    lifecycle_scheduler: Option<crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle>,
+    /// Compact RFC Timer J/K state for completed UDP non-INVITE
+    /// transactions. Full runners leave the active maps as soon as this
+    /// tombstone is installed.
+    compact_non_invite_tombstones:
+        Arc<crate::transaction::lifecycle_scheduler::CompactNonInviteTombstones>,
     /// Client response routes transition atomically from active to a bounded,
     /// expiring INVITE tombstone. Retired entries authenticate late forked or
     /// retransmitted 2xx responses and retain the request template needed to
     /// ACK them without keeping the transaction runner alive.
-    transaction_destinations: Arc<DashMap<TransactionKey, ClientResponseRouteState>>,
-    retired_client_transaction_capacity: usize,
+    transaction_destinations: Arc<DashMap<Arc<TransactionKey>, ClientResponseRouteState>>,
+    retired_client_transaction_capacity: Arc<AtomicUsize>,
     retired_client_transaction_count: Arc<AtomicUsize>,
-    retired_client_transaction_insert_count: Arc<AtomicUsize>,
+    retired_client_deadlines: Arc<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
     /// Event sender
-    events_tx: mpsc::Sender<TransactionEvent>,
-    /// Additional event subscribers. ArcSwap so the broadcast hot path
+    events_tx: TransactionEventSender,
+    /// Global observational subscribers. ArcSwap so the broadcast hot path
     /// (every transaction state change, every retransmit) reads via a
     /// single atomic load instead of acquiring an async mutex. Writes
     /// (subscribe/unsubscribe) use copy-on-write RCU.
@@ -512,16 +1463,17 @@ pub struct TransactionManager {
     /// Maps subscribers to transactions they're interested in.
     /// DashMap — guards never held across `.await`.
     subscriber_to_transactions: Arc<DashMap<usize, Vec<TransactionKey>>>,
-    /// Maps transactions to subscribers interested in them.
-    /// DashMap — guards never held across `.await`.
-    transaction_to_subscribers: Arc<DashMap<TransactionKey, Vec<usize>>>,
+    /// Direct transaction-keyed observational subscribers. Keyed event
+    /// delivery reads only this transaction's small vector; it never scans the
+    /// global subscriber population.
+    transaction_to_subscribers: Arc<DashMap<TransactionKey, Vec<EventSubscriber>>>,
     /// Subscriber counter for assigning unique IDs. `AtomicUsize` —
     /// the previous `Mutex<usize>` only ever did fetch-and-increment.
     next_subscriber_id: Arc<AtomicUsize>,
     /// Transport message channel
-    transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
+    transport_rx: Option<Arc<Mutex<mpsc::Receiver<TransportEvent>>>>,
     /// Separately reserved lifecycle/control channel.
-    control_transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
+    control_transport_rx: Option<Arc<Mutex<mpsc::Receiver<TransportEvent>>>>,
     /// Running flag. `AtomicBool` — the previous `Mutex<bool>` was
     /// locked per-iteration of the message loop.
     running: Arc<AtomicBool>,
@@ -568,7 +1520,8 @@ pub struct TransactionManager {
     request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
     /// Successful ingress identities awaiting dialog/session consumption.
     pending_inbound_principals: Arc<DashMap<TransactionKey, InboundPrincipalBinding>>,
-    pending_inbound_principal_inserted_at: Arc<DashMap<TransactionKey, Instant>>,
+    pending_inbound_principal_inserted_at: Arc<DashMap<TransactionKey, InboundPrincipalLease>>,
+    pending_inbound_principal_generation: Arc<AtomicU64>,
     transaction_dispatch_workers: usize,
     transaction_dispatch_queue_capacity: usize,
     transaction_command_channel_capacity: usize,
@@ -620,30 +1573,225 @@ enum TransactionDispatchLane {
     Normal,
 }
 
-#[derive(Debug, Clone)]
-struct TerminatedCleanupItem {
-    transaction_id: TransactionKey,
-    attempts: u16,
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct Invite2xxDeadline {
     due_at: Instant,
+    expires_at: Instant,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 struct Invite2xxDueEntry {
+    transaction_id: Arc<TransactionKey>,
     due_at: Instant,
-    sequence: u64,
-    transaction_id: TransactionKey,
+    expires_at: Instant,
+    generation: u64,
 }
 
-impl Ord for Invite2xxDueEntry {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other
-            .due_at
-            .cmp(&self.due_at)
-            .then_with(|| other.sequence.cmp(&self.sequence))
+/// Exact deadline index for cached INVITE 2xx responses.
+///
+/// `by_due` drives retransmission, `by_expiry` drives expiry and bounded
+/// capacity eviction, and `by_transaction` makes replacement exact. Keeping
+/// one entry in each index avoids the stale heap growth and periodic full-heap
+/// rebuild previously caused by ACKs and retransmission backoff.
+#[derive(Debug, Default)]
+struct Invite2xxDeadlineScheduler {
+    by_due: BTreeMap<(Instant, u64), Arc<TransactionKey>>,
+    by_expiry: BTreeMap<(Instant, u64), Arc<TransactionKey>>,
+    by_transaction: HashMap<Arc<TransactionKey>, Invite2xxDeadline>,
+    next_generation: u64,
+}
+
+impl Invite2xxDeadlineScheduler {
+    fn next_generation(&mut self, due_at: Instant, expires_at: Instant) -> u64 {
+        loop {
+            let generation = self.next_generation;
+            self.next_generation = self.next_generation.wrapping_add(1);
+            if !self.by_due.contains_key(&(due_at, generation))
+                && !self.by_expiry.contains_key(&(expires_at, generation))
+            {
+                return generation;
+            }
+        }
+    }
+
+    fn schedule(
+        &mut self,
+        transaction_id: TransactionKey,
+        due_at: Instant,
+        expires_at: Instant,
+    ) -> u64 {
+        let previous = self
+            .by_transaction
+            .get_key_value(&transaction_id)
+            .map(|(key, deadline)| (Arc::clone(key), *deadline));
+
+        if let Some((_, previous)) = previous.as_ref() {
+            if previous.due_at == due_at && previous.expires_at == expires_at {
+                return previous.generation;
+            }
+        }
+
+        let transaction_id = previous
+            .as_ref()
+            .map(|(key, _)| Arc::clone(key))
+            .unwrap_or_else(|| Arc::new(transaction_id));
+        if let Some((_, previous)) = previous {
+            self.by_due.remove(&(previous.due_at, previous.generation));
+            self.by_expiry
+                .remove(&(previous.expires_at, previous.generation));
+        }
+
+        let generation = self.next_generation(due_at, expires_at);
+        let deadline = Invite2xxDeadline {
+            due_at,
+            expires_at,
+            generation,
+        };
+        self.by_transaction
+            .insert(Arc::clone(&transaction_id), deadline);
+        self.by_due
+            .insert((due_at, generation), Arc::clone(&transaction_id));
+        self.by_expiry
+            .insert((expires_at, generation), transaction_id);
+        generation
+    }
+
+    fn unschedule(&mut self, transaction_id: &TransactionKey, generation: u64) -> bool {
+        let Some(deadline) = self.by_transaction.get(transaction_id).copied() else {
+            return false;
+        };
+        if deadline.generation != generation {
+            return false;
+        }
+        self.remove_exact(transaction_id, deadline).is_some()
+    }
+
+    fn remove_exact(
+        &mut self,
+        transaction_id: &TransactionKey,
+        deadline: Invite2xxDeadline,
+    ) -> Option<Invite2xxDueEntry> {
+        if !self
+            .by_transaction
+            .get(transaction_id)
+            .is_some_and(|current| *current == deadline)
+        {
+            return None;
+        }
+
+        let (transaction_id, _) = self.by_transaction.remove_entry(transaction_id)?;
+        self.by_due.remove(&(deadline.due_at, deadline.generation));
+        self.by_expiry
+            .remove(&(deadline.expires_at, deadline.generation));
+        Some(Invite2xxDueEntry {
+            transaction_id,
+            due_at: deadline.due_at,
+            expires_at: deadline.expires_at,
+            generation: deadline.generation,
+        })
+    }
+
+    fn take_due(&mut self, now: Instant, max_work: usize) -> (Vec<Invite2xxDueEntry>, bool) {
+        let mut due = Vec::with_capacity(max_work.min(self.len()));
+        while due.len() < max_work {
+            let Some((&(due_at, generation), transaction_id)) = self.by_due.first_key_value()
+            else {
+                break;
+            };
+            if due_at > now {
+                break;
+            }
+
+            let transaction_id = Arc::clone(transaction_id);
+            let Some(deadline) = self.by_transaction.get(transaction_id.as_ref()).copied() else {
+                // This invariant is defended in release builds as well as by
+                // debug assertions: discard only the inconsistent index row.
+                self.by_due.pop_first();
+                continue;
+            };
+            if deadline.due_at != due_at || deadline.generation != generation {
+                self.by_due.pop_first();
+                continue;
+            }
+            if let Some(entry) = self.remove_exact(transaction_id.as_ref(), deadline) {
+                due.push(entry);
+            }
+        }
+
+        let capped = due.len() == max_work
+            && self
+                .by_due
+                .first_key_value()
+                .is_some_and(|(&(due_at, _), _)| due_at <= now);
+        (due, capped)
+    }
+
+    fn take_expired_and_overflow(
+        &mut self,
+        now: Instant,
+        capacity: usize,
+        max_work: usize,
+    ) -> Vec<Invite2xxDueEntry> {
+        let mut removals = Vec::with_capacity(max_work.min(self.len()));
+        while removals.len() < max_work {
+            let Some((&(expires_at, generation), transaction_id)) =
+                self.by_expiry.first_key_value()
+            else {
+                break;
+            };
+            if expires_at > now && self.len() <= capacity {
+                break;
+            }
+
+            let transaction_id = Arc::clone(transaction_id);
+            let Some(deadline) = self.by_transaction.get(transaction_id.as_ref()).copied() else {
+                self.by_expiry.pop_first();
+                continue;
+            };
+            if deadline.expires_at != expires_at || deadline.generation != generation {
+                self.by_expiry.pop_first();
+                continue;
+            }
+            if let Some(entry) = self.remove_exact(transaction_id.as_ref(), deadline) {
+                removals.push(entry);
+            }
+        }
+        removals
+    }
+
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.by_due.len(), self.by_transaction.len());
+        debug_assert_eq!(self.by_expiry.len(), self.by_transaction.len());
+        self.by_transaction.len()
+    }
+
+    fn clear(&mut self) {
+        self.by_due.clear();
+        self.by_expiry.clear();
+        self.by_transaction.clear();
     }
 }
 
-impl PartialOrd for Invite2xxDueEntry {
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ServerInviteAckExpiryEntry {
+    due_at: Instant,
+    generation: u64,
+    dialog_key: ServerInviteDialogKey,
+}
+
+impl Ord for ServerInviteAckExpiryEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // BinaryHeap is a max-heap, so reverse deadline/sequence ordering to
+        // expose the earliest deadline at `peek()`.
+        other
+            .due_at
+            .cmp(&self.due_at)
+            .then_with(|| other.generation.cmp(&self.generation))
+    }
+}
+
+impl PartialOrd for ServerInviteAckExpiryEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
@@ -666,12 +1814,6 @@ fn build_timer_settings() -> TimerSettings {
         }
     }
     settings
-}
-
-fn closed_transport_event_receiver() -> Arc<Mutex<mpsc::Receiver<TransportEvent>>> {
-    let (sender, receiver) = mpsc::channel(1);
-    drop(sender);
-    Arc::new(Mutex::new(receiver))
 }
 
 fn transaction_ingress_kind(event: &TransportEvent) -> TransactionIngressKind {
@@ -951,72 +2093,101 @@ async fn process_transaction_dispatch_event(
     }
 }
 
-fn drain_due_cleanup_items(
-    delayed: &mut VecDeque<TerminatedCleanupItem>,
-    batch: &mut Vec<TerminatedCleanupItem>,
-) {
-    let now = Instant::now();
-    while batch.len() < TERMINATED_CLEANUP_BATCH_MAX {
-        let Some(item) = delayed.front() else {
-            break;
-        };
-        if item.due_at > now {
-            break;
-        }
-        if let Some(item) = delayed.pop_front() {
-            batch.push(item);
+impl TransactionManager {
+    pub(crate) fn try_enter_existing_operation(&self) -> Option<TransactionManagerAdmissionGuard> {
+        self.admission_lifecycle.try_enter_existing()
+    }
+
+    fn install_terminal_delivery_failure_hook(&self) {
+        let lifecycle = Arc::clone(&self.admission_lifecycle);
+        self.events_tx
+            .install_terminal_delivery_failure_hook(Arc::new(move || {
+                lifecycle.begin_draining();
+            }));
+    }
+
+    fn retained_client_deadline_context(&self) -> RetainedClientDeadlineContext {
+        RetainedClientDeadlineContext {
+            client_completions: Arc::downgrade(&self.client_completions),
+            client_completion_deadlines: Arc::downgrade(&self.client_completion_deadlines),
+            client_completion_capacity: self.client_completion_capacity,
+            transaction_destinations: Arc::downgrade(&self.transaction_destinations),
+            retired_client_deadlines: Arc::downgrade(&self.retired_client_deadlines),
+            retired_client_transaction_capacity: Arc::clone(
+                &self.retired_client_transaction_capacity,
+            ),
+            retired_client_transaction_count: Arc::downgrade(
+                &self.retired_client_transaction_count,
+            ),
         }
     }
-}
 
-impl TransactionManager {
-    fn start_terminated_cleanup_worker(&self, mut rx: mpsc::Receiver<TerminatedCleanupItem>) {
-        let manager = self.clone();
+    fn start_retained_client_deadline_worker(&self) {
+        if let Some(worker) = self.retained_client_deadline_worker.as_ref() {
+            worker.start(self.retained_client_deadline_context());
+        }
+    }
+
+    fn wake_retained_client_deadline_worker(&self) {
+        if let Some(worker) = self.retained_client_deadline_worker.as_ref() {
+            worker.wake();
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_client_deadline_worker_snapshot(
+        &self,
+    ) -> Option<RetainedClientDeadlineWorkerSnapshot> {
+        self.retained_client_deadline_worker
+            .as_ref()
+            .map(RetainedClientDeadlineWorker::snapshot)
+    }
+
+    fn start_terminated_cleanup_worker(&self, mut rx: mpsc::Receiver<TransactionKey>) {
+        let mut manager = self.clone();
+        manager.terminated_cleanup_tx = None;
+        manager.lifecycle_scheduler = None;
+        manager.terminated_cleanup_shutdown = None;
+        let shutdown = self
+            .terminated_cleanup_shutdown
+            .as_ref()
+            .expect("runtime transaction managers install cleanup shutdown")
+            .clone();
         tokio::spawn(async move {
             diagnostics::record_termination_cleanup_worker_spawned();
-            let mut delayed = VecDeque::new();
-            let mut rx_closed = false;
-            let mut retry_tick = tokio::time::interval(TERMINATED_CLEANUP_RETRY_DELAY);
-            retry_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
+            let mut batch = Vec::with_capacity(TERMINATED_CLEANUP_BATCH_MAX);
+            let mut seen = HashSet::with_capacity(TERMINATED_CLEANUP_BATCH_MAX);
             loop {
-                let mut batch = Vec::with_capacity(TERMINATED_CLEANUP_BATCH_MAX);
-                drain_due_cleanup_items(&mut delayed, &mut batch);
-
-                if batch.is_empty() {
-                    tokio::select! {
-                        item = rx.recv(), if !rx_closed => {
-                            match item {
-                                Some(item) => batch.push(item),
-                                None => rx_closed = true,
+                let transaction_id = tokio::select! {
+                    biased;
+                    _ = shutdown.notified() => break,
+                    transaction_id = rx.recv() => {
+                        let Some(transaction_id) = transaction_id else {
+                            break;
+                        };
+                        transaction_id
+                    }
+                };
+                // Deduplicate both StateChanged(Terminated) and the runner's
+                // authoritative TransactionTerminated notification without a
+                // retained per-transaction retry/timer object.
+                batch.clear();
+                seen.clear();
+                seen.insert(transaction_id.clone());
+                batch.push(transaction_id);
+                for _ in 1..TERMINATED_CLEANUP_BATCH_MAX {
+                    match rx.try_recv() {
+                        Ok(transaction_id) => {
+                            if seen.insert(transaction_id.clone()) {
+                                batch.push(transaction_id);
                             }
                         }
-                        _ = retry_tick.tick() => {}
-                    }
-                    drain_due_cleanup_items(&mut delayed, &mut batch);
-                }
-
-                while !rx_closed && batch.len() < TERMINATED_CLEANUP_BATCH_MAX {
-                    match rx.try_recv() {
-                        Ok(item) => batch.push(item),
                         Err(mpsc::error::TryRecvError::Empty) => break,
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            rx_closed = true;
-                            break;
-                        }
+                        Err(mpsc::error::TryRecvError::Disconnected) => break,
                     }
                 }
 
-                if batch.is_empty() {
-                    if rx_closed && delayed.is_empty() {
-                        break;
-                    }
-                    continue;
-                }
-
-                manager
-                    .process_terminated_cleanup_batch(batch, &mut delayed)
-                    .await;
+                manager.process_transaction_cleanup_batch(&batch).await;
             }
 
             debug!("Terminated transaction cleanup worker stopped");
@@ -1024,17 +2195,11 @@ impl TransactionManager {
     }
 
     fn enqueue_terminated_transaction_cleanup(&self, transaction_id: TransactionKey) {
-        let item = TerminatedCleanupItem {
-            transaction_id,
-            attempts: 0,
-            due_at: Instant::now(),
-        };
-
         let Some(tx) = &self.terminated_cleanup_tx else {
             return;
         };
 
-        match tx.try_send(item) {
+        match tx.try_send(transaction_id) {
             Ok(()) => diagnostics::record_termination_cleanup_enqueued(),
             Err(mpsc::error::TrySendError::Full(_)) => {
                 diagnostics::record_termination_cleanup_queue_full();
@@ -1043,34 +2208,65 @@ impl TransactionManager {
         }
     }
 
-    async fn process_terminated_cleanup_batch(
-        &self,
-        batch: Vec<TerminatedCleanupItem>,
-        delayed: &mut VecDeque<TerminatedCleanupItem>,
-    ) {
-        diagnostics::record_termination_cleanup_batch(batch.len());
-
-        for mut item in batch {
+    async fn process_terminated_cleanup_batch(&self, batch: &[TransactionKey]) {
+        for transaction_id in batch {
             diagnostics::record_termination_cleanup_in_flight(1);
-            let ready = self.transaction_lifecycle_destroyed(&item.transaction_id);
-            if ready || item.attempts >= TERMINATED_CLEANUP_MAX_ATTEMPTS {
-                if !ready {
-                    warn!(
-                        transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&item.transaction_id),
-                        attempts = item.attempts,
-                        "Lifecycle cleanup timeout, forcing transaction removal"
-                    );
-                }
-                diagnostics::record_termination_cleanup_poll_attempts(item.attempts as u64);
-                self.remove_terminated_transaction(&item.transaction_id)
-                    .await;
+            if self.transaction_lifecycle_destroyed(transaction_id) {
+                self.remove_terminated_transaction(transaction_id).await;
                 diagnostics::record_termination_cleanup_removed();
             } else {
-                item.attempts += 1;
-                item.due_at = Instant::now() + TERMINATED_CLEANUP_RETRY_DELAY;
-                delayed.push_back(item);
+                // StateChanged(Terminated) can be observed before the shared
+                // lifecycle scheduler finishes its 600 ms fence. The runner
+                // submits a second, authoritative notification after it exits;
+                // retain only the compact safety index in the meantime.
+                self.mark_transaction_terminated_indexed(transaction_id);
             }
             diagnostics::record_termination_cleanup_in_flight(-1);
+        }
+    }
+
+    async fn process_transaction_cleanup_batch(&self, batch: &[TransactionKey]) {
+        diagnostics::record_termination_cleanup_batch(batch.len());
+
+        // Explicit API operations transfer their admission guards into the
+        // private index before their cleanup key is queued. Drain them first
+        // without reacquiring admission: shutdown advances to Stopping before
+        // `wait_idle`, so requiring a new guard here would strand the accepted
+        // operation and deadlock shutdown on its transferred guard.
+        let mut explicit = Vec::new();
+        for transaction_id in batch {
+            if let Some((_, mut operations)) =
+                self.explicit_termination_operations.remove(transaction_id)
+            {
+                explicit.append(&mut operations);
+            }
+        }
+        futures::stream::iter(explicit)
+            .for_each_concurrent(
+                Some(EXPLICIT_TERMINATION_CONCURRENCY_MAX),
+                |operation| async move {
+                    operation.execute(self).await;
+                },
+            )
+            .await;
+
+        if self.explicit_termination_operations.is_empty()
+            && self.explicit_termination_operations.capacity()
+                > self.transaction_index_initial_capacity.max(4_096)
+        {
+            self.explicit_termination_operations.shrink_to_fit();
+        }
+
+        // Ordinary runner notifications do not own a transferred guard. Keep
+        // their existing fail-closed shutdown behavior, but never stop the
+        // worker merely because admission or cancellation closed: a queued
+        // explicit key may still follow and must release its own guard.
+        let Some(_cleanup_operation) = self.admission_lifecycle.try_enter_existing() else {
+            return;
+        };
+        tokio::select! {
+            _ = self.operation_cancellation.cancelled() => {}
+            _ = self.process_terminated_cleanup_batch(batch) => {}
         }
     }
 
@@ -1143,6 +2339,63 @@ impl TransactionManager {
         self.transaction_command_channel_capacity
     }
 
+    /// Register the integrated dialog consumer's extra dispatch queue. Compact
+    /// terminal key fences then remain live until the dialog worker confirms
+    /// that it has finished processing `TransactionTerminated`.
+    pub(crate) fn require_compact_dialog_terminal_ack(&self) {
+        if self.events_tx.supports_exact_compact_terminal_ack() {
+            self.events_tx.require_terminal_ack();
+            if let Some(scheduler) = self.lifecycle_scheduler.as_ref() {
+                scheduler.require_dialog_terminal_ack();
+            }
+        }
+    }
+
+    pub(crate) fn dialog_terminal_consumer_attach_state_is_clean(&self) -> bool {
+        self.transaction_admissions.entries.is_empty()
+            && self.client_transactions.is_empty()
+            && self.server_transactions.is_empty()
+            && self.client_completions.is_empty()
+            && self.compact_non_invite_tombstones.is_empty()
+            && self.transaction_destinations.is_empty()
+            && self.terminated_transactions.is_empty()
+            && self.server_invite_dialog_index.is_empty()
+            && self.invite_2xx_response_cache.is_empty()
+    }
+
+    pub(crate) fn take_terminal_event_fence(
+        &self,
+        event: &Arc<TransactionEvent>,
+    ) -> Option<crate::transaction::event_sender::TerminalEventFence> {
+        self.events_tx.take_terminal_event_fence(event)
+    }
+
+    /// Acknowledge the exact compact generation carried by the processed
+    /// shared event. The pointer-bound sidecar prevents any same-key legacy
+    /// event from finalizing a replacement generation.
+    pub(crate) fn acknowledge_compact_dialog_terminal(
+        &self,
+        transaction_id: &TransactionKey,
+        generation: u64,
+    ) {
+        if self
+            .compact_non_invite_tombstones
+            .get(transaction_id)
+            .is_none_or(|entry| entry.value().state().get() != TransactionState::Terminated)
+        {
+            return;
+        }
+        crate::transaction::lifecycle_scheduler::acknowledge_dialog_terminal_generation(
+            &self.compact_non_invite_tombstones,
+            &self.transaction_destinations,
+            &self.pending_inbound_principals,
+            &self.pending_inbound_principal_inserted_at,
+            transaction_id,
+            generation,
+            self.events_tx.observer_fanout(),
+        );
+    }
+
     /// Set the maximum number of cached INVITE 2xx responses retransmitted by
     /// each proactive maintenance tick. Values below `1` are clamped to `1`.
     pub fn set_invite_2xx_retransmit_max_due_per_tick(&self, max_due_per_tick: usize) {
@@ -1156,6 +2409,10 @@ impl TransactionManager {
     /// reflect live retention rather than expired tombstone/cache residue.
     pub fn retention_counts(&self) -> TransactionManagerRetentionCounts {
         self.maintenance_prune_retained_state();
+        // This API is an explicit diagnostic snapshot, so repair any expired
+        // entry that predates the due queue or survived a corrupted/stale
+        // deadline. Runtime maintenance itself never scans the full map.
+        self.repair_expired_server_invite_dialog_index();
 
         let invite_2xx_response_due_queue = self
             .invite_2xx_response_due_queue
@@ -1179,7 +2436,14 @@ impl TransactionManager {
                 .iter()
                 .filter(|entry| entry.value().is_active())
                 .count(),
-            event_subscribers: self.event_subscribers.load().len(),
+            compact_non_invite_tombstones: self.compact_non_invite_tombstones.len(),
+            compact_non_invite_deadlines: self
+                .lifecycle_scheduler
+                .as_ref()
+                .map(|scheduler| scheduler.compact_deadline_count())
+                .unwrap_or(0),
+            event_subscribers: self.event_subscribers.load().len()
+                + self.subscriber_to_transactions.len(),
             subscriber_to_transactions: self.subscriber_to_transactions.len(),
             transaction_to_subscribers: self.transaction_to_subscribers.len(),
             pending_inbound_bytes: self.pending_inbound_bytes.len(),
@@ -1198,12 +2462,79 @@ impl TransactionManager {
         self.retired_client_transaction_count_unpruned()
     }
 
+    /// Return aggregate-safe counts for exact completion storage.
+    pub fn client_completion_retention_counts(&self) -> ClientCompletionRetentionCounts {
+        let mut counts = ClientCompletionRetentionCounts::default();
+        for entry in self.client_completions.iter() {
+            if entry.value().retained_deadline().is_some() {
+                counts.retained += 1;
+            } else {
+                counts.active += 1;
+            }
+            let diagnostics = entry.value().diagnostics();
+            counts.compact += diagnostics.compact;
+            counts.parsed_responses += diagnostics.parsed_responses;
+            counts.wire_responses += diagnostics.wire_responses;
+            counts.wire_response_bytes += diagnostics.wire_response_bytes;
+        }
+        // INVITE request/route/auth state and its exact completion now share
+        // one retained record and one deadline. Count that completion here
+        // even though it no longer occupies `client_completions`.
+        for entry in self.transaction_destinations.iter() {
+            let Some(retired) = entry.value().retired() else {
+                continue;
+            };
+            if self.client_completions.contains_key(entry.key().as_ref()) {
+                // A transition observer caught the tiny route-published,
+                // active-completion-not-yet-removed interval. Report the
+                // authoritative active map record once rather than double
+                // counting the same exact completion.
+                continue;
+            }
+            counts.retained += 1;
+            let diagnostics = retired.completion.diagnostics();
+            counts.compact += diagnostics.compact;
+            counts.parsed_responses += diagnostics.parsed_responses;
+            counts.wire_responses += diagnostics.wire_responses;
+            counts.wire_response_bytes += diagnostics.wire_response_bytes;
+        }
+        counts.deadlines = self
+            .client_completion_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
+            + self
+                .retired_client_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len();
+        counts
+    }
+
+    /// Return aggregate-safe retained INVITE storage diagnostics without
+    /// cloning any tombstone. The parsed ACK-template count intentionally
+    /// remains zero because templates are reconstructed only while handling a
+    /// rare late/forked 2xx response.
+    pub fn retired_client_retention_counts(&self) -> RetiredClientRetentionCounts {
+        self.prune_retired_client_transactions();
+        let mut counts = RetiredClientRetentionCounts::default();
+        for entry in self.transaction_destinations.iter() {
+            if let Some(retired) = entry.value().retired() {
+                counts.transactions += 1;
+                counts.request_wire_bytes += retired.request_wire.len();
+            }
+        }
+        counts.deadlines = self.retired_client_deadline_count();
+        counts
+    }
+
     /// Return retained transaction breakdowns for perf diagnostics.
     ///
     /// This is diagnostic-only data used to attribute retained transactions by
     /// method, RFC state, transaction kind, and lifecycle after soak drains.
     pub fn retention_breakdown(&self) -> serde_json::Value {
         self.maintenance_prune_retained_state();
+        self.repair_expired_server_invite_dialog_index();
 
         fn increment(counts: &mut BTreeMap<String, usize>, key: impl Into<String>) {
             *counts.entry(key.into()).or_default() += 1;
@@ -1247,6 +2578,185 @@ impl TransactionManager {
             );
         }
 
+        let completion_counts = self.client_completion_retention_counts();
+        let retired_client_counts = self.retired_client_retention_counts();
+
+        // These values deliberately separate payload bytes and inline record
+        // sizes from hash/tree node overhead. Together with table capacities
+        // they make a diagnostic profile actionable without pretending that
+        // `size_of` is an allocator-accurate heap measurement.
+        let transaction_key_payload_bytes = |key: &TransactionKey| key.branch.capacity();
+        let server_dialog_key_payload_bytes = |key: &ServerInviteDialogKey| {
+            key.call_id.capacity()
+                + key.from_tag.capacity()
+                + key.to_tag.as_ref().map_or(0, String::capacity)
+        };
+
+        let mut compact_client_tombstones = 0_usize;
+        let mut compact_server_tombstones = 0_usize;
+        let mut compact_tombstone_key_bytes = 0_usize;
+        let mut compact_server_response_wire_bytes = 0_usize;
+        let mut compact_client_completion_wire_bytes = 0_usize;
+        let mut compact_client_live_completion_cells = 0_usize;
+        for entry in self.compact_non_invite_tombstones.iter() {
+            compact_tombstone_key_bytes += transaction_key_payload_bytes(entry.key());
+            match entry.value() {
+                crate::transaction::lifecycle_scheduler::CompactNonInviteTombstone::Client {
+                    completion,
+                    live_completion,
+                    ..
+                } => {
+                    compact_client_tombstones += 1;
+                    compact_client_completion_wire_bytes +=
+                        completion.diagnostics().wire_response_bytes;
+                    compact_client_live_completion_cells +=
+                        usize::from(live_completion.strong_count() > 0);
+                }
+                crate::transaction::lifecycle_scheduler::CompactNonInviteTombstone::Server {
+                    response_wire,
+                    ..
+                } => {
+                    compact_server_tombstones += 1;
+                    compact_server_response_wire_bytes += response_wire.len();
+                }
+            }
+        }
+
+        let mut completion_key_bytes = 0_usize;
+        let mut completion_route_shared_key_records = 0_usize;
+        for entry in self.client_completions.iter() {
+            completion_key_bytes += transaction_key_payload_bytes(entry.key());
+            completion_route_shared_key_records += self
+                .transaction_destinations
+                .get(entry.key().as_ref())
+                .is_some_and(|route| Arc::ptr_eq(entry.key(), route.key()))
+                as usize;
+        }
+        let (
+            completion_deadline_count,
+            completion_deadline_key_bytes,
+            completion_deadline_shared_key_records,
+        ) = {
+            let deadlines = self
+                .client_completion_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                deadlines.by_deadline.len(),
+                deadlines
+                    .by_deadline
+                    .values()
+                    .map(|key| transaction_key_payload_bytes(key.as_ref()))
+                    .sum::<usize>(),
+                deadlines
+                    .by_deadline
+                    .values()
+                    .filter(|key| {
+                        self.client_completions
+                            .get(key.as_ref())
+                            .is_some_and(|completion| Arc::ptr_eq(completion.key(), key))
+                    })
+                    .count(),
+            )
+        };
+
+        let mut retired_route_key_bytes = 0_usize;
+        let mut retained_invite_key_bytes = 0_usize;
+        let mut retained_invite_records = 0_usize;
+        let mut retained_invite_response_records = 0_usize;
+        let mut retired_completion_wire_bytes = 0_usize;
+        let mut retired_shared_wire_records = 0_usize;
+        for entry in self.transaction_destinations.iter() {
+            retired_route_key_bytes += transaction_key_payload_bytes(entry.key());
+            if let Some(retired) = entry.value().retired() {
+                retained_invite_records += 1;
+                retained_invite_key_bytes += transaction_key_payload_bytes(entry.key());
+                retained_invite_response_records += usize::from(retired.has_completion_wire());
+                retired_completion_wire_bytes += retired.completion_wire_len();
+                retired_shared_wire_records +=
+                    usize::from(retired.has_completion_wire() && retired.shares_wire_allocation());
+            }
+        }
+        let (
+            retired_deadline_count,
+            retired_deadline_key_bytes,
+            retired_deadline_shared_key_records,
+        ) = {
+            let deadlines = self
+                .retired_client_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                deadlines.by_deadline.len(),
+                deadlines
+                    .by_deadline
+                    .values()
+                    .map(|key| transaction_key_payload_bytes(key.as_ref()))
+                    .sum::<usize>(),
+                deadlines
+                    .by_deadline
+                    .values()
+                    .filter(|key| {
+                        self.transaction_destinations
+                            .get(key.as_ref())
+                            .is_some_and(|route| Arc::ptr_eq(route.key(), key))
+                    })
+                    .count(),
+            )
+        };
+
+        let mut server_dialog_index_key_bytes = 0_usize;
+        let mut server_dialog_index_transaction_key_bytes = 0_usize;
+        for entry in self.server_invite_dialog_index.iter() {
+            server_dialog_index_key_bytes += server_dialog_key_payload_bytes(entry.key());
+            server_dialog_index_transaction_key_bytes +=
+                transaction_key_payload_bytes(&entry.value().transaction_id);
+        }
+        let (server_dialog_expiry_count, server_dialog_expiry_key_bytes) = {
+            let deadlines = self
+                .server_invite_dialog_expiry_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            (
+                deadlines.len(),
+                deadlines
+                    .iter()
+                    .map(|deadline| server_dialog_key_payload_bytes(&deadline.dialog_key))
+                    .sum::<usize>(),
+            )
+        };
+        let mut server_dialog_reverse_transaction_key_bytes = 0_usize;
+        let mut server_dialog_reverse_dialog_key_bytes = 0_usize;
+        for entry in self.server_invite_dialog_keys_by_tx.iter() {
+            server_dialog_reverse_transaction_key_bytes +=
+                transaction_key_payload_bytes(entry.key());
+            server_dialog_reverse_dialog_key_bytes += entry
+                .value()
+                .iter()
+                .map(server_dialog_key_payload_bytes)
+                .sum::<usize>();
+        }
+
+        let consolidated_retired_invite_layout = serde_json::json!({
+            "records": retained_invite_records,
+            "legacy_map_records": retained_invite_records.saturating_mul(2),
+            "current_map_records": retained_invite_records,
+            "legacy_deadline_records": retained_invite_records.saturating_mul(2),
+            "current_deadline_records": retired_deadline_count,
+            "legacy_transaction_key_payload_allocated_bytes": retained_invite_key_bytes.saturating_mul(4),
+            "current_transaction_key_payload_allocated_bytes": retained_invite_key_bytes,
+            "legacy_wire_backing_allocations": retained_invite_records.saturating_add(retained_invite_response_records),
+            "current_wire_backing_allocations": retained_invite_records,
+            "shared_deadline_key_records": retired_deadline_shared_key_records,
+            "shared_request_response_records": retired_shared_wire_records,
+            "legacy_value_inline_bytes_per_record": std::mem::size_of::<LegacyRetiredClientTransactionLayout>()
+                + std::mem::size_of::<ClientTransactionCompletionEntry>(),
+            "current_value_inline_bytes_per_record": std::mem::size_of::<RetiredClientTransaction>(),
+            "legacy_index_inline_bytes_per_record": std::mem::size_of::<TransactionKey>().saturating_mul(2)
+                + std::mem::size_of::<Arc<TransactionKey>>().saturating_mul(2),
+            "current_index_inline_bytes_per_record": std::mem::size_of::<Arc<TransactionKey>>().saturating_mul(2),
+        });
+
         serde_json::json!({
             "client_by_method": client_by_method,
             "client_by_state": client_by_state,
@@ -1256,7 +2766,102 @@ impl TransactionManager {
             "server_by_state": server_by_state,
             "server_by_kind": server_by_kind,
             "server_by_lifecycle": server_by_lifecycle,
-            "retired_client_transactions": self.retired_client_transaction_count_unpruned(),
+            "compact_non_invite_tombstones": self.compact_non_invite_tombstones.len(),
+            "compact_non_invite_deadlines": self.lifecycle_scheduler.as_ref().map(|scheduler| scheduler.compact_deadline_count()).unwrap_or(0),
+            "retired_client_transactions": retired_client_counts.transactions,
+            "retired_client_deadlines": retired_client_counts.deadlines,
+            "retired_client_request_wire_bytes": retired_client_counts.request_wire_bytes,
+            "retired_client_ack_template_allocations": retired_client_counts.ack_template_allocations,
+            "retired_client": {
+                "transactions": retired_client_counts.transactions,
+                "request_wire_bytes": retired_client_counts.request_wire_bytes,
+                "ack_template_allocations": retired_client_counts.ack_template_allocations,
+                "deadlines": retired_client_counts.deadlines,
+            },
+            "client_completions": {
+                "active": completion_counts.active,
+                "retained": completion_counts.retained,
+                "compact": completion_counts.compact,
+                "parsed_responses": completion_counts.parsed_responses,
+                "wire_responses": completion_counts.wire_responses,
+                "wire_response_bytes": completion_counts.wire_response_bytes,
+                "deadlines": completion_counts.deadlines,
+            },
+            "storage": {
+                "transaction_index_capacity": {
+                    "logical": self.transaction_index_logical_capacity,
+                    "initial_per_map": self.transaction_index_initial_capacity,
+                    "max_eager_per_map": MAX_EAGER_TRANSACTION_INDEX_CAPACITY,
+                },
+                "record_inline_bytes": {
+                    "transaction_key": std::mem::size_of::<TransactionKey>(),
+                    "server_invite_dialog_key": std::mem::size_of::<ServerInviteDialogKey>(),
+                    "server_invite_ack_index_entry": std::mem::size_of::<ServerInviteAckIndexEntry>(),
+                    "server_invite_ack_expiry_entry": std::mem::size_of::<ServerInviteAckExpiryEntry>(),
+                    "client_completion_entry": std::mem::size_of::<ClientTransactionCompletionEntry>(),
+                    "retained_client_completion": std::mem::size_of::<crate::transaction::completion::RetainedClientTransactionCompletion>(),
+                    "live_client_completion": std::mem::size_of::<crate::transaction::completion::ClientTransactionCompletion>(),
+                    "retired_client_transaction": std::mem::size_of::<RetiredClientTransaction>(),
+                    "client_response_route_state": std::mem::size_of::<ClientResponseRouteState>(),
+                    "compact_non_invite_tombstone": std::mem::size_of::<crate::transaction::lifecycle_scheduler::CompactNonInviteTombstone>(),
+                    "transport_route": std::mem::size_of::<TransportRoute>(),
+                },
+                "table_capacity": {
+                    "client_transactions": self.client_transactions.capacity(),
+                    "server_transactions": self.server_transactions.capacity(),
+                    "client_completions": self.client_completions.capacity(),
+                    "terminated_transactions": self.terminated_transactions.capacity(),
+                    "server_invite_dialog_index": self.server_invite_dialog_index.capacity(),
+                    "server_invite_dialog_keys_by_tx": self.server_invite_dialog_keys_by_tx.capacity(),
+                    "compact_non_invite_tombstones": self.compact_non_invite_tombstones.capacity(),
+                    "transaction_destinations": self.transaction_destinations.capacity(),
+                    "transaction_to_subscribers": self.transaction_to_subscribers.capacity(),
+                    "pending_inbound_bytes": self.pending_inbound_bytes.capacity(),
+                    "pending_inbound_inserted_at": self.pending_inbound_inserted_at.capacity(),
+                    "pending_inbound_transport": self.pending_inbound_transport.capacity(),
+                    "pending_inbound_timing": self.pending_inbound_timing.capacity(),
+                    "pending_inbound_principals": self.pending_inbound_principals.capacity(),
+                    "pending_inbound_principal_inserted_at": self.pending_inbound_principal_inserted_at.capacity(),
+                },
+                "compact_non_invite": {
+                    "client_tombstones": compact_client_tombstones,
+                    "server_tombstones": compact_server_tombstones,
+                    "transaction_key_payload_bytes": compact_tombstone_key_bytes,
+                    "server_response_wire_bytes": compact_server_response_wire_bytes,
+                    "client_completion_wire_bytes": compact_client_completion_wire_bytes,
+                    "client_live_completion_cells": compact_client_live_completion_cells,
+                    "client_route_owner_proofs": compact_client_tombstones,
+                },
+                "client_completion": {
+                    "map_transaction_key_payload_bytes": completion_key_bytes,
+                    "map_route_shared_key_records": completion_route_shared_key_records,
+                    "wire_response_bytes": completion_counts.wire_response_bytes,
+                    "deadline_records": completion_deadline_count,
+                    "deadline_transaction_key_payload_bytes": completion_deadline_key_bytes,
+                    "deadline_shared_key_records": completion_deadline_shared_key_records,
+                },
+                "retired_client_route": {
+                    "map_transaction_key_payload_bytes": retired_route_key_bytes,
+                    "request_wire_bytes": retired_client_counts.request_wire_bytes,
+                    "completion_wire_bytes": retired_completion_wire_bytes,
+                    "shared_request_response_wire_records": retired_shared_wire_records,
+                    "deadline_records": retired_deadline_count,
+                    "deadline_transaction_key_payload_bytes": retired_deadline_key_bytes,
+                    "deadline_shared_key_records": retired_deadline_shared_key_records,
+                    "consolidated_layout": consolidated_retired_invite_layout,
+                },
+                "server_invite_ack_index": {
+                    "index_records": self.server_invite_dialog_index.len(),
+                    "index_dialog_key_payload_bytes": server_dialog_index_key_bytes,
+                    "index_transaction_key_payload_bytes": server_dialog_index_transaction_key_bytes,
+                    "expiry_records": server_dialog_expiry_count,
+                    "expiry_dialog_key_payload_bytes": server_dialog_expiry_key_bytes,
+                    "reverse_records": self.server_invite_dialog_keys_by_tx.len(),
+                    "reverse_transaction_key_payload_bytes": server_dialog_reverse_transaction_key_bytes,
+                    "reverse_dialog_key_payload_bytes": server_dialog_reverse_dialog_key_bytes,
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+            },
         })
     }
 
@@ -1350,8 +2955,17 @@ impl TransactionManager {
         principal: AuthenticatedPrincipal,
         context: &SipRequestIngressContext,
     ) {
-        self.pending_inbound_principal_inserted_at
-            .insert(key.clone(), Instant::now());
+        let generation = self
+            .pending_inbound_principal_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.pending_inbound_principal_inserted_at.insert(
+            key.clone(),
+            InboundPrincipalLease {
+                inserted_at: Instant::now(),
+                generation,
+            },
+        );
         self.pending_inbound_principals
             .insert(key, InboundPrincipalBinding::new(principal, context));
     }
@@ -1365,7 +2979,16 @@ impl TransactionManager {
         &self,
         sender: mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>,
     ) {
-        *self.flow_event_sender.write().await = Some(sender);
+        let Some(_operation) = self.admission_lifecycle.try_enter_existing() else {
+            return;
+        };
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {}
+            mut slot = self.flow_event_sender.write() => {
+                *slot = Some(sender);
+            }
+        }
     }
 
     /// Close the dialog-layer flow event channel during an orderly manager
@@ -1429,16 +3052,40 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
+        let index_initial_capacity = transaction_index_initial_capacity(index_capacity);
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
         let (terminated_cleanup_tx, terminated_cleanup_rx) =
             mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
-        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principals = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principal_inserted_at =
+            Arc::new(DashMap::with_capacity(index_initial_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
+        // Observation is optional. Keep its indexes allocation-light until a
+        // caller actually subscribes instead of sizing them like protocol
+        // transaction tables.
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let events_tx = TransactionEventSender::with_observers(
+            events_tx,
+            TransactionObserverFanout::new(
+                event_subscribers.clone(),
+                subscriber_to_transactions.clone(),
+                transaction_to_subscribers.clone(),
+            ),
+        );
+        let compact_non_invite_tombstones = Arc::new(DashMap::new());
+        let lifecycle_scheduler =
+            crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle::new_managed(
+                &compact_non_invite_tombstones,
+                &transaction_destinations,
+                &pending_inbound_principals,
+                &pending_inbound_principal_inserted_at,
+                &events_tx,
+            );
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -1454,59 +3101,86 @@ impl TransactionManager {
         let manager = Self {
             transport,
             client_transactions,
-            server_transactions,
-            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
-                index_capacity.saturating_mul(2),
+            transaction_admissions: TransactionAdmissionRegistry::new(),
+            admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
+            operation_cancellation: TransactionManagerOperationCancellation::new(),
+            shutdown_gate: Arc::new(Mutex::new(())),
+            transaction_index_logical_capacity: index_capacity,
+            transaction_index_initial_capacity: index_initial_capacity,
+            client_completions: Arc::new(DashMap::new()),
+            client_completion_deadlines: Arc::new(std::sync::Mutex::new(
+                ClientCompletionDeadlineScheduler::default(),
             )),
-            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index_capacity: index_capacity,
-            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            client_completion_capacity: retired_client_transaction_capacity(index_capacity),
+            retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
+            server_transactions,
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::new()),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            server_invite_dialog_expiry_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            server_invite_dialog_deadline_generation: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::new()),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
-            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
-            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(
+                Invite2xxDeadlineScheduler::default(),
+            )),
+            explicit_termination_operations: Arc::new(DashMap::new()),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
+            terminated_cleanup_shutdown: Some(Arc::new(tokio::sync::Notify::new())),
+            lifecycle_scheduler: Some(lifecycle_scheduler),
+            compact_non_invite_tombstones,
             transaction_destinations,
-            retired_client_transaction_capacity: retired_client_transaction_capacity(
-                index_capacity,
-            ),
+            retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
+                retired_client_transaction_capacity(index_capacity),
+            )),
             retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
-            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
+            retired_client_deadlines: Arc::new(std::sync::Mutex::new(
+                RetiredClientDeadlineScheduler::default(),
+            )),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
-            transport_rx,
-            control_transport_rx: closed_transport_event_receiver(),
+            transport_rx: Some(transport_rx),
+            control_transport_rx: None,
             running,
             timer_settings,
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            request_ingress_authorizer: None,
-            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
-                index_capacity,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
             )),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            request_ingress_authorizer: None,
+            pending_inbound_principals,
+            pending_inbound_principal_inserted_at,
+            pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
-                TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+                DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
             invite_2xx_retransmit_max_due_per_tick: Arc::new(AtomicUsize::new(
-                INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+                DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
             )),
         };
 
+        manager.install_terminal_delivery_failure_hook();
+        manager.start_retained_client_deadline_worker();
         // Start the message processing loop
         manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
@@ -1579,16 +3253,38 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
+        let index_initial_capacity = transaction_index_initial_capacity(index_capacity);
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
         let (terminated_cleanup_tx, terminated_cleanup_rx) =
             mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
-        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principals = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principal_inserted_at =
+            Arc::new(DashMap::with_capacity(index_initial_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
+        // Observation is optional; these maps grow only on subscription.
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let events_tx = TransactionEventSender::with_observers(
+            events_tx,
+            TransactionObserverFanout::new(
+                event_subscribers.clone(),
+                subscriber_to_transactions.clone(),
+                transaction_to_subscribers.clone(),
+            ),
+        );
+        let compact_non_invite_tombstones = Arc::new(DashMap::new());
+        let lifecycle_scheduler =
+            crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle::new_managed(
+                &compact_non_invite_tombstones,
+                &transaction_destinations,
+                &pending_inbound_principals,
+                &pending_inbound_principal_inserted_at,
+                &events_tx,
+            );
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -1603,59 +3299,86 @@ impl TransactionManager {
         let manager = Self {
             transport,
             client_transactions,
-            server_transactions,
-            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
-                index_capacity.saturating_mul(2),
+            transaction_admissions: TransactionAdmissionRegistry::new(),
+            admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
+            operation_cancellation: TransactionManagerOperationCancellation::new(),
+            shutdown_gate: Arc::new(Mutex::new(())),
+            transaction_index_logical_capacity: index_capacity,
+            transaction_index_initial_capacity: index_initial_capacity,
+            client_completions: Arc::new(DashMap::new()),
+            client_completion_deadlines: Arc::new(std::sync::Mutex::new(
+                ClientCompletionDeadlineScheduler::default(),
             )),
-            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index_capacity: index_capacity,
-            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            client_completion_capacity: retired_client_transaction_capacity(index_capacity),
+            retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
+            server_transactions,
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::new()),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            server_invite_dialog_expiry_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            server_invite_dialog_deadline_generation: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::new()),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
-            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
-            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(
+                Invite2xxDeadlineScheduler::default(),
+            )),
+            explicit_termination_operations: Arc::new(DashMap::new()),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
+            terminated_cleanup_shutdown: Some(Arc::new(tokio::sync::Notify::new())),
+            lifecycle_scheduler: Some(lifecycle_scheduler),
+            compact_non_invite_tombstones,
             transaction_destinations,
-            retired_client_transaction_capacity: retired_client_transaction_capacity(
-                index_capacity,
-            ),
+            retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
+                retired_client_transaction_capacity(index_capacity),
+            )),
             retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
-            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
+            retired_client_deadlines: Arc::new(std::sync::Mutex::new(
+                RetiredClientDeadlineScheduler::default(),
+            )),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
-            transport_rx,
-            control_transport_rx: closed_transport_event_receiver(),
+            transport_rx: Some(transport_rx),
+            control_transport_rx: None,
             running,
             timer_settings,
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            request_ingress_authorizer: None,
-            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
-                index_capacity,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
             )),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            request_ingress_authorizer: None,
+            pending_inbound_principals,
+            pending_inbound_principal_inserted_at,
+            pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
-                TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+                DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
             invite_2xx_retransmit_max_due_per_tick: Arc::new(AtomicUsize::new(
-                INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+                DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
             )),
         };
 
+        manager.install_terminal_delivery_failure_hook();
+        manager.start_retained_client_deadline_worker();
         // Start the message processing loop
         manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
@@ -1665,9 +3388,12 @@ impl TransactionManager {
 
     /// Creates a transaction manager synchronously (without async).
     ///
-    /// This constructor is provided for contexts where async initialization
-    /// isn't possible. It creates a minimal transaction manager with dummy
-    /// channels that will need to be properly connected later.
+    /// This constructor is provided for code that cannot make its constructor
+    /// async but is already executing inside a Tokio runtime. It installs the
+    /// same manager-owned lifecycle scheduler and terminal cleanup worker as
+    /// the async constructors. Calling it outside an entered Tokio runtime
+    /// panics with an actionable message; use [`TransactionManager::new`] when
+    /// transport ingress and a public primary event receiver are required.
     ///
     /// Note: Using the async `new()` method is preferred in async contexts.
     ///
@@ -1751,6 +3477,25 @@ impl TransactionManager {
         .await
     }
 
+    /// Creates a transaction manager whose authoritative TU event channel
+    /// stores pointer-sized shared events.
+    pub async fn with_transport_manager_shared(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<Arc<TransactionEvent>>)> {
+        Self::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_shared(
+            transport_manager,
+            transport_rx,
+            capacity,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// Creates a transaction manager with separate event-queue and hot-index
     /// capacities.
     ///
@@ -1808,6 +3553,100 @@ impl TransactionManager {
         dispatch_queue_capacity: Option<usize>,
         request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
+        let (manager, events) =
+            Self::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_mode(
+                transport_manager,
+                transport_rx,
+                capacity,
+                index_capacity,
+                dispatch_workers,
+                dispatch_queue_capacity,
+                request_ingress_authorizer,
+                None,
+                TransactionEventChannelMode::Owned,
+            )
+            .await?;
+        match events {
+            TransactionManagerEventReceiver::Owned(events) => Ok((manager, events)),
+            TransactionManagerEventReceiver::Shared(_) => unreachable!("owned event mode"),
+        }
+    }
+
+    /// Canonical pointer-sized transaction-event path used by the integrated
+    /// dialog stack. Legacy constructors select an independent owned-value
+    /// primary, preserving their original single-queue semantics.
+    pub async fn with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_shared(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+        dispatch_workers: Option<usize>,
+        dispatch_queue_capacity: Option<usize>,
+        request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+    ) -> Result<(Self, mpsc::Receiver<Arc<TransactionEvent>>)> {
+        let (manager, events) =
+            Self::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_mode(
+                transport_manager,
+                transport_rx,
+                capacity,
+                index_capacity,
+                dispatch_workers,
+                dispatch_queue_capacity,
+                request_ingress_authorizer,
+                None,
+                TransactionEventChannelMode::Shared,
+            )
+            .await?;
+        match events {
+            TransactionManagerEventReceiver::Shared(events) => Ok((manager, events)),
+            TransactionManagerEventReceiver::Owned(_) => unreachable!("shared event mode"),
+        }
+    }
+
+    /// Shared-event constructor with an explicit, allocation-lazy logical
+    /// bound for active UDP non-INVITE transactions plus retained Timer J/K
+    /// tombstones. This bound is deliberately independent from hot-index
+    /// sizing and must cover the expected anti-reuse/retransmission horizon.
+    pub async fn with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_shared_with_compact_retention_capacity(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+        dispatch_workers: Option<usize>,
+        dispatch_queue_capacity: Option<usize>,
+        request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+        compact_retention_capacity: usize,
+    ) -> Result<(Self, mpsc::Receiver<Arc<TransactionEvent>>)> {
+        let (manager, events) =
+            Self::with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_mode(
+                transport_manager,
+                transport_rx,
+                capacity,
+                index_capacity,
+                dispatch_workers,
+                dispatch_queue_capacity,
+                request_ingress_authorizer,
+                Some(compact_retention_capacity.max(1)),
+                TransactionEventChannelMode::Shared,
+            )
+            .await?;
+        match events {
+            TransactionManagerEventReceiver::Shared(events) => Ok((manager, events)),
+            TransactionManagerEventReceiver::Owned(_) => unreachable!("shared event mode"),
+        }
+    }
+
+    async fn with_transport_manager_and_index_capacity_and_dispatch_and_authorizer_mode(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+        dispatch_workers: Option<usize>,
+        dispatch_queue_capacity: Option<usize>,
+        request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+        compact_retention_capacity: Option<usize>,
+        event_mode: TransactionEventChannelMode,
+    ) -> Result<(Self, TransactionManagerEventReceiver)> {
         // Wrap the manager's per-flavour registry behind a
         // `MultiplexedTransport` so outbound requests get URI-aware
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
@@ -1826,13 +3665,30 @@ impl TransactionManager {
         let control_transport_rx = transport_manager
             .take_control_event_receiver()
             .await
-            .map(|receiver| Arc::new(Mutex::new(receiver)))
-            .unwrap_or_else(closed_transport_event_receiver);
+            .map(|receiver| Arc::new(Mutex::new(receiver)));
 
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);
-        let (events_tx, events_rx) = mpsc::channel(events_capacity);
+        let (owned_events_tx, shared_events_tx, events_rx) = match event_mode {
+            TransactionEventChannelMode::Owned => {
+                let (sender, receiver) = mpsc::channel(events_capacity);
+                (
+                    Some(sender),
+                    None,
+                    TransactionManagerEventReceiver::Owned(receiver),
+                )
+            }
+            TransactionEventChannelMode::Shared => {
+                let (sender, receiver) = mpsc::channel(events_capacity);
+                (
+                    None,
+                    Some(sender),
+                    TransactionManagerEventReceiver::Shared(receiver),
+                )
+            }
+        };
         let index_capacity = transaction_index_capacity(index_capacity.or(Some(events_capacity)));
+        let index_initial_capacity = transaction_index_initial_capacity(index_capacity);
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
         let transaction_dispatch_workers = transaction_dispatch_worker_count(dispatch_workers);
         let transaction_dispatch_queue_capacity =
@@ -1840,12 +3696,46 @@ impl TransactionManager {
         let (terminated_cleanup_tx, terminated_cleanup_rx) =
             mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
-        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principals = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principal_inserted_at =
+            Arc::new(DashMap::with_capacity(index_initial_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
+        // Observation is optional; these maps grow only on subscription.
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let observers = TransactionObserverFanout::new(
+            event_subscribers.clone(),
+            subscriber_to_transactions.clone(),
+            transaction_to_subscribers.clone(),
+        );
+        let events_tx = match (owned_events_tx, shared_events_tx) {
+            (Some(sender), None) => TransactionEventSender::with_observers(sender, observers),
+            (None, Some(sender)) => {
+                TransactionEventSender::with_shared_observers(sender, observers)
+            }
+            _ => unreachable!("exactly one transaction-event sender mode"),
+        };
+        let compact_non_invite_tombstones = Arc::new(DashMap::new());
+        let lifecycle_scheduler = match compact_retention_capacity {
+            Some(capacity) => crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle::new_managed_with_retention_capacity(
+                &compact_non_invite_tombstones,
+                &transaction_destinations,
+                &pending_inbound_principals,
+                &pending_inbound_principal_inserted_at,
+                &events_tx,
+                capacity,
+            ),
+            None => crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle::new_managed(
+                &compact_non_invite_tombstones,
+                &transaction_destinations,
+                &pending_inbound_principals,
+                &pending_inbound_principal_inserted_at,
+                &events_tx,
+            ),
+        };
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -1861,32 +3751,50 @@ impl TransactionManager {
         let manager = Self {
             transport: default_transport,
             client_transactions,
-            server_transactions,
-            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
-                index_capacity.saturating_mul(2),
+            transaction_admissions: TransactionAdmissionRegistry::new(),
+            admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
+            operation_cancellation: TransactionManagerOperationCancellation::new(),
+            shutdown_gate: Arc::new(Mutex::new(())),
+            transaction_index_logical_capacity: index_capacity,
+            transaction_index_initial_capacity: index_initial_capacity,
+            client_completions: Arc::new(DashMap::new()),
+            client_completion_deadlines: Arc::new(std::sync::Mutex::new(
+                ClientCompletionDeadlineScheduler::default(),
             )),
-            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index_capacity: index_capacity,
-            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            client_completion_capacity: retired_client_transaction_capacity(index_capacity),
+            retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
+            server_transactions,
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::new()),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            server_invite_dialog_expiry_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            server_invite_dialog_deadline_generation: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::new()),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
-            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
-            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(
+                Invite2xxDeadlineScheduler::default(),
+            )),
+            explicit_termination_operations: Arc::new(DashMap::new()),
             terminated_cleanup_tx: Some(terminated_cleanup_tx),
+            terminated_cleanup_shutdown: Some(Arc::new(tokio::sync::Notify::new())),
+            lifecycle_scheduler: Some(lifecycle_scheduler),
+            compact_non_invite_tombstones,
             transaction_destinations,
-            retired_client_transaction_capacity: retired_client_transaction_capacity(
-                index_capacity,
-            ),
+            retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
+                retired_client_transaction_capacity(index_capacity),
+            )),
             retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
-            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
+            retired_client_deadlines: Arc::new(std::sync::Mutex::new(
+                RetiredClientDeadlineScheduler::default(),
+            )),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
-            transport_rx,
+            transport_rx: Some(transport_rx),
             control_transport_rx,
             running,
             timer_settings,
@@ -1894,26 +3802,35 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            request_ingress_authorizer,
-            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
-                index_capacity,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
             )),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            request_ingress_authorizer,
+            pending_inbound_principals,
+            pending_inbound_principal_inserted_at,
+            pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
             transaction_dispatch_workers,
             transaction_dispatch_queue_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
-                TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+                DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
             invite_2xx_retransmit_max_due_per_tick: Arc::new(AtomicUsize::new(
-                INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+                DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
             )),
         };
 
+        manager.install_terminal_delivery_failure_hook();
+        manager.start_retained_client_deadline_worker();
         // Start the message processing loop
         manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
@@ -1963,18 +3880,43 @@ impl TransactionManager {
         transport: Arc<dyn Transport>,
         timer_settings_opt: Option<TimerSettings>,
     ) -> Self {
-        let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
+        tokio::runtime::Handle::try_current().expect(
+            "TransactionManager::with_config/new_sync requires an active Tokio runtime; use TransactionManager::new for async initialization",
+        );
         let index_capacity = transaction_index_capacity(None);
+        let index_initial_capacity = transaction_index_initial_capacity(index_capacity);
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
-        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
+        let (terminated_cleanup_tx, terminated_cleanup_rx) =
+            mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principals = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let pending_inbound_principal_inserted_at =
+            Arc::new(DashMap::with_capacity(index_initial_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
+        // Observation is optional; these maps grow only on subscription.
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let events_tx =
+            TransactionEventSender::detached_with_observers(TransactionObserverFanout::new(
+                event_subscribers.clone(),
+                subscriber_to_transactions.clone(),
+                transaction_to_subscribers.clone(),
+            ));
+        let compact_non_invite_tombstones = Arc::new(DashMap::new());
+        let lifecycle_scheduler =
+            crate::transaction::lifecycle_scheduler::LifecycleSchedulerHandle::new_managed(
+                &compact_non_invite_tombstones,
+                &transaction_destinations,
+                &pending_inbound_principals,
+                &pending_inbound_principal_inserted_at,
+                &events_tx,
+            );
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
-        let (_, transport_rx) = mpsc::channel(100); // Dummy channel
-        let transport_rx = Arc::new(Mutex::new(transport_rx));
+        // No receive loop or primary TU receiver exists for this historical
+        // outbound-only constructor. Optional fields model that topology
+        // directly instead of allocating inert channels and sink tasks.
         let running = Arc::new(AtomicBool::new(false));
 
         // Create timer settings
@@ -1984,61 +3926,90 @@ impl TransactionManager {
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
 
-        Self {
+        let manager = Self {
             transport,
             client_transactions,
-            server_transactions,
-            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
-                index_capacity.saturating_mul(2),
+            transaction_admissions: TransactionAdmissionRegistry::new(),
+            admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
+            operation_cancellation: TransactionManagerOperationCancellation::new(),
+            shutdown_gate: Arc::new(Mutex::new(())),
+            transaction_index_logical_capacity: index_capacity,
+            transaction_index_initial_capacity: index_initial_capacity,
+            client_completions: Arc::new(DashMap::new()),
+            client_completion_deadlines: Arc::new(std::sync::Mutex::new(
+                ClientCompletionDeadlineScheduler::default(),
             )),
-            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index_capacity: index_capacity,
-            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            client_completion_capacity: retired_client_transaction_capacity(index_capacity),
+            retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
+            server_transactions,
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::new()),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            server_invite_dialog_expiry_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            server_invite_dialog_deadline_generation: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::new()),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
-            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
-            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
-            terminated_cleanup_tx: None,
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(
+                Invite2xxDeadlineScheduler::default(),
+            )),
+            explicit_termination_operations: Arc::new(DashMap::new()),
+            terminated_cleanup_tx: Some(terminated_cleanup_tx),
+            terminated_cleanup_shutdown: Some(Arc::new(tokio::sync::Notify::new())),
+            lifecycle_scheduler: Some(lifecycle_scheduler),
+            compact_non_invite_tombstones,
             transaction_destinations,
-            retired_client_transaction_capacity: retired_client_transaction_capacity(
-                index_capacity,
-            ),
+            retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
+                retired_client_transaction_capacity(index_capacity),
+            )),
             retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
-            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
+            retired_client_deadlines: Arc::new(std::sync::Mutex::new(
+                RetiredClientDeadlineScheduler::default(),
+            )),
             events_tx,
             event_subscribers,
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
-            transport_rx,
-            control_transport_rx: closed_transport_event_receiver(),
+            transport_rx: None,
+            control_transport_rx: None,
             running,
             timer_settings,
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            request_ingress_authorizer: None,
-            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
-                index_capacity,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
             )),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            request_ingress_authorizer: None,
+            pending_inbound_principals,
+            pending_inbound_principal_inserted_at,
+            pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 100,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
-                TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+                DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
             invite_2xx_retransmit_max_due_per_tick: Arc::new(AtomicUsize::new(
-                INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+                DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
             )),
-        }
+        };
+        manager.install_terminal_delivery_failure_hook();
+        manager.start_retained_client_deadline_worker();
+        manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
+        manager
     }
 
     /// Creates a minimal transaction manager for testing purposes.
@@ -2063,9 +4034,10 @@ impl TransactionManager {
 
         // Transaction registries
         let index_capacity = transaction_index_capacity(Some(10));
+        let index_initial_capacity = transaction_index_initial_capacity(index_capacity);
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
-        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_initial_capacity));
 
         // Setup timer manager
         let timer_settings = build_timer_settings();
@@ -2076,68 +4048,107 @@ impl TransactionManager {
         let running = Arc::new(AtomicBool::new(false));
 
         // Track destinations
-        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_initial_capacity));
 
         // Initialize subscriber-related fields
-        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
-        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let events_tx = TransactionEventSender::with_observers(
+            events_tx,
+            TransactionObserverFanout::new(
+                event_subscribers.clone(),
+                subscriber_to_transactions.clone(),
+                transaction_to_subscribers.clone(),
+            ),
+        );
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
 
-        Self {
+        let manager = Self {
             transport,
             events_tx,
             event_subscribers,
             client_transactions,
-            server_transactions,
-            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
-                index_capacity.saturating_mul(2),
+            transaction_admissions: TransactionAdmissionRegistry::new(),
+            admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
+            operation_cancellation: TransactionManagerOperationCancellation::new(),
+            shutdown_gate: Arc::new(Mutex::new(())),
+            transaction_index_logical_capacity: index_capacity,
+            transaction_index_initial_capacity: index_initial_capacity,
+            client_completions: Arc::new(DashMap::new()),
+            client_completion_deadlines: Arc::new(std::sync::Mutex::new(
+                ClientCompletionDeadlineScheduler::default(),
             )),
-            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
-            server_invite_dialog_index_capacity: index_capacity,
-            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            client_completion_capacity: retired_client_transaction_capacity(index_capacity),
+            retained_client_deadline_worker: None,
+            server_transactions,
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::new()),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            server_invite_dialog_expiry_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            server_invite_dialog_deadline_generation: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::new()),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
-            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
-            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
-            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(
+                Invite2xxDeadlineScheduler::default(),
+            )),
+            explicit_termination_operations: Arc::new(DashMap::new()),
             terminated_cleanup_tx: None,
+            terminated_cleanup_shutdown: None,
+            lifecycle_scheduler: None,
+            compact_non_invite_tombstones: Arc::new(DashMap::new()),
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
             timer_settings,
             running,
             transaction_destinations,
-            retired_client_transaction_capacity: retired_client_transaction_capacity(
-                index_capacity,
-            ),
+            retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
+                retired_client_transaction_capacity(index_capacity),
+            )),
             retired_client_transaction_count: Arc::new(AtomicUsize::new(0)),
-            retired_client_transaction_insert_count: Arc::new(AtomicUsize::new(0)),
+            retired_client_deadlines: Arc::new(std::sync::Mutex::new(
+                RetiredClientDeadlineScheduler::default(),
+            )),
             subscriber_to_transactions,
             transaction_to_subscribers,
             next_subscriber_id,
-            transport_rx: Arc::new(Mutex::new(transport_rx)),
-            control_transport_rx: closed_transport_event_receiver(),
+            transport_rx: Some(Arc::new(Mutex::new(transport_rx))),
+            control_transport_rx: None,
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            request_ingress_authorizer: None,
-            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
-            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
-                index_capacity,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
             )),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_transport: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            request_ingress_authorizer: None,
+            pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_principal_inserted_at: Arc::new(dashmap::DashMap::with_capacity(
+                index_initial_capacity,
+            )),
+            pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 10,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
-                TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+                DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
             invite_2xx_retransmit_max_due_per_tick: Arc::new(AtomicUsize::new(
-                INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+                DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
             )),
-        }
+        };
+        manager.install_terminal_delivery_failure_hook();
+        manager
     }
 
     /// Sends a request through a client transaction.
@@ -2183,6 +4194,20 @@ impl TransactionManager {
     /// # }
     /// ```
     pub async fn send_request(&self, transaction_id: &TransactionKey) -> Result<()> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped request send".into()))
+            }
+            result = self.send_request_within_operation(transaction_id) => result,
+        }
+    }
+
+    async fn send_request_within_operation(&self, transaction_id: &TransactionKey) -> Result<()> {
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - sending request");
 
         // Clone the Arc<dyn ClientTransaction> out of the shard so we
@@ -2201,13 +4226,6 @@ impl TransactionManager {
             ));
         };
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
-
-        let tx_kind = tx.kind();
-        let _initial_state = tx.state();
-
-        // First subscribe to events BEFORE initiating the transaction
-        // so we don't miss any events that happen during initiation
-        let mut event_rx = self.subscribe();
 
         // Use the TransactionExt trait to safely downcast
         use crate::transaction::client::TransactionExt;
@@ -2231,231 +4249,12 @@ impl TransactionManager {
             // need to authenticate that response.
             let bound_route = client_tx.data().request_route.lock().await.clone();
             if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
-                if matches!(state.value(), ClientResponseRouteState::Active(_)) {
-                    *state = ClientResponseRouteState::Active(bound_route);
+                if let ClientResponseRouteState::Active { route, .. } = state.value_mut() {
+                    *route = bound_route;
                 }
             }
 
-            let current_state = tx.state();
-            if current_state == TransactionState::Terminated {
-                if tx_kind == TransactionKind::InviteClient {
-                    if tx
-                        .last_response()
-                        .await
-                        .is_some_and(|response| response.status().is_success())
-                    {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client terminated during initiate - treating as success (fast 2xx)");
-                        return Ok(());
-                    }
-                }
-                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction terminated immediately during initiate - likely transport error");
-                return Err(Error::transport_error(
-                    rvoip_sip_transport::Error::ProtocolError(
-                        "Transaction terminated immediately".into(),
-                    ),
-                    "Failed to send request - transaction terminated immediately",
-                ));
-            }
-
-            if tx_kind != TransactionKind::InviteClient {
-                let timeout_duration = tokio::time::Duration::from_millis(100);
-
-                return match tokio::time::timeout(timeout_duration, async {
-                    while let Some(event) = event_rx.recv().await {
-                        match event {
-                            TransactionEvent::TransportError {
-                                transaction_id: tx_id,
-                                ..
-                            } if tx_id == *transaction_id => {
-                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Received TransportError event");
-                                return Err(Error::transport_error(
-                                    rvoip_sip_transport::Error::ProtocolError(
-                                        "Transport error during request send".into(),
-                                    ),
-                                    "Failed to send request - transport error",
-                                ));
-                            }
-                            TransactionEvent::StateChanged {
-                                transaction_id: tx_id,
-                                previous_state,
-                                new_state,
-                            } if tx_id == *transaction_id => {
-                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), previous=?previous_state, new=?new_state, "Transaction state changed");
-
-                                if new_state == TransactionState::Terminated
-                                    && (previous_state == TransactionState::Initial
-                                        || previous_state == TransactionState::Calling
-                                        || previous_state == TransactionState::Trying)
-                                {
-                                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
-                                    return Err(Error::transport_error(
-                                        rvoip_sip_transport::Error::ProtocolError(
-                                            "Transaction terminated unexpectedly".into(),
-                                        ),
-                                        "Failed to send request - transaction terminated",
-                                    ));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    match self
-                        .client_transactions
-                        .get(transaction_id)
-                        .map(|entry| entry.value().state())
-                    {
-                        Some(TransactionState::Terminated) => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction terminated during send wait - likely transport error");
-                            Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError(
-                                    "Transaction terminated after processing".into(),
-                                ),
-                                "Failed to send request - transaction terminated",
-                            ))
-                        }
-                        Some(final_state) => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Non-INVITE transaction send initiated");
-                            Ok(())
-                        }
-                        None => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction was removed during send wait");
-                            Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError(
-                                    "Transaction was removed".into(),
-                                ),
-                                "Failed to send request - transaction removed",
-                            ))
-                        }
-                    }
-                })
-                .await
-                {
-                    Err(_) => match self
-                        .client_transactions
-                        .get(transaction_id)
-                        .map(|entry| entry.value().state())
-                    {
-                        Some(TransactionState::Terminated) => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE terminated within 100 ms safety wait - likely transport error");
-                            Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError(
-                                    "Transaction terminated after timeout".into(),
-                                ),
-                                "Failed to send request - transaction terminated",
-                            ))
-                        }
-                        Some(final_state) => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Non-INVITE transaction still exists after safety wait");
-                            Ok(())
-                        }
-                        None => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Non-INVITE transaction was removed after safety wait");
-                            Err(Error::transport_error(
-                                rvoip_sip_transport::Error::ProtocolError(
-                                    "Transaction was removed after timeout".into(),
-                                ),
-                                "Failed to send request - transaction removed",
-                            ))
-                        }
-                    },
-                    Ok(result) => result,
-                };
-            }
-
-            // Drain events already observed during `initiate()`. This preserves
-            // immediate transport-error propagation without imposing a fixed
-            // post-send wait on successful INVITE call setup.
-            while let Ok(event) = event_rx.try_recv() {
-                match event {
-                    TransactionEvent::TransportError {
-                        transaction_id: tx_id,
-                        ..
-                    } if tx_id == *transaction_id => {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Received TransportError event");
-                        return Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ProtocolError(
-                                "Transport error during request send".into(),
-                            ),
-                            "Failed to send request - transport error",
-                        ));
-                    }
-                    TransactionEvent::StateChanged {
-                        transaction_id: tx_id,
-                        previous_state,
-                        new_state,
-                    } if tx_id == *transaction_id => {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), previous=?previous_state, new=?new_state, "Transaction state changed");
-
-                        if new_state == TransactionState::Terminated {
-                            let invite_2xx_path = tx_kind == TransactionKind::InviteClient
-                                && previous_state == TransactionState::Calling
-                                && tx
-                                    .last_response()
-                                    .await
-                                    .is_some_and(|response| response.status().is_success());
-                            if invite_2xx_path {
-                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
-                                return Ok(());
-                            }
-                            if previous_state == TransactionState::Initial
-                                || previous_state == TransactionState::Calling
-                                || previous_state == TransactionState::Trying
-                            {
-                                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
-                                return Err(Error::transport_error(
-                                    rvoip_sip_transport::Error::ProtocolError(
-                                        "Transaction terminated unexpectedly".into(),
-                                    ),
-                                    "Failed to send request - transaction terminated",
-                                ));
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            match self
-                .client_transactions
-                .get(transaction_id)
-                .map(|entry| entry.value().state())
-            {
-                Some(TransactionState::Terminated) => {
-                    if tx_kind == TransactionKind::InviteClient
-                        && tx
-                            .last_response()
-                            .await
-                            .is_some_and(|response| response.status().is_success())
-                    {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client terminated during immediate event drain - treating as success (fast 2xx)");
-                        Ok(())
-                    } else {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction is terminated after immediate event drain");
-                        Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ProtocolError(
-                                "Transaction terminated after processing".into(),
-                            ),
-                            "Failed to send request - transaction terminated",
-                        ))
-                    }
-                }
-                Some(final_state) => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), state=?final_state, "Transaction send initiated");
-                    Ok(())
-                }
-                None if tx_kind == TransactionKind::InviteClient => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "INVITE client transaction removed during immediate event drain - treating as success (fast 2xx)");
-                    Ok(())
-                }
-                None => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Transaction was removed during immediate event drain");
-                    Err(Error::transport_error(
-                        rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
-                        "Failed to send request - transaction removed",
-                    ))
-                }
-            }
+            Ok(())
         } else {
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "TransactionManager::send_request - failed to downcast to client transaction");
             Err(Error::Other(
@@ -2517,6 +4316,53 @@ impl TransactionManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> Result<()> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped response send".into()))
+            }
+            result = self.send_response_within_operation(transaction_id, response) => result,
+        }
+    }
+
+    /// Classify the authoritative completion of the final response generation
+    /// currently owned by an exact server transaction.
+    ///
+    /// This is intentionally generation-scoped. If the original API waiter was
+    /// cancelled after runner admission, a replacement waiter observes the same
+    /// runner-owned write rather than either losing completion or following a
+    /// later retry generation. Absence of the transaction is terminal because
+    /// the exact generation can no longer be retried safely.
+    pub(crate) async fn classify_final_response_completion(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> crate::transaction::server::FinalResponseCompletionDisposition {
+        use crate::transaction::server::FinalResponseCompletionDisposition;
+
+        let transaction = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|entry| Arc::clone(entry.value()));
+        let Some(transaction) = transaction else {
+            return FinalResponseCompletionDisposition::WireUnknownErrorTerminal;
+        };
+        let data = transaction.data();
+        let Some(generation) = data.current_final_response_supervision_generation() else {
+            return FinalResponseCompletionDisposition::ZeroWireRetryable;
+        };
+        data.await_final_response_completion_for_generation(generation)
+            .await
+    }
+
+    async fn send_response_within_operation(
+        &self,
+        transaction_id: &TransactionKey,
+        response: Response,
+    ) -> Result<()> {
         rvoip_sip_core::validation::validate_wire_response(&response)?;
         let is_200_ok = response.status().as_u16() == 200;
 
@@ -2558,6 +4404,118 @@ impl TransactionManager {
         }
     }
 
+    /// Recover the natural non-INVITE Completed -> Timer J lifecycle after a
+    /// caller was cancelled between the exact final transport write and the
+    /// Completed command enqueue. Returns `false` only when no final response
+    /// was proven on wire, so the caller may force-terminate that generation.
+    pub(crate) async fn recover_bye_final_response_lifecycle(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        if self
+            .compact_non_invite_tombstones
+            .contains_key(transaction_id)
+        {
+            return true;
+        }
+        let transaction = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone());
+        let Some(transaction) = transaction else {
+            // This API is called only for an already-admitted BYE generation.
+            // Absence from both active and compact indexes proves that its
+            // lifecycle has already retired; it is not an active pre-wire leak.
+            return true;
+        };
+        let data = transaction.data();
+        if data.request.method() != Method::Bye {
+            return false;
+        }
+        let wire_outcome = tokio::time::timeout(
+            BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT,
+            data.await_final_response_wire_outcome(),
+        )
+        .await;
+        if !matches!(wire_outcome, Ok(true)) {
+            return false;
+        }
+        if matches!(
+            data.state.get(),
+            TransactionState::Completed | TransactionState::Terminated
+        ) {
+            return true;
+        }
+        // Subscribe before enqueue so a fast runner cannot advance Completed
+        // between the state check and watch registration. This is an exact
+        // state-cell wait, not the removed global event subscription/polling
+        // path.
+        let state = Arc::clone(&data.state);
+        let mut state_changes = state.subscribe();
+        if data
+            .cmd_tx
+            .send(InternalTransactionCommand::TransitionTo(
+                TransactionState::Completed,
+            ))
+            .await
+            .is_err()
+        {
+            return self
+                .compact_non_invite_tombstones
+                .contains_key(transaction_id)
+                || self
+                    .server_transactions
+                    .get(transaction_id)
+                    .map_or(true, |transaction| {
+                        matches!(
+                            transaction.value().state(),
+                            TransactionState::Completed | TransactionState::Terminated
+                        )
+                    });
+        }
+        let deadline = tokio::time::Instant::now() + BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT;
+        loop {
+            if matches!(
+                state.get(),
+                TransactionState::Completed | TransactionState::Terminated
+            ) || self
+                .compact_non_invite_tombstones
+                .contains_key(transaction_id)
+                || !self.server_transactions.contains_key(transaction_id)
+            {
+                return true;
+            }
+            match tokio::time::timeout_at(deadline, state_changes.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) | Err(_) => {
+                    return matches!(
+                        state.get(),
+                        TransactionState::Completed | TransactionState::Terminated
+                    ) || self
+                        .compact_non_invite_tombstones
+                        .contains_key(transaction_id)
+                        || !self.server_transactions.contains_key(transaction_id);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn bye_final_response_may_have_reached_wire(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        self.compact_non_invite_tombstones
+            .contains_key(transaction_id)
+            || self
+                .server_transactions
+                .get(transaction_id)
+                .is_some_and(|transaction| {
+                    let data = transaction.value().data();
+                    data.request.method() == Method::Bye
+                        && data.final_response_may_have_reached_wire()
+                })
+    }
+
     /// Checks if a transaction with the given ID exists.
     ///
     /// This method looks for the transaction in both client and server
@@ -2585,6 +4543,9 @@ impl TransactionManager {
     pub async fn transaction_exists(&self, transaction_id: &TransactionKey) -> bool {
         self.client_transactions.contains_key(transaction_id)
             || self.server_transactions.contains_key(transaction_id)
+            || self
+                .compact_non_invite_tombstones
+                .contains_key(transaction_id)
     }
 
     /// Gets the current state of a transaction.
@@ -2641,6 +4602,9 @@ impl TransactionManager {
         if let Some(entry) = self.server_transactions.get(transaction_id) {
             return Ok(entry.value().state());
         }
+        if let Some(state) = self.compact_non_invite_state(transaction_id) {
+            return Ok(state.get());
+        }
         Err(Error::transaction_not_found(
             transaction_id.clone(),
             "transaction_state - transaction not found",
@@ -2694,6 +4658,13 @@ impl TransactionManager {
         }
         if let Some(entry) = self.server_transactions.get(transaction_id) {
             return Ok(entry.value().kind());
+        }
+        if let Some(entry) = self.compact_non_invite_tombstones.get(transaction_id) {
+            return Ok(if entry.value().is_client() {
+                TransactionKind::NonInviteClient
+            } else {
+                TransactionKind::NonInviteServer
+            });
         }
         Err(Error::transaction_not_found(
             transaction_id.clone(),
@@ -2757,8 +4728,7 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<SocketAddr> {
-        self.client_response_route_state(transaction_id)
-            .map(|state| state.route().destination)
+        self.with_client_response_route_state(transaction_id, |state| state.route().destination)
     }
 
     /// Return the authority- and flow-bearing route used by a client transaction.
@@ -2766,44 +4736,281 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<TransportRoute> {
-        self.client_response_route_state(transaction_id)
-            .map(|state| state.route().clone())
+        self.with_client_response_route_state(transaction_id, |state| state.route().clone())
     }
 
-    fn client_response_route_state(
+    /// Read one active/retired response-route record without cloning the
+    /// complete retired request tombstone. Expired records are removed only
+    /// when their exact deadline generation is still authoritative; a
+    /// concurrent replacement is retried instead of being reported missing.
+    fn with_client_response_route_state<T>(
         &self,
         transaction_id: &TransactionKey,
-    ) -> Option<ClientResponseRouteState> {
-        let state = self
-            .transaction_destinations
-            .get(transaction_id)
-            .map(|entry| entry.value().clone())?;
-        if state
-            .retired()
-            .is_some_and(|retired| retired.expires_at <= Instant::now())
-        {
+        read: impl Fn(&ClientResponseRouteState) -> T,
+    ) -> Option<T> {
+        loop {
+            let state = self.transaction_destinations.get(transaction_id)?;
+            let Some(retired) = state.retired() else {
+                return Some(read(state.value()));
+            };
+            if retired.expires_at > Instant::now() {
+                return Some(read(state.value()));
+            }
+            let expires_at = retired.expires_at;
+            let deadline_version = retired.deadline_version;
+            drop(state);
             if self
                 .transaction_destinations
                 .remove_if(transaction_id, |_, current| {
-                    current
-                        .retired()
-                        .is_some_and(|retired| retired.expires_at <= Instant::now())
+                    current.retired().is_some_and(|retired| {
+                        retired.deadline_version == deadline_version
+                            && retired.expires_at == expires_at
+                            && retired.expires_at <= Instant::now()
+                    })
                 })
                 .is_some()
             {
                 self.decrement_retired_client_transaction_count();
+                self.unschedule_retired_client_deadline(
+                    transaction_id,
+                    expires_at,
+                    deadline_version,
+                );
+                return None;
             }
-            return None;
+            // A newer generation replaced the expired value after our read.
+            // Resolve that exact current generation instead of exposing a
+            // transient unknown-transaction result.
         }
-        Some(state)
     }
 
+    fn retired_client_request_wire(&self, transaction_id: &TransactionKey) -> Option<bytes::Bytes> {
+        self.with_client_response_route_state(transaction_id, |state| {
+            state.retired().map(|retired| retired.request_wire.clone())
+        })
+        .flatten()
+    }
+
+    fn retired_client_original_request(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Result<Option<Request>> {
+        self.retired_client_request_wire(transaction_id)
+            .map(|wire| RetiredClientTransaction::original_request_from_wire(wire.as_ref()))
+            .transpose()
+    }
+
+    #[cfg(test)]
     fn retired_client_transaction(
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<RetiredClientTransaction> {
-        self.client_response_route_state(transaction_id)
-            .and_then(|state| state.retired().cloned())
+        self.with_client_response_route_state(transaction_id, |state| state.retired().cloned())
+            .flatten()
+    }
+
+    fn install_client_completion(
+        &self,
+        transaction_id: Arc<TransactionKey>,
+        transaction: &ArcClientTransaction,
+    ) {
+        let completion = transaction.data().completion.clone();
+        if let Some(previous) = self.client_completions.insert(
+            Arc::clone(&transaction_id),
+            ClientTransactionCompletionEntry::Active(completion),
+        ) {
+            if let Some((expires_at, version)) = previous.retained_deadline() {
+                self.client_completion_deadlines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unschedule(transaction_id.as_ref(), expires_at, version);
+            }
+        }
+    }
+
+    /// Resolve an exact completion cell without touching the global deadline
+    /// queue on the ordinary active/retained read path. A waiter that wins the
+    /// expiry race keeps its cloned Arc; a new lookup lazily removes only its
+    /// own expired generation.
+    fn client_completion(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<ClientTransactionCompletionEntry> {
+        let completion = self
+            .client_completions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone());
+        let Some(completion) = completion else {
+            // UDP Timer K already owns the exact completion Arc and its
+            // authoritative expiry. Avoid duplicating the transaction key,
+            // wire response, and deadline in the manager retention maps.
+            let compact = self
+                .compact_non_invite_tombstones
+                .get(transaction_id)
+                .filter(|entry| entry.value().expires_at() > Instant::now())
+                .and_then(|entry| entry.value().client_completion().cloned())
+                .map(ClientTransactionCompletionEntry::Retained);
+            if compact.is_some() {
+                return compact;
+            }
+            return self
+                .with_client_response_route_state(transaction_id, |state| {
+                    state.retired().map(|retired| retired.completion.clone())
+                })
+                .flatten()
+                .map(ClientTransactionCompletionEntry::Retained);
+        };
+        if !completion.is_expired(Instant::now()) {
+            return Some(completion);
+        }
+
+        let Some((expires_at, version)) = completion.retained_deadline() else {
+            return Some(completion);
+        };
+        if self
+            .client_completions
+            .remove_if(transaction_id, |_, current| {
+                current.retained_deadline() == Some((expires_at, version))
+                    && current.is_expired(Instant::now())
+            })
+            .is_some()
+        {
+            self.client_completion_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unschedule(transaction_id, expires_at, version);
+        }
+        None
+    }
+
+    /// Keep the exact result cell available after the transaction runner and
+    /// route are removed. This is intentionally separate from INVITE late-2xx
+    /// route retention because BYE, MESSAGE, and authentication retries also
+    /// need race-free completion observation.
+    async fn client_completion_retention(
+        &self,
+        transaction_id: &TransactionKey,
+        transaction: &ArcClientTransaction,
+    ) -> (Instant, bool) {
+        if transaction_id.method() == &Method::Invite {
+            return (Instant::now() + CLIENT_TRANSACTION_COMPLETION_TTL, false);
+        }
+
+        // A backed-up dialog shard may consume a losslessly delivered 401/407
+        // after the ordinary reliable-transport race grace. Preserve only
+        // challenge-bearing completions for the full retry horizon; ordinary
+        // TCP/TLS non-INVITEs still retire after the one-second grace.
+        if transaction
+            .data()
+            .completion
+            .has_auth_challenge_request_uri()
+        {
+            return (Instant::now() + CLIENT_TRANSACTION_COMPLETION_TTL, false);
+        }
+
+        // A UDP non-INVITE runner is replaced by the compact Timer K
+        // tombstone before cleanup. Use that exact deadline so the completion
+        // cannot outlive the RFC retransmission-absorption window.
+        if let Some(expires_at) = self
+            .compact_non_invite_tombstones
+            .get(transaction_id)
+            .filter(|entry| entry.value().is_client())
+            .map(|entry| entry.value().expires_at())
+        {
+            return (expires_at, true);
+        }
+
+        let route = transaction.data().request_route.lock().await;
+        if crate::transaction::timer_utils::uses_unreliable_transport(
+            &route,
+            self.transport.default_transport_type(),
+        ) {
+            (
+                Instant::now() + transaction.data().timer_config.wait_time_k,
+                false,
+            )
+        } else {
+            (
+                Instant::now() + RELIABLE_CLIENT_COMPLETION_RACE_GRACE,
+                false,
+            )
+        }
+    }
+
+    fn retain_client_completion(
+        &self,
+        transaction_id: &TransactionKey,
+        expires_at: Instant,
+        keep_live_until_expiry: bool,
+        admission_owner: Option<TransactionAdmissionOwner>,
+    ) {
+        let Some((completion, shared_transaction_id)) = self
+            .client_completions
+            .get(transaction_id)
+            .and_then(|entry| match entry.value() {
+                ClientTransactionCompletionEntry::Active(completion) => {
+                    Some((Arc::clone(completion), Arc::clone(entry.key())))
+                }
+                ClientTransactionCompletionEntry::Retained(_) => None,
+            })
+        else {
+            return;
+        };
+
+        if keep_live_until_expiry {
+            // The compact Timer K tombstone already owns an immutable exact
+            // completion and a weak bridge to this cell. Remove the duplicate
+            // manager-map owner. Existing waiters keep their Arc; new waiters
+            // resolve the immutable tombstone through `client_completion`.
+            self.client_completions
+                .remove_if(transaction_id, |_, current| {
+                    matches!(
+                        current,
+                        ClientTransactionCompletionEntry::Active(active)
+                            if Arc::ptr_eq(active, &completion)
+                    )
+                });
+            return;
+        }
+
+        let version = self
+            .client_completion_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .next_version(expires_at);
+        // Response serialization is transaction-local and can allocate. Keep
+        // it outside the shared deadline critical section so unrelated
+        // completions retire concurrently.
+        let retained = completion
+            .retained(expires_at, version)
+            .with_admission_owner(admission_owner);
+        let mut deadlines = self
+            .client_completion_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let previous_wake = deadlines.next_wake_at(now, self.client_completion_capacity);
+        let installed = self.client_completions.get_mut(transaction_id).is_some_and(
+            |mut current| match current.value() {
+                ClientTransactionCompletionEntry::Active(active)
+                    if Arc::ptr_eq(active, &completion) =>
+                {
+                    *current = ClientTransactionCompletionEntry::Retained(retained);
+                    true
+                }
+                ClientTransactionCompletionEntry::Active(_)
+                | ClientTransactionCompletionEntry::Retained(_) => false,
+            },
+        );
+        if installed {
+            deadlines.schedule(shared_transaction_id, expires_at, version);
+        }
+        let should_wake = installed
+            && deadlines.next_wake_at(now, self.client_completion_capacity) != previous_wake;
+        drop(deadlines);
+        if should_wake {
+            self.wake_retained_client_deadline_worker();
+        }
     }
 
     /// Replace the active route in-place with a tombstone built from the
@@ -2816,12 +5023,24 @@ impl TransactionManager {
         transaction_id: &TransactionKey,
         transaction: &ArcClientTransaction,
     ) -> bool {
+        // Completed UDP non-INVITE transactions have already published a
+        // compact Timer K tombstone. Keep the exact active response route
+        // through T4 so retransmitted final responses remain authenticated;
+        // the due scheduler removes both records atomically at expiry.
+        if self
+            .compact_non_invite_tombstones
+            .get(transaction_id)
+            .is_some_and(|entry| entry.value().is_client())
+        {
+            return false;
+        }
+
         // Only INVITE can legitimately produce dialog-forming 2xx responses
         // after its client transaction has terminated. Other methods discard
         // their route immediately instead of broadening the retained surface.
         if transaction_id.is_server()
             || transaction_id.method() != &Method::Invite
-            || !transaction.data().initial_send_succeeded()
+            || !transaction.data().initial_send_attempted()
         {
             self.transaction_destinations
                 .remove_if(transaction_id, |_, state| state.is_active());
@@ -2829,18 +5048,52 @@ impl TransactionManager {
         }
 
         let exact_route = transaction.data().request_route.lock().await.clone();
+        let expires_at = Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL;
+        // Reserve a unique deadline identity, then serialize the request and
+        // exact completion together outside the shared deadline critical
+        // section. Skipped versions are harmless; publishing a record and its
+        // deadline remains one linearizable mutation below.
+        let deadline_version = self
+            .retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .next_version(expires_at);
+        let retired = RetiredClientTransaction::new(
+            transaction.data().request.as_ref(),
+            transaction.data().completion.as_ref(),
+            exact_route,
+            expires_at,
+            deadline_version,
+            transaction.data().transaction_admission_owner(),
+        );
         let mut transitioned = false;
+        // Scheduling and the Active -> Retired mutation share one short
+        // critical section. Maintenance can therefore never observe a newly
+        // retired route without its exact deadline generation.
+        let mut deadlines = self
+            .retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let now = Instant::now();
+        let retired_capacity = self
+            .retired_client_transaction_capacity
+            .load(Ordering::Acquire);
+        let previous_wake = deadlines.next_wake_at(now, retired_capacity);
         if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
             if state.is_active() {
-                *state = ClientResponseRouteState::Retired(RetiredClientTransaction {
-                    request: transaction.data().request.as_ref().clone(),
-                    route: exact_route,
-                    expires_at: Instant::now() + RETIRED_CLIENT_TRANSACTION_TTL,
-                });
+                let shared_transaction_id = Arc::clone(state.key());
+                *state = ClientResponseRouteState::Retired(retired);
+                deadlines.schedule(shared_transaction_id, expires_at, deadline_version);
                 self.retired_client_transaction_count
                     .fetch_add(1, Ordering::AcqRel);
                 transitioned = true;
             }
+        }
+        let should_wake =
+            transitioned && deadlines.next_wake_at(now, retired_capacity) != previous_wake;
+        drop(deadlines);
+        if should_wake {
+            self.wake_retained_client_deadline_worker();
         }
         transitioned
     }
@@ -2857,6 +5110,46 @@ impl TransactionManager {
         let transitioned = self
             .retire_client_transaction(transaction_id, &transaction)
             .await;
+
+        // Active -> Retired is the linearization point for a successfully
+        // sent INVITE. If another cleanup caller already performed that
+        // transition, only that owner may remove the live transaction Arc.
+        // Otherwise the second caller can remove it while the owner is still
+        // publishing the tombstone/deadline, exposing a transient unknown
+        // authentication window for a late 2xx response.
+        if !transitioned
+            && !transaction_id.is_server()
+            && transaction_id.method() == &Method::Invite
+            && transaction.data().initial_send_attempted()
+            && self
+                .transaction_destinations
+                .get(transaction_id)
+                .is_some_and(|state| state.retired().is_some())
+        {
+            return false;
+        }
+
+        if transitioned {
+            let completion = &transaction.data().completion;
+            self.client_completions
+                .remove_if(transaction_id, |_, current| {
+                    matches!(
+                        current,
+                        ClientTransactionCompletionEntry::Active(active)
+                            if Arc::ptr_eq(active, completion)
+                    )
+                });
+        } else {
+            let (completion_expires_at, keep_live_until_expiry) = self
+                .client_completion_retention(transaction_id, &transaction)
+                .await;
+            self.retain_client_completion(
+                transaction_id,
+                completion_expires_at,
+                keep_live_until_expiry,
+                transaction.data().transaction_admission_owner(),
+            );
+        }
 
         #[cfg(test)]
         if transitioned {
@@ -2882,19 +5175,59 @@ impl TransactionManager {
             return removed;
         }
 
-        let inserts = self
-            .retired_client_transaction_insert_count
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        if inserts % 1024 == 0
-            || self
-                .retired_client_transaction_count
+        if self
+            .retired_client_transaction_count
+            .load(Ordering::Acquire)
+            > self
+                .retired_client_transaction_capacity
                 .load(Ordering::Acquire)
-                > self.retired_client_transaction_capacity
         {
             self.prune_retired_client_transactions();
         }
         removed
+    }
+
+    fn unschedule_retired_client_deadline(
+        &self,
+        transaction_id: &TransactionKey,
+        expires_at: Instant,
+        deadline_version: u64,
+    ) {
+        self.retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unschedule(transaction_id, expires_at, deadline_version);
+    }
+
+    #[cfg(test)]
+    fn reschedule_retired_client_deadline_for_test(
+        &self,
+        transaction_id: &TransactionKey,
+        expires_at: Instant,
+    ) -> bool {
+        let mut deadlines = self
+            .retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let deadline_version = deadlines.next_version(expires_at);
+        let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) else {
+            return false;
+        };
+        let shared_transaction_id = Arc::clone(state.key());
+        let ClientResponseRouteState::Retired(retired) = state.value_mut() else {
+            return false;
+        };
+        deadlines.unschedule(transaction_id, retired.expires_at, retired.deadline_version);
+        retired.expires_at = expires_at;
+        retired.deadline_version = deadline_version;
+        retired
+            .completion
+            .set_deadline(expires_at, deadline_version);
+        deadlines.schedule(shared_transaction_id, expires_at, deadline_version);
+        drop(deadlines);
+        drop(state);
+        self.wake_retained_client_deadline_worker();
+        true
     }
 
     #[cfg(test)]
@@ -2921,6 +5254,29 @@ impl TransactionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
+    #[cfg(test)]
+    fn install_termination_takeover_test_gate(
+        &self,
+        transaction_id: TransactionKey,
+        runner_joined: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    ) {
+        *TERMINATION_TAKEOVER_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(TerminationTakeoverTestGate {
+            transaction_id,
+            runner_joined,
+            release,
+        });
+    }
+
+    #[cfg(test)]
+    fn clear_termination_takeover_test_gate(&self) {
+        *TERMINATION_TAKEOVER_TEST_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// Subscribe to events from all transactions.
     ///
     /// This method creates a new subscription to all transaction events.
@@ -2931,17 +5287,16 @@ impl TransactionManager {
     /// * `mpsc::Receiver<TransactionEvent>` - The event receiver
     pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
         let (tx, rx) = mpsc::channel(100);
+        let Some(_operation) = self.admission_lifecycle.try_enter_existing() else {
+            return rx;
+        };
         let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
         // ArcSwap RCU.
         self.event_subscribers.rcu(|current| {
             let mut next = Vec::with_capacity(current.len() + 1);
             next.extend(current.iter().cloned());
-            next.push(EventSubscriber {
-                id,
-                sender: tx.clone(),
-                global: true,
-            });
+            next.push(EventSubscriber::new(id, tx.clone(), true));
             next
         });
 
@@ -2965,39 +5320,43 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Result<mpsc::Receiver<TransactionEvent>> {
-        // Validate that transaction exists
-        if !self.transaction_exists(transaction_id).await {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        // Capture an allocation/generation authority, not only the bare SIP
+        // key. Timer J/K cleanup may permit that key to be reused while this
+        // method is inserting its two observer indexes.
+        let Some(authority) = self.transaction_subscription_authority(transaction_id) else {
             return Err(Error::transaction_not_found(
                 transaction_id.clone(),
-                "subscribe_to_transaction - transaction not found",
+                "subscribe_to_transaction - transaction not found or terminal",
             ));
-        }
+        };
 
         let (tx, rx) = mpsc::channel(100);
 
         let subscriber_id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-        // Add to global subscribers list — ArcSwap RCU.
-        self.event_subscribers.rcu(|current| {
-            let mut next = Vec::with_capacity(current.len() + 1);
-            next.extend(current.iter().cloned());
-            next.push(EventSubscriber {
-                id: subscriber_id,
-                sender: tx.clone(),
-                global: false,
-            });
-            next
-        });
+        let subscriber = EventSubscriber::new(subscriber_id, tx, false);
+        let observers = self
+            .events_tx
+            .observer_fanout()
+            .expect("transaction manager installs observer fanout");
+        observers.add_transaction_subscriber(transaction_id.clone(), subscriber);
 
-        self.transaction_to_subscribers
-            .entry(transaction_id.clone())
-            .or_insert_with(Vec::new)
-            .push(subscriber_id);
-
-        self.subscriber_to_transactions
-            .entry(subscriber_id)
-            .or_insert_with(Vec::new)
-            .push(transaction_id.clone());
+        // Insert then revalidate. Compact expiry sets the tombstone state to
+        // Terminated before taking its terminal observer snapshot, so either
+        // this subscriber is included in that snapshot or it removes only its
+        // own indexes and reports the race. It can never attach to a later
+        // same-key transaction generation.
+        if self.transaction_subscription_authority(transaction_id) != Some(authority) {
+            observers.remove_subscriber(subscriber_id);
+            return Err(Error::transaction_not_found(
+                transaction_id.clone(),
+                "subscribe_to_transaction - transaction became terminal or was replaced",
+            ));
+        }
 
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_id, "Added transaction-specific subscriber");
 
@@ -3018,12 +5377,19 @@ impl TransactionManager {
         &self,
         transaction_ids: &[TransactionKey],
     ) -> Result<mpsc::Receiver<TransactionEvent>> {
-        // Validate that all transactions exist
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        // Capture exact authorities before mutating either observer index.
+        let mut authorities = Vec::with_capacity(transaction_ids.len());
         for tx_id in transaction_ids {
-            if !self.transaction_exists(tx_id).await {
+            if let Some(authority) = self.transaction_subscription_authority(tx_id) {
+                authorities.push((tx_id.clone(), authority));
+            } else {
                 return Err(Error::transaction_not_found(
                     tx_id.clone(),
-                    "subscribe_to_transactions - transaction not found",
+                    "subscribe_to_transactions - transaction not found or terminal",
                 ));
             }
         }
@@ -3032,33 +5398,23 @@ impl TransactionManager {
 
         let subscriber_id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-        // Add to global subscribers list — ArcSwap RCU.
-        self.event_subscribers.rcu(|current| {
-            let mut next = Vec::with_capacity(current.len() + 1);
-            next.extend(current.iter().cloned());
-            next.push(EventSubscriber {
-                id: subscriber_id,
-                sender: tx.clone(),
-                global: false,
-            });
-            next
-        });
+        let subscriber = EventSubscriber::new(subscriber_id, tx, false);
+        let observers = self
+            .events_tx
+            .observer_fanout()
+            .expect("transaction manager installs observer fanout");
 
         for tx_id in transaction_ids {
-            self.transaction_to_subscribers
-                .entry(tx_id.clone())
-                .or_insert_with(Vec::new)
-                .push(subscriber_id);
+            observers.add_transaction_subscriber(tx_id.clone(), subscriber.clone());
         }
 
-        {
-            let mut entry = self
-                .subscriber_to_transactions
-                .entry(subscriber_id)
-                .or_insert_with(Vec::new);
-            for tx_id in transaction_ids {
-                entry.push(tx_id.clone());
-            }
+        if authorities.iter().any(|(transaction_id, authority)| {
+            self.transaction_subscription_authority(transaction_id) != Some(authority.clone())
+        }) {
+            observers.remove_subscriber(subscriber_id);
+            return Err(Error::Other(
+                "one or more transaction subscriptions became terminal or were replaced".into(),
+            ));
         }
 
         debug!(
@@ -3070,6 +5426,35 @@ impl TransactionManager {
         Ok(rx)
     }
 
+    fn transaction_subscription_authority(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<TransactionSubscriptionAuthority> {
+        if let Some(tombstone) = self.compact_non_invite_tombstones.get(transaction_id) {
+            return (tombstone.value().state().get() != TransactionState::Terminated).then(|| {
+                TransactionSubscriptionAuthority::Compact(tombstone.value().generation())
+            });
+        }
+        if let Some(transaction) = self.client_transactions.get(transaction_id) {
+            if transaction.value().state() == TransactionState::Terminated {
+                return None;
+            }
+            return Some(TransactionSubscriptionAuthority::Client(
+                transaction.value().clone(),
+            ));
+        }
+        self.server_transactions
+            .get(transaction_id)
+            .and_then(|transaction| {
+                if transaction.value().state() == TransactionState::Terminated {
+                    return None;
+                }
+                Some(TransactionSubscriptionAuthority::Server(
+                    transaction.value().clone(),
+                ))
+            })
+    }
+
     /// Shutdown the transaction manager gracefully - BOTTOM-UP
     ///
     /// This performs a graceful shutdown in BOTTOM-UP order:
@@ -3078,7 +5463,30 @@ impl TransactionManager {
     /// 3. Drain any remaining messages
     /// 4. Clear active transactions
     /// 5. Clear event subscribers
+    pub(crate) fn begin_shutdown_drain(&self) {
+        self.admission_lifecycle.begin_draining();
+        // Wake potentially unbounded sends/authorizers before an owning
+        // dialog-layer operation fence is awaited. Existing fail-closed
+        // cleanup remains admissible until `shutdown` advances to Stopping.
+        self.operation_cancellation.cancel();
+    }
+
     pub async fn shutdown(&self) {
+        let _shutdown_guard = self.shutdown_gate.lock().await;
+        if self.admission_lifecycle.state() == MANAGER_ADMISSION_STOPPED {
+            return;
+        }
+        self.begin_shutdown_drain();
+        self.admission_lifecycle.begin_stopping();
+        // Drop every potentially unbounded transport-handler future (slow
+        // external authorizer, saturated primary TU, blocked response send)
+        // before waiting for the operation fence. Staged publication guards
+        // run synchronously as those futures are cancelled.
+        // Every creator holds its guard through map/index publication or
+        // complete rollback, and every cleanup operation admitted during
+        // fail-closed draining holds the same counter. Closing both gates
+        // before waiting prevents late mutation after force-clear.
+        self.admission_lifecycle.wait_idle().await;
         info!("TransactionManager shutting down gracefully");
 
         // Step 1: Stop the message processing loop FIRST.
@@ -3115,21 +5523,59 @@ impl TransactionManager {
             .iter()
             .map(|entry| entry.value().clone())
             .collect();
-        for tx in in_flight_clients {
+        for tx in &in_flight_clients {
             let _ = tx
                 .data()
                 .cmd_tx
                 .try_send(InternalTransactionCommand::Terminate);
         }
-        for tx in in_flight_servers {
+        for tx in &in_flight_servers {
             let _ = tx
                 .data()
                 .cmd_tx
                 .try_send(InternalTransactionCommand::Terminate);
         }
 
-        // Step 3: Small drain period for in-flight messages
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Give every runner one bounded, manager-wide grace interval, then
+        // abort and join any producer that did not exit. Joining is mandatory:
+        // clearing maps while a runner still owns Data permits post-clear
+        // events, wire writes, and timer registration.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut runner_handles =
+            Vec::with_capacity(in_flight_clients.len() + in_flight_servers.len());
+        for transaction in &in_flight_clients {
+            if let Some(handle) = transaction.data().event_loop_handle.lock().await.take() {
+                runner_handles.push(handle);
+            }
+        }
+        for transaction in &in_flight_servers {
+            if let Some(handle) = transaction.data().event_loop_handle.lock().await.take() {
+                runner_handles.push(handle);
+            }
+        }
+        for handle in &runner_handles {
+            if !handle.is_finished() {
+                handle.abort();
+            }
+        }
+        for handle in runner_handles {
+            let _ = handle.await;
+        }
+        self.timer_manager.shutdown().await;
+
+        // Stop the manager-owned due queue after active runners have received
+        // their direct termination command. Pending grace entries are moved
+        // straight to Destroyed and woken, so the scheduler cannot retain
+        // transaction data after manager shutdown.
+        if let Some(scheduler) = self.lifecycle_scheduler.as_ref() {
+            scheduler.shutdown().await;
+        }
+        if let Some(worker) = self.retained_client_deadline_worker.as_ref() {
+            worker.shutdown().await;
+        }
+        if let Some(shutdown) = self.terminated_cleanup_shutdown.as_ref() {
+            shutdown.notify_one();
+        }
 
         // Step 4: Wait for all transactions to reach Destroyed lifecycle state
         let client_count = self.client_transactions.len();
@@ -3182,15 +5628,35 @@ impl TransactionManager {
 
         // Now clear the transaction maps
         self.client_transactions.clear();
+        self.client_completions.clear();
+        self.client_completion_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.server_transactions.clear();
         self.terminated_transactions.clear();
+        debug_assert!(self.explicit_termination_operations.is_empty());
+        self.explicit_termination_operations.clear();
         self.server_invite_dialog_index.clear();
         self.server_invite_dialog_keys_by_tx.clear();
-        self.invite_2xx_response_cache.clear();
-        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
-            queue.clear();
+        self.server_invite_dialog_expiry_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        {
+            let mut scheduler = self
+                .invite_2xx_response_due_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.invite_2xx_response_cache.clear();
+            scheduler.clear();
         }
         self.transaction_destinations.clear();
+        self.compact_non_invite_tombstones.clear();
+        self.retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.retired_client_transaction_count
             .store(0, Ordering::Release);
         self.pending_inbound_bytes.clear();
@@ -3199,23 +5665,41 @@ impl TransactionManager {
         self.pending_inbound_timing.clear();
         self.pending_inbound_principals.clear();
         self.pending_inbound_principal_inserted_at.clear();
+        // Admission is closed before shutdown cleanup begins. Any shared
+        // terminal event left queued after its dialog receiver disappeared is
+        // now unreachable, so release its external owner fence explicitly.
+        self.events_tx.clear_terminal_event_fences();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
         // Broadcast to all event subscribers
-        Self::broadcast_event(
-            TransactionEvent::ShutdownComplete,
-            &self.events_tx,
-            &self.event_subscribers,
-            Some(&self.subscriber_to_transactions),
-            Some(&self.transaction_to_subscribers),
-            Some(self.clone()),
+        if tokio::time::timeout(
+            Duration::from_millis(100),
+            Self::broadcast_event(
+                TransactionEvent::ShutdownComplete,
+                &self.events_tx,
+                &self.event_subscribers,
+                Some(&self.subscriber_to_transactions),
+                Some(&self.transaction_to_subscribers),
+                Some(self.clone()),
+            ),
         )
-        .await;
+        .await
+        .is_err()
+        {
+            warn!("Timed out publishing ShutdownComplete to a stalled primary TU");
+        }
 
         // Step 5: Clear event subscribers
         self.event_subscribers.store(Arc::new(Vec::new()));
         self.subscriber_to_transactions.clear();
         self.transaction_to_subscribers.clear();
+
+        // The registry stores only plain generations, so explicit clear is
+        // non-reentrant and safe even when caller-held transaction Arcs later
+        // drop their external owners. Stopped managers never admit reuse.
+        self.transaction_admissions.entries.clear();
+        debug_assert_eq!(self.transaction_admissions.entries.len(), 0);
+        self.admission_lifecycle.mark_stopped();
 
         info!("TransactionManager shutdown complete - BOTTOM-UP");
     }
@@ -3234,48 +5718,13 @@ impl TransactionManager {
     /// * `manager` - Optional manager for processing termination events
     async fn broadcast_event(
         event: TransactionEvent,
-        primary_tx: &mpsc::Sender<TransactionEvent>,
-        subscribers: &Arc<ArcSwap<Vec<EventSubscriber>>>,
-        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
-        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
+        primary_tx: &TransactionEventSender,
+        _subscribers: &Arc<ArcSwap<Vec<EventSubscriber>>>,
+        _subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
+        _transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<EventSubscriber>>>>,
         manager: Option<TransactionManager>,
     ) {
         let broadcast_started = diagnostics::transaction_timing_enabled().then(Instant::now);
-        // Extract transaction ID from the event for filtering
-        let transaction_id = match &event {
-            TransactionEvent::StateChanged { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::SuccessResponse { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::FailureResponse { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::ProvisionalResponse { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::TransactionTerminated { transaction_id } => Some(transaction_id),
-            TransactionEvent::TimerTriggered { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::AckReceived { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::CancelReceived { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::InviteRequest { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::NonInviteRequest { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::AckRequest { transaction_id, .. } => Some(transaction_id),
-            TransactionEvent::CancelRequest { transaction_id, .. } => Some(transaction_id),
-            // These events don't have a specific transaction ID
-            TransactionEvent::StrayResponse { .. } => None,
-            TransactionEvent::StrayAck { .. } => None,
-            TransactionEvent::StrayCancel { .. } => None,
-            TransactionEvent::StrayAckRequest { .. } => None,
-            // Add other event types for completeness
-            _ => None,
-        };
-
-        // Get list of interested subscribers for this transaction
-        let interested_subscribers = if let (Some(tx_id), Some(tx_to_subs_map)) =
-            (transaction_id, transaction_to_subscribers)
-        {
-            tx_to_subs_map
-                .get(tx_id)
-                .map(|r| r.value().clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new() // No specific subscribers for this transaction or global event
-        };
-
         if let Some(manager_instance) = manager.as_ref() {
             match &event {
                 TransactionEvent::StateChanged {
@@ -3301,63 +5750,6 @@ impl TransactionManager {
                 warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to primary channel");
             }
         }
-
-        // Send to interested subscribers only. ArcSwap::load is a
-        // single atomic load — no mutex acquire on the hot path.
-        let subs_snapshot = subscribers.load();
-        let subs: &Vec<EventSubscriber> = &subs_snapshot;
-        let mut closed_subscribers = Vec::new();
-
-        // If we have transaction-specific subscribers, filter events
-        if transaction_to_subscribers.is_some() {
-            for sub in subs.iter() {
-                // Send to this subscriber if:
-                // 1. It subscribed globally
-                // 2. It is explicitly interested in this transaction
-                // 3. The event is not tied to a transaction and the subscriber is global
-                let should_send = sub.global
-                    || transaction_id.is_some_and(|_| interested_subscribers.contains(&sub.id));
-
-                if should_send {
-                    if let Err(e) = sub.sender.send(event.clone()).await {
-                        closed_subscribers.push(sub.id);
-                        // During shutdown, channel closed errors are expected - use debug level
-                        // Check if this is a channel closed error during shutdown
-                        if e.to_string().contains("channel closed") {
-                            debug!(
-                                "Subscriber {} channel closed during shutdown (expected)",
-                                sub.id
-                            );
-                        } else {
-                            warn!(subscriber_id=sub.id, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to subscriber");
-                        }
-                    }
-                }
-            }
-        } else {
-            // No transaction filtering, send to all (backward compatibility)
-            for sub in subs.iter() {
-                if let Err(e) = sub.sender.send(event.clone()).await {
-                    closed_subscribers.push(sub.id);
-                    // During shutdown, channel closed errors are expected - use debug level
-                    if e.to_string().contains("channel closed") {
-                        debug!(
-                            "Subscriber {} channel closed during shutdown (expected)",
-                            sub.id
-                        );
-                    } else {
-                        warn!(subscriber_id=sub.id, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send event to subscriber");
-                    }
-                }
-            }
-        }
-
-        Self::prune_event_subscribers(
-            subscribers,
-            subscriber_to_transactions,
-            transaction_to_subscribers,
-            &closed_subscribers,
-        );
 
         if let Some(manager_instance) = manager.as_ref() {
             match &event {
@@ -3391,82 +5783,17 @@ impl TransactionManager {
         }
     }
 
-    fn prune_event_subscribers(
-        subscribers: &Arc<ArcSwap<Vec<EventSubscriber>>>,
-        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
-        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
-        closed_subscriber_ids: &[usize],
-    ) {
-        let explicit_closed: HashSet<usize> = closed_subscriber_ids.iter().copied().collect();
-        let snapshot = subscribers.load();
-        let removed_ids: Vec<usize> = snapshot
-            .iter()
-            .filter(|subscriber| {
-                explicit_closed.contains(&subscriber.id) || subscriber.sender.is_closed()
-            })
-            .map(|subscriber| subscriber.id)
-            .collect();
-
-        if removed_ids.is_empty() {
-            return;
-        }
-
-        let removed: HashSet<usize> = removed_ids.iter().copied().collect();
-        subscribers.rcu(|current| {
-            let mut next = Vec::with_capacity(current.len().saturating_sub(removed.len()));
-            next.extend(
-                current
-                    .iter()
-                    .filter(|subscriber| !removed.contains(&subscriber.id))
-                    .cloned(),
-            );
-            next
-        });
-
-        for subscriber_id in removed_ids {
-            Self::remove_subscriber_indexes(
-                subscriber_id,
-                subscriber_to_transactions,
-                transaction_to_subscribers,
-            );
-        }
-    }
-
-    fn remove_subscriber_indexes(
-        subscriber_id: usize,
-        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
-        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
-    ) {
-        let Some(subscriber_to_transactions) = subscriber_to_transactions else {
-            return;
-        };
-
-        let Some((_, transaction_ids)) = subscriber_to_transactions.remove(&subscriber_id) else {
-            return;
-        };
-
-        let Some(transaction_to_subscribers) = transaction_to_subscribers else {
-            return;
-        };
-
-        for transaction_id in transaction_ids {
-            let mut empty = false;
-            if let Some(mut entry) = transaction_to_subscribers.get_mut(&transaction_id) {
-                entry.value_mut().retain(|id| *id != subscriber_id);
-                empty = entry.value().is_empty();
-            }
-            if empty {
-                transaction_to_subscribers.remove(&transaction_id);
-            }
-        }
-    }
-
     /// Actually remove a terminated transaction from all maps
     async fn remove_terminated_transaction(&self, transaction_id: &TransactionKey) {
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removing terminated transaction after grace period");
 
         let mut terminated = false;
         self.request_transaction_runner_stop(transaction_id);
+
+        // Keyed observers remain until the exact terminal sender snapshots
+        // and publishes them. Authoritative map cleanup is independent of a
+        // stalled primary channel, while the admission owner prevents a new
+        // same-key transaction from inheriting this observer bucket.
 
         if self
             .retire_and_remove_client_transaction(transaction_id)
@@ -3497,24 +5824,6 @@ impl TransactionManager {
         self.pending_inbound_transport.remove(transaction_id);
         self.pending_inbound_timing.remove(transaction_id);
 
-        // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
-        if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(transaction_id) {
-            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
-
-            for subscriber_id in subscriber_ids {
-                let mut empty = false;
-                if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
-                    let tx_list = entry.value_mut();
-                    tx_list.retain(|tx_id| tx_id != transaction_id);
-                    empty = tx_list.is_empty();
-                }
-                if empty {
-                    self.subscriber_to_transactions.remove(&subscriber_id);
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), subscriber_id, "Removed empty subscriber mapping");
-                }
-            }
-        }
-
         // Unregister from timer manager (defensive - it should auto-unregister)
         let unregister_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         self.timer_manager
@@ -3534,10 +5843,14 @@ impl TransactionManager {
 
     /// Start the message processing loop for handling incoming transport events
     fn start_message_loop(&self) {
-        let events_tx = self.events_tx.clone();
-        let transport_rx = self.transport_rx.clone();
+        let Some(transport_rx) = self.transport_rx.clone() else {
+            debug!("Transaction manager has no transport ingress; message loop not started");
+            return;
+        };
+        // Publish synchronously so an immediate shutdown cannot be undone by
+        // a later-scheduled task storing `true` after drain has begun.
+        self.running.store(true, Ordering::Release);
         let control_transport_rx = self.control_transport_rx.clone();
-        let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
         let manager_arc = self.clone();
         let dispatch_workers = self.transaction_dispatch_workers;
@@ -3546,10 +5859,6 @@ impl TransactionManager {
 
         tokio::spawn(async move {
             debug!("Starting transaction message loop");
-
-            // Create a separate channel to receive events from transactions
-            let (internal_tx, mut internal_rx) = mpsc::channel(100);
-            let _internal_tx = internal_tx;
 
             let dispatch_senders = if dispatch_workers > DEFAULT_TRANSACTION_DISPATCH_WORKERS {
                 Some(start_transaction_dispatch_workers(
@@ -3563,16 +5872,15 @@ impl TransactionManager {
             };
             let fallback_dispatch_worker = Arc::new(AtomicUsize::new(0));
 
-            // Set running flag (AtomicBool — single store instruction)
-            running.store(true, Ordering::Relaxed);
-
             // Get the transport receiver
             let mut receiver = transport_rx.lock().await;
-            let mut control_receiver = control_transport_rx.lock().await;
+            let mut control_receiver = match control_transport_rx.as_ref() {
+                Some(receiver) => Some(receiver.lock().await),
+                None => None,
+            };
             let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
             cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let cleanup_running = Arc::new(AtomicBool::new(false));
-            let mut cleanup_ticks = 0usize;
             let mut invite_2xx_retransmit_interval =
                 tokio::time::interval(Duration::from_millis(100));
             invite_2xx_retransmit_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -3588,20 +5896,31 @@ impl TransactionManager {
                     break;
                 }
 
-                // Use tokio::select to wait for a message from either the transport or internal channel
+                // Wait for transport work and bounded maintenance ticks. The
+                // former internal transaction-event channel had no producer;
+                // retaining both halves allocated a dummy queue forever.
                 tokio::select! {
                     biased;
-                    Some(control_event) = control_receiver.recv() => {
-                        if manager_arc.running.load(Ordering::Relaxed) {
-                            if let Some(dispatch_senders) = dispatch_senders.as_ref() {
-                                dispatch_transaction_event(
-                                    control_event,
-                                    dispatch_senders,
-                                    &fallback_dispatch_worker,
-                                ).await;
-                            } else if let Err(e) = manager_arc.handle_transport_event(control_event).await {
-                                error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport control event");
+                    control_event = async {
+                        match control_receiver.as_mut() {
+                            Some(receiver) => receiver.recv().await,
+                            None => std::future::pending::<Option<TransportEvent>>().await,
+                        }
+                    } => {
+                        if let Some(control_event) = control_event {
+                            if manager_arc.running.load(Ordering::Relaxed) {
+                                if let Some(dispatch_senders) = dispatch_senders.as_ref() {
+                                    dispatch_transaction_event(
+                                        control_event,
+                                        dispatch_senders,
+                                        &fallback_dispatch_worker,
+                                    ).await;
+                                } else if let Err(e) = manager_arc.handle_transport_event(control_event).await {
+                                    error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error handling transport control event");
+                                }
                             }
+                        } else {
+                            control_receiver = None;
                         }
                     }
                     Some(mut message_event) = receiver.recv() => {
@@ -3634,20 +5953,7 @@ impl TransactionManager {
                             debug!("Skipping transport event processing - shutting down");
                         }
                     }
-                    Some(transaction_event) = internal_rx.recv() => {
-                        // Handle transaction events, particularly termination events
-                        Self::broadcast_event(
-                            transaction_event,
-                            &events_tx,
-                            &event_subscribers,
-                            Some(&manager_arc.subscriber_to_transactions),
-                            Some(&manager_arc.transaction_to_subscribers),
-                            Some(manager_arc.clone()),
-                        ).await;
-                    }
                     _ = cleanup_interval.tick() => {
-                        cleanup_ticks = cleanup_ticks.wrapping_add(1);
-                        let full_sweep = cleanup_ticks % 10 == 0;
                         if cleanup_running
                             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                             .is_ok()
@@ -3655,25 +5961,37 @@ impl TransactionManager {
                             let manager_clone = manager_arc.clone();
                             let cleanup_running = cleanup_running.clone();
                             tokio::spawn(async move {
-                                manager_clone.maintenance_prune_retained_state();
-                                let cleanup_result = if full_sweep {
-                                    manager_clone.cleanup_terminated_transactions().await
-                                } else {
-                                    manager_clone.cleanup_indexed_terminated_transactions().await
+                                let Some(_maintenance_operation) = manager_clone
+                                    .admission_lifecycle
+                                    .try_enter_existing()
+                                else {
+                                    cleanup_running.store(false, Ordering::Release);
+                                    return;
                                 };
-
-                                match cleanup_result {
-                                    Ok(count) if count > 0 => {
-                                        debug!(
-                                            full_sweep,
-                                            "Periodic cleanup removed {} terminated transactions",
-                                            count
-                                        );
+                                tokio::select! {
+                                    _ = manager_clone.operation_cancellation.cancelled() => {}
+                                    cleanup_result = async {
+                                        manager_clone.maintenance_prune_auxiliary_retained_state();
+                                        // Runtime repair is bounded to the authoritative
+                                        // terminal index. A full active-table scan remains
+                                        // available only through the explicit diagnostic API.
+                                        manager_clone
+                                            .cleanup_indexed_terminated_transactions_within_operation()
+                                            .await
+                                    } => {
+                                        match cleanup_result {
+                                            Ok(count) if count > 0 => {
+                                                debug!(
+                                                    "Periodic cleanup removed {} terminated transactions",
+                                                    count
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Periodic transaction cleanup failed");
+                                            }
+                                            _ => {}
+                                        }
                                     }
-                                    Err(e) => {
-                                        error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Periodic transaction cleanup failed");
-                                    }
-                                    _ => {}
                                 }
                                 cleanup_running.store(false, Ordering::Release);
                             });
@@ -3687,9 +6005,20 @@ impl TransactionManager {
                             let manager_clone = manager_arc.clone();
                             let retransmit_running = invite_2xx_retransmit_running.clone();
                             tokio::spawn(async move {
-                                let count = manager_clone.retransmit_due_invite_2xx_responses().await;
-                                if count > 0 {
-                                    trace!("Retransmitted {} cached INVITE 2xx responses", count);
+                                let Some(_retransmit_operation) = manager_clone
+                                    .admission_lifecycle
+                                    .try_enter_existing()
+                                else {
+                                    retransmit_running.store(false, Ordering::Release);
+                                    return;
+                                };
+                                tokio::select! {
+                                    _ = manager_clone.operation_cancellation.cancelled() => {}
+                                    count = manager_clone.retransmit_due_invite_2xx_responses() => {
+                                        if count > 0 {
+                                            trace!("Retransmitted {} cached INVITE 2xx responses", count);
+                                        }
+                                    }
                                 }
                                 retransmit_running.store(false, Ordering::Release);
                             });
@@ -3739,19 +6068,18 @@ impl TransactionManager {
     ) -> Result<TransactionKey> {
         self.create_client_transaction_on_route_inner(request, request_route, None)
             .await
+            .map(|(key, _owner)| key)
     }
 
-    /// Create a client transaction whose Timer B/F cannot outlive a logical
-    /// operation deadline owned by a higher layer. This is intentionally
-    /// crate-private: ordinary transactions continue to use the manager's
-    /// configured timer settings, while retained RFC 3263 INVITE attempts use
-    /// the remaining budget rather than restarting a full Timer B.
-    pub(crate) async fn create_client_transaction_on_route_with_timeout(
+    /// Atomically return the exact allocation owner with the key. Failover
+    /// plans retain this owner beyond ordinary transaction-map cleanup and
+    /// must not recover it through a second, racy map lookup.
+    pub(crate) async fn create_client_transaction_on_route_with_timeout_and_owner(
         &self,
         request: Request,
         request_route: TransportRoute,
         transaction_timeout: Duration,
-    ) -> Result<TransactionKey> {
+    ) -> Result<(TransactionKey, TransactionAdmissionOwner)> {
         let mut timer_settings = self.timer_settings.clone();
         timer_settings.transaction_timeout = transaction_timeout.max(Duration::from_millis(1));
         self.create_client_transaction_on_route_inner(request, request_route, Some(timer_settings))
@@ -3763,7 +6091,7 @@ impl TransactionManager {
         request: Request,
         mut request_route: TransportRoute,
         timer_settings_override: Option<TimerSettings>,
-    ) -> Result<TransactionKey> {
+    ) -> Result<(TransactionKey, TransactionAdmissionOwner)> {
         crate::transaction::transport::multiplexed::validate_request_route_security(
             &request,
             &request_route,
@@ -3815,6 +6143,26 @@ impl TransactionManager {
 
         // We'll create the transaction key directly
         let key = TransactionKey::new(branch.clone(), request.method().clone(), false);
+        let _admission_guard = self.admission_lifecycle.try_enter().ok_or_else(|| {
+            Error::Other("transaction manager is draining; new transactions are closed".into())
+        })?;
+        if self.compact_non_invite_tombstones.contains_key(&key) {
+            return Err(Error::Other(
+                "transaction key is retained by an active UDP Timer K tombstone".into(),
+            ));
+        }
+        let duplicate_kind = if request.method() == Method::Invite {
+            TransactionKind::InviteClient
+        } else {
+            TransactionKind::NonInviteClient
+        };
+        let admission_owner = self.transaction_admissions.try_claim(&key).ok_or_else(|| {
+            Error::TransactionExists {
+                key: key.clone(),
+                kind: duplicate_kind,
+            }
+        })?;
+        let returned_admission_owner = admission_owner.clone();
 
         // For CANCEL method, make sure we don't add a new Via header if one already exists
         // This is already checked in create_cancel_request, but we'll verify here as well
@@ -3894,21 +6242,45 @@ impl TransactionManager {
         let timer_settings =
             timer_settings_override.or_else(|| self.timer_settings_for_request(&modified_request));
 
+        // Reserve the complete UDP Timer K horizon before the transaction
+        // constructor starts its runner or any request can reach the wire.
+        // Saturation is an admission failure; an accepted transaction must
+        // never shorten its RFC retransmission-absorption fence.
+        let compact_retention_reservation = if modified_request.method() != Method::Invite
+            && crate::transaction::timer_utils::uses_unreliable_transport(
+                &request_route,
+                self.transport.default_transport_type(),
+            ) {
+            match self.lifecycle_scheduler.as_ref() {
+                Some(scheduler) => Some(scheduler.try_reserve_compact_retention().ok_or(
+                    Error::TransactionCapacityExhausted {
+                        resource: "UDP non-INVITE Timer K retention",
+                        limit: scheduler.compact_retention_limit(),
+                    },
+                )?),
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // Create the appropriate transaction. Returns Arc<dyn ClientTransaction>
         // so the map can shard (DashMap) and call sites can clone the
         // Arc out before any `.await`.
         let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Creating ClientInviteTransaction");
-                let tx = ClientInviteTransaction::new_with_route_and_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    request_route.clone(),
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    timer_settings,
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientInviteTransaction::new_with_route_command_capacity_and_timer_manager(
+                        key.clone(),
+                        modified_request.clone(),
+                        request_route.clone(),
+                        self.transport.clone(),
+                        self.events_tx.clone_for_transaction(),
+                        timer_settings,
+                        self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
+                    )?;
                 tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created ClientInviteTransaction");
                 Arc::new(tx)
             }
@@ -3920,15 +6292,17 @@ impl TransactionManager {
                         "Creating transaction for CANCEL with possible validation issues"
                     );
                 }
-                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    request_route.clone(),
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    timer_settings,
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_route_command_capacity_and_timer_manager(
+                        key.clone(),
+                        modified_request.clone(),
+                        request_route.clone(),
+                        self.transport.clone(),
+                        self.events_tx.clone_for_transaction(),
+                        timer_settings,
+                        self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
+                    )?;
                 Arc::new(tx)
             }
             Method::Update => {
@@ -3939,39 +6313,72 @@ impl TransactionManager {
                         "Creating transaction for UPDATE with possible validation issues"
                     );
                 }
-                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    request_route.clone(),
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    timer_settings,
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_route_command_capacity_and_timer_manager(
+                        key.clone(),
+                        modified_request.clone(),
+                        request_route.clone(),
+                        self.transport.clone(),
+                        self.events_tx.clone_for_transaction(),
+                        timer_settings,
+                        self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
+                    )?;
                 Arc::new(tx)
             }
             _ => {
-                let tx = ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    request_route.clone(),
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    timer_settings,
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_route_command_capacity_and_timer_manager(
+                        key.clone(),
+                        modified_request.clone(),
+                        request_route.clone(),
+                        self.transport.clone(),
+                        self.events_tx.clone_for_transaction(),
+                        timer_settings,
+                        self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
+                    )?;
                 Arc::new(tx)
             }
         };
 
-        // Store the transaction + complete request route.
+        if let Some(cleanup_tx) = self.terminated_cleanup_tx.as_ref() {
+            transaction
+                .data()
+                .install_termination_cleanup_sender(cleanup_tx.clone());
+        }
+        if let Some(reservation) = compact_retention_reservation {
+            transaction
+                .data()
+                .install_compact_retention_reservation(reservation);
+        }
+        if let Some(scheduler) = self.lifecycle_scheduler.as_ref() {
+            transaction
+                .data()
+                .install_lifecycle_scheduler(scheduler.clone());
+        }
+        transaction
+            .data()
+            .install_transaction_admission_owner(admission_owner);
+
+        // Store the authoritative completion cell before publishing the live
+        // transaction. Internal waiters never need to subscribe to events.
+        let shared_retention_key = Arc::new(key.clone());
+        self.install_client_completion(Arc::clone(&shared_retention_key), &transaction);
+        let response_route_owner = Arc::as_ptr(transaction.data()) as usize;
         self.client_transactions.insert(key.clone(), transaction);
-        if self
-            .transaction_destinations
-            .insert(key.clone(), ClientResponseRouteState::Active(request_route))
-            .is_some_and(|previous| previous.retired().is_some())
-        {
-            self.decrement_retired_client_transaction_count();
+        if let Some(previous) = self.transaction_destinations.insert(
+            shared_retention_key,
+            ClientResponseRouteState::active(request_route, response_route_owner),
+        ) {
+            if let Some(retired) = previous.retired() {
+                self.decrement_retired_client_transaction_count();
+                self.unschedule_retired_client_deadline(
+                    &key,
+                    retired.expires_at,
+                    retired.deadline_version,
+                );
+            }
         }
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created client transaction");
@@ -3980,11 +6387,29 @@ impl TransactionManager {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created CANCEL transaction");
         }
 
-        Ok(key)
+        Ok((key, returned_admission_owner))
     }
 
     /// Creates and sends an ACK request for a 2xx response to an INVITE.
     pub async fn send_ack_for_2xx(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+    ) -> Result<()> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped ACK send".into()))
+            }
+            result = self.send_ack_for_2xx_within_operation(invite_tx_id, response) => result,
+        }
+    }
+
+    async fn send_ack_for_2xx_within_operation(
         &self,
         invite_tx_id: &TransactionKey,
         response: &Response,
@@ -4064,8 +6489,20 @@ impl TransactionManager {
         };
 
         let found = match message {
-            Message::Request(_) => self.server_transactions.contains_key(&key),
-            Message::Response(_) => self.client_transactions.contains_key(&key),
+            Message::Request(_) => {
+                self.server_transactions.contains_key(&key)
+                    || self
+                        .compact_non_invite_tombstones
+                        .get(&key)
+                        .is_some_and(|entry| !entry.value().is_client())
+            }
+            Message::Response(_) => {
+                self.client_transactions.contains_key(&key)
+                    || self
+                        .compact_non_invite_tombstones
+                        .get(&key)
+                        .is_some_and(|entry| entry.value().is_client())
+            }
         };
 
         Ok(found.then_some(key))
@@ -4158,13 +6595,20 @@ impl TransactionManager {
             ));
         }
 
-        // Get the original INVITE request
-        let invite_request = self.original_request(invite_tx_id).await?.ok_or_else(|| {
-            Error::transaction_not_found(
-                invite_tx_id.clone(),
-                "ACK request template is unavailable",
-            )
-        })?;
+        // Active transactions own the parsed request directly. Retired
+        // INVITEs reconstruct it lazily from their immutable wire image only
+        // when a rare late/forked 2xx actually needs an ACK.
+        let invite_request =
+            if let Some(request) = self.retired_client_original_request(invite_tx_id)? {
+                request
+            } else {
+                self.original_request(invite_tx_id).await?.ok_or_else(|| {
+                    Error::transaction_not_found(
+                        invite_tx_id.clone(),
+                        "ACK request template is unavailable",
+                    )
+                })?
+            };
 
         // Use the original INVITE top Via sent-by for the ACK's sent-by
         // address. With multiplexed transports, `transport.local_addr()`
@@ -4278,6 +6722,14 @@ impl TransactionManager {
 
         // Create the transaction key directly with is_server: true
         let key = TransactionKey::new(branch, request.method().clone(), true);
+        let _admission_guard = self.admission_lifecycle.try_enter().ok_or_else(|| {
+            Error::Other("transaction manager is draining; new transactions are closed".into())
+        })?;
+        if self.compact_non_invite_tombstones.contains_key(&key) {
+            return Err(Error::Other(
+                "transaction key is retained by an active UDP Timer J tombstone".into(),
+            ));
+        }
         let mut cancel_target_invite_tx_id = None;
 
         // Check if this is a retransmission of an existing transaction.
@@ -4287,6 +6739,7 @@ impl TransactionManager {
             .get(&key)
             .map(|r| r.value().clone());
         if let Some(transaction) = existing {
+            drop(_admission_guard);
             transaction.process_request(request.clone()).await?;
             debug!(
                 id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
@@ -4296,18 +6749,69 @@ impl TransactionManager {
             return Ok(transaction);
         }
 
+        let duplicate_kind = if request.method() == Method::Invite {
+            TransactionKind::InviteServer
+        } else {
+            TransactionKind::NonInviteServer
+        };
+        let admission_owner = match self.transaction_admissions.try_claim(&key) {
+            Some(owner) => owner,
+            None => {
+                // A concurrent first request may have published after our
+                // initial lookup. Preserve retransmission semantics when that
+                // publication is already visible; otherwise report the exact
+                // admission collision without constructing a second runner.
+                if let Some(transaction) = self
+                    .server_transactions
+                    .get(&key)
+                    .map(|entry| entry.value().clone())
+                {
+                    drop(_admission_guard);
+                    transaction.process_request(request.clone()).await?;
+                    return Ok(transaction);
+                }
+                return Err(Error::TransactionExists {
+                    key,
+                    kind: duplicate_kind,
+                });
+            }
+        };
+
+        // Reserve the complete UDP Timer J replay horizon before constructing
+        // the runner or publishing the transaction. A saturated listener may
+        // reject new work, but it must not accept a request and later discard
+        // its final-response replay state early.
+        let compact_retention_reservation = if request.method() != Method::Invite
+            && crate::transaction::timer_utils::uses_unreliable_transport(
+                &response_route,
+                self.transport.default_transport_type(),
+            ) {
+            match self.lifecycle_scheduler.as_ref() {
+                Some(scheduler) => Some(scheduler.try_reserve_compact_retention().ok_or(
+                    Error::TransactionCapacityExhausted {
+                        resource: "UDP non-INVITE Timer J retention",
+                        limit: scheduler.compact_retention_limit(),
+                    },
+                )?),
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // Create a new transaction based on the request method
         let transaction: Arc<dyn ServerTransaction> = match request.method() {
             Method::Invite => {
                 let tx = Arc::new(
-                    ServerInviteTransaction::new_with_response_route_and_command_channel_capacity(
+                    ServerInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
                         response_route.clone(),
                         self.transport.clone(),
-                        self.events_tx.clone(),
+                        self.events_tx.clone_for_transaction(),
                         Some(self.timer_settings.clone()),
                         self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
                     )?,
                 );
 
@@ -4316,7 +6820,7 @@ impl TransactionManager {
                     method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
                     "Created new ServerInviteTransaction"
                 );
-                self.index_server_invite_dialog(&request, &key);
+                self.index_server_invite_dialog(&request, &key, admission_owner.clone());
                 tx
             }
             Method::Cancel => {
@@ -4340,14 +6844,15 @@ impl TransactionManager {
 
                 // Create a non-INVITE server transaction for CANCEL
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
                         response_route.clone(),
                         self.transport.clone(),
-                        self.events_tx.clone(),
+                        self.events_tx.clone_for_transaction(),
                         Some(self.timer_settings.clone()),
                         self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
                     )?,
                 );
 
@@ -4363,14 +6868,15 @@ impl TransactionManager {
 
                 // Create a non-INVITE server transaction for UPDATE
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
                         response_route.clone(),
                         self.transport.clone(),
-                        self.events_tx.clone(),
+                        self.events_tx.clone_for_transaction(),
                         Some(self.timer_settings.clone()),
                         self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
                     )?,
                 );
 
@@ -4379,14 +6885,15 @@ impl TransactionManager {
             }
             _ => {
                 let tx = Arc::new(
-                    ServerNonInviteTransaction::new_with_response_route_and_command_channel_capacity(
+                    ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
                         response_route.clone(),
                         self.transport.clone(),
-                        self.events_tx.clone(),
+                        self.events_tx.clone_for_transaction(),
                         Some(self.timer_settings.clone()),
                         self.transaction_command_channel_capacity,
+                        self.timer_manager.clone(),
                     )?,
                 );
 
@@ -4394,6 +6901,28 @@ impl TransactionManager {
                 tx
             }
         };
+
+        if let Some(cleanup_tx) = self.terminated_cleanup_tx.as_ref() {
+            transaction
+                .data()
+                .install_termination_cleanup_sender(cleanup_tx.clone());
+        }
+        if let Some(reservation) = compact_retention_reservation {
+            transaction
+                .data()
+                .install_compact_retention_reservation(reservation);
+        }
+        if let Some(scheduler) = self.lifecycle_scheduler.as_ref() {
+            transaction
+                .data()
+                .install_lifecycle_scheduler(scheduler.clone());
+        }
+        transaction
+            .data()
+            .install_transaction_admission_owner(admission_owner);
+        transaction
+            .data()
+            .install_manager_admission_lifecycle(&self.admission_lifecycle);
 
         // Store the transaction
         self.server_transactions
@@ -4405,14 +6934,32 @@ impl TransactionManager {
             _ => TransactionState::Trying,
         };
 
-        // Transition to the initial active state
+        // The transaction and its private runner are constructed in the same
+        // initial state. Publish the matching initialization command without
+        // an await: once the transaction and its derived INVITE index are
+        // visible, cancellation of this create future must not strand a
+        // partially published generation. The new private queue has at least
+        // one slot; Full/Closed is therefore an initialization failure and is
+        // rolled back synchronously.
         if let Err(e) = transaction
-            .send_command(InternalTransactionCommand::TransitionTo(initial_state))
-            .await
+            .data()
+            .cmd_tx
+            .try_send(InternalTransactionCommand::TransitionTo(initial_state))
         {
+            let e = Error::Other(format!(
+                "failed to initialize new server transaction command queue: {e}"
+            ));
             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction.id()), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize new server transaction");
+            // The transaction was published before the initialization
+            // command so retransmissions could find it. On channel failure,
+            // close subscription admission, remove its observer bucket while
+            // the exact map entry still fences same-key reuse, then remove
+            // only this allocation. Dropping the final data Arc releases its
+            // compact-retention reservation.
+            self.rollback_failed_server_initialization(&transaction);
             return Err(e);
         }
+        drop(_admission_guard);
 
         if publish_cancel_event && request.method() == Method::Cancel {
             let transaction_id = transaction.id().clone();
@@ -4438,11 +6985,62 @@ impl TransactionManager {
         Ok(transaction)
     }
 
-    fn index_server_invite_dialog(&self, request: &Request, key: &TransactionKey) {
+    pub(super) fn rollback_failed_server_initialization(
+        &self,
+        transaction: &Arc<dyn ServerTransaction>,
+    ) {
+        // Stop the runner while this exact Arc is still discoverable, then
+        // make every subsequent command silent before removing indexes.
+        self.request_transaction_runner_stop(transaction.id());
+        transaction.data().state.set(TransactionState::Terminated);
+        transaction
+            .data()
+            .set_lifecycle(TransactionLifecycle::Destroyed);
+        if let Some(observers) = self.events_tx.observer_fanout() {
+            observers.remove_transaction(transaction.id());
+        }
+        self.pending_inbound_principals.remove(transaction.id());
+        self.pending_inbound_principal_inserted_at
+            .remove(transaction.id());
+        self.pending_inbound_bytes.remove(transaction.id());
+        self.pending_inbound_inserted_at.remove(transaction.id());
+        self.pending_inbound_transport.remove(transaction.id());
+        self.pending_inbound_timing.remove(transaction.id());
+        self.transaction_destinations
+            .remove_if(transaction.id(), |_, route| route.is_active());
+        self.remove_server_invite_dialog_index_exact(transaction.id());
+        self.server_transactions
+            .remove_if(transaction.id(), |_, current| {
+                Arc::ptr_eq(current, transaction)
+            });
+        self.terminated_transactions.remove(transaction.id());
+
+        if let (Ok(runtime), Some(operation)) = (
+            tokio::runtime::Handle::try_current(),
+            self.admission_lifecycle.try_enter_existing(),
+        ) {
+            let manager = self.clone();
+            let transaction_id = transaction.id().clone();
+            runtime.spawn(async move {
+                let _operation = operation;
+                manager
+                    .timer_manager
+                    .unregister_transaction(&transaction_id)
+                    .await;
+            });
+        }
+    }
+
+    fn index_server_invite_dialog(
+        &self,
+        request: &Request,
+        key: &TransactionKey,
+        admission_owner: TransactionAdmissionOwner,
+    ) {
         if let Some(dialog_key) = ServerInviteDialogKey::from_request(request) {
             self.insert_server_invite_dialog_index_entry(
                 dialog_key,
-                ServerInviteAckIndexEntry::active(key.clone()),
+                ServerInviteAckIndexEntry::active_with_owner(key.clone(), Some(admission_owner)),
             );
         }
     }
@@ -4450,34 +7048,42 @@ impl TransactionManager {
     pub(crate) fn insert_server_invite_dialog_index_entry(
         &self,
         dialog_key: ServerInviteDialogKey,
-        entry: ServerInviteAckIndexEntry,
+        mut entry: ServerInviteAckIndexEntry,
     ) {
         let transaction_id = entry.transaction_id.clone();
         let is_active = entry.expires_at.is_none();
+        let generation = self.next_server_invite_dialog_deadline_generation();
+        entry.deadline_generation = generation;
+        let expires_at = entry.expires_at;
 
-        self.server_invite_dialog_index
+        let previous = self
+            .server_invite_dialog_index
             .insert(dialog_key.clone(), entry);
+
+        if let Some(previous) = previous {
+            if previous.expires_at.is_none()
+                && (!is_active || previous.transaction_id != transaction_id)
+            {
+                self.remove_server_invite_dialog_reverse_key(&previous.transaction_id, &dialog_key);
+            }
+        }
 
         if is_active {
             let mut keys = self
                 .server_invite_dialog_keys_by_tx
-                .entry(transaction_id)
+                .entry(transaction_id.clone())
                 .or_default();
             if !keys.iter().any(|existing| existing == &dialog_key) {
-                keys.push(dialog_key);
+                keys.push(dialog_key.clone());
             }
         }
 
-        let inserts = self
-            .server_invite_dialog_index_insert_count
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        let prune_interval = (self.server_invite_dialog_index_capacity / 4).max(1024);
-        if inserts % prune_interval == 0
-            || self.server_invite_dialog_index.len()
-                > self.server_invite_dialog_index_capacity.saturating_mul(2)
-        {
-            self.prune_server_invite_dialog_index();
+        if let Some(due_at) = expires_at {
+            self.schedule_server_invite_ack_expiry(ServerInviteAckExpiryEntry {
+                due_at,
+                generation,
+                dialog_key,
+            });
         }
     }
 
@@ -4486,18 +7092,62 @@ impl TransactionManager {
 
         if let Some((_, keys)) = self.server_invite_dialog_keys_by_tx.remove(transaction_id) {
             for key in keys {
+                let generation = self.next_server_invite_dialog_deadline_generation();
+                let mut should_schedule = false;
                 if let Some(mut indexed) = self.server_invite_dialog_index.get_mut(&key) {
                     if indexed.transaction_id == *transaction_id {
                         indexed.expires_at = Some(expires_at);
+                        indexed.deadline_generation = generation;
+                        should_schedule = true;
                     }
+                }
+
+                if should_schedule {
+                    self.schedule_server_invite_ack_expiry(ServerInviteAckExpiryEntry {
+                        due_at: expires_at,
+                        generation,
+                        dialog_key: key,
+                    });
                 }
             }
         }
+    }
 
-        if self.server_invite_dialog_index.len()
-            > self.server_invite_dialog_index_capacity.saturating_mul(2)
-        {
-            self.prune_server_invite_dialog_index();
+    fn remove_server_invite_dialog_index_exact(&self, transaction_id: &TransactionKey) {
+        let Some((_, keys)) = self.server_invite_dialog_keys_by_tx.remove(transaction_id) else {
+            return;
+        };
+        for key in keys {
+            self.server_invite_dialog_index
+                .remove_if(&key, |_, indexed| indexed.transaction_id == *transaction_id);
+        }
+    }
+
+    fn next_server_invite_dialog_deadline_generation(&self) -> u64 {
+        self.server_invite_dialog_deadline_generation
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn schedule_server_invite_ack_expiry(&self, deadline: ServerInviteAckExpiryEntry) {
+        self.server_invite_dialog_expiry_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(deadline);
+    }
+
+    fn remove_server_invite_dialog_reverse_key(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_key: &ServerInviteDialogKey,
+    ) {
+        let mut became_empty = false;
+        if let Some(mut keys) = self.server_invite_dialog_keys_by_tx.get_mut(transaction_id) {
+            keys.retain(|key| key != dialog_key);
+            became_empty = keys.is_empty();
+        }
+        if became_empty {
+            self.server_invite_dialog_keys_by_tx
+                .remove_if(transaction_id, |_, keys| keys.is_empty());
         }
     }
 
@@ -4571,6 +7221,8 @@ impl TransactionManager {
                 expires_at: now + INVITE_2XX_RESPONSE_CACHE_TTL,
                 next_retransmit_at: now + self.timer_settings.t1,
                 retransmit_interval: self.timer_settings.t1,
+                deadline_generation: 0,
+                _admission_owner: tx.data().transaction_admission_owner(),
             },
         );
     }
@@ -4578,22 +7230,31 @@ impl TransactionManager {
     fn insert_invite_2xx_response_cache_entry(
         &self,
         transaction_id: TransactionKey,
-        entry: Invite2xxResponseCacheEntry,
+        mut entry: Invite2xxResponseCacheEntry,
     ) {
-        let next_retransmit_at = entry.next_retransmit_at;
-        self.invite_2xx_response_cache
-            .insert(transaction_id.clone(), entry);
+        let scheduled_len = {
+            // All paths that modify both structures take the scheduler lock
+            // before a cache shard. A maintenance candidate therefore either
+            // observes this complete generation or an older generation, never
+            // a half-installed cache/deadline pair.
+            let mut scheduler = self
+                .invite_2xx_response_due_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            entry.deadline_generation = scheduler.schedule(
+                transaction_id.clone(),
+                entry.next_retransmit_at,
+                entry.expires_at,
+            );
+            self.invite_2xx_response_cache.insert(transaction_id, entry);
+            scheduler.len()
+        };
         diagnostics::record_invite_2xx_cache_insert();
-        self.schedule_invite_2xx_response_retransmit(transaction_id, next_retransmit_at);
 
-        let inserts = self
-            .invite_2xx_response_cache_insert_count
-            .fetch_add(1, Ordering::Relaxed)
-            + 1;
-        let prune_interval = (self.invite_2xx_response_cache_capacity / 4).max(1024);
-        if inserts % prune_interval == 0
-            || self.invite_2xx_response_cache.len() > self.invite_2xx_response_cache_capacity
-        {
+        // Overflow is normally at most one entry because every insertion
+        // checks the exact scheduler length. The bounded prune also handles a
+        // lowered runtime/test capacity without an unbounded catch-up pass.
+        if scheduled_len > self.invite_2xx_response_cache_capacity {
             self.prune_invite_2xx_response_cache();
         }
     }
@@ -4613,8 +7274,12 @@ impl TransactionManager {
         };
 
         if entry.is_expired(Instant::now()) {
-            self.invite_2xx_response_cache.remove(transaction_id);
-            diagnostics::record_invite_2xx_cache_expired();
+            if self.remove_invite_2xx_response_cache_generation(
+                transaction_id,
+                entry.deadline_generation,
+            ) {
+                diagnostics::record_invite_2xx_cache_expired();
+            }
             return Ok(false);
         }
 
@@ -4645,101 +7310,117 @@ impl TransactionManager {
         Ok(true)
     }
 
-    fn schedule_invite_2xx_response_retransmit(
+    fn remove_invite_2xx_response_cache_generation(
         &self,
-        transaction_id: TransactionKey,
-        due_at: Instant,
-    ) {
-        let sequence = self
-            .invite_2xx_response_due_sequence
-            .fetch_add(1, Ordering::Relaxed);
-        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
-            queue.push(Invite2xxDueEntry {
-                due_at,
-                sequence,
-                transaction_id,
-            });
-        }
+        transaction_id: &TransactionKey,
+        generation: u64,
+    ) -> bool {
+        let mut scheduler = self
+            .invite_2xx_response_due_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        scheduler.unschedule(transaction_id, generation);
+        self.invite_2xx_response_cache
+            .remove_if(transaction_id, |_, entry| {
+                entry.deadline_generation == generation
+            })
+            .is_some()
     }
 
     fn maintenance_prune_retained_state(&self) {
-        self.prune_server_invite_dialog_index();
-        self.prune_invite_2xx_response_cache();
+        self.maintenance_prune_auxiliary_retained_state();
+        // Diagnostic callers may request a synchronous snapshot. Keep that
+        // assist bounded as well; the due-driven worker owns any remainder.
         self.prune_retired_client_transactions();
-        self.compact_invite_2xx_response_due_queue();
+        self.prune_client_completions();
+    }
+
+    fn maintenance_prune_auxiliary_retained_state(&self) {
+        self.expire_due_server_invite_dialog_index(
+            Instant::now(),
+            SERVER_INVITE_ACK_EXPIRY_BATCH_MAX,
+        );
+        self.prune_invite_2xx_response_cache();
         self.prune_closed_event_subscribers_now();
         self.prune_stale_pending_inbound_bytes();
         self.prune_stale_pending_inbound_principals();
     }
 
     fn prune_retired_client_transactions(&self) {
-        if self.transaction_destinations.is_empty() {
-            return;
-        }
-
         let now = Instant::now();
-        let expired: Vec<TransactionKey> = self
-            .transaction_destinations
-            .iter()
-            .filter(|entry| {
-                entry
-                    .value()
-                    .retired()
-                    .is_some_and(|retired| retired.expires_at <= now)
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
-        for key in expired {
+        let retired_capacity = self
+            .retired_client_transaction_capacity
+            .load(Ordering::Acquire);
+        let (removals, more_due) = {
+            let mut deadlines = self
+                .retired_client_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let removals = deadlines.take_due_and_overflow(
+                now,
+                retired_capacity,
+                RETAINED_CLIENT_DEADLINE_BATCH_MAX,
+            );
+            let more_due = deadlines.has_due_or_overflow(now, retired_capacity);
+            (removals, more_due)
+        };
+
+        for deadline in removals {
             if self
                 .transaction_destinations
-                .remove_if(&key, |_, state| {
-                    state
-                        .retired()
-                        .is_some_and(|retired| retired.expires_at <= now)
+                .remove_if(deadline.transaction_id.as_ref(), |_, state| {
+                    state.retired().is_some_and(|retired| {
+                        retired.deadline_version == deadline.version
+                            && retired.expires_at == deadline.expires_at
+                    })
                 })
                 .is_some()
             {
                 self.decrement_retired_client_transaction_count();
             }
         }
-
-        let mut oldest: Vec<(TransactionKey, Instant)> = self
-            .transaction_destinations
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .value()
-                    .retired()
-                    .map(|retired| (entry.key().clone(), retired.expires_at))
-            })
-            .collect();
-        let len = oldest.len();
-        if len <= self.retired_client_transaction_capacity {
-            return;
+        if more_due {
+            self.wake_retained_client_deadline_worker();
         }
+    }
 
-        oldest.sort_by_key(|(_, expires_at)| *expires_at);
-        for (key, expires_at) in oldest
-            .into_iter()
-            .take(len.saturating_sub(self.retired_client_transaction_capacity))
-        {
-            if self
-                .transaction_destinations
-                .remove_if(&key, |_, state| {
-                    state
-                        .retired()
-                        .is_some_and(|retired| retired.expires_at == expires_at)
-                })
-                .is_some()
-            {
-                self.decrement_retired_client_transaction_count();
-            }
+    fn prune_client_completions(&self) {
+        let now = Instant::now();
+        let (removals, more_due) = {
+            let mut deadlines = self
+                .client_completion_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let removals = deadlines.take_due_and_overflow(
+                now,
+                self.client_completion_capacity,
+                RETAINED_CLIENT_DEADLINE_BATCH_MAX,
+            );
+            let more_due = deadlines.has_due_or_overflow(now, self.client_completion_capacity);
+            (removals, more_due)
+        };
+
+        for deadline in removals {
+            self.client_completions
+                .remove_if(deadline.transaction_id.as_ref(), |_, completion| {
+                    completion.retained_deadline() == Some((deadline.expires_at, deadline.version))
+                });
+        }
+        if more_due {
+            self.wake_retained_client_deadline_worker();
         }
     }
 
     fn retired_client_transaction_count_unpruned(&self) -> usize {
         self.retired_client_transaction_count
             .load(Ordering::Acquire)
+    }
+
+    fn retired_client_deadline_count(&self) -> usize {
+        self.retired_client_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     fn decrement_retired_client_transaction_count(&self) {
@@ -4751,12 +7432,9 @@ impl TransactionManager {
     }
 
     fn prune_closed_event_subscribers_now(&self) {
-        Self::prune_event_subscribers(
-            &self.event_subscribers,
-            Some(&self.subscriber_to_transactions),
-            Some(&self.transaction_to_subscribers),
-            &[],
-        );
+        if let Some(observers) = self.events_tx.observer_fanout() {
+            observers.prune_closed_now();
+        }
     }
 
     fn prune_stale_pending_inbound_bytes(&self) {
@@ -4810,7 +7488,7 @@ impl TransactionManager {
                 self.pending_inbound_principal_inserted_at
                     .get(entry.key())
                     .map(|inserted_at| {
-                        now.saturating_duration_since(*inserted_at.value())
+                        now.saturating_duration_since(inserted_at.value().inserted_at)
                             >= PENDING_INBOUND_PRINCIPAL_TTL
                     })
                     .unwrap_or(true)
@@ -4819,50 +7497,14 @@ impl TransactionManager {
             .collect();
 
         for key in stale_keys {
-            self.pending_inbound_principals.remove(&key);
-            self.pending_inbound_principal_inserted_at.remove(&key);
-        }
-    }
-
-    fn compact_invite_2xx_response_due_queue(&self) {
-        let now = Instant::now();
-        let mut expired_cache_keys = Vec::new();
-
-        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
-            if queue.is_empty() {
-                return;
-            }
-
-            let mut retained = BinaryHeap::with_capacity(queue.len());
-            while let Some(due_entry) = queue.pop() {
-                let keep = self
-                    .invite_2xx_response_cache
-                    .get(&due_entry.transaction_id)
-                    .map(|entry| {
-                        if entry.is_expired(now) {
-                            expired_cache_keys.push(due_entry.transaction_id.clone());
-                            false
-                        } else {
-                            due_entry.due_at == entry.next_retransmit_at
-                        }
-                    })
-                    .unwrap_or(false);
-
-                if keep {
-                    retained.push(due_entry);
-                }
-            }
-            *queue = retained;
-        }
-
-        for key in expired_cache_keys {
-            if self
-                .invite_2xx_response_cache
-                .get(&key)
-                .is_some_and(|entry| entry.value().is_expired(now))
-            {
-                self.invite_2xx_response_cache.remove(&key);
-                diagnostics::record_invite_2xx_cache_expired();
+            let expired_lease =
+                self.pending_inbound_principal_inserted_at
+                    .remove_if(&key, |_, lease| {
+                        now.saturating_duration_since(lease.inserted_at)
+                            >= PENDING_INBOUND_PRINCIPAL_TTL
+                    });
+            if expired_lease.is_some() {
+                self.pending_inbound_principals.remove(&key);
             }
         }
     }
@@ -4871,79 +7513,100 @@ impl TransactionManager {
         let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let cache_len = self.invite_2xx_response_cache.len();
         let now = Instant::now();
-        let mut due_entries = Vec::new();
-        let mut due_queue_len = 0usize;
-        let mut capped = false;
         let max_due_per_tick = self
             .invite_2xx_retransmit_max_due_per_tick
             .load(Ordering::Relaxed)
             .max(1);
-
-        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
-            due_queue_len = queue.len();
-            while queue.peek().is_some_and(|entry| entry.due_at <= now) {
-                if due_entries.len() >= max_due_per_tick {
-                    capped = true;
-                    break;
-                }
-                if let Some(entry) = queue.pop() {
-                    due_entries.push(entry);
-                }
-            }
-        }
+        let (due_queue_len, due_entries, capped) = {
+            let mut scheduler = self
+                .invite_2xx_response_due_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let due_queue_len = scheduler.len();
+            let (due_entries, capped) = scheduler.take_due(now, max_due_per_tick);
+            (due_queue_len, due_entries, capped)
+        };
 
         let scanned = due_entries.len();
         let mut expired_count = 0usize;
         let mut sends = Vec::new();
-        let mut reschedule = Vec::new();
 
         for due_entry in due_entries {
             let mut expired = false;
             let mut send = None;
-            let mut next_due = None;
 
-            if let Some(mut entry) = self
-                .invite_2xx_response_cache
-                .get_mut(&due_entry.transaction_id)
             {
-                if entry.is_expired(now) {
-                    expired = true;
-                } else if entry.acked_at.is_some() {
-                    // ACKed 2xx responses are retained only for duplicate INVITEs.
-                    // Proactive retransmission must stop once the ACK arrives.
-                } else if entry.next_retransmit_at <= due_entry.due_at
-                    && now >= entry.next_retransmit_at
+                // The due record has already left the scheduler. Reacquire it
+                // before the cache shard so a concurrent ACK/replacement uses
+                // the same lock order and receives a distinct generation.
+                let mut scheduler = self
+                    .invite_2xx_response_due_queue
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Some(mut entry) = self
+                    .invite_2xx_response_cache
+                    .get_mut(due_entry.transaction_id.as_ref())
                 {
-                    send = Some((
-                        entry.response.clone(),
-                        entry.wire_bytes.clone(),
-                        entry.route.clone(),
-                    ));
-                    entry.retransmit_interval = entry
-                        .retransmit_interval
-                        .saturating_mul(2)
-                        .min(self.timer_settings.t2);
-                    entry.next_retransmit_at = now + entry.retransmit_interval;
-                    next_due = Some(entry.next_retransmit_at);
+                    if entry.deadline_generation != due_entry.generation {
+                        // A replacement or ACK already installed a newer exact
+                        // deadline while this bounded batch was being handled.
+                    } else if entry.next_retransmit_at != due_entry.due_at
+                        || entry.expires_at != due_entry.expires_at
+                    {
+                        // Defensive repair for state written by old snapshots
+                        // or test instrumentation. Runtime writers update both
+                        // indexes atomically under this lock.
+                        entry.deadline_generation = scheduler.schedule(
+                            due_entry.transaction_id.as_ref().clone(),
+                            entry.next_retransmit_at,
+                            entry.expires_at,
+                        );
+                    } else if entry.is_expired(now) {
+                        expired = true;
+                    } else if entry.acked_at.is_some() {
+                        // ACKed entries normally have due_at == expires_at.
+                        // Preserve exact retention even if a clock boundary
+                        // made the due check win just before expiry.
+                        entry.deadline_generation = scheduler.schedule(
+                            due_entry.transaction_id.as_ref().clone(),
+                            entry.expires_at,
+                            entry.expires_at,
+                        );
+                    } else {
+                        send = Some((
+                            entry.response.clone(),
+                            entry.wire_bytes.clone(),
+                            entry.route.clone(),
+                        ));
+                        entry.retransmit_interval = entry
+                            .retransmit_interval
+                            .saturating_mul(2)
+                            .min(self.timer_settings.t2);
+                        entry.next_retransmit_at = now + entry.retransmit_interval;
+                        entry.deadline_generation = scheduler.schedule(
+                            due_entry.transaction_id.as_ref().clone(),
+                            entry.next_retransmit_at,
+                            entry.expires_at,
+                        );
+                    }
+                }
+
+                if expired
+                    && self
+                        .invite_2xx_response_cache
+                        .remove_if(due_entry.transaction_id.as_ref(), |_, entry| {
+                            entry.deadline_generation == due_entry.generation
+                        })
+                        .is_some()
+                {
+                    diagnostics::record_invite_2xx_cache_expired();
+                    expired_count += 1;
                 }
             }
 
-            if expired {
-                self.invite_2xx_response_cache
-                    .remove(&due_entry.transaction_id);
-                diagnostics::record_invite_2xx_cache_expired();
-                expired_count += 1;
-            }
             if let Some((response, wire_bytes, route)) = send {
                 sends.push((response, wire_bytes, route));
             }
-            if let Some(next_due) = next_due {
-                reschedule.push((due_entry.transaction_id, next_due));
-            }
-        }
-
-        for (transaction_id, due_at) in reschedule {
-            self.schedule_invite_2xx_response_retransmit(transaction_id, due_at);
         }
 
         let mut retransmitted = 0usize;
@@ -4997,8 +7660,10 @@ impl TransactionManager {
 
     pub(crate) fn mark_invite_2xx_response_cache_acked(&self, transaction_id: &TransactionKey) {
         let now = Instant::now();
-        let mut ack_retention_until = None;
-
+        let mut scheduler = self
+            .invite_2xx_response_due_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(mut entry) = self.invite_2xx_response_cache.get_mut(transaction_id) {
             if entry.acked_at.is_none() {
                 diagnostics::record_invite_2xx_ack_removed(entry.created_at.elapsed());
@@ -5007,80 +7672,115 @@ impl TransactionManager {
                 entry.acked_at = Some(now);
                 entry.expires_at = retained_until;
                 entry.next_retransmit_at = retained_until;
-                ack_retention_until = Some(retained_until);
+                entry.deadline_generation =
+                    scheduler.schedule(transaction_id.clone(), retained_until, retained_until);
             }
-        }
-
-        if let Some(retained_until) = ack_retention_until {
-            self.schedule_invite_2xx_response_retransmit(transaction_id.clone(), retained_until);
         }
     }
 
     pub(crate) fn remove_invite_2xx_response_cache(&self, transaction_id: &TransactionKey) {
-        self.invite_2xx_response_cache.remove(transaction_id);
+        let mut scheduler = self
+            .invite_2xx_response_due_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, entry)) = self.invite_2xx_response_cache.remove(transaction_id) {
+            scheduler.unschedule(transaction_id, entry.deadline_generation);
+        }
     }
 
     pub(crate) fn mark_transaction_terminated_indexed(&self, transaction_id: &TransactionKey) {
-        self.terminated_transactions
-            .insert(transaction_id.clone(), ());
+        // Synthetic compact Timer J/K lifecycle observations arrive after the
+        // active runner has already been removed. Re-indexing those keys would
+        // create a 2x event-rate cleanup backlog (and can outpace the bounded
+        // 1 Hz repair pass). Only live active maps require this wake index.
+        if self.client_transactions.contains_key(transaction_id)
+            || self.server_transactions.contains_key(transaction_id)
+        {
+            self.terminated_transactions
+                .insert(transaction_id.clone(), ());
+        }
     }
 
-    fn prune_server_invite_dialog_index(&self) {
+    fn expire_due_server_invite_dialog_index(&self, now: Instant, max_work: usize) -> usize {
+        if max_work == 0 {
+            return 0;
+        }
+
+        let due = {
+            let mut queue = self
+                .server_invite_dialog_expiry_queue
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut due = Vec::with_capacity(max_work.min(queue.len()));
+            while due.len() < max_work && queue.peek().is_some_and(|entry| entry.due_at <= now) {
+                if let Some(deadline) = queue.pop() {
+                    due.push(deadline);
+                }
+            }
+            due
+        };
+
+        let processed = due.len();
+        for deadline in due {
+            self.server_invite_dialog_index
+                .remove_if(&deadline.dialog_key, |_, current| {
+                    current.deadline_generation == deadline.generation
+                        && current.expires_at == Some(deadline.due_at)
+                        && current.is_expired(now)
+                });
+        }
+        processed
+    }
+
+    /// Full-map repair for explicit diagnostics only. Normal cleanup is
+    /// exclusively driven by `server_invite_dialog_expiry_queue`.
+    fn repair_expired_server_invite_dialog_index(&self) -> usize {
         let now = Instant::now();
-        let expired_keys: Vec<ServerInviteDialogKey> = self
+        let expired: Vec<(ServerInviteDialogKey, u64)> = self
             .server_invite_dialog_index
             .iter()
             .filter(|entry| entry.value().is_expired(now))
-            .map(|entry| entry.key().clone())
+            .map(|entry| (entry.key().clone(), entry.value().deadline_generation))
             .collect();
 
-        for key in expired_keys {
+        let mut removed = 0;
+        for (key, generation) in expired {
             if self
                 .server_invite_dialog_index
-                .get(&key)
-                .is_some_and(|entry| entry.value().is_expired(now))
+                .remove_if(&key, |_, current| {
+                    current.deadline_generation == generation && current.is_expired(now)
+                })
+                .is_some()
             {
-                self.server_invite_dialog_index.remove(&key);
+                removed += 1;
             }
         }
+        removed
     }
 
     fn prune_invite_2xx_response_cache(&self) {
         let now = Instant::now();
-        let expired_keys: Vec<TransactionKey> = self
-            .invite_2xx_response_cache
-            .iter()
-            .filter(|entry| entry.value().is_expired(now))
-            .map(|entry| entry.key().clone())
-            .collect();
+        let max_work = self
+            .invite_2xx_retransmit_max_due_per_tick
+            .load(Ordering::Relaxed)
+            .max(1);
+        let removals = self
+            .invite_2xx_response_due_queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take_expired_and_overflow(now, self.invite_2xx_response_cache_capacity, max_work);
 
-        for key in expired_keys {
+        for deadline in removals {
             if self
                 .invite_2xx_response_cache
-                .get(&key)
-                .is_some_and(|entry| entry.value().is_expired(now))
+                .remove_if(deadline.transaction_id.as_ref(), |_, entry| {
+                    entry.deadline_generation == deadline.generation
+                })
+                .is_some()
+                && deadline.expires_at <= now
             {
-                self.invite_2xx_response_cache.remove(&key);
+                diagnostics::record_invite_2xx_cache_expired();
             }
-        }
-
-        let len = self.invite_2xx_response_cache.len();
-        if len <= self.invite_2xx_response_cache_capacity {
-            return;
-        }
-
-        let mut entries: Vec<(TransactionKey, Instant)> = self
-            .invite_2xx_response_cache
-            .iter()
-            .map(|entry| (entry.key().clone(), entry.value().expires_at))
-            .collect();
-        entries.sort_by_key(|(_, expires_at)| *expires_at);
-
-        for (key, _) in entries
-            .into_iter()
-            .take(len.saturating_sub(self.invite_2xx_response_cache_capacity))
-        {
-            self.invite_2xx_response_cache.remove(&key);
         }
     }
 
@@ -5106,6 +7806,27 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<TransactionKey> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped CANCEL composition".into()))
+            }
+            result = self.cancel_invite_transaction_with_extras_within_operation(
+                invite_tx_id,
+                extra_headers,
+            ) => result,
+        }
+    }
+
+    async fn cancel_invite_transaction_with_extras_within_operation(
+        &self,
+        invite_tx_id: &TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<TransactionKey> {
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Canceling invite transaction");
 
         // Check that this is an INVITE client transaction
@@ -5117,8 +7838,16 @@ impl TransactionManager {
         }
 
         // Get the original INVITE request
-        let invite_request =
-            utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
+        // The active runner may already have been replaced by a compact
+        // retired INVITE after an ambiguous transport error. The compatibility
+        // accessor parses its immutable wire image lazily, preserving exact
+        // CANCEL construction without retaining the heavy transaction.
+        let invite_request = self.original_request(invite_tx_id).await?.ok_or_else(|| {
+            Error::transaction_not_found(
+                invite_tx_id.clone(),
+                "CANCEL request template is unavailable",
+            )
+        })?;
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Got INVITE request for cancellation");
 
@@ -5342,6 +8071,10 @@ impl fmt::Debug for TransactionManager {
             .field(
                 "retired_client_transactions",
                 &self.retired_client_transaction_count_unpruned(),
+            )
+            .field(
+                "retired_client_deadlines",
+                &self.retired_client_deadline_count(),
             )
             .field("events_tx", &self.events_tx) // Sender might be Debug
             .field("event_subscribers", &"Arc<Mutex<Vec<Sender>>>")

@@ -35,8 +35,11 @@ pub mod bridge;
 pub mod server;
 
 pub use adapter::{
-    AmazonConnectAdapter, AmazonConnectAdapterBuilder, ConnectMetrics, ConnectProfileResolverError,
-    ContactSetupObserver, ContactSetupStage, ContactTarget, ADAPTER_EVENT_CAP,
+    AmazonConnectAdapter, AmazonConnectAdapterBuilder, AmazonConnectCleanupObserver,
+    AmazonConnectDrainReport, AmazonConnectTransportHandle, ConnectMetrics,
+    ConnectProfileResolverError, ContactSetupObserver, ContactSetupStage, ContactTarget,
+    RecoveredAmazonConnectContact, RetainedAmazonConnectCleanup, ADAPTER_EVENT_CAP,
+    AMAZON_CONNECT_CONTACT_REFERENCE_KIND,
 };
 pub use config::ConnectConfig;
 pub use control::{

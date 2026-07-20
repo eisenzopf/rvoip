@@ -17,6 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type SessionSubscriber = Box<dyn Fn(SessionEvent) + Send + Sync>;
+type SessionSubscribers = Arc<RwLock<HashMap<SessionId, Vec<SessionSubscriber>>>>;
+
 /// Extended state machine with helper methods
 pub struct StateMachineHelpers {
     /// Core state machine
@@ -26,7 +29,7 @@ pub struct StateMachineHelpers {
     active_sessions: Arc<RwLock<HashMap<SessionId, SessionInfo>>>,
 
     /// Event subscribers
-    subscribers: Arc<RwLock<HashMap<SessionId, Vec<Box<dyn Fn(SessionEvent) + Send + Sync>>>>>,
+    subscribers: SessionSubscribers,
 }
 
 /// Events for subscribers
@@ -165,10 +168,13 @@ impl StateMachineHelpers {
         leg_session_id: &SessionId,
         transferor_session_id: &SessionId,
     ) -> Result<()> {
-        let mut session = self.state_machine.store.get_session(leg_session_id).await?;
-        session.transferor_session_id = Some(transferor_session_id.clone());
-        session.is_transfer_call = true;
-        self.state_machine.store.update_session(session).await?;
+        self.state_machine
+            .store
+            .update_session_with(leg_session_id, |session| {
+                session.transferor_session_id = Some(transferor_session_id.clone());
+                session.is_transfer_call = true;
+            })
+            .await?;
         Ok(())
     }
 
@@ -201,21 +207,24 @@ impl StateMachineHelpers {
             || pai_uri.is_some()
             || !extra_headers.is_empty()
         {
-            let mut session = self.state_machine.store.get_session(&session_id).await?;
-            if let Some(creds) = credentials {
-                session.credentials = Some(creds);
-            }
-            if let Some(referor) = transferor_session_id {
-                session.transferor_session_id = Some(referor);
-                session.is_transfer_call = true;
-            }
-            if let Some(pai) = pai_uri {
-                session.pai_uri = Some(pai);
-            }
-            if !extra_headers.is_empty() {
-                session.extra_headers = extra_headers;
-            }
-            self.state_machine.store.update_session(session).await?;
+            self.state_machine
+                .store
+                .update_session_with(&session_id, |session| {
+                    if let Some(creds) = credentials {
+                        session.credentials = Some(creds);
+                    }
+                    if let Some(referor) = transferor_session_id {
+                        session.transferor_session_id = Some(referor);
+                        session.is_transfer_call = true;
+                    }
+                    if let Some(pai) = pai_uri {
+                        session.pai_uri = Some(pai);
+                    }
+                    if !extra_headers.is_empty() {
+                        session.extra_headers = extra_headers;
+                    }
+                })
+                .await?;
         }
 
         self.state_machine
@@ -244,10 +253,13 @@ impl StateMachineHelpers {
     /// and flips `sdp_negotiated = true` before dispatching `AcceptCall`, so
     /// the `GenerateLocalSDP`/`NegotiateSDPAsUAS` actions become no-ops.
     pub async fn accept_call_with_sdp(&self, session_id: &SessionId, sdp: String) -> Result<()> {
-        let mut session = self.state_machine.store.get_session(session_id).await?;
-        session.local_sdp = Some(sdp);
-        session.sdp_negotiated = true;
-        self.state_machine.store.update_session(session).await?;
+        self.state_machine
+            .store
+            .update_session_with(session_id, |session| {
+                session.local_sdp = Some(sdp);
+                session.sdp_negotiated = true;
+            })
+            .await?;
 
         self.state_machine
             .process_event(session_id, EventType::AcceptCall)
@@ -314,8 +326,7 @@ impl StateMachineHelpers {
         if self
             .state_machine
             .store
-            .get_session(session_id)
-            .await
+            .with_session(session_id, |_| ())
             .is_err()
         {
             return Err(SessionError::SessionNotFound(session_id.to_string()));
@@ -401,8 +412,36 @@ impl StateMachineHelpers {
 
     /// Get current state of a session
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
-        let session = self.state_machine.store.get_session(session_id).await?;
-        Ok(session.call_state)
+        Ok(self
+            .state_machine
+            .store
+            .with_session(session_id, |session| session.call_state.clone())?)
+    }
+
+    /// Return the codec negotiated for one exact live session.
+    ///
+    /// Media adapters use this retained session-state value instead of
+    /// guessing PCMU before SDP negotiation has completed. A session whose
+    /// SDP was supplied by the application without an anchored media
+    /// negotiation cannot back a [`SipMediaStream`](crate::media_stream::SipMediaStream),
+    /// so fail that case instead of leaving stream binding pending forever.
+    pub(crate) async fn negotiated_media_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<crate::session_store::state::NegotiatedConfig>> {
+        let (negotiated_config, sdp_negotiated) = self
+            .state_machine
+            .store
+            .with_session(session_id, |session| {
+                (session.negotiated_config.clone(), session.sdp_negotiated)
+            })?;
+        match negotiated_config {
+            Some(config) => Ok(Some(config)),
+            None if sdp_negotiated => Err(crate::errors::SessionError::MediaError(
+                "SDP was supplied without an anchored negotiated media configuration".to_string(),
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Check if a session is in conference

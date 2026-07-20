@@ -99,7 +99,7 @@ mod tests {
             Some("bob"),
         );
         assert_eq!(cfg.urls, vec!["turn:turn.example.com:3478"]);
-        let username = cfg.username.expect("username");
+        let username = cfg.username.clone().expect("username");
         assert!(username.ends_with(":bob"));
         let expiry: u64 = username
             .split(':')
@@ -121,7 +121,7 @@ mod tests {
     #[test]
     fn generate_without_hint_omits_colon() {
         let cfg = generate_ephemeral("turn:x", b"k", Duration::from_secs(60), None);
-        let username = cfg.username.unwrap();
+        let username = cfg.username.clone().unwrap();
         assert!(!username.contains(':'), "no hint → no colon: {username}");
     }
 }

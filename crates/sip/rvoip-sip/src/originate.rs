@@ -5,12 +5,11 @@
 //! sending signaling. Header values and authentication material are omitted
 //! from every diagnostic representation.
 //!
-//! This admission layer does not apply the retained values to the wire. The
-//! Gate 7 activation step must use one duplicate-preserving append path for
-//! both the initial INVITE and authenticated retry, and must validate every
-//! generated [`crate::auth::ClientAuthHeader`] value again before converting
-//! it to a raw header (an AKA provider can generate arbitrary output). Its
-//! capture-UAS suite is the first end-to-end consumer of this context.
+//! The retained route applies these values only during staged activation. One
+//! duplicate-preserving append path serves the initial INVITE and authenticated
+//! retry, and every generated [`crate::auth::ClientAuthHeader`] value is
+//! validated again before raw-header conversion because an AKA provider can
+//! generate arbitrary output. Capture-UAS coverage verifies the complete path.
 
 use crate::api::headers::policy::{classify, HeaderRole};
 use crate::auth::SipClientAuth;
@@ -20,6 +19,75 @@ use std::fmt;
 use std::str::FromStr;
 use thiserror::Error;
 use zeroize::Zeroize;
+
+/// Maximum UTF-8 size of an opaque installed SIP profile revision.
+pub const MAX_SIP_PROFILE_REVISION_BYTES: usize = 128;
+
+/// Validation failure for an opaque installed SIP profile revision.
+///
+/// Variants deliberately do not retain the supplied value. A revision is a
+/// server-installed lookup key, never a SIP URI or caller-controlled route.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[non_exhaustive]
+pub enum SipProfileRevisionError {
+    /// The revision was empty.
+    #[error("the SIP profile revision is empty")]
+    Empty,
+    /// The revision exceeded its admission bound.
+    #[error("the SIP profile revision is too large")]
+    TooLarge,
+    /// The revision contained a byte outside the opaque-token alphabet.
+    #[error("the SIP profile revision is invalid")]
+    Invalid,
+}
+
+/// Immutable opaque key for one installed SIP adapter profile revision.
+///
+/// Bridge and routing code resolves a named profile to this revision before
+/// origination. The SIP adapter pool compares the key exactly; it never parses
+/// it as a destination, URI, tenant, credential, or policy expression. Values
+/// are intentionally omitted from `Debug` so logs cannot become a secondary
+/// routing-token channel.
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SipProfileRevision(String);
+
+impl SipProfileRevision {
+    /// Validate an opaque revision token.
+    ///
+    /// The conservative alphabet is sufficient for UUIDs and hexadecimal or
+    /// base64url configuration digests while deliberately excluding SIP URI
+    /// delimiters such as `:`, `@`, `/`, `?`, and `;`.
+    pub fn new(value: impl Into<String>) -> Result<Self, SipProfileRevisionError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(SipProfileRevisionError::Empty);
+        }
+        if value.len() > MAX_SIP_PROFILE_REVISION_BYTES {
+            return Err(SipProfileRevisionError::TooLarge);
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(SipProfileRevisionError::Invalid);
+        }
+        Ok(Self(value))
+    }
+
+    /// Explicitly reveal the opaque lookup key to the installed-profile owner.
+    ///
+    /// Do not derive a SIP destination or authorization decision from this
+    /// string. The adapter pool performs only an exact installed-key lookup.
+    pub fn expose_opaque(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SipProfileRevision {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SipProfileRevision([redacted])")
+    }
+}
 
 /// Maximum number of ordered application headers on an initial SIP INVITE.
 pub const MAX_SIP_INITIAL_HEADERS: usize = 32;
@@ -31,6 +99,8 @@ pub const MAX_SIP_INITIAL_HEADER_VALUE_BYTES: usize = 4_096;
 pub const MAX_SIP_INITIAL_HEADER_BYTES: usize = 16 * 1_024;
 /// Maximum UTF-8 size of a per-call SIP From URI.
 pub const MAX_SIP_ORIGINATE_FROM_URI_BYTES: usize = 4_096;
+/// Maximum UTF-8 size of a per-call outbound proxy URI.
+pub const MAX_SIP_ORIGINATE_PROXY_URI_BYTES: usize = 4_096;
 /// Maximum number of non-nested authentication alternatives retained by one call.
 pub const MAX_SIP_ORIGINATE_AUTH_OPTIONS: usize = 8;
 /// Maximum UTF-8 size of a Digest or Basic username.
@@ -113,28 +183,32 @@ impl SipInitialHeaders {
                 value.zeroize();
                 return Err(SipInitialHeadersError::TooManyHeaders);
             }
-            let next_aggregate = aggregate_bytes
-                .checked_add(supplied_name.len())
-                .and_then(|total| total.checked_add(value.len()));
-            let Some(next_aggregate) = next_aggregate else {
-                supplied_name.zeroize();
-                value.zeroize();
-                return Err(SipInitialHeadersError::AggregateTooLarge);
-            };
-            if next_aggregate > MAX_SIP_INITIAL_HEADER_BYTES {
-                supplied_name.zeroize();
-                value.zeroize();
-                return Err(SipInitialHeadersError::AggregateTooLarge);
-            }
             let result = validate_initial_header(&supplied_name, &value);
             supplied_name.zeroize();
-            let name = match result {
+            let mut name = match result {
                 Ok(name) => name,
                 Err(error) => {
                     value.zeroize();
                     return Err(error);
                 }
             };
+            // Admission and defensive adapter-boundary validation both charge
+            // the canonical retained/wire spelling. Compact aliases such as
+            // `alert` therefore cannot succeed here and grow past the
+            // aggregate bound after parsing into `Alert-Info`.
+            let next_aggregate = aggregate_bytes
+                .checked_add(name.as_str().len())
+                .and_then(|total| total.checked_add(value.len()));
+            let Some(next_aggregate) = next_aggregate else {
+                zeroize_header_name(&mut name);
+                value.zeroize();
+                return Err(SipInitialHeadersError::AggregateTooLarge);
+            };
+            if next_aggregate > MAX_SIP_INITIAL_HEADER_BYTES {
+                zeroize_header_name(&mut name);
+                value.zeroize();
+                return Err(SipInitialHeadersError::AggregateTooLarge);
+            }
             aggregate_bytes = next_aggregate;
             validated.entries.push((name, value));
         }
@@ -159,6 +233,24 @@ impl SipInitialHeaders {
         self.entries
             .iter()
             .map(|(name, value)| (name, value.as_str()))
+    }
+
+    fn validate(&self) -> Result<(), SipInitialHeadersError> {
+        if self.entries.len() > MAX_SIP_INITIAL_HEADERS {
+            return Err(SipInitialHeadersError::TooManyHeaders);
+        }
+        let mut aggregate_bytes = 0usize;
+        for (name, value) in &self.entries {
+            aggregate_bytes = aggregate_bytes
+                .checked_add(name.as_str().len())
+                .and_then(|total| total.checked_add(value.len()))
+                .ok_or(SipInitialHeadersError::AggregateTooLarge)?;
+            if aggregate_bytes > MAX_SIP_INITIAL_HEADER_BYTES {
+                return Err(SipInitialHeadersError::AggregateTooLarge);
+            }
+            validate_initial_header(name.as_str(), value)?;
+        }
+        Ok(())
     }
 }
 
@@ -192,6 +284,12 @@ pub enum SipOriginateContextError {
     /// The configured From URI exceeded its admission bound.
     #[error("the SIP originate From URI is too large")]
     FromUriTooLarge,
+    /// The configured outbound proxy was empty or not a SIP/SIPS URI.
+    #[error("the SIP originate outbound proxy URI is invalid")]
+    InvalidOutboundProxyUri,
+    /// The configured outbound proxy URI exceeded its admission bound.
+    #[error("the SIP originate outbound proxy URI is too large")]
+    OutboundProxyUriTooLarge,
     /// Static authentication material was empty or contained a forbidden byte.
     #[error("the SIP originate authentication material is invalid")]
     InvalidAuthMaterial,
@@ -216,6 +314,9 @@ pub enum SipOriginateContextError {
     /// Authentication material exceeded its aggregate admission bound.
     #[error("SIP originate authentication material is too large in aggregate")]
     AuthAggregateTooLarge,
+    /// Retained initial headers failed defensive adapter-boundary validation.
+    #[error("the SIP originate initial headers are invalid")]
+    InvalidInitialHeaders,
 }
 
 /// SIP-specific options carried opaquely by an outbound originate request.
@@ -225,7 +326,9 @@ pub enum SipOriginateContextError {
 /// values, and the optional From URI are all redacted from diagnostics.
 #[derive(Clone, Default)]
 pub struct SipOriginateContext {
+    profile_revision: Option<SipProfileRevision>,
     from_uri: Option<String>,
+    outbound_proxy_uri: Option<String>,
     auth: Option<SipClientAuth>,
     initial_headers: SipInitialHeaders,
 }
@@ -234,6 +337,16 @@ impl SipOriginateContext {
     /// Construct empty SIP options that inherit the adapter configuration.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select one exact server-installed SIP profile revision.
+    ///
+    /// The value is independent from the request target. A multi-profile
+    /// adapter rejects requests that omit this key rather than attempting to
+    /// infer policy from the target URI.
+    pub fn with_profile_revision(mut self, revision: SipProfileRevision) -> Self {
+        self.profile_revision = Some(revision);
+        self
     }
 
     /// Override the From URI for this outbound SIP call.
@@ -246,6 +359,13 @@ impl SipOriginateContext {
             from_uri.zeroize();
             return Err(SipOriginateContextError::FromUriTooLarge);
         }
+        // Reject control bytes before invoking the lower URI parser. Besides
+        // preventing line smuggling, this keeps malformed sensitive caller
+        // identity out of parser diagnostics.
+        if from_uri.chars().any(char::is_control) {
+            from_uri.zeroize();
+            return Err(SipOriginateContextError::InvalidFromUri);
+        }
         let parsed = match rvoip_sip_core::Uri::from_str(&from_uri) {
             Ok(parsed) => parsed,
             Err(_) => {
@@ -253,12 +373,10 @@ impl SipOriginateContext {
                 return Err(SipOriginateContextError::InvalidFromUri);
             }
         };
-        if from_uri.chars().any(char::is_control)
-            || !matches!(
-                parsed.scheme(),
-                rvoip_sip_core::types::uri::Scheme::Sip | rvoip_sip_core::types::uri::Scheme::Sips
-            )
-        {
+        if !matches!(
+            parsed.scheme(),
+            rvoip_sip_core::types::uri::Scheme::Sip | rvoip_sip_core::types::uri::Scheme::Sips
+        ) {
             from_uri.zeroize();
             return Err(SipOriginateContextError::InvalidFromUri);
         }
@@ -282,6 +400,29 @@ impl SipOriginateContext {
         Ok(self)
     }
 
+    /// Route this initial request through one explicit proxy without changing
+    /// another call's transport policy. The SIP stack owns the resulting
+    /// `Route` header and rejects application attempts to inject one.
+    pub fn with_outbound_proxy(
+        mut self,
+        outbound_proxy_uri: impl Into<String>,
+    ) -> Result<Self, SipOriginateContextError> {
+        let mut outbound_proxy_uri = outbound_proxy_uri.into();
+        if outbound_proxy_uri.len() > MAX_SIP_ORIGINATE_PROXY_URI_BYTES {
+            outbound_proxy_uri.zeroize();
+            return Err(SipOriginateContextError::OutboundProxyUriTooLarge);
+        }
+        if validate_outbound_proxy_uri(&outbound_proxy_uri).is_err() {
+            outbound_proxy_uri.zeroize();
+            return Err(SipOriginateContextError::InvalidOutboundProxyUri);
+        }
+        if let Some(previous) = self.outbound_proxy_uri.as_mut() {
+            previous.zeroize();
+        }
+        self.outbound_proxy_uri = Some(outbound_proxy_uri);
+        Ok(self)
+    }
+
     /// Supply validated application-controlled headers for the first INVITE.
     pub fn with_initial_headers(mut self, headers: SipInitialHeaders) -> Self {
         self.initial_headers = headers;
@@ -298,9 +439,19 @@ impl SipOriginateContext {
         self.auth.as_ref()
     }
 
+    /// Optional per-call outbound proxy. Treat it as sensitive routing data.
+    pub fn outbound_proxy_uri(&self) -> Option<&str> {
+        self.outbound_proxy_uri.as_deref()
+    }
+
     /// Validated first-INVITE application headers.
     pub fn initial_headers(&self) -> &SipInitialHeaders {
         &self.initial_headers
+    }
+
+    /// Exact installed profile revision requested for this call.
+    pub fn profile_revision(&self) -> Option<&SipProfileRevision> {
+        self.profile_revision.as_ref()
     }
 
     /// Revalidate all retained admission bounds before SIP allocates a route.
@@ -309,14 +460,38 @@ impl SipOriginateContext {
     /// context boundary so future construction paths cannot bypass admission.
     pub fn validate(&self) -> Result<(), SipOriginateContextError> {
         if let Some(from_uri) = self.from_uri.as_deref() {
-            if from_uri.len() > MAX_SIP_ORIGINATE_FROM_URI_BYTES {
-                return Err(SipOriginateContextError::FromUriTooLarge);
-            }
+            validate_from_uri(from_uri)?;
+        }
+        if let Some(outbound_proxy_uri) = self.outbound_proxy_uri.as_deref() {
+            validate_outbound_proxy_uri(outbound_proxy_uri)?;
         }
         if let Some(auth) = self.auth.as_ref() {
             validate_client_auth(auth)?;
         }
+        self.initial_headers
+            .validate()
+            .map_err(|_| SipOriginateContextError::InvalidInitialHeaders)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unvalidated_for_adapter_test(
+        from_uri: Option<String>,
+        auth: Option<SipClientAuth>,
+        initial_headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            profile_revision: None,
+            from_uri,
+            outbound_proxy_uri: None,
+            auth,
+            initial_headers: SipInitialHeaders {
+                entries: initial_headers
+                    .into_iter()
+                    .map(|(name, value)| (HeaderName::Other(name), value))
+                    .collect(),
+            },
+        }
     }
 }
 
@@ -324,7 +499,9 @@ impl fmt::Debug for SipOriginateContext {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SipOriginateContext")
+            .field("has_profile_revision", &self.profile_revision.is_some())
             .field("has_from_uri", &self.from_uri.is_some())
+            .field("has_outbound_proxy", &self.outbound_proxy_uri.is_some())
             .field("has_auth", &self.auth.is_some())
             .field("initial_header_count", &self.initial_headers.len())
             .finish()
@@ -335,6 +512,9 @@ impl Drop for SipOriginateContext {
     fn drop(&mut self) {
         if let Some(from_uri) = self.from_uri.as_mut() {
             from_uri.zeroize();
+        }
+        if let Some(outbound_proxy_uri) = self.outbound_proxy_uri.as_mut() {
+            outbound_proxy_uri.zeroize();
         }
         if let Some(auth) = self.auth.as_mut() {
             zeroize_client_auth(auth);
@@ -418,6 +598,42 @@ fn validate_client_auth(auth: &SipClientAuth) -> Result<(), SipOriginateContextE
                 return Err(SipOriginateContextError::NestedAuthOptions);
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_from_uri(from_uri: &str) -> Result<(), SipOriginateContextError> {
+    if from_uri.len() > MAX_SIP_ORIGINATE_FROM_URI_BYTES {
+        return Err(SipOriginateContextError::FromUriTooLarge);
+    }
+    if from_uri.chars().any(char::is_control) {
+        return Err(SipOriginateContextError::InvalidFromUri);
+    }
+    let parsed = rvoip_sip_core::Uri::from_str(from_uri)
+        .map_err(|_| SipOriginateContextError::InvalidFromUri)?;
+    if !matches!(
+        parsed.scheme(),
+        rvoip_sip_core::types::uri::Scheme::Sip | rvoip_sip_core::types::uri::Scheme::Sips
+    ) {
+        return Err(SipOriginateContextError::InvalidFromUri);
+    }
+    Ok(())
+}
+
+fn validate_outbound_proxy_uri(outbound_proxy_uri: &str) -> Result<(), SipOriginateContextError> {
+    if outbound_proxy_uri.len() > MAX_SIP_ORIGINATE_PROXY_URI_BYTES {
+        return Err(SipOriginateContextError::OutboundProxyUriTooLarge);
+    }
+    if outbound_proxy_uri.is_empty() || outbound_proxy_uri.chars().any(char::is_control) {
+        return Err(SipOriginateContextError::InvalidOutboundProxyUri);
+    }
+    let parsed = rvoip_sip_core::Uri::from_str(outbound_proxy_uri)
+        .map_err(|_| SipOriginateContextError::InvalidOutboundProxyUri)?;
+    if !matches!(
+        parsed.scheme(),
+        rvoip_sip_core::types::uri::Scheme::Sip | rvoip_sip_core::types::uri::Scheme::Sips
+    ) {
+        return Err(SipOriginateContextError::InvalidOutboundProxyUri);
     }
     Ok(())
 }
@@ -662,6 +878,63 @@ mod tests {
             consumed.get(),
             MAX_SIP_INITIAL_HEADERS + 1,
             "validation must stop at the first over-limit entry"
+        );
+    }
+
+    #[test]
+    fn canonical_header_accounting_matches_adapter_revalidation_at_the_boundary() {
+        let supplied_spelling_would_fit =
+            (0..MAX_SIP_INITIAL_HEADERS).map(|_| ("alert", "v".repeat(507)));
+        assert_eq!(
+            SipInitialHeaders::new(supplied_spelling_would_fit),
+            Err(SipInitialHeadersError::AggregateTooLarge),
+            "canonical Alert-Info wire spelling must be charged during admission"
+        );
+
+        let exact_canonical_boundary =
+            (0..MAX_SIP_INITIAL_HEADERS).map(|_| ("alert", "v".repeat(502)));
+        let headers = SipInitialHeaders::new(exact_canonical_boundary)
+            .expect("32 canonical Alert-Info lines fit exactly at 16 KiB");
+        let context = SipOriginateContext::new().with_initial_headers(headers);
+        assert_eq!(
+            context.validate(),
+            Ok(()),
+            "every publicly constructed successful context must pass adapter revalidation"
+        );
+
+        let over_canonical_boundary =
+            (0..MAX_SIP_INITIAL_HEADERS).map(|_| ("alert", "v".repeat(503)));
+        assert_eq!(
+            SipInitialHeaders::new(over_canonical_boundary),
+            Err(SipInitialHeadersError::AggregateTooLarge)
+        );
+    }
+
+    #[test]
+    fn outbound_proxy_is_typed_bounded_and_redacted() {
+        let context = SipOriginateContext::new()
+            .with_outbound_proxy("sips:edge.proxy.example:5061;lr")
+            .expect("valid secure proxy");
+        assert_eq!(
+            context.outbound_proxy_uri(),
+            Some("sips:edge.proxy.example:5061;lr")
+        );
+        assert_eq!(context.validate(), Ok(()));
+        assert!(!format!("{context:?}").contains("edge.proxy.example"));
+
+        for invalid in ["", "https://example.test", "sip:bad\rproxy"] {
+            assert_eq!(
+                SipOriginateContext::new()
+                    .with_outbound_proxy(invalid)
+                    .unwrap_err(),
+                SipOriginateContextError::InvalidOutboundProxyUri
+            );
+        }
+        assert_eq!(
+            SipOriginateContext::new()
+                .with_outbound_proxy(format!("sip:{}", "x".repeat(4_096)))
+                .unwrap_err(),
+            SipOriginateContextError::OutboundProxyUriTooLarge
         );
     }
 

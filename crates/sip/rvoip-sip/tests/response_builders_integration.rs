@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::events::Event;
+use rvoip_sip::api::handle::CallId;
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::respond::AuthScheme;
 use rvoip_sip::api::stream_peer::EventReceiver;
@@ -66,25 +67,26 @@ fn snapshot_u64(snapshot: &serde_json::Value, pointer: &str) -> u64 {
 }
 
 #[cfg(feature = "perf-tests")]
+const REJECTED_INVITE_RETENTION_POINTERS: &[&str] = &[
+    "/dialog_manager/dialogs",
+    "/dialog_manager/dialog_to_session",
+    "/dialog_manager/session_to_dialog",
+    "/dialog_manager/early_dialog_lookup",
+    "/dialog_manager/pending_response_transaction_by_dialog",
+    "/dialog_manager/transaction_dialog_route_hash",
+    "/session_store/total",
+];
+
+#[cfg(feature = "perf-tests")]
 async fn wait_for_rejected_invite_cleanup_at_or_below_baseline(
     coordinator: &UnifiedCoordinator,
     baseline: &serde_json::Value,
     timeout: Duration,
 ) -> serde_json::Value {
-    const POINTERS: &[&str] = &[
-        "/dialog_manager/dialogs",
-        "/dialog_manager/dialog_to_session",
-        "/dialog_manager/session_to_dialog",
-        "/dialog_manager/early_dialog_lookup",
-        "/dialog_manager/pending_response_transaction_by_dialog",
-        "/dialog_manager/transaction_dialog_route_hash",
-        "/session_store/total",
-    ];
-
     let deadline = tokio::time::Instant::now() + timeout;
     let mut last = coordinator.perf_diagnostic_snapshot().await;
     loop {
-        if POINTERS
+        if REJECTED_INVITE_RETENTION_POINTERS
             .iter()
             .all(|pointer| snapshot_u64(&last, pointer) <= snapshot_u64(baseline, pointer))
         {
@@ -97,6 +99,82 @@ async fn wait_for_rejected_invite_cleanup_at_or_below_baseline(
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         last = coordinator.perf_diagnostic_snapshot().await;
+    }
+}
+
+#[cfg(feature = "perf-tests")]
+async fn assert_rejected_invite_cleanup_at_or_below_baseline(
+    coordinator: &UnifiedCoordinator,
+    baseline: &serde_json::Value,
+) {
+    let after_reject = wait_for_rejected_invite_cleanup_at_or_below_baseline(
+        coordinator,
+        baseline,
+        Duration::from_secs(3),
+    )
+    .await;
+
+    for pointer in REJECTED_INVITE_RETENTION_POINTERS {
+        let before = snapshot_u64(baseline, pointer);
+        let after = snapshot_u64(&after_reject, pointer);
+        assert!(
+            after <= before,
+            "overload-rejected INVITE retained {}: before={} after={} snapshot={}",
+            pointer,
+            before,
+            after,
+            after_reject
+        );
+    }
+}
+
+async fn assert_call_reached_terminal(
+    coordinator: &std::sync::Arc<UnifiedCoordinator>,
+    id: &CallId,
+) {
+    coordinator
+        .session(id)
+        .wait_for_end(Some(Duration::from_secs(8)))
+        .await
+        .expect("overload-rejected caller call must reach a terminal state");
+}
+
+async fn wait_for_no_sessions(coordinator: &UnifiedCoordinator, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if coordinator.list_sessions().await.is_empty() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(feature = "perf-tests")]
+async fn wait_for_single_retired_lifecycle(
+    coordinator: &UnifiedCoordinator,
+    timeout: Duration,
+) -> serde_json::Value {
+    const ACTIVE: &str = "/session_store/lifecycle/authority/active_capacity_in_use";
+    const RETAINED: &str = "/session_store/lifecycle/authority/retained_total";
+    const RETIRED: &str = "/session_store/lifecycle/authority/retired";
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut snapshot = coordinator.perf_diagnostic_snapshot().await;
+    loop {
+        if snapshot_u64(&snapshot, ACTIVE) == 0
+            && snapshot_u64(&snapshot, RETAINED) == 1
+            && snapshot_u64(&snapshot, RETIRED) == 1
+        {
+            return snapshot;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return snapshot;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        snapshot = coordinator.perf_diagnostic_snapshot().await;
     }
 }
 
@@ -234,40 +312,175 @@ async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
     );
 
     #[cfg(feature = "perf-tests")]
-    {
-        let after_reject = wait_for_rejected_invite_cleanup_at_or_below_baseline(
-            &bob_coordinator,
-            &retention_baseline,
-            Duration::from_secs(3),
-        )
+    assert_rejected_invite_cleanup_at_or_below_baseline(&bob_coordinator, &retention_baseline)
         .await;
-
-        for pointer in [
-            "/dialog_manager/dialogs",
-            "/dialog_manager/dialog_to_session",
-            "/dialog_manager/session_to_dialog",
-            "/dialog_manager/early_dialog_lookup",
-            "/dialog_manager/pending_response_transaction_by_dialog",
-            "/dialog_manager/transaction_dialog_route_hash",
-            "/session_store/total",
-        ] {
-            let before = snapshot_u64(&retention_baseline, pointer);
-            let after = snapshot_u64(&after_reject, pointer);
-            assert!(
-                after <= before,
-                "overload-rejected INVITE retained {}: before={} after={} snapshot={}",
-                pointer,
-                before,
-                after,
-                after_reject
-            );
-        }
-    }
 
     let _ = alice
         .session(&first)
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await;
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lifecycle_active_capacity_rejects_with_503_and_cleans_exact_routes() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17926;
+    let bob_port = 17927;
+
+    let bob_cfg = cfg("bob-active-capacity", bob_port)
+        .with_server_capacity(1)
+        .with_server_overload_retry_after_secs(3);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    #[cfg(feature = "perf-tests")]
+    let bob_coordinator = bob.coordinator().clone();
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-active-capacity", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should fill active lifecycle capacity");
+
+    #[cfg(feature = "perf-tests")]
+    let retention_baseline = bob_coordinator.perf_diagnostic_snapshot().await;
+
+    let rejected = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await
+        .expect("overload INVITE should be dispatched");
+    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("alice did not see lifecycle active-capacity 503");
+    assert!(
+        raw.contains("Retry-After: 3"),
+        "expected lifecycle overload Retry-After: 3 on the wire; got:\n{raw}"
+    );
+    assert_call_reached_terminal(&alice, &rejected).await;
+
+    #[cfg(feature = "perf-tests")]
+    assert_rejected_invite_cleanup_at_or_below_baseline(&bob_coordinator, &retention_baseline)
+        .await;
+
+    let _ = alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await;
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17928;
+    let bob_port = 17929;
+
+    let bob_cfg = cfg("bob-retained-capacity", bob_port)
+        .with_server_capacity(1)
+        .with_server_retained_lifecycle_capacity(1)
+        .with_server_overload_retry_after_secs(4);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_coordinator = bob.coordinator().clone();
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-retained-capacity", alice_port))
+        .await
+        .expect("alice");
+    let mut alice_events = alice.events().await.expect("alice events");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+    alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should retire its server lifecycle");
+    assert!(
+        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(3)).await,
+        "first server call must leave the active session store before retained-capacity test"
+    );
+
+    #[cfg(feature = "perf-tests")]
+    let retention_baseline = {
+        let snapshot =
+            wait_for_single_retired_lifecycle(&bob_coordinator, Duration::from_secs(3)).await;
+        assert_eq!(
+            snapshot_u64(
+                &snapshot,
+                "/session_store/lifecycle/authority/active_capacity_in_use"
+            ),
+            0,
+            "first call still occupied active lifecycle capacity: {snapshot}"
+        );
+        assert_eq!(
+            snapshot_u64(
+                &snapshot,
+                "/session_store/lifecycle/authority/retained_total"
+            ),
+            1,
+            "first call did not fill the retained lifecycle bound: {snapshot}"
+        );
+        assert_eq!(
+            snapshot_u64(&snapshot, "/session_store/lifecycle/authority/retired"),
+            1,
+            "retained lifecycle was not an anti-reuse fence: {snapshot}"
+        );
+        snapshot
+    };
+
+    let rejected = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
+        .await
+        .expect("retained-capacity INVITE should be dispatched");
+    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
+        .await
+        .expect("alice did not see lifecycle retained-capacity 503");
+    assert!(
+        raw.contains("Retry-After: 4"),
+        "expected retained-capacity Retry-After: 4 on the wire; got:\n{raw}"
+    );
+    assert_call_reached_terminal(&alice, &rejected).await;
+
+    #[cfg(feature = "perf-tests")]
+    assert_rejected_invite_cleanup_at_or_below_baseline(&bob_coordinator, &retention_baseline)
+        .await;
+
     bob_shutdown.shutdown();
     let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
     tokio::time::sleep(Duration::from_millis(100)).await;

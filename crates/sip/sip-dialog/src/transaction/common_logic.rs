@@ -24,7 +24,6 @@ use rvoip_sip_transport::Transport;
 /// across all transaction types while reducing code duplication.
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tracing::{debug, error, trace};
 
 use crate::transaction::error::{Error, Result};
@@ -50,7 +49,7 @@ pub async fn send_state_changed_event(
     tx_id: &TransactionKey,
     previous_state: TransactionState,
     new_state: TransactionState,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "State transition: {:?} -> {:?}", previous_state, new_state);
     let _ = events_tx
@@ -78,7 +77,7 @@ pub async fn send_state_changed_event(
 /// * `events_tx` - The events channel to send on
 pub async fn send_transaction_terminated_event(
     tx_id: &TransactionKey,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated");
     let _ = events_tx
@@ -106,7 +105,7 @@ pub async fn send_transaction_terminated_event(
 pub async fn send_timer_triggered_event(
     tx_id: &TransactionKey,
     timer_name: &str,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), "Timer triggered event");
     let _ = events_tx
@@ -134,7 +133,7 @@ pub async fn send_timer_triggered_event(
 /// * `events_tx` - The events channel to send on
 pub async fn send_transaction_timeout_event(
     tx_id: &TransactionKey,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction timed out");
     let _ = events_tx
@@ -162,7 +161,7 @@ pub async fn send_transaction_timeout_event(
 pub async fn send_provisional_response_event(
     tx_id: &TransactionKey,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending provisional response event");
     let _ = events_tx
@@ -192,7 +191,7 @@ pub async fn send_provisional_response_event(
 pub async fn send_success_response_event(
     tx_id: &TransactionKey,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     remote_addr: SocketAddr,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending success response event");
@@ -225,7 +224,7 @@ pub async fn send_success_response_event(
 pub async fn send_failure_response_event(
     tx_id: &TransactionKey,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Sending failure response event");
     let _ = events_tx
@@ -252,7 +251,7 @@ pub async fn send_failure_response_event(
 /// * `events_tx` - The events channel to send on
 pub async fn send_transport_error_event(
     tx_id: &TransactionKey,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
 ) {
     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Sending transport error event");
     let _ = events_tx
@@ -289,7 +288,7 @@ pub async fn handle_response_by_status(
     tx_id: &TransactionKey,
     response: Response,
     current_state: TransactionState,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     is_invite: bool,
     remote_addr: SocketAddr,
 ) -> Option<TransactionState> {
@@ -380,7 +379,7 @@ pub async fn handle_response_by_status(
 async fn handle_success_response_for_client_non_invite_transaction(
     tx_id: &TransactionKey,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     remote_addr: SocketAddr,
 ) {
     // Success response
@@ -407,7 +406,7 @@ async fn handle_success_response_for_client_invite_transaction(
     tx_id: &TransactionKey,
     _state: TransactionState,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     remote_addr: SocketAddr,
 ) {
     // In the Calling or Proceeding state, move to the Terminated state
@@ -442,7 +441,7 @@ pub async fn handle_response_for_client_transaction(
     state: TransactionState,
     kind: TransactionKind,
     response: Response,
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     _transport: &Arc<dyn Transport>,
     remote_addr: SocketAddr,
 ) -> Result<TransactionState> {

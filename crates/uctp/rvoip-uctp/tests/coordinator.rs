@@ -26,6 +26,37 @@ use common::drive_auth_handshake;
 
 struct StablePrincipalValidator;
 
+struct ForwardingScopeSessionResolver;
+
+impl rvoip_uctp::state::SessionBindingResolver for ForwardingScopeSessionResolver {
+    fn resolve_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_session: &rvoip_uctp::ids::SessionId,
+    ) -> Result<rvoip_uctp::ids::SessionId, rvoip_uctp::state::ResourceBindingError> {
+        principal.require_scope("private:forward").map_err(|_| {
+            rvoip_uctp::state::ResourceBindingError::forbidden("forwarding-scope-required")
+        })?;
+        Ok(wire_session.clone())
+    }
+
+    fn reauthorize_session(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_session: &rvoip_uctp::ids::SessionId,
+        canonical_session: &rvoip_uctp::ids::SessionId,
+    ) -> Result<(), rvoip_uctp::state::ResourceBindingError> {
+        if wire_session != canonical_session {
+            return Err(rvoip_uctp::state::ResourceBindingError::forbidden(
+                "session-mismatch",
+            ));
+        }
+        principal.require_scope("private:forward").map_err(|_| {
+            rvoip_uctp::state::ResourceBindingError::forbidden("forwarding-scope-required")
+        })
+    }
+}
+
 #[async_trait]
 impl BearerValidator for StablePrincipalValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
@@ -45,10 +76,14 @@ impl BearerValidator for StablePrincipalValidator {
             "user:alice"
         };
         let identity = IdentityId::from_string(subject);
-        let scopes = if token == "no-scopes" {
-            Vec::new()
-        } else {
-            vec!["*".into()]
+        let scopes = match token {
+            "no-scopes" => Vec::new(),
+            "receive-only" => vec![
+                rvoip_uctp::state::UCTP_SESSION_SCOPE.into(),
+                rvoip_uctp::state::UCTP_SUBSCRIBE_SCOPE.into(),
+                rvoip_uctp::state::UCTP_RECEIVE_ONLY_SCOPE.into(),
+            ],
+            _ => vec!["*".into()],
         };
         let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
@@ -428,6 +463,114 @@ async fn authenticated_command_without_required_scope_is_rejected() {
 }
 
 #[tokio::test]
+async fn receive_only_credential_rejects_publishing_offer_before_state_commit() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coordinator = UctpCoordinator::start(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        Arc::new(StablePrincipalValidator),
+    );
+
+    in_tx.send(auth_hello_env()).await.unwrap();
+    let challenge = out_rx.recv().await.expect("auth challenge");
+    in_tx
+        .send(auth_response_env("receive-only", &challenge.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        out_rx.recv().await.expect("auth session").msg_type,
+        MessageType::AuthSession
+    );
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::Authenticated { .. })
+    ));
+
+    in_tx
+        .send(session_invite_env(
+            "broadcast-session",
+            "broadcast-conversation",
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::InboundInvite { .. })
+    ));
+
+    let offer = connection_offer_with_direction_env(
+        "broadcast-session",
+        "publishing-connection",
+        &["opus"],
+        "sendrecv",
+    );
+    let offer_id = offer.id.clone();
+    in_tx.send(offer).await.unwrap();
+
+    let rejection = out_rx.recv().await.expect("receive-only rejection");
+    assert_eq!(rejection.msg_type, MessageType::Error);
+    assert_eq!(rejection.in_reply_to.as_deref(), Some(offer_id.as_str()));
+    let error: rvoip_uctp::payloads::control::Error = rejection.decode_payload().unwrap();
+    assert_eq!(error.code, 403);
+    assert_eq!(error.category, "auth");
+    assert_eq!(error.reason, "receive-only-credential");
+    assert_eq!(coordinator.resource_snapshot().connections, 0);
+    assert!(events_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn receive_only_credential_allows_recvonly_offer() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coordinator = UctpCoordinator::start(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        Arc::new(StablePrincipalValidator),
+    );
+
+    in_tx.send(auth_hello_env()).await.unwrap();
+    let challenge = out_rx.recv().await.expect("auth challenge");
+    in_tx
+        .send(auth_response_env("receive-only", &challenge.id))
+        .await
+        .unwrap();
+    let _ = out_rx.recv().await.expect("auth session");
+    let _ = events_rx.recv().await.expect("authenticated event");
+    in_tx
+        .send(session_invite_env(
+            "broadcast-session",
+            "broadcast-conversation",
+        ))
+        .await
+        .unwrap();
+    let _ = events_rx.recv().await.expect("invite event");
+
+    in_tx
+        .send(connection_offer_with_direction_env(
+            "broadcast-session",
+            "subscriber-connection",
+            &["opus"],
+            "recvonly",
+        ))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::ConnectionOpened { .. })
+    ));
+    assert_eq!(coordinator.resource_snapshot().connections, 1);
+    assert!(out_rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn second_auth_response_cannot_switch_peer_owner() {
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
@@ -486,8 +629,13 @@ async fn inbound_invite_emits_event() {
     let event = events_rx.recv().await.expect("expected InboundInvite");
     match event {
         UctpSessionEvent::InboundInvite {
-            from, to, medium, ..
+            cid,
+            from,
+            to,
+            medium,
+            ..
         } => {
+            assert_eq!(cid.as_deref(), Some("conv_y"));
             assert!(!from.is_empty());
             assert_ne!(
                 from, "part_alice",
@@ -609,6 +757,19 @@ fn connection_offer_env(sid: &str, connid: &str, prefs: &[&str]) -> UctpEnvelope
         payload: serde_json::to_value(payload).unwrap(),
         signature: None,
     }
+}
+
+fn connection_offer_with_direction_env(
+    sid: &str,
+    connid: &str,
+    prefs: &[&str],
+    direction: &str,
+) -> UctpEnvelope {
+    let mut envelope = connection_offer_env(sid, connid, prefs);
+    let mut payload: connection::ConnectionOffer = envelope.decode_payload().unwrap();
+    payload.streams_offered[0].direction = direction.to_owned();
+    envelope.payload = serde_json::to_value(payload).unwrap();
+    envelope
 }
 
 fn connection_ready_env(sid: &str, connid: &str) -> UctpEnvelope {
@@ -2053,6 +2214,78 @@ async fn auth_refresh_rejects_ownership_switch_and_preserves_prior_principal() {
         events_rx.recv().await,
         Some(UctpSessionEvent::InboundInvite { .. })
     ));
+}
+
+#[tokio::test]
+async fn auth_refresh_rejects_scope_drop_before_existing_session_authority_changes() {
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        Arc::new(StablePrincipalValidator),
+    );
+    let bindings =
+        rvoip_uctp::state::PeerResourceBindings::new(Arc::new(ForwardingScopeSessionResolver));
+    coord
+        .set_resource_bindings(Arc::clone(&bindings))
+        .expect("fresh coordinator accepts forwarding authority");
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::Authenticated { .. })
+    ));
+    in_tx
+        .send(session_invite_env(
+            "scope-bound-session",
+            "scope-bound-conversation",
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        events_rx.recv().await,
+        Some(UctpSessionEvent::InboundInvite { .. })
+    ));
+
+    let refresh = UctpEnvelope::new(
+        MessageType::AuthRefresh,
+        serde_json::to_value(auth::AuthRefresh {
+            method: "bearer".into(),
+            credential: "no-scopes".into(),
+            actor_token: None,
+        })
+        .unwrap(),
+    );
+    let refresh_id = refresh.id.clone();
+    in_tx.send(refresh).await.unwrap();
+
+    let reply = out_rx
+        .recv()
+        .await
+        .expect("scope-dropping refresh rejection");
+    assert_eq!(reply.msg_type, MessageType::Error);
+    assert_eq!(reply.in_reply_to.as_deref(), Some(refresh_id.as_str()));
+    let error: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
+    assert_eq!(error.code, 403);
+    assert_eq!(error.reason, "forwarding-scope-required");
+    assert!(
+        events_rx.try_recv().is_err(),
+        "refresh must not authenticate"
+    );
+
+    let principal = coord
+        .authenticated_principal()
+        .expect("prior principal remains authoritative");
+    assert!(principal.has_scope("private:forward"));
+    bindings
+        .reauthorize_bound_session(&rvoip_uctp::ids::SessionId::from_string(
+            "scope-bound-session",
+        ))
+        .expect("existing media/session authority still uses the prior principal");
 }
 
 #[tokio::test]

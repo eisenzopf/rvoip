@@ -9,8 +9,8 @@
 //! These helpers are used by code that mutates the inbound Request
 //! in-place before forwarding (proxy-style on top of
 //! `Transport::send_message_raw`). The default B2BUA pattern in this
-//! codebase — `coord.invite(...)` + `with_headers_from(&call, ...)`
-//! + `send()` — builds a *fresh* outbound INVITE with the SBC's own
+//! codebase uses `coord.invite(...)`, `with_headers_from(&call, ...)`, and
+//! `send()` to build a *fresh* outbound INVITE with the SBC's own
 //! Via stamped from scratch, so it never needs to strip in the
 //! first place. The helpers cover the "forward existing Request"
 //! shape that Phase 8.5 stateless-proxy work will lean on.

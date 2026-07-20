@@ -14,7 +14,8 @@ use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
-    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, RejectReason,
+    SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -45,6 +46,8 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 /// back to the peer or to allocate per-subscriber MediaStreams.
 #[derive(Clone)]
 pub(crate) struct Route {
+    /// Exact peer-selected Conversation ID from the authenticated invite.
+    pub cid: Option<String>,
     /// Peer-selected Session ID used on outbound UCTP envelopes.
     pub sid: String,
     /// Canonical process-wide resource IDs authorized by the configured
@@ -220,6 +223,7 @@ pub struct UctpQuicAdapter {
     #[allow(dead_code)]
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
+    inbound_contexts: Arc<DashMap<ConnectionId, InboundConnectionContext>>,
     lifecycle_sink: AdapterLifecycleSinkSlot,
     events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     _server: Arc<UctpQuicServer>,
@@ -230,6 +234,17 @@ pub struct UctpQuicAdapter {
 }
 
 impl UctpQuicAdapter {
+    /// Return the coordinator's current authenticated principal for one
+    /// canonical Connection. This reflects successful `auth.refresh`
+    /// rotations and is intended for application-owned, continuously
+    /// revalidated resource leases.
+    pub fn authenticated_principal(
+        &self,
+        connection: &ConnectionId,
+    ) -> Option<rvoip_auth_core::AuthenticatedPrincipal> {
+        self.route(connection)
+            .and_then(|route| route.coordinator.authenticated_principal())
+    }
     /// Construct and spawn the server's accept loop.
     pub async fn new(config: UctpQuicConfig) -> Result<Arc<Self>, crate::errors::UctpQuicError> {
         let local_addr = config
@@ -241,6 +256,7 @@ impl UctpQuicAdapter {
         let by_connection: Arc<DashMap<ConnectionId, String>> = Arc::new(DashMap::new());
         let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
         let routes: Arc<DashMap<ConnectionId, Route>> = Arc::new(DashMap::new());
+        let inbound_contexts = Arc::new(DashMap::new());
         let lifecycle_sink = AdapterLifecycleSinkSlot::default();
 
         let server = UctpQuicServer::start(
@@ -251,6 +267,7 @@ impl UctpQuicAdapter {
             Arc::clone(&by_connection),
             Arc::clone(&by_uctp_sid),
             Arc::clone(&routes),
+            Arc::clone(&inbound_contexts),
             config.max_concurrent_connections,
             config.quinn_stats_interval,
             config.subscription_handler,
@@ -264,6 +281,7 @@ impl UctpQuicAdapter {
             by_connection,
             by_uctp_sid,
             routes,
+            inbound_contexts,
             lifecycle_sink,
             events_tx,
             _server: server,
@@ -276,6 +294,16 @@ impl UctpQuicAdapter {
 
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Stop accepting new raw-QUIC peers while allowing active peer sessions
+    /// to complete their normal lifecycle.
+    pub fn begin_drain(&self) {
+        self._server.begin_drain();
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self._server.is_draining()
     }
 
     fn route(&self, conn: &ConnectionId) -> Option<Route> {
@@ -368,6 +396,12 @@ impl ConnectionAdapter for UctpQuicAdapter {
 
     fn is_connection_live(&self, conn: &ConnectionId) -> bool {
         self.routes.contains_key(conn)
+    }
+
+    fn take_inbound_context(&self, conn: &ConnectionId) -> Option<InboundConnectionContext> {
+        self.inbound_contexts
+            .remove(conn)
+            .map(|(_, context)| context)
     }
 
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {
@@ -669,8 +703,12 @@ impl ConnectionAdapter for UctpQuicAdapter {
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let wire_connection_id =
             rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
+        let wire_conversation_id = route.cid.as_deref().ok_or_else(|| {
+            RvoipError::Adapter("UCTP data route has no conversation binding".into())
+        })?;
         rvoip_uctp::adapter_helpers::send_data_message_via_envelope(
             &route.out_tx,
+            wire_conversation_id,
             &route.sid,
             &wire_connection_id,
             &message,

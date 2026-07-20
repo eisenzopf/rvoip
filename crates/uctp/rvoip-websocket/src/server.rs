@@ -423,7 +423,7 @@ async fn spawn_peer_session<S>(
                             detail: "bearer".into(),
                         })
                     }
-                    UctpSessionEvent::InboundInvite { sid, from, .. } => {
+                    UctpSessionEvent::InboundInvite { cid, sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
                             warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
@@ -454,6 +454,7 @@ async fn spawn_peer_session<S>(
                             >,
                         > = Arc::new(parking_lot::Mutex::new(None));
                         let route = Route {
+                            cid,
                             sid: sid.to_string(),
                             binding:
                                 rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding::new(

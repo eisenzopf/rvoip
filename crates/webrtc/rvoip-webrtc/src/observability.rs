@@ -60,6 +60,54 @@ pub fn render_prometheus(metrics: &WebRtcMetrics) -> String {
         "Data messages dropped because the bounded adapter event queue was full (counter).",
         metrics.data_messages_dropped_total,
     );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_active_http_resources",
+        "Live WHIP/WHEP HTTP resources with retained mutation state (gauge).",
+        metrics.active_http_resources as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_http_resource_tasks",
+        "Live WHEP HTTP resource expiry supervisors (gauge).",
+        metrics.http_resource_tasks as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_peer_session_tasks",
+        "Live adapter-owned tasks supervised by WebRTC peer routes (gauge).",
+        metrics.peer_session_tasks as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_media_tasks",
+        "Live RTP pump and stats tasks retained by WebRTC media streams (gauge).",
+        metrics.media_tasks as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_inbound_ws_connection_tasks",
+        "Live bounded inbound WS/WSS connection tasks (gauge).",
+        metrics.inbound_ws_connection_tasks as u64,
+    );
+    emit_gauge(
+        &mut out,
+        "rvoip_webrtc_inbound_admission_tasks",
+        "Live inbound admission-confirmation tasks awaiting an application decision (gauge).",
+        metrics.inbound_admission_tasks as u64,
+    );
+    emit_counter(
+        &mut out,
+        "rvoip_webrtc_inbound_ws_connections_rejected_total",
+        "Inbound WS/WSS connections rejected because the connection-task budget was exhausted (counter).",
+        metrics.inbound_ws_connections_rejected_total,
+    );
+    emit_counter(
+        &mut out,
+        "rvoip_webrtc_legacy_whep_sessions_total",
+        "WHEP sessions created through explicit legacy server-offer mode (counter).",
+        metrics.legacy_whep_sessions_total,
+    );
     out
 }
 
@@ -221,6 +269,14 @@ mod tests {
             sessions_rejected_over_cap: 0,
             reaped_total: 4,
             data_messages_dropped_total: 5,
+            active_http_resources: 6,
+            http_resource_tasks: 1,
+            peer_session_tasks: 3,
+            media_tasks: 4,
+            inbound_ws_connection_tasks: 5,
+            inbound_admission_tasks: 7,
+            inbound_ws_connections_rejected_total: 6,
+            legacy_whep_sessions_total: 2,
         };
         let body = render_prometheus(&m);
 
@@ -232,6 +288,14 @@ mod tests {
             "rvoip_webrtc_sessions_rejected_over_cap",
             "rvoip_webrtc_reaped_total",
             "rvoip_webrtc_data_messages_dropped_total",
+            "rvoip_webrtc_active_http_resources",
+            "rvoip_webrtc_http_resource_tasks",
+            "rvoip_webrtc_peer_session_tasks",
+            "rvoip_webrtc_media_tasks",
+            "rvoip_webrtc_inbound_ws_connection_tasks",
+            "rvoip_webrtc_inbound_admission_tasks",
+            "rvoip_webrtc_inbound_ws_connections_rejected_total",
+            "rvoip_webrtc_legacy_whep_sessions_total",
         ] {
             assert!(
                 body.contains(&format!("# HELP {series}")),
@@ -245,6 +309,9 @@ mod tests {
         assert!(body.contains("rvoip_webrtc_inbound_total 7"));
         assert!(body.contains("rvoip_webrtc_active_sessions 2"));
         assert!(body.contains("rvoip_webrtc_reaped_total 4"));
+        assert!(body.contains("rvoip_webrtc_active_http_resources 6"));
+        assert!(body.contains("rvoip_webrtc_inbound_admission_tasks 7"));
+        assert!(body.contains("rvoip_webrtc_legacy_whep_sessions_total 2"));
     }
 
     #[test]

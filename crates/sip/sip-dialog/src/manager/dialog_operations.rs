@@ -272,15 +272,19 @@ impl DialogStore for DialogManager {
 
         // Cancel any RFC 4028 refresh task + RFC 3262 retransmit tasks
         // associated with this dialog before we unwind state.
-        crate::manager::session_timer::cancel_refresh_task(self, dialog_id);
-        self.reliable_provisional_tasks.retain(|(d, _), abort| {
-            if d == dialog_id {
-                abort.abort();
-                false
-            } else {
-                true
-            }
-        });
+        crate::manager::session_timer::cancel_refresh_task(self, dialog_id)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "Session refresh task did not drain".to_string(),
+                context: None,
+            })?;
+        self.reliable_provisional_tasks
+            .close_dialog(dialog_id)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "Reliable provisional tasks did not drain".to_string(),
+                context: None,
+            })?;
 
         // Get the dialog and terminate it
         if let Some(mut dialog_entry) = self.dialogs.get_mut(dialog_id) {

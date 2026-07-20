@@ -14,7 +14,7 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 
 [features]
 default = []
-signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core"]
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest"]
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
 client = ["dep:serde_json"]
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
@@ -37,13 +37,18 @@ client-video-vp8 = ["client-video", "dep:vpx-encode", "dep:env-libvpx-sys", "dep
 # on macOS, V4L2 on Linux). `openh264` fetches a BSD-licensed binary at
 # build time — see <https://github.com/cisco/openh264>.
 client-video-h264 = ["client-video", "dep:openh264", "dep:nokhwa"]
-tls-rustls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
+tls-rustls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
 # Headless-Chromium driven interop test (dev-only; needs Chromium binary on PATH).
 interop-browser = ["signaling-whip", "signaling-ws", "dep:chromiumoxide"]
 # Long-running soak test (default 60s; set SOAK_SECS=3600 for the full 1h run).
 # Asserts tokio task count returns to baseline after sustained churn — catches
 # task leaks that the regular test suite doesn't have time to surface.
 soak-1h = []
+# Enables downstream conformance assertions that require the owner-reviewed
+# UDP TURN/NACK alpha-fork candidate. The authoritative crates.io alpha does
+# not implement relay-only gathering, so default CI keeps these visible as
+# ignored rather than reporting an unapproved dependency as integrated.
+turn-fork-candidate = []
 bridge-quic = [
     "signaling-whip",
     "dep:rvoip-quic",
@@ -86,11 +91,14 @@ axum = { workspace = true, optional = true }
 hyper = { version = "1", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", features = ["trace", "cors"], optional = true }
-tokio-tungstenite = { workspace = true, optional = true }
+tokio-tungstenite = { workspace = true, optional = true, features = ["rustls-tls-webpki-roots"] }
+zeroize.workspace = true
 axum-server = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 chromiumoxide = { workspace = true, optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
 
 # D3a — cpal microphone/speaker + opus encoder. Both pinned to the same
 # versions audio-core (`cpal = "0.15"`) and media-core (`opus = "0.3"`)
@@ -128,6 +136,8 @@ rcgen.workspace = true
 # published manifest rather than requiring rvoip-sip on crates.io. See rvoip-core.
 rvoip-sip = { path = "../../sip/rvoip-sip" }
 rand = { workspace = true }
+turn-server = { package = "turn", version = "0.11.0" }
+webrtc-util = { version = "0.12.0", features = ["conn", "vnet"] }
 
 [[test]]
 name = "webrtc_bridge_e2e"
@@ -156,6 +166,22 @@ required-features = ["comprehensive"]
 [[test]]
 name = "ws_trickle_ice"
 required-features = ["signaling-ws"]
+
+[[test]]
+name = "outbound_ws_originating"
+required-features = ["signaling-ws"]
+
+[[test]]
+name = "outbound_whip_originating"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "whep_counter_offer_conformance"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "outbound_whep_originating"
+required-features = ["signaling-whip"]
 
 [[test]]
 name = "whip_trickle_patch"
@@ -252,6 +278,10 @@ required-features = []
 [[test]]
 name = "sip_webrtc_bridge"
 required-features = ["signaling-whip"]
+
+[[test]]
+name = "sip_webrtc_acceptance"
+required-features = ["tls-rustls", "signaling-whip", "signaling-ws"]
 
 [[test]]
 name = "browser_interop"

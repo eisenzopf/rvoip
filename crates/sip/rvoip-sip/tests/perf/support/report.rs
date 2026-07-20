@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use super::env::EnvironmentBlock;
 use super::histogram::{LatencyHistogram, LatencySnapshot};
 use super::load::LoadProfile;
-use super::sampler::{ResourceSample, ResourceSummary};
+use super::sampler::{ResourceSample, ResourceSummary, ResourceWindowSummary};
 
 /// One result column in the JSON `results` block.
 #[derive(Debug, Clone, Serialize)]
@@ -36,6 +36,11 @@ pub struct ScenarioReport {
     rss_growth_mb_per_min: Option<f64>,
     rss_tail_growth_mb_per_min: Option<f64>,
     rss_tail_window_secs: Option<f64>,
+    rss_tail_window_requested_secs: Option<f64>,
+    rss_tail_window_complete: Option<bool>,
+    rss_tail_sample_count: usize,
+    rss_sample_interval_estimate_secs: Option<f64>,
+    resource_windows: Vec<ResourceWindowSummary>,
     avg_cpu_pct: Option<f64>,
     rss_sample_count: usize,
     rss_samples_path: Option<PathBuf>,
@@ -59,6 +64,11 @@ impl ScenarioReport {
             rss_growth_mb_per_min: None,
             rss_tail_growth_mb_per_min: None,
             rss_tail_window_secs: None,
+            rss_tail_window_requested_secs: None,
+            rss_tail_window_complete: None,
+            rss_tail_sample_count: 0,
+            rss_sample_interval_estimate_secs: None,
+            resource_windows: Vec::new(),
             avg_cpu_pct: None,
             rss_sample_count: 0,
             rss_samples_path: None,
@@ -86,6 +96,11 @@ impl ScenarioReport {
             self.rss_growth_mb_per_min = Some(summary.rss_growth_mb_per_min);
             self.rss_tail_growth_mb_per_min = Some(summary.rss_tail_growth_mb_per_min);
             self.rss_tail_window_secs = Some(summary.rss_tail_window_secs);
+            self.rss_tail_window_requested_secs = Some(summary.rss_tail_window_requested_secs);
+            self.rss_tail_window_complete = Some(summary.rss_tail_window_complete);
+            self.rss_tail_sample_count = summary.rss_tail_sample_count;
+            self.rss_sample_interval_estimate_secs = Some(summary.sample_interval_estimate_secs);
+            self.resource_windows = summary.windows;
             self.avg_cpu_pct = Some(summary.avg_cpu_pct);
         }
         self
@@ -155,12 +170,49 @@ impl ScenarioReport {
         } else {
             Value::Array(Vec::new())
         };
+        let mut resource_windows = Map::new();
+        for window in &self.resource_windows {
+            resource_windows.insert(
+                window.name.clone(),
+                serde_json::to_value(window).expect("serialize resource window"),
+            );
+        }
+        let active_growth = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "active_load")
+            .map(|window| window.rss_growth_mb_per_min);
+        let cleanup_growth_per_min = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "post_drain_cleanup")
+            .map(|window| window.rss_growth_mb_per_min);
+        let cleanup_retained_growth = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "post_drain_cleanup")
+            .and_then(|window| window.rss_retained_growth_mb);
+        let cleanup_endpoint_growth_per_hour = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "post_drain_cleanup")
+            .and_then(|window| window.rss_endpoint_growth_mb_per_hour);
         let resources = json!({
             "baseline_rss_mb": self.baseline_rss_mb,
             "peak_rss_mb": self.peak_rss_mb,
             "rss_growth_mb_per_min": self.rss_growth_mb_per_min,
             "rss_tail_growth_mb_per_min": self.rss_tail_growth_mb_per_min,
             "rss_tail_window_secs": self.rss_tail_window_secs,
+            "rss_tail_window_requested_secs": self.rss_tail_window_requested_secs,
+            "rss_tail_window_complete": self.rss_tail_window_complete,
+            "rss_tail_sample_count": self.rss_tail_sample_count,
+            "rss_sample_interval_estimate_secs": self.rss_sample_interval_estimate_secs,
+            "rss_active_growth_mb_per_min": active_growth,
+            "rss_cleanup_growth_mb_per_min": cleanup_growth_per_min,
+            "rss_cleanup_growth_mb_per_hour": cleanup_growth_per_min.map(|value| value * 60.0),
+            "rss_cleanup_retained_growth_mb": cleanup_retained_growth,
+            "rss_cleanup_endpoint_growth_mb_per_hour": cleanup_endpoint_growth_per_hour,
+            "rss_windows": Value::Object(resource_windows),
             "avg_cpu_pct": self.avg_cpu_pct,
             "rss_sample_count": self.rss_sample_count,
             "rss_samples_path": self.rss_samples_path.as_ref().map(|path| path.display().to_string()),
@@ -277,10 +329,53 @@ impl ScenarioReport {
         if let Some(growth) = self.rss_tail_growth_mb_per_min {
             let marker = if growth.abs() > 1.0 { "  ⚠" } else { "" };
             let window = self.rss_tail_window_secs.unwrap_or_default();
+            let requested = self.rss_tail_window_requested_secs.unwrap_or_default();
             println!(
-                " RSS tail    : {:+.2} MB/min over last {:.0}s{marker}",
-                growth, window
+                " RSS tail    : {:+.2} MB/min ({:.1}s actual / {:.1}s requested){marker}",
+                growth, window, requested
             );
+        }
+        if let Some(active) = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "active_load")
+        {
+            println!(
+                " RSS active  : {:+.2} MB/min ({:.1}s, {} samples, complete={})",
+                active.rss_growth_mb_per_min,
+                active.actual_coverage_secs,
+                active.sample_count,
+                active.complete,
+            );
+        }
+        if let Some(cleanup) = self
+            .resource_windows
+            .iter()
+            .find(|window| window.name == "post_drain_cleanup")
+        {
+            println!(
+                " RSS cleanup : {:+.2} MB/hour ({:.1}s, {} samples, complete={})",
+                cleanup.rss_growth_mb_per_min * 60.0,
+                cleanup.actual_coverage_secs,
+                cleanup.sample_count,
+                cleanup.complete,
+            );
+            if let Some(retained_growth) = cleanup.rss_retained_growth_mb {
+                println!(
+                    " RSS retained: {:+.2} MB (endpoint medians, {:.1}s bands, {}/{})",
+                    retained_growth,
+                    cleanup.rss_endpoint_band_secs,
+                    cleanup.rss_start_sample_count,
+                    cleanup.rss_end_sample_count,
+                );
+            }
+            if let Some(endpoint_growth) = cleanup.rss_endpoint_growth_mb_per_hour {
+                println!(
+                    " RSS endpoint: {:+.2} MB/hour ({:.1}s representative separation)",
+                    endpoint_growth,
+                    cleanup.rss_endpoint_separation_secs.unwrap_or_default(),
+                );
+            }
         }
         if let Some(cpu) = self.avg_cpu_pct {
             println!(" avg CPU     : {:.1}%", cpu);
@@ -292,6 +387,9 @@ impl ScenarioReport {
 }
 
 fn target_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("RVOIP_PERF_OUTPUT_ROOT") {
+        return PathBuf::from(path);
+    }
     // Walk up from CARGO_MANIFEST_DIR (crate root) to the workspace
     // root (where `target/` lives). Cargo always sets this env var when
     // building tests.

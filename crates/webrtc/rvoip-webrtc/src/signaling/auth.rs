@@ -24,7 +24,7 @@ use crate::adapter::RouteAuthorization;
 const MAX_SESSION_HINT_PREFIX_BYTES: usize = 64;
 const MAX_SESSION_HINT_BYTES: usize = rvoip_core::MAX_INBOUND_ROUTING_HINT_BYTES;
 const AUTH_TOKEN_SUBPROTOCOL_PREFIX: &str = "token.";
-const SIGNALING_SUBPROTOCOL: &str = "rvoip.webrtc.v1";
+pub(crate) const SIGNALING_SUBPROTOCOL: &str = "rvoip.webrtc.v1";
 
 /// Authentication context attached to a request after a successful hook.
 /// Its complete principal is retained on the adapter route for ownership,
@@ -148,6 +148,24 @@ pub trait WsAuthHook: Send + Sync {
     }
 }
 
+/// Optional deployment policy that binds an already validated WebSocket
+/// bearer to the private session hint carried in the same handshake.
+///
+/// The core bearer validator still owns identity, expiry, and scope checks.
+/// This second boundary is for short-lived attachment credentials whose
+/// authority must be unusable with another call/session hint. It runs before
+/// the HTTP 101 response and receives the complete validated principal; raw
+/// values must never be logged by implementations.
+#[async_trait]
+pub trait WsBearerSessionBinding: Send + Sync {
+    async fn authorize(
+        &self,
+        bearer: &str,
+        session_hint: &str,
+        principal: &AuthenticatedPrincipal,
+    ) -> Result<(), AuthRejection>;
+}
+
 /// No-op hook — every request is accepted as the anonymous principal.
 /// This is the default when no hook is registered, preserving the
 /// pre-G2 behavior.
@@ -254,6 +272,7 @@ pub struct AuthCoreHook {
     realm: String,
     pub allow_query_tokens: bool,
     session_hint_subprotocol_prefix: Option<String>,
+    session_binding: Option<std::sync::Arc<dyn WsBearerSessionBinding>>,
 }
 
 /// Invalid opt-in WebSocket session-hint configuration.
@@ -272,6 +291,7 @@ impl AuthCoreHook {
             realm: "rvoip".into(),
             allow_query_tokens: false,
             session_hint_subprotocol_prefix: None,
+            session_binding: None,
         }
     }
 
@@ -307,6 +327,18 @@ impl AuthCoreHook {
         }
         self.session_hint_subprotocol_prefix = Some(prefix);
         Ok(self)
+    }
+
+    /// Require a deployment-owned relationship between the validated bearer
+    /// and the extracted private session hint. Callers normally combine this
+    /// with [`Self::try_with_session_hint_subprotocol_prefix`].
+    #[must_use]
+    pub fn with_session_binding(
+        mut self,
+        binding: std::sync::Arc<dyn WsBearerSessionBinding>,
+    ) -> Self {
+        self.session_binding = Some(binding);
+        self
     }
 
     async fn validate(
@@ -412,6 +444,15 @@ impl WsAuthHook for AuthCoreHook {
             from_subprotocol.or_else(|| self.allow_query_tokens.then_some(query_token).flatten());
         let mut context = self.validate(token, "webrtc:connect").await?;
         context.session_hint = self.session_hint(subprotocols)?;
+        if let Some(binding) = self.session_binding.as_ref() {
+            let bearer = token.ok_or_else(|| self.unauthorized())?;
+            let hint = context
+                .session_hint
+                .as_deref()
+                .ok_or(AuthRejection::Forbidden)?;
+            let principal = context.principal.as_ref().ok_or(AuthRejection::Forbidden)?;
+            binding.authorize(bearer, hint, principal).await?;
+        }
         Ok(context)
     }
 
@@ -442,6 +483,29 @@ pub fn extract_bearer(header: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ExactSessionBinding;
+
+    #[async_trait]
+    impl WsBearerSessionBinding for ExactSessionBinding {
+        async fn authorize(
+            &self,
+            bearer: &str,
+            session_hint: &str,
+            principal: &AuthenticatedPrincipal,
+        ) -> Result<(), AuthRejection> {
+            if bearer == "valid-auth"
+                && session_hint == "private-attachment-token"
+                && principal.subject == "private-subject"
+                && principal.tenant.as_deref() == Some("private-tenant")
+                && principal.issuer.as_deref() == Some("private-issuer")
+            {
+                Ok(())
+            } else {
+                Err(AuthRejection::Forbidden)
+            }
+        }
+    }
 
     struct TestPrincipalValidator;
 
@@ -608,6 +672,61 @@ mod tests {
         );
         let principal = context.principal.unwrap();
         assert_eq!(principal.tenant.as_deref(), Some("private-tenant"));
+    }
+
+    #[tokio::test]
+    async fn auth_core_binds_bearer_to_exact_attachment_before_accepting() {
+        let hook = core_hook().with_session_binding(std::sync::Arc::new(ExactSessionBinding));
+        let peer = "127.0.0.1:1".parse().unwrap();
+
+        let accepted = WsAuthHook::authenticate(
+            &hook,
+            &[
+                "rvoip.webrtc.v1".into(),
+                "token.valid-auth".into(),
+                "bridgefu.attach.private-attachment-token".into(),
+            ],
+            None,
+            peer,
+        )
+        .await
+        .expect("the credential is bound to this exact attachment");
+        assert_eq!(
+            accepted.session_hint.as_deref(),
+            Some("private-attachment-token")
+        );
+
+        assert!(matches!(
+            WsAuthHook::authenticate(
+                &hook,
+                &[
+                    "rvoip.webrtc.v1".into(),
+                    "token.valid-auth".into(),
+                    "bridgefu.attach.another-call".into(),
+                ],
+                None,
+                peer,
+            )
+            .await,
+            Err(AuthRejection::Forbidden)
+        ));
+    }
+
+    #[tokio::test]
+    async fn configured_binding_requires_a_private_session_hint() {
+        let hook = AuthCoreHook::new(std::sync::Arc::new(TestPrincipalValidator))
+            .with_session_binding(std::sync::Arc::new(ExactSessionBinding));
+
+        assert!(matches!(
+            WsAuthHook::authenticate(
+                &hook,
+                &["rvoip.webrtc.v1".into(), "token.valid-auth".into()],
+                None,
+                "127.0.0.1:1".parse().unwrap(),
+            )
+            .await,
+            Err(AuthRejection::Forbidden)
+        ));
     }
 
     #[tokio::test]

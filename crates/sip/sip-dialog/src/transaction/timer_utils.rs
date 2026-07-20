@@ -1,10 +1,26 @@
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{debug, trace};
+use tracing::trace;
+
+use rvoip_sip_transport::transport::TransportType;
+use rvoip_sip_transport::TransportRoute;
 
 use crate::transaction::timer::{TimerManager, TimerSettings, TimerType};
 use crate::transaction::{InternalTransactionCommand, TransactionKey, TransactionState};
+
+/// Whether an RFC 3261 retransmission-absorption timer is required for the
+/// selected route.
+///
+/// Timers J and K are zero on reliable transports. A route created by older
+/// callers may not carry an explicit transport kind, so use the transport
+/// implementation's default in that case.
+pub(crate) fn uses_unreliable_transport(
+    route: &TransportRoute,
+    default_transport: TransportType,
+) -> bool {
+    route.transport_type.unwrap_or(default_transport) == TransportType::Udp
+}
 
 /// Helper module for transaction-specific timer operations using the core timer infrastructure.
 /// This provides a simpler interface for transaction implementations to start/stop timers.
@@ -20,7 +36,8 @@ use crate::transaction::{InternalTransactionCommand, TransactionKey, Transaction
 /// * `cmd_tx` - Channel to send commands when the timer fires
 ///
 /// # Returns
-/// A JoinHandle for the timer task
+/// A compatibility `JoinHandle` that completes with the deadline and whose
+/// `abort` operation cancels it. The shared timer worker owns the actual sleep.
 pub async fn start_transaction_timer(
     timer_manager: &TimerManager,
     tx_id: &TransactionKey,
@@ -43,6 +60,24 @@ pub async fn start_transaction_timer(
     Ok(handle)
 }
 
+/// Core-path variant of [`start_transaction_timer`] that uses the shared
+/// deadline worker directly and allocates no compatibility proxy task.
+pub(crate) async fn start_transaction_timer_managed(
+    timer_manager: &TimerManager,
+    tx_id: &TransactionKey,
+    timer_name: &str,
+    timer_type: TimerType,
+    interval: Duration,
+    cmd_tx: mpsc::Sender<InternalTransactionCommand>,
+) -> Result<crate::transaction::timer::manager::ManagedTimerHandle, crate::transaction::error::Error>
+{
+    let handle = timer_manager
+        .start_timer_managed(tx_id.clone(), timer_type, interval, cmd_tx)
+        .await?;
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), interval=?interval, "Started managed transaction timer");
+    Ok(handle)
+}
+
 /// Starts a timer with a transition to a specified state when it expires
 ///
 /// # Arguments
@@ -55,47 +90,55 @@ pub async fn start_transaction_timer(
 /// * `target_state` - State to transition to when the timer fires
 ///
 /// # Returns
-/// A JoinHandle for the timer task
+/// A compatibility `JoinHandle` for completion and cancellation. The shared
+/// timer worker owns the actual deadline.
 pub async fn start_timer_with_transition(
     timer_manager: &TimerManager,
     tx_id: &TransactionKey,
     timer_name: &str,
-    _timer_type: TimerType,
+    timer_type: TimerType,
     interval: Duration,
     cmd_tx: mpsc::Sender<InternalTransactionCommand>,
     target_state: TransactionState,
 ) -> Result<JoinHandle<()>, crate::transaction::error::Error> {
-    // Clone values for transition - this fixes the 'borrowed data escapes function' error
-    let tx_id_clone = tx_id.clone();
-    let cmd_tx_clone = cmd_tx.clone();
-    let state = target_state;
-    let timer_name_clone = timer_name.to_string(); // Clone the timer name to avoid borrowing issues
-
-    // Register the transaction if not already done
     timer_manager
-        .register_transaction(tx_id_clone.clone(), cmd_tx_clone.clone())
+        .register_transaction(tx_id.clone(), cmd_tx)
         .await;
-
-    // We need to create a custom timer handler that will send both Timer and TransitionTo commands
-    let handle = tokio::spawn(async move {
-        // Sleep for the interval
-        tokio::time::sleep(interval).await;
-
-        // Then send both commands
-        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(&timer_name_clone), timer_len=timer_name_clone.len(), "Timer fired with transition to {:?}", state);
-
-        // First send the timer event
-        let _ = cmd_tx_clone
-            .send(InternalTransactionCommand::Timer(timer_name_clone.clone()))
-            .await;
-
-        // Then send the transition command
-        let _ = cmd_tx_clone
-            .send(InternalTransactionCommand::TransitionTo(state))
-            .await;
-    });
-
+    let handle = timer_manager
+        .start_timer_with_transition(
+            tx_id.clone(),
+            timer_name.to_string(),
+            timer_type,
+            interval,
+            target_state,
+        )
+        .await?;
     trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), interval=?interval, target_state=?target_state, "Started timer with transition");
+    Ok(handle)
+}
+
+/// Core-path transition timer using the shared queue without a proxy task.
+pub(crate) async fn start_timer_with_transition_managed(
+    timer_manager: &TimerManager,
+    tx_id: &TransactionKey,
+    timer_name: &str,
+    timer_type: TimerType,
+    interval: Duration,
+    cmd_tx: mpsc::Sender<InternalTransactionCommand>,
+    target_state: TransactionState,
+) -> Result<crate::transaction::timer::manager::ManagedTimerHandle, crate::transaction::error::Error>
+{
+    let handle = timer_manager
+        .start_timer_managed_with_transition(
+            tx_id.clone(),
+            timer_name.to_string(),
+            timer_type,
+            interval,
+            target_state,
+            cmd_tx,
+        )
+        .await?;
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), interval=?interval, target_state=?target_state, "Started managed timer with transition");
     Ok(handle)
 }
 
@@ -107,6 +150,43 @@ pub async fn start_timer_with_transition(
 pub async fn unregister_transaction(timer_manager: &TimerManager, tx_id: &TransactionKey) {
     timer_manager.unregister_transaction(tx_id).await;
     trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unregistered transaction from timer manager");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn route(transport_type: Option<TransportType>) -> TransportRoute {
+        let mut route = TransportRoute::new("127.0.0.1:5060".parse().unwrap());
+        route.transport_type = transport_type;
+        route
+    }
+
+    #[test]
+    fn retransmission_absorption_is_udp_only() {
+        assert!(uses_unreliable_transport(
+            &route(Some(TransportType::Udp)),
+            TransportType::Tcp,
+        ));
+
+        for transport in [
+            TransportType::Tcp,
+            TransportType::Tls,
+            TransportType::Ws,
+            TransportType::Wss,
+        ] {
+            assert!(!uses_unreliable_transport(
+                &route(Some(transport)),
+                TransportType::Udp,
+            ));
+        }
+    }
+
+    #[test]
+    fn retransmission_absorption_uses_transport_default_when_route_is_unspecified() {
+        assert!(uses_unreliable_transport(&route(None), TransportType::Udp,));
+        assert!(!uses_unreliable_transport(&route(None), TransportType::Tls,));
+    }
 }
 
 /// Helper that creates a proper backoff interval for retransmission timers

@@ -51,6 +51,11 @@ impl ServerInviteDialogKey {
 pub(crate) struct ServerInviteAckIndexEntry {
     pub(crate) transaction_id: TransactionKey,
     pub(crate) expires_at: Option<Instant>,
+    /// Monotonic identity assigned by the manager whenever this dialog-key
+    /// binding changes. Retention deadlines carry the same generation so an
+    /// old deadline cannot remove a newer binding for a reused dialog key.
+    pub(crate) deadline_generation: u64,
+    pub(crate) _admission_owner: Option<crate::transaction::manager::TransactionAdmissionOwner>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +68,11 @@ pub(crate) struct Invite2xxResponseCacheEntry {
     pub(crate) expires_at: Instant,
     pub(crate) next_retransmit_at: Instant,
     pub(crate) retransmit_interval: Duration,
+    /// Identity of the exact retransmit/expiry deadline currently registered
+    /// with the manager. A superseded deadline cannot mutate or remove a
+    /// replacement cache entry that happens to reuse the same transaction key.
+    pub(crate) deadline_generation: u64,
+    pub(crate) _admission_owner: Option<crate::transaction::manager::TransactionAdmissionOwner>,
 }
 
 impl Invite2xxResponseCacheEntry {
@@ -72,10 +82,25 @@ impl Invite2xxResponseCacheEntry {
 }
 
 impl ServerInviteAckIndexEntry {
+    #[cfg(test)]
     pub(crate) fn active(transaction_id: TransactionKey) -> Self {
         Self {
             transaction_id,
             expires_at: None,
+            deadline_generation: 0,
+            _admission_owner: None,
+        }
+    }
+
+    pub(crate) fn active_with_owner(
+        transaction_id: TransactionKey,
+        admission_owner: Option<crate::transaction::manager::TransactionAdmissionOwner>,
+    ) -> Self {
+        Self {
+            transaction_id,
+            expires_at: None,
+            deadline_generation: 0,
+            _admission_owner: admission_owner,
         }
     }
 

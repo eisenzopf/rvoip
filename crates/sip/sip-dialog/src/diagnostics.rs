@@ -44,9 +44,8 @@ const MAX_CALL_TIMING_TRACE_ENTRIES: usize = 20_000;
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 static DIALOG_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
-static CALL_TIMING_TRACE_OVERFLOW: AtomicU64 = AtomicU64::new(0);
-static CALL_TIMING_TRACES: LazyLock<Mutex<HashMap<String, CallTimingTraceCounts>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static CALL_TIMING_TRACE_STORE: LazyLock<CallTimingTraceStore> =
+    LazyLock::new(CallTimingTraceStore::default);
 
 static DUP_INVITE_EXISTING_TX: AtomicU64 = AtomicU64::new(0);
 static DUP_INVITE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -117,6 +116,11 @@ static TERMINATION_CLEANUP_BATCH_MAX: AtomicU64 = AtomicU64::new(0);
 static TERMINATION_CLEANUP_INDEXED_SCAN_KEYS: AtomicU64 = AtomicU64::new(0);
 static TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS: AtomicU64 = AtomicU64::new(0);
 static TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_TERMINATION_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_TERMINATION_COMPLETED: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_TERMINATION_FAILED: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_TERMINATION_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static EXPLICIT_TERMINATION_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
 
 static INVITE_2XX_MAINTENANCE_TICKS: AtomicU64 = AtomicU64::new(0);
 static INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -484,6 +488,8 @@ pub struct Snapshot {
     pub termination_cleanup_worker_spawned: u64,
     pub termination_cleanup_in_flight: u64,
     pub termination_cleanup_max_in_flight: u64,
+    /// Legacy compatibility counter. The due-driven cleanup scheduler does
+    /// not poll transactions, so new runs report zero.
     pub termination_cleanup_poll_attempts: u64,
     pub termination_cleanup_removed: u64,
     pub termination_cleanup_batches: u64,
@@ -492,6 +498,11 @@ pub struct Snapshot {
     pub termination_cleanup_indexed_scan_keys: u64,
     pub termination_cleanup_full_scan_client_keys: u64,
     pub termination_cleanup_full_scan_server_keys: u64,
+    pub explicit_termination_enqueued: u64,
+    pub explicit_termination_completed: u64,
+    pub explicit_termination_failed: u64,
+    pub explicit_termination_in_flight: u64,
+    pub explicit_termination_max_in_flight: u64,
     pub invite_2xx_maintenance_ticks: u64,
     pub invite_2xx_maintenance_cache_len_total: u64,
     pub invite_2xx_maintenance_cache_len_max: u64,
@@ -722,6 +733,115 @@ impl CallTimingTraceCounts {
     }
 }
 
+/// Bounded storage for per-call timing traces.
+///
+/// Keeping the state behind an instance also lets unit tests exercise the
+/// complete retention and redaction behavior without racing the process-wide
+/// diagnostics switches or resetting production counters used by other tests.
+#[derive(Default)]
+struct CallTimingTraceStore {
+    overflow: AtomicU64,
+    traces: Mutex<HashMap<String, CallTimingTraceCounts>>,
+}
+
+impl CallTimingTraceStore {
+    fn record(&self, call_id: &str, update: impl FnOnce(&mut CallTimingTraceCounts, u64)) {
+        if call_id.is_empty() {
+            return;
+        }
+
+        let call_correlation = rvoip_sip_core::diagnostics::opaque_call_correlation(call_id);
+        let Ok(mut traces) = self.traces.lock() else {
+            return;
+        };
+        if !traces.contains_key(&call_correlation) && traces.len() >= MAX_CALL_TIMING_TRACE_ENTRIES
+        {
+            self.overflow.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        let now_us = epoch_us();
+        let trace = traces.entry(call_correlation).or_default();
+        update(trace, now_us);
+    }
+
+    fn record_uac_invite_2xx_response(&self, call_id: &str) {
+        self.record(
+            call_id,
+            CallTimingTraceCounts::record_uac_invite_2xx_response,
+        );
+    }
+
+    fn record_uac_ack_attempt(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_uac_ack_attempt);
+    }
+
+    fn record_uac_ack_success(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_uac_ack_success);
+    }
+
+    fn record_uac_ack_failure(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_uac_ack_failure);
+    }
+
+    fn record_uac_call_answered_emit(&self, call_id: &str) {
+        self.record(
+            call_id,
+            CallTimingTraceCounts::record_uac_call_answered_emit,
+        );
+    }
+
+    fn record_hub_response_invite_2xx(&self, call_id: &str) {
+        self.record(
+            call_id,
+            CallTimingTraceCounts::record_hub_response_invite_2xx,
+        );
+    }
+
+    fn record_hub_call_answered(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_hub_call_answered);
+    }
+
+    fn record_hub_ack_sent(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_hub_ack_sent);
+    }
+
+    fn record_uas_ack_received(&self, call_id: &str) {
+        self.record(call_id, CallTimingTraceCounts::record_uas_ack_received);
+    }
+
+    fn record_lifecycle_call_answered(&self, call_id: &str) {
+        self.record(
+            call_id,
+            CallTimingTraceCounts::record_lifecycle_call_answered,
+        );
+    }
+
+    fn reset(&self) {
+        self.overflow.store(0, Ordering::Relaxed);
+        if let Ok(mut traces) = self.traces.lock() {
+            traces.clear();
+        }
+    }
+
+    fn overflow(&self) -> u64 {
+        self.overflow.load(Ordering::Relaxed)
+    }
+
+    fn snapshots(&self) -> Vec<CallTimingTraceSnapshot> {
+        let Ok(traces) = self.traces.lock() else {
+            return Vec::new();
+        };
+
+        let mut rows = traces
+            .iter()
+            .map(|(call_correlation, trace)| trace.snapshot(call_correlation.clone()))
+            .collect::<Vec<_>>();
+        rows.sort_by(|left, right| left.call_correlation.cmp(&right.call_correlation));
+        rows
+    }
+}
+
 pub fn enabled() -> bool {
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
         2 => true,
@@ -797,9 +917,7 @@ pub fn reset() {
     for metric in dialog_latency_metrics() {
         metric.reset();
     }
-    if let Ok(mut traces) = CALL_TIMING_TRACES.lock() {
-        traces.clear();
-    }
+    CALL_TIMING_TRACE_STORE.reset();
 }
 
 pub fn snapshot() -> Snapshot {
@@ -853,8 +971,8 @@ pub fn snapshot() -> Snapshot {
         hub_ack_sent: HUB_ACK_SENT.load(Ordering::Relaxed),
         hub_ack_sent_session_found: HUB_ACK_SENT_SESSION_FOUND.load(Ordering::Relaxed),
         hub_ack_sent_session_missing: HUB_ACK_SENT_SESSION_MISSING.load(Ordering::Relaxed),
-        call_timing_trace_overflow: CALL_TIMING_TRACE_OVERFLOW.load(Ordering::Relaxed),
-        call_timing_traces: call_timing_trace_snapshots(),
+        call_timing_trace_overflow: CALL_TIMING_TRACE_STORE.overflow(),
+        call_timing_traces: CALL_TIMING_TRACE_STORE.snapshots(),
         dialog_route_request: DIALOG_ROUTE_REQUEST.load(Ordering::Relaxed),
         dialog_route_stored: DIALOG_ROUTE_STORED.load(Ordering::Relaxed),
         dialog_route_transaction_key: DIALOG_ROUTE_TRANSACTION_KEY.load(Ordering::Relaxed),
@@ -884,6 +1002,12 @@ pub fn snapshot() -> Snapshot {
         termination_cleanup_full_scan_client_keys: TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS
             .load(Ordering::Relaxed),
         termination_cleanup_full_scan_server_keys: TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS
+            .load(Ordering::Relaxed),
+        explicit_termination_enqueued: EXPLICIT_TERMINATION_ENQUEUED.load(Ordering::Relaxed),
+        explicit_termination_completed: EXPLICIT_TERMINATION_COMPLETED.load(Ordering::Relaxed),
+        explicit_termination_failed: EXPLICIT_TERMINATION_FAILED.load(Ordering::Relaxed),
+        explicit_termination_in_flight: EXPLICIT_TERMINATION_IN_FLIGHT.load(Ordering::Relaxed),
+        explicit_termination_max_in_flight: EXPLICIT_TERMINATION_MAX_IN_FLIGHT
             .load(Ordering::Relaxed),
         invite_2xx_maintenance_ticks: INVITE_2XX_MAINTENANCE_TICKS.load(Ordering::Relaxed),
         invite_2xx_maintenance_cache_len_total: INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL
@@ -1066,7 +1190,9 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          other={}] termination_cleanup=[enqueued={} queue_full={} worker_spawned={} \
          in_flight={} max_in_flight={} poll_attempts={} removed={} batches={} \
          batch_total={} batch_max={} indexed_scan_keys={} full_scan_client_keys={} \
-         full_scan_server_keys={}] invite_2xx_maintenance=[ticks={} cache_len_total={} \
+         full_scan_server_keys={} explicit_enqueued={} explicit_completed={} \
+         explicit_failed={} explicit_in_flight={} explicit_max_in_flight={}] \
+         invite_2xx_maintenance=[ticks={} cache_len_total={} \
          cache_len_max={} due_queue_len_total={} due_queue_len_max={} scanned={} due={} \
          expired={} capped_ticks={}] global_publish=[count={} \
          handler_count_total={} handler_count_max={} incoming_call={} ack={} bye={} other={}] \
@@ -1145,6 +1271,11 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.termination_cleanup_indexed_scan_keys,
         snapshot.termination_cleanup_full_scan_client_keys,
         snapshot.termination_cleanup_full_scan_server_keys,
+        snapshot.explicit_termination_enqueued,
+        snapshot.explicit_termination_completed,
+        snapshot.explicit_termination_failed,
+        snapshot.explicit_termination_in_flight,
+        snapshot.explicit_termination_max_in_flight,
         snapshot.invite_2xx_maintenance_ticks,
         snapshot.invite_2xx_maintenance_cache_len_total,
         snapshot.invite_2xx_maintenance_cache_len_max,
@@ -1379,62 +1510,62 @@ pub(crate) fn record_hub_ack_sent_session(found: bool) {
 }
 
 pub fn record_call_timing_uac_invite_2xx_response(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uac_invite_2xx_response(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uac_invite_2xx_response(call_id);
     });
 }
 
 pub fn record_call_timing_uac_ack_attempt(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uac_ack_attempt(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uac_ack_attempt(call_id);
     });
 }
 
 pub fn record_call_timing_uac_ack_success(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uac_ack_success(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uac_ack_success(call_id);
     });
 }
 
 pub fn record_call_timing_uac_ack_failure(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uac_ack_failure(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uac_ack_failure(call_id);
     });
 }
 
 pub fn record_call_timing_uac_call_answered_emit(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uac_call_answered_emit(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uac_call_answered_emit(call_id);
     });
 }
 
 pub fn record_call_timing_hub_response_invite_2xx(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_hub_response_invite_2xx(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_hub_response_invite_2xx(call_id);
     });
 }
 
 pub fn record_call_timing_hub_call_answered(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_hub_call_answered(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_hub_call_answered(call_id);
     });
 }
 
 pub fn record_call_timing_hub_ack_sent(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_hub_ack_sent(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_hub_ack_sent(call_id);
     });
 }
 
 pub fn record_call_timing_uas_ack_received(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_uas_ack_received(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_uas_ack_received(call_id);
     });
 }
 
 pub fn record_call_timing_lifecycle_call_answered(call_id: &str) {
-    record_call_timing_trace(call_id, |trace, now_us| {
-        trace.record_lifecycle_call_answered(now_us);
+    record_call_timing_trace(|traces| {
+        traces.record_lifecycle_call_answered(call_id);
     });
 }
 
@@ -1538,12 +1669,6 @@ pub(crate) fn record_termination_cleanup_in_flight(delta: i64) {
     update_max(&TERMINATION_CLEANUP_MAX_IN_FLIGHT, current);
 }
 
-pub(crate) fn record_termination_cleanup_poll_attempts(attempts: u64) {
-    if transaction_timing_enabled() {
-        TERMINATION_CLEANUP_POLL_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
-    }
-}
-
 pub(crate) fn record_termination_cleanup_removed() {
     if transaction_timing_enabled() {
         TERMINATION_CLEANUP_REMOVED.fetch_add(1, Ordering::Relaxed);
@@ -1574,6 +1699,40 @@ pub(crate) fn record_termination_cleanup_full_scan(
 pub(crate) fn record_termination_cleanup_timer_unregister(elapsed: Duration) {
     if transaction_timing_enabled() {
         TERMINATION_CLEANUP_TIMER_UNREGISTER.record(elapsed);
+    }
+}
+
+pub(crate) fn record_explicit_termination_enqueued() {
+    if transaction_timing_enabled() {
+        EXPLICIT_TERMINATION_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_explicit_termination_in_flight(delta: i64) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    let current = if delta >= 0 {
+        EXPLICIT_TERMINATION_IN_FLIGHT.fetch_add(delta as u64, Ordering::Relaxed) + delta as u64
+    } else {
+        EXPLICIT_TERMINATION_IN_FLIGHT
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_sub((-delta) as u64))
+            })
+            .unwrap_or_else(|current| current)
+            .saturating_sub((-delta) as u64)
+    };
+    update_max(&EXPLICIT_TERMINATION_MAX_IN_FLIGHT, current);
+}
+
+pub(crate) fn record_explicit_termination_completed(success: bool) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    if success {
+        EXPLICIT_TERMINATION_COMPLETED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        EXPLICIT_TERMINATION_FAILED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -1696,6 +1855,7 @@ pub(crate) fn record_bye_path_send_response(elapsed: Duration) {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn record_bye_path_release_tx(elapsed: Duration) {
     if dialog_timing_enabled() {
         BYE_PATH_RELEASE_TX.record(elapsed);
@@ -1895,36 +2055,12 @@ pub(crate) fn record_dialog_initial_invite_setup(elapsed: Duration) {
     }
 }
 
-fn record_call_timing_trace(call_id: &str, update: impl FnOnce(&mut CallTimingTraceCounts, u64)) {
-    if !enabled() || call_id.is_empty() {
+fn record_call_timing_trace(update: impl FnOnce(&CallTimingTraceStore)) {
+    if !enabled() {
         return;
     }
 
-    let call_correlation = rvoip_sip_core::diagnostics::opaque_call_correlation(call_id);
-    let Ok(mut traces) = CALL_TIMING_TRACES.lock() else {
-        return;
-    };
-    if !traces.contains_key(&call_correlation) && traces.len() >= MAX_CALL_TIMING_TRACE_ENTRIES {
-        CALL_TIMING_TRACE_OVERFLOW.fetch_add(1, Ordering::Relaxed);
-        return;
-    }
-
-    let now_us = epoch_us();
-    let trace = traces.entry(call_correlation).or_default();
-    update(trace, now_us);
-}
-
-fn call_timing_trace_snapshots() -> Vec<CallTimingTraceSnapshot> {
-    let Ok(traces) = CALL_TIMING_TRACES.lock() else {
-        return Vec::new();
-    };
-
-    let mut rows = traces
-        .iter()
-        .map(|(call_correlation, trace)| trace.snapshot(call_correlation.clone()))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| left.call_correlation.cmp(&right.call_correlation));
-    rows
+    update(&CALL_TIMING_TRACE_STORE);
 }
 
 fn set_first_last_u64(first: &mut Option<u64>, last: &mut Option<u64>, value: u64) {
@@ -2142,7 +2278,6 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &HUB_ACK_SENT,
         &HUB_ACK_SENT_SESSION_FOUND,
         &HUB_ACK_SENT_SESSION_MISSING,
-        &CALL_TIMING_TRACE_OVERFLOW,
         &FIRST_INVITE_TO_200_COUNT,
         &FIRST_INVITE_TO_200_SUM_US,
         &FIRST_INVITE_TO_200_MAX_US,
@@ -2188,6 +2323,11 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &TERMINATION_CLEANUP_INDEXED_SCAN_KEYS,
         &TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS,
         &TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS,
+        &EXPLICIT_TERMINATION_ENQUEUED,
+        &EXPLICIT_TERMINATION_COMPLETED,
+        &EXPLICIT_TERMINATION_FAILED,
+        &EXPLICIT_TERMINATION_IN_FLIGHT,
+        &EXPLICIT_TERMINATION_MAX_IN_FLIGHT,
         &INVITE_2XX_MAINTENANCE_TICKS,
         &INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL,
         &INVITE_2XX_MAINTENANCE_CACHE_LEN_MAX,
@@ -2290,23 +2430,22 @@ mod tests {
 
     #[test]
     fn call_timing_traces_record_and_reset() {
-        set_enabled_for_tests(true);
-        reset();
+        let traces = CallTimingTraceStore::default();
 
-        record_call_timing_uac_invite_2xx_response("call-a");
-        record_call_timing_uac_ack_attempt("call-a");
-        record_call_timing_uac_ack_success("call-a");
-        record_call_timing_uac_call_answered_emit("call-a");
-        record_call_timing_hub_response_invite_2xx("call-a");
-        record_call_timing_hub_call_answered("call-a");
-        record_call_timing_hub_ack_sent("call-a");
-        record_call_timing_uas_ack_received("call-a");
-        record_call_timing_lifecycle_call_answered("call-a");
+        traces.record_uac_invite_2xx_response("call-a");
+        traces.record_uac_ack_attempt("call-a");
+        traces.record_uac_ack_success("call-a");
+        traces.record_uac_call_answered_emit("call-a");
+        traces.record_hub_response_invite_2xx("call-a");
+        traces.record_hub_call_answered("call-a");
+        traces.record_hub_ack_sent("call-a");
+        traces.record_uas_ack_received("call-a");
+        traces.record_lifecycle_call_answered("call-a");
 
-        let first_snapshot = snapshot();
-        assert_eq!(first_snapshot.call_timing_trace_overflow, 0);
-        assert_eq!(first_snapshot.call_timing_traces.len(), 1);
-        let trace = &first_snapshot.call_timing_traces[0];
+        let first_snapshot = traces.snapshots();
+        assert_eq!(traces.overflow(), 0);
+        assert_eq!(first_snapshot.len(), 1);
+        let trace = &first_snapshot[0];
         assert_eq!(
             trace.call_correlation,
             rvoip_sip_core::diagnostics::opaque_call_correlation("call-a")
@@ -2325,22 +2464,21 @@ mod tests {
         assert!(trace.first_uas_ack_received_epoch_us.is_some());
         assert!(trace.first_lifecycle_call_answered_epoch_us.is_some());
 
-        reset();
-        assert!(snapshot().call_timing_traces.is_empty());
+        traces.reset();
+        assert!(traces.snapshots().is_empty());
     }
 
     #[test]
     fn call_timing_snapshots_never_retain_or_serialize_raw_call_id() {
         const RAW_CALL_ID: &str = "private-call\r\nProxy-Authorization: Digest dialog-secret";
-        set_enabled_for_tests(true);
-        reset();
+        let traces = CallTimingTraceStore::default();
 
-        record_call_timing_uac_ack_attempt(RAW_CALL_ID);
-        record_call_timing_uac_ack_success(RAW_CALL_ID);
+        traces.record_uac_ack_attempt(RAW_CALL_ID);
+        traces.record_uac_ack_success(RAW_CALL_ID);
 
-        let snapshot = snapshot();
-        assert_eq!(snapshot.call_timing_traces.len(), 1);
-        let trace = &snapshot.call_timing_traces[0];
+        let snapshot = traces.snapshots();
+        assert_eq!(snapshot.len(), 1);
+        let trace = &snapshot[0];
         assert_eq!(
             trace.call_correlation,
             rvoip_sip_core::diagnostics::opaque_call_correlation(RAW_CALL_ID)
@@ -2533,11 +2671,15 @@ mod tests {
         record_termination_cleanup_batch(3);
         record_termination_cleanup_in_flight(1);
         record_termination_cleanup_in_flight(-1);
-        record_termination_cleanup_poll_attempts(2);
         record_termination_cleanup_removed();
         record_termination_cleanup_indexed_scan(5, Duration::from_micros(425));
         record_termination_cleanup_full_scan(7, 11, Duration::from_micros(475));
         record_termination_cleanup_timer_unregister(Duration::from_micros(525));
+        record_explicit_termination_enqueued();
+        record_explicit_termination_in_flight(1);
+        record_explicit_termination_completed(true);
+        record_explicit_termination_in_flight(-1);
+        record_explicit_termination_completed(false);
         record_invite_2xx_maintenance(13, 31, 17, 19, 23, true, Duration::from_micros(575));
         record_invite_2xx_proactive_send(Duration::from_micros(625));
         record_global_publish("incoming_call", 29, Duration::from_micros(675));
@@ -2609,11 +2751,16 @@ mod tests {
         assert_eq!(snapshot.termination_cleanup_batches, 1);
         assert_eq!(snapshot.termination_cleanup_batch_total, 3);
         assert_eq!(snapshot.termination_cleanup_max_in_flight, 1);
-        assert_eq!(snapshot.termination_cleanup_poll_attempts, 2);
+        assert_eq!(snapshot.termination_cleanup_poll_attempts, 0);
         assert_eq!(snapshot.termination_cleanup_removed, 1);
         assert_eq!(snapshot.termination_cleanup_indexed_scan_keys, 5);
         assert_eq!(snapshot.termination_cleanup_full_scan_client_keys, 7);
         assert_eq!(snapshot.termination_cleanup_full_scan_server_keys, 11);
+        assert_eq!(snapshot.explicit_termination_enqueued, 1);
+        assert_eq!(snapshot.explicit_termination_completed, 1);
+        assert_eq!(snapshot.explicit_termination_failed, 1);
+        assert_eq!(snapshot.explicit_termination_in_flight, 0);
+        assert_eq!(snapshot.explicit_termination_max_in_flight, 1);
         assert_eq!(snapshot.invite_2xx_maintenance_ticks, 1);
         assert_eq!(snapshot.invite_2xx_maintenance_cache_len_max, 13);
         assert_eq!(snapshot.invite_2xx_maintenance_due_queue_len_max, 31);

@@ -51,17 +51,14 @@ async fn build_client(port: u16) -> StreamPeer {
 /// the peer shuts down.
 fn spawn_auto_answer(mut peer: StreamPeer) -> tokio::task::JoinHandle<StreamPeer> {
     tokio::spawn(async move {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(30), peer.wait_for_incoming()).await {
-                Ok(Ok(incoming)) => {
-                    if let Ok(handle) = incoming.accept().await {
-                        // Fire-and-forget: the client drives hangup.
-                        tokio::spawn(async move {
-                            let _ = handle.wait_for_end(Some(Duration::from_secs(30))).await;
-                        });
-                    }
-                }
-                Ok(Err(_)) | Err(_) => break,
+        while let Ok(Ok(incoming)) =
+            tokio::time::timeout(Duration::from_secs(30), peer.wait_for_incoming()).await
+        {
+            if let Ok(handle) = incoming.accept().await {
+                // Fire-and-forget: the client drives hangup.
+                tokio::spawn(async move {
+                    let _ = handle.wait_for_end(Some(Duration::from_secs(30))).await;
+                });
             }
         }
         peer

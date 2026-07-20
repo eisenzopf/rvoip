@@ -58,6 +58,10 @@ fn uac_cancel_pending_provisional_sends_cancel_without_terminal_event() {
         let t = transition(&table, Role::UAC, CallState::CancelPending, event);
         assert_eq!(t.next_state, Some(CallState::Cancelling));
         assert!(t.actions.contains(&Action::SendCANCELWithOptions));
+        assert!(
+            !t.actions.contains(&Action::CleanupMedia),
+            "terminal cancellation release must remain the single media-cleanup owner"
+        );
         assert_no_terminal_publish(t);
     }
 }
@@ -71,6 +75,10 @@ fn uac_ringing_and_early_teardown_send_cancel_without_immediate_cancelled_event(
             let t = transition(&table, Role::UAC, state, event);
             assert_eq!(t.next_state, Some(CallState::Cancelling));
             assert!(t.actions.contains(&Action::SendCANCELWithOptions));
+            assert!(
+                !t.actions.contains(&Action::CleanupMedia),
+                "terminal cancellation release must remain the single media-cleanup owner"
+            );
             assert_no_terminal_publish(t);
         }
     }
@@ -121,6 +129,10 @@ fn uac_late_200_after_cancel_acks_and_byes_without_established_event() {
                 .any(|event| matches!(event, EventTemplate::CallEstablished)),
             "late 200 OK after cancel must not publish CallEstablished"
         );
+        assert!(
+            !t.actions.contains(&Action::CleanupMedia),
+            "the BYE-initiating phase must not race terminal media cleanup"
+        );
     }
 }
 
@@ -135,7 +147,55 @@ fn uac_late_answer_bye_cleanup_publishes_cancelled_on_dialog_terminated() {
     );
 
     assert_eq!(t.next_state, Some(CallState::Cancelled));
+    assert!(t.actions.contains(&Action::CleanupDialog));
+    assert!(
+        !t.actions.contains(&Action::CleanupMedia),
+        "the retained terminal release owns cancellation media cleanup"
+    );
     assert!(t.publish_events.contains(&EventTemplate::CallCancelled));
+}
+
+#[test]
+fn local_bye_initiators_defer_media_cleanup_to_terminal_phase() {
+    let table = load();
+
+    for (role, state, event) in [
+        (Role::UAC, CallState::Active, EventType::HangupCall),
+        (Role::UAS, CallState::Active, EventType::HangupCall),
+        (
+            Role::UAS,
+            CallState::AnsweringHangupPending,
+            EventType::DialogACK,
+        ),
+    ] {
+        let t = transition(&table, role, state, event);
+        assert!(t.actions.contains(&Action::SendBYE));
+        assert!(
+            !t.actions.contains(&Action::CleanupMedia),
+            "{role:?}/{state:?} must leave cleanup to terminal confirmation"
+        );
+    }
+
+    let terminating = transition(
+        &table,
+        Role::UAC,
+        CallState::Terminating,
+        EventType::DialogTerminated,
+    );
+    assert!(terminating.actions.contains(&Action::CleanupDialog));
+    assert!(
+        !terminating.actions.contains(&Action::CleanupMedia),
+        "the terminal handler retained release must remain the single media owner"
+    );
+
+    for event in [EventType::DialogTerminated, EventType::DialogTimeout] {
+        let cancelling = transition(&table, Role::UAC, CallState::Cancelling, event);
+        assert!(cancelling.actions.contains(&Action::CleanupDialog));
+        assert!(
+            !cancelling.actions.contains(&Action::CleanupMedia),
+            "the terminal handler/watchdog exact release must remain the single media owner"
+        );
+    }
 }
 
 #[test]
@@ -201,6 +261,10 @@ fn uas_answering_hangup_pending_ack_sends_bye_without_established_event() {
 
     assert_eq!(t.next_state, Some(CallState::Terminating));
     assert!(t.actions.contains(&Action::SendBYE));
+    assert!(
+        !t.actions.contains(&Action::CleanupMedia),
+        "the ACK/BYE phase must defer media cleanup until terminal confirmation"
+    );
     assert!(
         !t.publish_events
             .iter()

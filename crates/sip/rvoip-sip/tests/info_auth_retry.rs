@@ -16,7 +16,7 @@ use tokio::time::{sleep, timeout};
 use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
-use rvoip_sip::CallState;
+use rvoip_sip::{CallState, SessionError};
 
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::prelude::*;
@@ -362,6 +362,143 @@ async fn info_407_retry_uses_proxy_authorization() {
         (false, true),
         "407 retry must use Proxy-Authorization only"
     );
+
+    uas_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn info_401_without_challenge_releases_exact_request_slot() {
+    const TERMINAL_UAS_PORT: u16 = 35284;
+    const TERMINAL_UAC_PORT: u16 = 35285;
+
+    let sock = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{TERMINAL_UAS_PORT}"))
+            .await
+            .expect("UAS bind"),
+    );
+    let info_count = Arc::new(AtomicU32::new(0));
+    let sock_task = Arc::clone(&sock);
+    let count_task = Arc::clone(&info_count);
+    let uas_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(packet) => packet,
+                Err(_) => return,
+            };
+            let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+                continue;
+            };
+            let response = match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    for header in response.headers.iter_mut() {
+                        if let TypedHeader::To(to) = header {
+                            if to.tag().is_none() {
+                                to.set_tag("uas-info-terminal-tag");
+                            }
+                            break;
+                        }
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(
+                            format!("<sip:bob@127.0.0.1:{TERMINAL_UAS_PORT}>").into_bytes(),
+                        ),
+                    ));
+                    Some(response)
+                }
+                Method::Ack => None,
+                Method::Info => {
+                    let attempt = count_task.fetch_add(1, Ordering::SeqCst);
+                    Some(create_response(
+                        &request,
+                        if attempt == 0 {
+                            // No WWW-Authenticate header: this is terminal and
+                            // must release the exact tracker entry rather than
+                            // waiting for its forty-second safety expiry.
+                            StatusCode::Unauthorized
+                        } else {
+                            StatusCode::Ok
+                        },
+                    ))
+                }
+                _ => Some(create_response(&request, StatusCode::Ok)),
+            };
+            if let Some(response) = response {
+                let _ = sock_task
+                    .send_to(&Message::Response(response).to_bytes(), from)
+                    .await;
+            }
+        }
+    });
+
+    let coord = UnifiedCoordinator::new(Config::local("alice", TERMINAL_UAC_PORT))
+        .await
+        .expect("UAC coordinator");
+    sleep(Duration::from_millis(150)).await;
+    let call_id = coord
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{TERMINAL_UAC_PORT}")),
+            format!("sip:bob@127.0.0.1:{TERMINAL_UAS_PORT}"),
+        )
+        .send()
+        .await
+        .expect("invite.send()");
+
+    let active = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(state) = coord.get_state(&call_id).await {
+                if state == CallState::Active {
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(active.is_ok(), "call never reached Active");
+
+    coord
+        .info(&call_id, "application/dtmf-relay")
+        .with_body("Signal=1\r\nDuration=160\r\n")
+        .send()
+        .await
+        .expect("first info.send()");
+    timeout(Duration::from_secs(2), async {
+        while info_count.load(Ordering::SeqCst) < 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("UAS did not receive first INFO");
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            match coord
+                .info(&call_id, "application/dtmf-relay")
+                .with_body("Signal=2\r\nDuration=160\r\n")
+                .send()
+                .await
+            {
+                Ok(()) => break,
+                Err(SessionError::Conflict {
+                    method: Method::Info,
+                }) => sleep(Duration::from_millis(10)).await,
+                Err(error) => panic!("second INFO failed unexpectedly: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal 401 did not release INFO request slot");
+
+    timeout(Duration::from_secs(2), async {
+        while info_count.load(Ordering::SeqCst) < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("UAS did not receive second INFO");
 
     uas_handle.abort();
 }

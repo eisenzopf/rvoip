@@ -1751,9 +1751,12 @@ pub enum EndpointSrtpMode {
 ///
 /// `Debug` reports only the selected profile variant. In particular, the
 /// `Custom` variant never delegates to the embedded runtime configuration.
-#[derive(Clone)]
+// Boxing `Custom(Config)` would break the public constructor/pattern API.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Default)]
 pub enum EndpointProfile {
     /// Local loopback development profile.
+    #[default]
     Local,
     /// Directly reachable LAN PBX endpoint.
     LanPbx,
@@ -1786,11 +1789,7 @@ impl fmt::Debug for EndpointProfile {
     }
 }
 
-impl Default for EndpointProfile {
-    fn default() -> Self {
-        Self::Local
-    }
-}
+type EndpointConfigurator = Box<dyn FnOnce(&mut Config) + Send>;
 
 /// Builder for [`Endpoint`].
 ///
@@ -1842,7 +1841,7 @@ pub struct EndpointBuilder {
     sip_trace: Option<crate::api::events::SipTraceConfig>,
     from_uri: Option<String>,
     contact_uri: Option<String>,
-    configurators: Vec<Box<dyn FnOnce(&mut Config) + Send>>,
+    configurators: Vec<EndpointConfigurator>,
 }
 
 impl EndpointBuilder {

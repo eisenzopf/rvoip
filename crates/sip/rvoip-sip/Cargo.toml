@@ -397,6 +397,7 @@ rand = "0.8"
 strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
+tokio = { version = "1.40", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 rvoip-sip-transport.workspace = true
@@ -465,6 +466,10 @@ generated-validation = [
 dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
 # Optional G.729A/G.729AB media support. Off by default.
 g729 = ["rvoip-media-core/g729"]
+# Optional native Opus media support for negotiated SIP legs. Bridgefu enables
+# this so SIP Opus is represented as Opus codec payload in MediaFrame rather
+# than being mis-decoded as G.711.
+opus = ["rvoip-media-core/opus"]
 # Heap profiling for `examples/profiling/dhat_*.rs`. Pulls in the dhat
 # global allocator and turns the gated examples into compilable
 # binaries. Off by default so `cargo build` / `cargo test` never see

@@ -89,9 +89,12 @@ use self::error::Result;
 // Core submodules
 mod authorization;
 pub mod common_logic;
+mod completion;
 pub mod error;
 pub mod event;
+pub mod event_sender;
 pub mod key;
+mod lifecycle_scheduler;
 pub mod logic;
 pub mod runner;
 pub mod safe_diagnostics;
@@ -111,6 +114,7 @@ pub mod transport;
 pub mod utils;
 
 // Re-export core types
+pub use completion::{ClientTransactionFailure, ClientTransactionOutcome};
 pub use error::{Error as TransactionError, Result as TransactionResult};
 pub use event::*;
 pub use key::*;
@@ -130,7 +134,10 @@ pub use authorization::{
     SipRequestAuthorization, SipRequestIngressAuthorizer, SipRequestIngressContext,
     SipRequestRejection,
 };
-pub use manager::{TransactionManager, MAX_TRANSACTION_DISPATCH_WORKERS};
+pub use manager::{
+    TransactionManager, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+    DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MAX_TRANSACTION_DISPATCH_WORKERS,
+};
 
 /// Defines the core traits, types, and machinery for SIP transactions.
 ///
@@ -195,6 +202,11 @@ pub enum InternalTransactionCommand {
     /// Delivers an incoming SIP `Message` (Request or Response) to the transaction for processing.
     /// The transaction will determine how this message affects its state based on its kind and current state.
     ProcessMessage(Message),
+    /// Transfers ownership of an outbound server response to the existing
+    /// transaction runner. The runner performs the transport write and owns
+    /// the resulting transition without self-enqueuing another command.
+    #[doc(hidden)]
+    SupervisedServerResponse(std::sync::Arc<server::SupervisedServerResponse>),
     /// Signals that a specific transaction timer has fired.
     /// The `String` typically identifies the timer (e.g., "Timer_A", "Timer_F").
     Timer(String),
@@ -204,6 +216,11 @@ pub enum InternalTransactionCommand {
     /// Instructs the transaction to terminate immediately, cleaning up its resources.
     /// This might be used for forceful shutdown or after a critical error.
     Terminate,
+    /// Retire a completed non-INVITE runner after the manager has atomically
+    /// installed its compact UDP Timer J/K tombstone. Unlike `Terminate`, the
+    /// due scheduler owns the later TimerTriggered/StateChanged/Terminated
+    /// observations, so the runner exits without publishing them twice.
+    CompactRetire,
     /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
     /// This is sent when the TU sends any provisional response, making the automatic 100 Trying unnecessary.
     /// RFC 3261 Section 17.2.1: "If the TU does not send a provisional response within 200ms,
@@ -394,7 +411,8 @@ mod tests {
         let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
         let _cmd4 = InternalTransactionCommand::TransportError;
         let _cmd5 = InternalTransactionCommand::Terminate;
-        let _cmd6 = InternalTransactionCommand::CancelTimer100;
+        let _cmd6 = InternalTransactionCommand::CompactRetire;
+        let _cmd7 = InternalTransactionCommand::CancelTimer100;
     }
 
     #[test]

@@ -84,6 +84,9 @@ pub enum TransferKind {
 }
 
 /// Evidence that a transfer target actually progressed beyond REFER receipt.
+// Keep the public evidence payloads source-compatible; callers construct and
+// pattern-match these variants directly.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Eq)]
 pub enum TransferTargetEvidence {
     /// A REFER `message/sipfrag` produced provisional target progress before

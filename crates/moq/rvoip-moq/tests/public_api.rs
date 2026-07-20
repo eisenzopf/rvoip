@@ -6,19 +6,23 @@ use rvoip_core_traits::broadcast::{
     BroadcastProtocolFamily, BroadcastPublisher, BroadcastResource,
 };
 use rvoip_moq::{
-    InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqBroadcastPublisher, MoqCatalogApplyOutcome,
-    MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriber, MoqCatalogSubscriberConfig,
-    MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig, MoqCompatibility,
-    MoqEndOfGroupEvidence, MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion,
-    MoqPublisherConfig, MoqRelayConnectionPolicy, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
-    MoqRelayTlsConfig, MoqSanitizedEvent, MoqSanitizedEventKind, MoqSanitizedEventsConfig,
-    MoqSubscriberCredential, MoqSubscriberCredentialError, MoqSubscriberCredentialProvider,
-    MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState, CATALOG_TRACK, EVENTS_TRACK,
-    LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
+    InMemoryMoqGroupIdAllocator, LocOpusPacketizer, MoqAudioObjectReceiver, MoqAudioSubscriber,
+    MoqAudioSubscriberConfig, MoqAudioSubscriberLifecycle, MoqBroadcastPublisher,
+    MoqCatalogApplyOutcome, MoqCatalogObject, MoqCatalogStateMachine, MoqCatalogSubscriber,
+    MoqCatalogSubscriberConfig, MoqCatalogSubscriberLifecycle, MoqCatalogSubscriberTlsConfig,
+    MoqCompatibility, MoqEndOfGroupEvidence, MoqGroupIdAllocator, MoqNamespace, MoqProtocolVersion,
+    MoqPublisherConfig, MoqReceivedAudioObject, MoqRelayConnectionPolicy, MoqRelayPeerIdentity,
+    MoqRelaySubstratePolicy, MoqRelayTlsConfig, MoqSanitizedEvent, MoqSanitizedEventKind,
+    MoqSanitizedEventsConfig, MoqSubscriberCredential, MoqSubscriberCredentialError,
+    MoqSubscriberCredentialProvider, MoqSubscriberCredentialRequest, MsfCatalog, MsfCatalogState,
+    CATALOG_TRACK, EVENTS_TRACK, LOC_DRAFT, MOQT_DRAFT, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT,
 };
 use url::Url;
 
 struct TestCredentialProvider;
+
+#[cfg(feature = "relay-runtime")]
+struct DenyPublisherAuthority;
 
 fn assert_send_sync<T: Send + Sync>() {}
 
@@ -29,6 +33,21 @@ impl MoqSubscriberCredentialProvider for TestCredentialProvider {
         _request: MoqSubscriberCredentialRequest,
     ) -> Result<MoqSubscriberCredential, MoqSubscriberCredentialError> {
         MoqSubscriberCredential::new(b"single-use-test-token".to_vec())
+    }
+}
+
+#[cfg(feature = "relay-runtime")]
+#[async_trait]
+impl rvoip_moq::MoqPublisherPublicationAuthority for DenyPublisherAuthority {
+    async fn active_publication(
+        &self,
+        _request: &rvoip_moq::MoqPublisherPublicationRequest,
+        _now: chrono::DateTime<Utc>,
+    ) -> Result<
+        Option<rvoip_moq::MoqPublisherPublicationGrant>,
+        rvoip_moq::MoqPublisherPublicationAuthorityError,
+    > {
+        Ok(None)
     }
 }
 
@@ -84,6 +103,17 @@ async fn application_contract_uses_only_rvoip_owned_models() {
     assert!(!format!("{subscriber_tls:?}").contains("PRIVATE KEY"));
     let _managed_constructor = MoqCatalogSubscriber::bind;
     assert_send_sync::<MoqCatalogSubscriber>();
+    let audio_config = MoqAudioSubscriberConfig::new(
+        Url::parse("moqt://relay.example/tenant/broadcast").unwrap(),
+        namespace.clone(),
+    );
+    audio_config.validate().unwrap();
+    assert!(!MoqAudioSubscriberLifecycle::Live.is_terminal());
+    assert!(MoqAudioSubscriberLifecycle::Closed.is_terminal());
+    let _managed_audio_constructor = MoqAudioSubscriber::bind;
+    assert_send_sync::<MoqAudioSubscriber>();
+    assert_send_sync::<MoqAudioObjectReceiver>();
+    assert_send_sync::<MoqReceivedAudioObject>();
 
     let _packetizer = LocOpusPacketizer::new();
     assert_eq!(
@@ -157,10 +187,11 @@ async fn application_contract_uses_only_rvoip_owned_models() {
 #[test]
 fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     use rvoip_moq::{
+        MoqPublisherAdmissionConfig, MoqPublisherCertificateBinding, MoqPublisherNamespaceCeiling,
         MoqRelayCertificateBinding, MoqRelayDeploymentMode, MoqRelayListenerKind,
         MoqRelayPublisherBinding, MoqRelayRuntimeLimits, MoqRelayRuntimeSecurity,
         MoqRelayRuntimeTimeouts, MoqRelayServerTlsConfig, MoqRelayTopology, MoqRelayTopologyLimits,
-        MoqRelayUpstreamRoute, MoqRelayUpstreamRoutes,
+        MoqRelayUpstreamRoute, MoqRelayUpstreamRoutes, RvoipMoqPublisherAdmission,
     };
 
     let security = MoqRelayRuntimeSecurity::PublisherMutualTls {
@@ -184,6 +215,24 @@ fn relay_runtime_contract_uses_only_rvoip_owned_models() {
     assert_eq!(
         relay_subscriber.listener_kind(),
         MoqRelayListenerKind::RelaySubscriberMutualTls
+    );
+    let dynamic_publisher = MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic {
+        admission: Arc::new(
+            RvoipMoqPublisherAdmission::new(
+                [MoqPublisherCertificateBinding {
+                    certificate_sha256: "ef".repeat(32),
+                    namespace_ceiling: MoqPublisherNamespaceCeiling::tenant_prefix("tenant")
+                        .unwrap(),
+                }],
+                Arc::new(DenyPublisherAuthority),
+                MoqPublisherAdmissionConfig::new(std::time::Duration::from_secs(1), 4).unwrap(),
+            )
+            .unwrap(),
+        ),
+    };
+    assert_eq!(
+        dynamic_publisher.listener_kind(),
+        MoqRelayListenerKind::PublisherMutualTls
     );
     assert_eq!(
         MoqRelayDeploymentMode::default(),

@@ -57,6 +57,32 @@ fn http() -> reqwest::Client {
 
 const MIN_OFFER: &str = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\nc=IN IP4 127.0.0.1\r\na=mid:0\r\na=ice-ufrag:abcd\r\na=ice-pwd:abcdefghijklmnopqrstuv\r\na=fingerprint:sha-256 AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99\r\na=setup:actpass\r\na=sendrecv\r\na=rtcp-mux\r\na=rtpmap:111 opus/48000/2\r\n";
 
+async fn create_resource(base: &str) -> (String, String) {
+    let response = http()
+        .post(format!("{base}/whip/preconditions"))
+        .header("content-type", "application/sdp")
+        .body(MIN_OFFER)
+        .send()
+        .await
+        .expect("create WHIP resource");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let location = response
+        .headers()
+        .get("location")
+        .expect("location")
+        .to_str()
+        .expect("location text")
+        .to_owned();
+    let etag = response
+        .headers()
+        .get("etag")
+        .expect("etag")
+        .to_str()
+        .expect("etag text")
+        .to_owned();
+    (format!("{base}{location}"), etag)
+}
+
 #[tokio::test]
 async fn whip_anonymous_default_accepts_post() {
     let (_adapter, base) = start_anonymous_server().await;
@@ -186,12 +212,10 @@ async fn whip_link_header_auto_populated_from_ice_servers() {
 
 #[tokio::test]
 async fn whip_patch_ice_restart_without_if_match_returns_428() {
-    let (adapter, base) = start_anonymous_server().await;
-    let _ = &adapter; // unused-binding warning shut
-                      // Need a real connection id for the PATCH path. Just use a fake one —
-                      // the If-Match check fires before the connection lookup.
+    let (_adapter, base) = start_anonymous_server().await;
+    let (resource, _etag) = create_resource(&base).await;
     let resp = http()
-        .patch(format!("{base}/whip/nonexistent"))
+        .patch(resource)
         .header("content-type", "application/sdp")
         .body("v=0\r\n")
         .send()
@@ -203,8 +227,9 @@ async fn whip_patch_ice_restart_without_if_match_returns_428() {
 #[tokio::test]
 async fn whip_patch_ice_restart_with_stale_if_match_returns_412() {
     let (_adapter, base) = start_anonymous_server().await;
+    let (resource, _etag) = create_resource(&base).await;
     let resp = http()
-        .patch(format!("{base}/whip/anyid"))
+        .patch(resource)
         .header("content-type", "application/sdp")
         .header("if-match", "\"stale-etag-value\"")
         .body("v=0\r\n")

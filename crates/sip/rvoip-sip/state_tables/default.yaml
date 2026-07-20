@@ -197,6 +197,21 @@ transitions:
       sdp_negotiated: true
     description: "Early media received"
 
+  # A normal UAS commonly sends 180 before its 183+SDP. The UAC is already
+  # in Ringing in that case, but it must still negotiate and install the
+  # provisional RTP/SRTP context without waiting for the final 200.
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog183SessionProgress"
+    next_state: "EarlyMedia"
+    actions:
+      - type: "NegotiateSDPAsUAC"
+      - type: "StartMediaSession"
+    conditions:
+      sdp_negotiated: true
+    description: "Early media received after ringing"
+
   # UAC receives 200 OK while still initiating (fast answer without ringing)
   - role: "UAC"
     state: "Initiating"
@@ -407,8 +422,7 @@ transitions:
     next_state: "Terminating"
     actions:
       - type: "SendBYE"
-      - type: "CleanupMedia"
-    description: "ACK received after pending UAS hangup; send BYE"
+    description: "ACK received after pending UAS hangup; send BYE and defer cleanup until terminal confirmation"
 
   # Missing ACK after 200 OK fails the call attempt; BYE is not legal
   # because the dialog was never confirmed by the UAC.
@@ -525,8 +539,7 @@ transitions:
     next_state: "Terminating"
     actions:
       - type: "SendBYE"
-      - type: "CleanupMedia"
-    description: "Hangup active call"
+    description: "Hangup active call; terminal confirmation or the coordinator fallback owns cleanup"
 
   # Remote BYE arrives while we're in any active-call state. dialog-
   # core has already sent 200 OK on the wire; the state machine just
@@ -742,10 +755,15 @@ transitions:
       - "CallTerminated"
     description: "Inbound BYE during early media — cleanup and finalize"
 
-  # Cleanup after our own local hangup ran. This is the local-initiated
-  # path: HangupCall took us Active → Terminating (sending BYE +
-  # CleanupMedia along the way); peer's 200 OK then drives the dialog
-  # transaction Completed, which surfaces as DialogTerminated here.
+  # Complete the signaling phase after our own local hangup. This is a
+  # deliberately two-phase path: HangupCall takes us Active → Terminating
+  # and sends BYE,
+  # while the peer's 200 OK drives the dialog transaction to Completed and
+  # surfaces as DialogTerminated here. Keeping cleanup out of the initiating
+  # row prevents a fast 200 response from retiring the exact session while the
+  # original SendBYE action is still unwinding. The coordinator's retained
+  # exact terminal release owns the single media cleanup and also covers dialog
+  # stacks that do not surface this event.
   - role: "Both"
     state: "Terminating"
     event:
@@ -753,10 +771,9 @@ transitions:
     next_state: "Terminated"
     actions:
       - type: "CleanupDialog"
-      - type: "CleanupMedia"
     publish:
       - "CallTerminated"
-    description: "Local hangup confirmed (peer's 200 OK arrived)"
+    description: "Local hangup confirmed; retained exact release owns the single media cleanup"
 
   # RFC 3261 §14.1 — Hold is a re-INVITE. Session parameters MUST NOT
   # change until a 2xx response arrives. We enter an intermediate
@@ -1132,10 +1149,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      # RFC 3515 §2.4.5 — on a transfer leg, surface the failure back to
-      # the transferor via a final sipfrag NOTIFY. No-op for
-      # non-transfer sessions.
-      - type: "SendTransferNotifyFailure"
       # SIP_API_DESIGN_2 §7.3 invariant #2 — final response on the
       # INVITE; release the stash even though the call failed.
       - type: "ClearPendingINVITEOptions"
@@ -1151,7 +1164,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1165,7 +1177,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1179,7 +1190,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1193,7 +1203,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1207,7 +1216,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1234,7 +1242,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1248,7 +1255,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1262,7 +1268,6 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-      - type: "SendTransferNotifyFailure"
       - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
@@ -1331,8 +1336,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Provisional response arrived after pending cancel; send CANCEL"
+    description: "Provisional response arrived after pending cancel; send CANCEL and leave cleanup to terminal release"
 
   - role: "UAC"
     state: "CancelPending"
@@ -1341,8 +1345,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Early-media provisional arrived after pending cancel; send CANCEL without starting media"
+    description: "Early-media provisional arrived after pending cancel; send CANCEL without starting media and leave cleanup to terminal release"
 
   - role: "UAC"
     state: "CancelPending"
@@ -1353,8 +1356,7 @@ transitions:
       - type: "StoreRemoteSDP"
       - type: "SendACK"
       - type: "SendBYE"
-      - type: "CleanupMedia"
-    description: "Late 200 OK won the race before CANCEL was legal; ACK then BYE without publishing CallEstablished"
+    description: "Late 200 OK won the race before CANCEL was legal; ACK then BYE and defer cleanup without publishing CallEstablished"
 
   - role: "UAC"
     state: "CancelPending"
@@ -1411,8 +1413,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Cancel ringing call; wait for final INVITE response"
+    description: "Cancel ringing call; wait for final INVITE response and terminal release"
 
   # `SessionHandle::hangup()` is the single user-facing "stop this call"
   # API. It fires `HangupCall`; this block routes it to the CANCEL wire
@@ -1428,8 +1429,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Hangup while ringing; send CANCEL and wait for final INVITE response"
+    description: "Hangup while ringing; send CANCEL and wait for final INVITE response and terminal release"
 
   - role: "UAC"
     state: "EarlyMedia"
@@ -1438,8 +1438,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Cancel during early media; send CANCEL and wait for final INVITE response"
+    description: "Cancel during early media; send CANCEL and wait for final INVITE response and terminal release"
 
   # EarlyMedia (reliable 183 path): provisional already received, dialog
   # still in Early state; CANCEL is appropriate.
@@ -1450,8 +1449,7 @@ transitions:
     next_state: "Cancelling"
     actions:
       - type: "SendCANCELWithOptions"
-      - type: "CleanupMedia"
-    description: "Hangup during early media; send CANCEL and wait for final INVITE response"
+    description: "Hangup during early media; send CANCEL and wait for final INVITE response and terminal release"
 
   - role: "UAC"
     state: "Cancelling"
@@ -1473,8 +1471,7 @@ transitions:
       - type: "StoreRemoteSDP"
       - type: "SendACK"
       - type: "SendBYE"
-      - type: "CleanupMedia"
-    description: "Late 200 OK after CANCEL; ACK then BYE without publishing CallEstablished"
+    description: "Late 200 OK after CANCEL; ACK then BYE and defer cleanup without publishing CallEstablished"
 
   - role: "UAC"
     state: "Cancelling"
@@ -1485,7 +1482,7 @@ transitions:
       - type: "CleanupDialog"
     publish:
       - "CallCancelled"
-    description: "Late-answer BYE cleanup completed after cancellation"
+    description: "Late-answer BYE completed; the retained terminal release owns media cleanup"
 
   - role: "UAC"
     state: "Cancelling"
@@ -1496,7 +1493,7 @@ transitions:
       - type: "CleanupDialog"
     publish:
       - "CallCancelled"
-    description: "Cancellation completed by transaction timeout"
+    description: "Cancellation completed by transaction timeout; the watchdog retained release owns media cleanup"
 
   # Receive CANCEL for incoming call
   - role: "UAS"
@@ -1565,7 +1562,7 @@ transitions:
   # `Initiating` (INVITE) and `Registering` (REGISTER) are handled by
   # their dedicated rows above; the state discriminator keeps the
   # paths from colliding.
-  - role: "UAC"
+  - role: "Both"
     state: "Active"
     event:
       type: "AuthRequired"
@@ -1574,6 +1571,19 @@ transitions:
       - type: "StoreAuthChallenge"
       - type: "SendRequestWithAuth"
     description: "In-dialog request auth retry (BYE/REFER/NOTIFY/INFO/UPDATE)"
+
+  # Legacy `hangup()` enters Terminating before its BYE is written. Keep the
+  # state stable while a 401/407 challenge replays the retained exact BYE
+  # options. Both dialog roles may originate a local BYE.
+  - role: "Both"
+    state: "Terminating"
+    event:
+      type: "AuthRequired"
+    next_state: "Terminating"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "Terminating local BYE auth retry (RFC 3261 §22.2)"
 
   - role: "UAC"
     state: "Idle"

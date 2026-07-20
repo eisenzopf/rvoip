@@ -75,7 +75,7 @@ use crate::manager::DialogManager;
 // Re-export main API types
 pub use client::DialogClient;
 pub use server::DialogServer;
-pub use unified::UnifiedDialogApi;
+pub use unified::{ExactResponseSendError, FinalResponseCompletionDisposition, UnifiedDialogApi};
 
 // Re-export shared types
 pub use common::{CallHandle, CallInfo, DialogEvent, DialogHandle};

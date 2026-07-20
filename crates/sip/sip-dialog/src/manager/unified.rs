@@ -106,9 +106,11 @@
 //! ```
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
@@ -126,6 +128,367 @@ use crate::subscription::SubscriptionManager;
 
 // Import the existing core DialogManager functionality
 use super::core::DialogManager;
+
+const INITIAL_INVITE_INSTALLING: u8 = 0;
+const INITIAL_INVITE_INSTALLED: u8 = 1;
+const INITIAL_INVITE_DISPATCHING: u8 = 2;
+const INITIAL_INVITE_SENT: u8 = 3;
+const INITIAL_INVITE_WIRE_UNKNOWN: u8 = 4;
+const INITIAL_INVITE_RELEASING: u8 = 5;
+
+/// Exact ownership proof for a locally installed outbound initial INVITE.
+///
+/// The opaque token prevents stale cleanup work from releasing a later
+/// installation that happens to use the same application session identifier.
+/// Callers may retain this small handle in their own resource registry.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InitialInviteOwner {
+    dialog_id: DialogId,
+    call_id: String,
+    session_id: Option<String>,
+    token: Uuid,
+}
+
+impl InitialInviteOwner {
+    pub fn dialog_id(&self) -> &DialogId {
+        &self.dialog_id
+    }
+
+    pub fn call_id(&self) -> &str {
+        &self.call_id
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+}
+
+impl std::fmt::Debug for InitialInviteOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialInviteOwner")
+            .field("dialog_id", &self.dialog_id)
+            .field("call_id_len", &self.call_id.len())
+            .field("session_id_present", &self.session_id.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Side-effect-free outbound INVITE plan.
+///
+/// Planning parses and validates caller input, allocates the exact Dialog-ID
+/// and Call-ID, and snapshots the registration Service-Route. It does not
+/// publish dialog state, install mappings, create transactions, or send wire
+/// bytes.
+pub struct PlannedInitialInvite {
+    owner: InitialInviteOwner,
+    dialog: Dialog,
+    options: crate::api::unified::InviteRequestOptions,
+}
+
+impl PlannedInitialInvite {
+    pub fn owner(&self) -> &InitialInviteOwner {
+        &self.owner
+    }
+
+    pub fn dialog_id(&self) -> &DialogId {
+        self.owner.dialog_id()
+    }
+
+    pub fn call_id(&self) -> &str {
+        self.owner.call_id()
+    }
+}
+
+impl std::fmt::Debug for PlannedInitialInvite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PlannedInitialInvite")
+            .field("owner", &self.owner)
+            .field("route_count", &self.dialog.route_set.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A plan whose exact dialog and optional session mapping are installed
+/// locally, but whose INVITE has not been dispatched.
+pub struct InstalledInitialInvite {
+    owner: InitialInviteOwner,
+    options: crate::api::unified::InviteRequestOptions,
+    lease: InitialInviteInstallLease,
+}
+
+impl InstalledInitialInvite {
+    pub fn owner(&self) -> &InitialInviteOwner {
+        &self.owner
+    }
+}
+
+struct InitialInviteInstallLease {
+    manager: UnifiedDialogManager,
+    owner: InitialInviteOwner,
+    armed: bool,
+}
+
+impl InitialInviteInstallLease {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for InitialInviteInstallLease {
+    fn drop(&mut self) {
+        if self.armed {
+            self.manager
+                .compensate_dropped_initial_invite_install(&self.owner);
+        }
+    }
+}
+
+impl std::fmt::Debug for InstalledInitialInvite {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstalledInitialInvite")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What is known about wire emission when an initial-INVITE dispatch finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitialInviteWireOutcome {
+    /// Dispatch failed before any transaction attempt could reach transport.
+    ZeroWire,
+    /// The transaction layer accepted one INVITE for transmission.
+    Sent,
+    /// An attempt reached transport, but failure timing makes emission
+    /// impossible to prove either way.
+    Unknown,
+}
+
+/// Dispatch failure that preserves the exact owner needed for subsequent
+/// CANCEL/BYE teardown when wire emission is unknown.
+pub struct InitialInviteDispatchError {
+    owner: InitialInviteOwner,
+    wire_outcome: InitialInviteWireOutcome,
+    error: ApiError,
+}
+
+impl InitialInviteDispatchError {
+    pub fn owner(&self) -> &InitialInviteOwner {
+        &self.owner
+    }
+
+    pub fn wire_outcome(&self) -> InitialInviteWireOutcome {
+        self.wire_outcome
+    }
+
+    pub fn error(&self) -> &ApiError {
+        &self.error
+    }
+
+    pub fn into_api_error(self) -> ApiError {
+        self.error
+    }
+}
+
+impl std::fmt::Debug for InitialInviteDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialInviteDispatchError")
+            .field("owner", &self.owner)
+            .field("wire_outcome", &self.wire_outcome)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for InitialInviteDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "initial INVITE dispatch failed ({:?})",
+            self.wire_outcome
+        )
+    }
+}
+
+impl std::error::Error for InitialInviteDispatchError {}
+
+/// Terminal result from a retained initial-INVITE dispatch task.
+pub struct InitialInviteDispatchCompletion {
+    owner: InitialInviteOwner,
+    wire_outcome: InitialInviteWireOutcome,
+    transaction_id: Option<TransactionKey>,
+    error: Option<ApiError>,
+}
+
+impl InitialInviteDispatchCompletion {
+    pub fn owner(&self) -> &InitialInviteOwner {
+        &self.owner
+    }
+
+    pub fn wire_outcome(&self) -> InitialInviteWireOutcome {
+        self.wire_outcome
+    }
+
+    pub fn transaction_id(&self) -> Option<&TransactionKey> {
+        self.transaction_id.as_ref()
+    }
+
+    pub fn error(&self) -> Option<&ApiError> {
+        self.error.as_ref()
+    }
+
+    pub fn into_result(
+        self,
+    ) -> Result<(InitialInviteOwner, TransactionKey), InitialInviteDispatchError> {
+        match (self.transaction_id, self.error) {
+            (Some(transaction_id), None) => Ok((self.owner, transaction_id)),
+            (_, Some(error)) => Err(InitialInviteDispatchError {
+                owner: self.owner,
+                wire_outcome: self.wire_outcome,
+                error,
+            }),
+            _ => Err(InitialInviteDispatchError {
+                owner: self.owner,
+                wire_outcome: self.wire_outcome,
+                error: ApiError::internal(
+                    "Initial INVITE dispatch completed without a transaction",
+                ),
+            }),
+        }
+    }
+}
+
+impl std::fmt::Debug for InitialInviteDispatchCompletion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialInviteDispatchCompletion")
+            .field("owner", &self.owner)
+            .field("wire_outcome", &self.wire_outcome)
+            .field("transaction_present", &self.transaction_id.is_some())
+            .field("error_present", &self.error.is_some())
+            .finish()
+    }
+}
+
+enum InitialInviteDispatchTask {
+    Running(tokio::sync::oneshot::Receiver<InitialInviteDispatchCompletion>),
+    Ready(Option<InitialInviteDispatchCompletion>),
+}
+
+/// Result handle for a manager-owned retained dispatch. Dropping it does not
+/// cancel or detach ownership; the manager registry joins the task on stop.
+pub struct InitialInviteDispatch {
+    manager: UnifiedDialogManager,
+    owner: InitialInviteOwner,
+    task: InitialInviteDispatchTask,
+}
+
+impl InitialInviteDispatch {
+    pub fn owner(&self) -> &InitialInviteOwner {
+        &self.owner
+    }
+
+    pub async fn wait(mut self) -> InitialInviteDispatchCompletion {
+        let task = std::mem::replace(&mut self.task, InitialInviteDispatchTask::Ready(None));
+        match task {
+            InitialInviteDispatchTask::Ready(Some(completion)) => completion,
+            InitialInviteDispatchTask::Ready(None) => InitialInviteDispatchCompletion {
+                owner: self.owner,
+                wire_outcome: InitialInviteWireOutcome::Unknown,
+                transaction_id: None,
+                error: Some(ApiError::internal(
+                    "Initial INVITE dispatch completion was already consumed",
+                )),
+            },
+            InitialInviteDispatchTask::Running(completion) => match completion.await {
+                Ok(completion) => completion,
+                Err(_task_closed) => {
+                    self.manager.mark_initial_invite_wire_unknown(&self.owner);
+                    self.manager
+                        .supervise_wire_unknown_cleanup(self.owner.clone());
+                    InitialInviteDispatchCompletion {
+                        owner: self.owner,
+                        wire_outcome: InitialInviteWireOutcome::Unknown,
+                        transaction_id: None,
+                        error: Some(ApiError::internal("Initial INVITE dispatch task failed")),
+                    }
+                }
+            },
+        }
+    }
+}
+
+impl std::fmt::Debug for InitialInviteDispatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialInviteDispatch")
+            .field("owner", &self.owner)
+            .finish_non_exhaustive()
+    }
+}
+
+struct InitialInviteInstallRecord {
+    token: Uuid,
+    phase: Arc<AtomicU8>,
+    /// Admission is owned by the exact installation record. Removing the
+    /// exact record drops the permit; stale cleanup cannot release a newer
+    /// installation's capacity.
+    _capacity_permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+struct InitialInviteCleanupTask {
+    token: Uuid,
+    abort: tokio::task::AbortHandle,
+    completion: tokio::sync::watch::Receiver<bool>,
+}
+
+struct InitialInviteCleanupCompletion {
+    sender: Option<tokio::sync::watch::Sender<bool>>,
+}
+
+impl Drop for InitialInviteCleanupCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(true);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct InitialInviteDispatchTaskRecord {
+    token: Uuid,
+    abort: tokio::task::AbortHandle,
+    completion: tokio::sync::watch::Receiver<bool>,
+}
+
+struct InitialInviteDispatchExecution {
+    manager: UnifiedDialogManager,
+    owner: InitialInviteOwner,
+    task_token: Uuid,
+    completion: Option<tokio::sync::watch::Sender<bool>>,
+    normal_completion: bool,
+}
+
+impl Drop for InitialInviteDispatchExecution {
+    fn drop(&mut self) {
+        if !self.normal_completion {
+            self.manager.mark_initial_invite_wire_unknown(&self.owner);
+            self.manager
+                .supervise_wire_unknown_cleanup(self.owner.clone());
+        }
+        self.manager
+            .initial_invite_dispatch_tasks
+            .remove_if(&self.owner.dialog_id, |_, current| {
+                current.token == self.task_token
+            });
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(true);
+        }
+    }
+}
 
 /// Unified DialogManager that supports client, server, and hybrid modes
 ///
@@ -166,6 +529,32 @@ pub struct UnifiedDialogManager {
 
     /// Statistics for this manager instance
     stats: Arc<tokio::sync::RwLock<ManagerStats>>,
+
+    /// Opaque exact-owner records for staged outbound initial INVITEs.
+    /// This is deliberately only a resource-ownership index; dialog-core's
+    /// existing lifecycle remains the sole signaling authority.
+    initial_invite_installs: Arc<dashmap::DashMap<DialogId, Arc<InitialInviteInstallRecord>>>,
+
+    /// The public staged-install boundary is independently bounded before it
+    /// can publish any dialog/session state. The configured logical INVITE
+    /// capacity is reused as the semaphore size.
+    initial_invite_install_slots: Arc<tokio::sync::Semaphore>,
+
+    /// Manager-owned retained dispatch tasks. Callers only observe a result
+    /// receiver, so dropping a public handle cannot detach work from shutdown.
+    initial_invite_dispatch_tasks: Arc<dashmap::DashMap<DialogId, InitialInviteDispatchTaskRecord>>,
+    initial_invite_dispatch_gate: Arc<std::sync::Mutex<bool>>,
+
+    /// One owned protocol-cleanup driver per legacy wrapper failure. The map
+    /// bounds task count by installed dialogs and gives shutdown an exact
+    /// abort set.
+    initial_invite_cleanup_tasks: Arc<dashmap::DashMap<DialogId, InitialInviteCleanupTask>>,
+    initial_invite_cleanup_gate: Arc<std::sync::Mutex<bool>>,
+
+    #[cfg(test)]
+    initial_invite_dispatch_test_hook: Arc<AtomicU8>,
+    #[cfg(test)]
+    initial_invite_cleanup_test_hook: Arc<AtomicU8>,
 }
 
 impl std::fmt::Debug for UnifiedDialogManager {
@@ -270,11 +659,24 @@ impl UnifiedDialogManager {
 
         // **NEW**: Inject the unified configuration into the core manager
         core.set_config(config.clone());
+        let initial_invite_install_capacity = core.invite_failover_active_plan_capacity;
 
         Ok(Self {
             core,
             config,
             stats: Arc::new(tokio::sync::RwLock::new(ManagerStats::default())),
+            initial_invite_installs: Arc::new(dashmap::DashMap::new()),
+            initial_invite_install_slots: Arc::new(tokio::sync::Semaphore::new(
+                initial_invite_install_capacity,
+            )),
+            initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
+            #[cfg(test)]
+            initial_invite_dispatch_test_hook: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            initial_invite_cleanup_test_hook: Arc::new(AtomicU8::new(0)),
         })
     }
 
@@ -317,11 +719,74 @@ impl UnifiedDialogManager {
 
         // **NEW**: Inject the unified configuration into the core manager
         core.set_config(config.clone());
+        let initial_invite_install_capacity = core.invite_failover_active_plan_capacity;
 
         Ok(Self {
             core,
             config,
             stats: Arc::new(tokio::sync::RwLock::new(ManagerStats::default())),
+            initial_invite_installs: Arc::new(dashmap::DashMap::new()),
+            initial_invite_install_slots: Arc::new(tokio::sync::Semaphore::new(
+                initial_invite_install_capacity,
+            )),
+            initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
+            #[cfg(test)]
+            initial_invite_dispatch_test_hook: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            initial_invite_cleanup_test_hook: Arc::new(AtomicU8::new(0)),
+        })
+    }
+
+    /// Create a unified dialog manager on the pointer-sized authoritative
+    /// transaction-event path.
+    pub async fn with_shared_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        config: DialogManagerConfig,
+    ) -> DialogResult<Self> {
+        if config.validate().is_err() {
+            error!("Failed to create UnifiedDialogManager: invalid configuration");
+            return Err(DialogError::internal_error("Invalid configuration", None));
+        }
+
+        let local_address = config.local_address();
+        info!(
+            "Creating UnifiedDialogManager with shared global events in {:?} mode at {}",
+            Self::mode_name(&config),
+            local_address
+        );
+
+        let mut core = DialogManager::with_shared_global_events_and_index_capacity_and_config(
+            transaction_manager,
+            transaction_events,
+            local_address,
+            config.dialog_config().max_dialogs.unwrap_or(10_000),
+            Some(config.clone()),
+        )
+        .await?;
+
+        core.set_config(config.clone());
+        let initial_invite_install_capacity = core.invite_failover_active_plan_capacity;
+
+        Ok(Self {
+            core,
+            config,
+            stats: Arc::new(tokio::sync::RwLock::new(ManagerStats::default())),
+            initial_invite_installs: Arc::new(dashmap::DashMap::new()),
+            initial_invite_install_slots: Arc::new(tokio::sync::Semaphore::new(
+                initial_invite_install_capacity,
+            )),
+            initial_invite_dispatch_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_dispatch_gate: Arc::new(std::sync::Mutex::new(true)),
+            initial_invite_cleanup_tasks: Arc::new(dashmap::DashMap::new()),
+            initial_invite_cleanup_gate: Arc::new(std::sync::Mutex::new(true)),
+            #[cfg(test)]
+            initial_invite_dispatch_test_hook: Arc::new(AtomicU8::new(0)),
+            #[cfg(test)]
+            initial_invite_cleanup_test_hook: Arc::new(AtomicU8::new(0)),
         })
     }
 
@@ -399,11 +864,169 @@ impl UnifiedDialogManager {
     pub async fn stop(&self) -> DialogResult<()> {
         info!("Stopping UnifiedDialogManager");
 
+        {
+            let mut accepting = self
+                .initial_invite_dispatch_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *accepting = false;
+        }
+        self.abort_and_join_initial_invite_dispatch_tasks().await?;
+        {
+            let mut accepting = self
+                .initial_invite_cleanup_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *accepting = false;
+        }
+        let incomplete_cleanup = self
+            .drain_abort_and_join_initial_invite_cleanup_tasks()
+            .await?;
+        let retained_wire_unknown = self
+            .initial_invite_installs
+            .iter()
+            .filter(|record| record.phase.load(Ordering::Acquire) == INITIAL_INVITE_WIRE_UNKNOWN)
+            .count();
+        let incomplete_cleanup = incomplete_cleanup.max(retained_wire_unknown);
+        if incomplete_cleanup > 0 {
+            return Err(DialogError::InternalError {
+                message: format!(
+                    "initial INVITE protocol drain incomplete for {} wire-unknown owner(s); local ownership preserved",
+                    incomplete_cleanup
+                ),
+                context: None,
+            });
+        }
+
         // Stop the core dialog manager
         self.core.stop().await?;
+        self.initial_invite_installs.clear();
 
         info!("UnifiedDialogManager stopped successfully");
         Ok(())
+    }
+
+    async fn abort_and_join_initial_invite_dispatch_tasks(&self) -> DialogResult<()> {
+        let tasks: Vec<(DialogId, InitialInviteDispatchTaskRecord)> = self
+            .initial_invite_dispatch_tasks
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        for (_, task) in &tasks {
+            task.abort.abort();
+        }
+
+        let mut stragglers = 0usize;
+        for (dialog_id, task) in tasks {
+            let mut completion = task.completion.clone();
+            let completed = *completion.borrow()
+                || tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if completion.changed().await.is_err() || *completion.borrow() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_ok();
+            if completed {
+                self.initial_invite_dispatch_tasks
+                    .remove_if(&dialog_id, |_, current| current.token == task.token);
+            } else {
+                stragglers = stragglers.saturating_add(1);
+                warn!(
+                    dialog_id = %dialog_id,
+                    "Initial INVITE dispatch task did not stop within the join deadline"
+                );
+            }
+        }
+
+        if stragglers == 0 {
+            Ok(())
+        } else {
+            Err(DialogError::InternalError {
+                message: format!(
+                    "{} initial INVITE dispatch task(s) did not stop before core shutdown",
+                    stragglers
+                ),
+                context: None,
+            })
+        }
+    }
+
+    async fn drain_abort_and_join_initial_invite_cleanup_tasks(&self) -> DialogResult<usize> {
+        let tasks: Vec<(DialogId, InitialInviteCleanupTask)> = self
+            .initial_invite_cleanup_tasks
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+
+        // Give already-owned cleanup drivers one bounded window to issue their
+        // single CANCEL/BYE and observe a terminal response. Aborting first
+        // could orphan a peer after a real wire-unknown INVITE.
+        let drain_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        loop {
+            let all_complete = tasks.iter().all(|(_, task)| {
+                *task.completion.borrow() || task.completion.has_changed().is_err()
+            });
+            if all_complete || tokio::time::Instant::now() >= drain_deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        for (dialog_id, task) in &tasks {
+            if *task.completion.borrow() || task.completion.has_changed().is_err() {
+                self.initial_invite_cleanup_tasks
+                    .remove_if(dialog_id, |_, current| current.token == task.token);
+            }
+        }
+
+        let incomplete: Vec<_> = tasks
+            .iter()
+            .filter(|(_, task)| !*task.completion.borrow() && task.completion.has_changed().is_ok())
+            .map(|(dialog_id, task)| (dialog_id.clone(), task.clone()))
+            .collect();
+        for (_, task) in &incomplete {
+            task.abort.abort();
+        }
+
+        let mut stragglers = 0usize;
+        for (dialog_id, task) in incomplete.iter().cloned() {
+            let mut completion = task.completion.clone();
+            let completed = *completion.borrow()
+                || tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if completion.changed().await.is_err() || *completion.borrow() {
+                            break;
+                        }
+                    }
+                })
+                .await
+                .is_ok();
+            if completed {
+                self.initial_invite_cleanup_tasks
+                    .remove_if(&dialog_id, |_, current| current.token == task.token);
+            } else {
+                stragglers = stragglers.saturating_add(1);
+                warn!(
+                    dialog_id = %dialog_id,
+                    "Initial INVITE cleanup task did not stop within the join deadline"
+                );
+            }
+        }
+
+        if stragglers == 0 {
+            Ok(incomplete.len())
+        } else {
+            Err(DialogError::InternalError {
+                message: format!(
+                    "{} initial INVITE cleanup task(s) did not stop before core shutdown",
+                    stragglers
+                ),
+                context: None,
+            })
+        }
     }
 
     // REMOVED: Channel-based methods - use GlobalEventCoordinator instead
@@ -414,6 +1037,813 @@ impl UnifiedDialogManager {
     // ========================================
     // CLIENT-MODE OPERATIONS
     // ========================================
+
+    /// Validate and allocate an exact outbound initial-INVITE plan without
+    /// installing state, publishing events, or touching the network.
+    pub async fn plan_initial_invite(
+        &self,
+        pre_register_session_id: Option<String>,
+        mut options: crate::api::unified::InviteRequestOptions,
+    ) -> ApiResult<PlannedInitialInvite> {
+        use rvoip_sip_core::types::header::HeaderName;
+
+        if !self.config.supports_outgoing_calls() {
+            return Err(ApiError::Configuration {
+                message: "Outgoing calls not supported in Server mode".to_string(),
+            });
+        }
+        crate::api::unified::validate_initial_invite_options(&options)?;
+
+        if let Some(authorization) = options.precomputed_authorization.take() {
+            options.extra_headers.insert(
+                0,
+                rvoip_sip_core::validation::validated_authorization_header(
+                    HeaderName::Authorization,
+                    authorization,
+                )
+                .map_err(|_| {
+                    ApiError::protocol("INVITE Authorization failed wire-safety validation")
+                })?,
+            );
+        }
+
+        let local_uri: Uri = options
+            .from_uri
+            .parse()
+            .map_err(|_| ApiError::Configuration {
+                message: "Invalid caller URI".to_string(),
+            })?;
+        let remote_uri: Uri = options
+            .to_uri
+            .parse()
+            .map_err(|_| ApiError::Configuration {
+                message: "Invalid target URI".to_string(),
+            })?;
+        let call_id = options
+            .call_id
+            .clone()
+            .unwrap_or_else(|| format!("call-{}", Uuid::new_v4()));
+        options.call_id = Some(call_id.clone());
+
+        let mut dialog = Dialog::new_early(
+            call_id.clone(),
+            local_uri.clone(),
+            remote_uri,
+            None,
+            None,
+            true,
+        );
+        if let Some(service_route) = self
+            .core
+            .service_route_for_aor(&local_uri.to_string())
+            .await
+        {
+            dialog.route_set = service_route;
+        }
+
+        let owner = InitialInviteOwner {
+            dialog_id: dialog.id.clone(),
+            call_id,
+            session_id: pre_register_session_id,
+            token: Uuid::new_v4(),
+        };
+        Ok(PlannedInitialInvite {
+            owner,
+            dialog,
+            options,
+        })
+    }
+
+    /// Install the plan's exact dialog and optional session mapping locally.
+    ///
+    /// This operation is synchronous by design: once it returns, a response
+    /// racing the subsequent dispatch can already resolve both mappings.
+    pub fn install_initial_invite(
+        &self,
+        plan: PlannedInitialInvite,
+    ) -> ApiResult<InstalledInitialInvite> {
+        self.install_initial_invite_with_sink(plan, |_| Ok(()))
+    }
+
+    /// Install with a synchronous, non-cloneable lifecycle handoff.
+    ///
+    /// The `FnOnce` sink is the exact ownership linearization point for an
+    /// upper lifecycle/resource registry. It receives the non-cloneable
+    /// installed value by reference after exact admission is reserved, but
+    /// before dialog/session mappings or network state are published. If the
+    /// sink rejects the handoff, the admission record and permit are removed
+    /// without publishing mappings. Dropping the returned value before
+    /// dispatch also compensates the never-sent installation synchronously.
+    pub fn install_initial_invite_with_sink<F>(
+        &self,
+        plan: PlannedInitialInvite,
+        sink: F,
+    ) -> ApiResult<InstalledInitialInvite>
+    where
+        F: FnOnce(&InstalledInitialInvite) -> ApiResult<()>,
+    {
+        use dashmap::mapref::entry::Entry;
+
+        let accepting = self
+            .initial_invite_dispatch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*accepting || !self.core.is_accepting_work() {
+            return Err(ApiError::Dialog {
+                message: "Initial INVITE admission is closed".to_string(),
+            });
+        }
+
+        let PlannedInitialInvite {
+            owner,
+            dialog,
+            options,
+        } = plan;
+        let capacity_permit = self
+            .initial_invite_install_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ApiError::Dialog {
+                message: "Initial INVITE admission capacity exhausted".to_string(),
+            })?;
+
+        let record = Arc::new(InitialInviteInstallRecord {
+            token: owner.token,
+            phase: Arc::new(AtomicU8::new(INITIAL_INVITE_INSTALLING)),
+            _capacity_permit: capacity_permit,
+        });
+        match self.initial_invite_installs.entry(owner.dialog_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(record.clone());
+            }
+            Entry::Occupied(_) => {
+                return Err(ApiError::Dialog {
+                    message: "Initial INVITE dialog owner already installed".to_string(),
+                });
+            }
+        }
+
+        let installed = InstalledInitialInvite {
+            lease: InitialInviteInstallLease {
+                manager: self.clone(),
+                owner: owner.clone(),
+                armed: true,
+            },
+            owner,
+            options,
+        };
+
+        if self.core.dialogs.contains_key(&installed.owner.dialog_id) {
+            return Err(ApiError::Dialog {
+                message: "Initial INVITE dialog already exists".to_string(),
+            });
+        }
+        if installed
+            .owner
+            .session_id
+            .as_ref()
+            .is_some_and(|session_id| self.core.session_to_dialog.contains_key(session_id))
+        {
+            return Err(ApiError::Dialog {
+                message: "Session already owns a dialog".to_string(),
+            });
+        }
+
+        // No dialog/session mapping exists before this callback. A lifecycle
+        // registry can therefore record the exact owner before cancellation
+        // could strand lower-layer resources.
+        sink(&installed)?;
+
+        match self.core.dialogs.entry(installed.owner.dialog_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(dialog);
+            }
+            Entry::Occupied(_) => {
+                return Err(ApiError::Dialog {
+                    message: "Initial INVITE dialog already exists".to_string(),
+                });
+            }
+        }
+
+        if let Some(session_id) = installed.owner.session_id.as_ref() {
+            match self.core.session_to_dialog.entry(session_id.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(installed.owner.dialog_id.clone());
+                }
+                Entry::Occupied(_) => {
+                    return Err(ApiError::Dialog {
+                        message: "Session already owns a dialog".to_string(),
+                    });
+                }
+            }
+            self.core
+                .dialog_to_session
+                .insert(installed.owner.dialog_id.clone(), session_id.clone());
+        }
+
+        record
+            .phase
+            .store(INITIAL_INVITE_INSTALLED, Ordering::Release);
+        Ok(installed)
+    }
+
+    /// Start a retained dispatch of an installed initial INVITE.
+    ///
+    /// The installed value is consumed, preventing duplicate dispatch. The
+    /// task is retained in the manager registry, remains owned if this result
+    /// handle is dropped, and is joined during manager shutdown.
+    pub fn dispatch_initial_invite(
+        &self,
+        installed: InstalledInitialInvite,
+    ) -> InitialInviteDispatch {
+        let owner = installed.owner.clone();
+        let runtime = tokio::runtime::Handle::try_current();
+        let task = match runtime {
+            Err(_) => InitialInviteDispatchTask::Ready(Some(InitialInviteDispatchCompletion {
+                owner: owner.clone(),
+                wire_outcome: InitialInviteWireOutcome::ZeroWire,
+                transaction_id: None,
+                error: Some(ApiError::internal(
+                    "Initial INVITE dispatch requires a Tokio runtime",
+                )),
+            })),
+            Ok(runtime) => {
+                let accepting = self
+                    .initial_invite_dispatch_gate
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if !*accepting
+                    || self
+                        .initial_invite_dispatch_tasks
+                        .contains_key(owner.dialog_id())
+                {
+                    InitialInviteDispatchTask::Ready(Some(InitialInviteDispatchCompletion {
+                        owner: owner.clone(),
+                        wire_outcome: InitialInviteWireOutcome::ZeroWire,
+                        transaction_id: None,
+                        error: Some(ApiError::Dialog {
+                            message: "Initial INVITE dispatch admission is closed".to_string(),
+                        }),
+                    }))
+                } else {
+                    let task_token = Uuid::new_v4();
+                    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+                    let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
+                    let manager = self.clone();
+                    let task_owner = owner.clone();
+                    let task = runtime.spawn(async move {
+                        let mut execution = InitialInviteDispatchExecution {
+                            manager: manager.clone(),
+                            owner: task_owner,
+                            task_token,
+                            completion: Some(completion_tx),
+                            normal_completion: false,
+                        };
+                        if start_rx.await.is_err() {
+                            return;
+                        }
+                        let completion = manager.dispatch_initial_invite_inner(installed).await;
+                        if completion.wire_outcome() == InitialInviteWireOutcome::Unknown {
+                            manager.supervise_wire_unknown_cleanup(completion.owner().clone());
+                        }
+                        execution.normal_completion = true;
+                        drop(execution);
+                        let _ = result_tx.send(completion);
+                    });
+                    self.initial_invite_dispatch_tasks.insert(
+                        owner.dialog_id().clone(),
+                        InitialInviteDispatchTaskRecord {
+                            token: task_token,
+                            abort: task.abort_handle(),
+                            completion: completion_rx,
+                        },
+                    );
+                    drop(task);
+                    let _ = start_tx.send(());
+                    InitialInviteDispatchTask::Running(result_rx)
+                }
+            }
+        };
+        InitialInviteDispatch {
+            manager: self.clone(),
+            owner,
+            task,
+        }
+    }
+
+    async fn dispatch_initial_invite_inner(
+        &self,
+        installed: InstalledInitialInvite,
+    ) -> InitialInviteDispatchCompletion {
+        let InstalledInitialInvite {
+            owner,
+            options,
+            mut lease,
+        } = installed;
+        let record = self
+            .initial_invite_installs
+            .get(&owner.dialog_id)
+            .map(|record| record.value().clone());
+        let admitted = record.as_ref().is_some_and(|record| {
+            record.token == owner.token
+                && record
+                    .phase
+                    .compare_exchange(
+                        INITIAL_INVITE_INSTALLED,
+                        INITIAL_INVITE_DISPATCHING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+        });
+        if !admitted {
+            return InitialInviteDispatchCompletion {
+                owner,
+                wire_outcome: InitialInviteWireOutcome::ZeroWire,
+                transaction_id: None,
+                error: Some(ApiError::Dialog {
+                    message: "Initial INVITE installation is not dispatchable".to_string(),
+                }),
+            };
+        }
+        lease.disarm();
+
+        #[cfg(test)]
+        match self
+            .initial_invite_dispatch_test_hook
+            .swap(0, Ordering::AcqRel)
+        {
+            1 => panic!("injected initial INVITE dispatch panic after admission"),
+            2 => std::future::pending::<()>().await,
+            _ => {}
+        }
+
+        {
+            let mut stats = self.stats.write().await;
+            stats.outgoing_calls = stats.outgoing_calls.saturating_add(1);
+            stats.active_dialogs = stats.active_dialogs.saturating_add(1);
+        }
+        self.core
+            .emit_dialog_event(DialogEvent::Created {
+                dialog_id: owner.dialog_id.clone(),
+            })
+            .await;
+
+        let body = options.sdp.map(bytes::Bytes::from);
+        let send_result = self
+            .core
+            .send_initial_invite_with_wire_receipt(
+                &owner.dialog_id,
+                body,
+                options.extra_headers,
+                options.from_display,
+                options.contact_uri,
+                options.outbound_proxy_uri,
+                options.supported_100rel,
+            )
+            .await;
+
+        match send_result {
+            Ok(transaction_id) => {
+                if let Some(record) = record {
+                    let _ = record.phase.compare_exchange(
+                        INITIAL_INVITE_DISPATCHING,
+                        INITIAL_INVITE_SENT,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                }
+                InitialInviteDispatchCompletion {
+                    owner,
+                    wire_outcome: InitialInviteWireOutcome::Sent,
+                    transaction_id: Some(transaction_id),
+                    error: None,
+                }
+            }
+            Err(failure) => {
+                if failure.wire_was_attempted() {
+                    self.mark_initial_invite_wire_unknown(&owner);
+                    InitialInviteDispatchCompletion {
+                        owner,
+                        wire_outcome: InitialInviteWireOutcome::Unknown,
+                        transaction_id: None,
+                        error: Some(ApiError::from(failure.into_dialog_error())),
+                    }
+                } else {
+                    let error = ApiError::from(failure.into_dialog_error());
+                    self.rollback_zero_wire_dispatch(&owner).await;
+                    InitialInviteDispatchCompletion {
+                        owner,
+                        wire_outcome: InitialInviteWireOutcome::ZeroWire,
+                        transaction_id: None,
+                        error: Some(error),
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark_initial_invite_wire_unknown(&self, owner: &InitialInviteOwner) {
+        if let Some(record) = self.initial_invite_installs.get(&owner.dialog_id) {
+            if record.token == owner.token {
+                let _ = record.phase.compare_exchange(
+                    INITIAL_INVITE_DISPATCHING,
+                    INITIAL_INVITE_WIRE_UNKNOWN,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                );
+            }
+        }
+    }
+
+    fn compensate_dropped_initial_invite_install(&self, owner: &InitialInviteOwner) -> bool {
+        let Some(record) = self
+            .initial_invite_installs
+            .get(&owner.dialog_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return false;
+        };
+        if record.token != owner.token {
+            return false;
+        }
+        loop {
+            let phase = record.phase.load(Ordering::Acquire);
+            if phase != INITIAL_INVITE_INSTALLING && phase != INITIAL_INVITE_INSTALLED {
+                return false;
+            }
+            if record
+                .phase
+                .compare_exchange(
+                    phase,
+                    INITIAL_INVITE_RELEASING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+        if self
+            .initial_invite_installs
+            .remove_if(&owner.dialog_id, |_, current| current.token == owner.token)
+            .is_none()
+        {
+            return false;
+        }
+        if let Some(session_id) = owner.session_id.as_ref() {
+            self.core
+                .session_to_dialog
+                .remove_if(session_id, |_, mapped| mapped == &owner.dialog_id);
+        }
+        self.core.cleanup_dialog_storage(&owner.dialog_id);
+        true
+    }
+
+    async fn release_initial_invite_owner_from_phase(
+        &self,
+        owner: &InitialInviteOwner,
+        expected_phase: u8,
+    ) -> bool {
+        let Some(record) = self
+            .initial_invite_installs
+            .get(&owner.dialog_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return false;
+        };
+        if record.token != owner.token {
+            return false;
+        }
+        if record
+            .phase
+            .compare_exchange(
+                expected_phase,
+                INITIAL_INVITE_RELEASING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .initial_invite_installs
+            .remove_if(&owner.dialog_id, |_, current| current.token == owner.token)
+            .is_none()
+        {
+            return false;
+        }
+        self.core
+            .cleanup_dialog_storage_and_transactions(&owner.dialog_id)
+            .await;
+        true
+    }
+
+    /// Roll back a locally installed, never-dispatched INVITE by exact owner.
+    ///
+    /// Dispatching, Sent, and Unknown owners are refused because they require
+    /// protocol teardown (CANCEL or BYE) before local release.
+    pub async fn compensate_initial_invite(&self, owner: &InitialInviteOwner) -> bool {
+        self.release_initial_invite_owner_from_phase(owner, INITIAL_INVITE_INSTALLED)
+            .await
+    }
+
+    /// Return whether this exact initial-INVITE owner is still retained.
+    ///
+    /// This is intentionally owner-qualified: a delayed upper-layer release
+    /// must never infer ownership from a reusable application session ID or
+    /// even from a Dialog-ID alone.
+    pub fn initial_invite_owner_is_retained(&self, owner: &InitialInviteOwner) -> bool {
+        self.initial_invite_installs
+            .get(owner.dialog_id())
+            .is_some_and(|record| record.token == owner.token)
+    }
+
+    /// Hand a sent initial INVITE to the manager's protocol-teardown
+    /// supervisor.
+    ///
+    /// The supervisor applies the dialog-state-specific CANCEL/BYE policy and
+    /// its at-most-once ambiguous-send rules. Repeated calls for the same exact
+    /// owner are harmless; stale owners are refused.
+    pub fn supervise_initial_invite_teardown(&self, owner: &InitialInviteOwner) -> bool {
+        loop {
+            let Some(record) = self
+                .initial_invite_installs
+                .get(owner.dialog_id())
+                .map(|entry| entry.value().clone())
+            else {
+                return false;
+            };
+            if record.token != owner.token {
+                return false;
+            }
+
+            match record.phase.load(Ordering::Acquire) {
+                INITIAL_INVITE_SENT => {
+                    if record
+                        .phase
+                        .compare_exchange(
+                            INITIAL_INVITE_SENT,
+                            INITIAL_INVITE_WIRE_UNKNOWN,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    self.supervise_wire_unknown_cleanup(owner.clone());
+                    return true;
+                }
+                INITIAL_INVITE_WIRE_UNKNOWN => {
+                    self.supervise_wire_unknown_cleanup(owner.clone());
+                    return true;
+                }
+                _ => return false,
+            }
+        }
+    }
+
+    /// Retire an exact sent/uncertain initial-INVITE owner after the upper
+    /// layer has already dispatched the legal protocol teardown or observed a
+    /// terminal dialog.
+    ///
+    /// This does not synthesize signaling. Callers that have not already sent
+    /// CANCEL/BYE must use [`Self::supervise_initial_invite_teardown`].
+    pub async fn finish_initial_invite_teardown(&self, owner: &InitialInviteOwner) -> bool {
+        let released = self
+            .release_initial_invite_owner_from_phase(owner, INITIAL_INVITE_SENT)
+            .await
+            || self
+                .release_initial_invite_owner_from_phase(owner, INITIAL_INVITE_WIRE_UNKNOWN)
+                .await;
+        if released {
+            let mut stats = self.stats.write().await;
+            stats.active_dialogs = stats.active_dialogs.saturating_sub(1);
+        }
+        released
+    }
+
+    async fn rollback_zero_wire_dispatch(&self, owner: &InitialInviteOwner) {
+        if self
+            .release_initial_invite_owner_from_phase(owner, INITIAL_INVITE_DISPATCHING)
+            .await
+        {
+            let mut stats = self.stats.write().await;
+            stats.active_dialogs = stats.active_dialogs.saturating_sub(1);
+            stats.failed_calls = stats.failed_calls.saturating_add(1);
+        }
+    }
+
+    fn finish_legacy_sent_owner_handoff(&self, owner: &InitialInviteOwner) {
+        let Some(record) = self
+            .initial_invite_installs
+            .get(owner.dialog_id())
+            .map(|entry| entry.value().clone())
+        else {
+            return;
+        };
+        if record.token != owner.token
+            || record
+                .phase
+                .compare_exchange(
+                    INITIAL_INVITE_SENT,
+                    INITIAL_INVITE_RELEASING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+        {
+            return;
+        }
+        self.initial_invite_installs
+            .remove_if(owner.dialog_id(), |_, current| current.token == owner.token);
+    }
+
+    fn supervise_wire_unknown_cleanup(&self, owner: InitialInviteOwner) {
+        use dashmap::mapref::entry::Entry;
+
+        let accepting = self
+            .initial_invite_cleanup_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*accepting {
+            return;
+        }
+        let task_token = Uuid::new_v4();
+        let manager = self.clone();
+        let task_dialog_id = owner.dialog_id.clone();
+        let map_dialog_id = task_dialog_id.clone();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            let _completion = InitialInviteCleanupCompletion {
+                sender: Some(completion_tx),
+            };
+            if start_rx.await.is_err() {
+                return;
+            }
+            manager.run_wire_unknown_cleanup(owner).await;
+            manager
+                .initial_invite_cleanup_tasks
+                .remove_if(&task_dialog_id, |_, task| task.token == task_token);
+        });
+        let abort = task.abort_handle();
+        drop(task);
+
+        match self.initial_invite_cleanup_tasks.entry(map_dialog_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(InitialInviteCleanupTask {
+                    token: task_token,
+                    abort,
+                    completion: completion_rx,
+                });
+                let _ = start_tx.send(());
+            }
+            Entry::Occupied(_) => {
+                abort.abort();
+            }
+        }
+    }
+
+    async fn run_wire_unknown_cleanup(&self, owner: InitialInviteOwner) {
+        #[cfg(test)]
+        if self
+            .initial_invite_cleanup_test_hook
+            .compare_exchange(2, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let mut retry_delay = std::time::Duration::from_millis(10);
+        let mut cancel_attempted = false;
+        let mut bye_attempted = false;
+        loop {
+            let still_owned = self
+                .initial_invite_installs
+                .get(owner.dialog_id())
+                .is_some_and(|record| {
+                    record.token == owner.token
+                        && record.phase.load(Ordering::Acquire) == INITIAL_INVITE_WIRE_UNKNOWN
+                });
+            if !still_owned {
+                return;
+            }
+            if self
+                .try_protocol_teardown_for_wire_unknown(
+                    &owner,
+                    &mut cancel_attempted,
+                    &mut bye_attempted,
+                )
+                .await
+            {
+                self.core
+                    .complete_wire_unknown_invite_for_dialog(owner.dialog_id())
+                    .await;
+                if self
+                    .release_initial_invite_owner_from_phase(&owner, INITIAL_INVITE_WIRE_UNKNOWN)
+                    .await
+                {
+                    let mut stats = self.stats.write().await;
+                    stats.active_dialogs = stats.active_dialogs.saturating_sub(1);
+                    stats.failed_calls = stats.failed_calls.saturating_add(1);
+                }
+                return;
+            }
+            #[cfg(test)]
+            if self
+                .initial_invite_cleanup_test_hook
+                .swap(0, Ordering::AcqRel)
+                == 1
+            {
+                std::future::pending::<()>().await;
+            }
+            tokio::time::sleep(retry_delay).await;
+            retry_delay = (retry_delay * 2).min(std::time::Duration::from_secs(1));
+        }
+    }
+
+    async fn try_protocol_teardown_for_wire_unknown(
+        &self,
+        owner: &InitialInviteOwner,
+        cancel_attempted: &mut bool,
+        bye_attempted: &mut bool,
+    ) -> bool {
+        let state = match self.core.get_dialog_state(owner.dialog_id()) {
+            Ok(state) => state,
+            Err(_) => {
+                return self
+                    .core
+                    .wire_unknown_invite_has_terminal_failure(owner.dialog_id())
+                    .await;
+            }
+        };
+        match state {
+            DialogState::Initial | DialogState::Early => {
+                if self
+                    .core
+                    .wire_unknown_invite_has_terminal_failure(owner.dialog_id())
+                    .await
+                {
+                    return true;
+                }
+                // `send_cancel` does not expose a wire receipt on error. Once
+                // invoked, an Err is therefore ambiguous and must not create a
+                // second CANCEL. Keep the exact owner/capacity charged while
+                // watching for a terminal or confirmed dialog transition.
+                if *cancel_attempted {
+                    return false;
+                }
+                *cancel_attempted = true;
+                let _ = self.send_cancel(owner.dialog_id()).await;
+                // A 200 response to CANCEL only settles the CANCEL transaction;
+                // it does not settle the original INVITE. The next supervisor
+                // pass verifies the retained INVITE's terminal response.
+                false
+            }
+            DialogState::Confirmed | DialogState::Recovering => {
+                // Apply the same at-most-once rule to BYE: a lower-layer Err
+                // can occur after bytes crossed the transport boundary.
+                if *bye_attempted {
+                    return false;
+                }
+                *bye_attempted = true;
+                let transaction_id = match self
+                    .core
+                    .send_request(owner.dialog_id(), Method::Bye, None)
+                    .await
+                {
+                    Ok(transaction_id) => transaction_id,
+                    Err(_) => return false,
+                };
+                let timeout = self
+                    .core
+                    .transaction_manager()
+                    .timer_settings()
+                    .transaction_timeout;
+                match self
+                    .core
+                    .transaction_manager()
+                    .wait_for_final_response(&transaction_id, timeout)
+                    .await
+                {
+                    Ok(Some(response)) => {
+                        response.status().is_success()
+                            || response.status() == StatusCode::CallOrTransactionDoesNotExist
+                    }
+                    Ok(None) | Err(_) => false,
+                }
+            }
+            DialogState::Terminated => {
+                self.core
+                    .wire_unknown_invite_has_terminal_failure(owner.dialog_id())
+                    .await
+            }
+        }
+    }
 
     /// Make an outgoing call (Client/Hybrid modes only)
     ///
@@ -895,146 +2325,37 @@ impl UnifiedDialogManager {
         outbound_proxy_uri: Option<Uri>,
         supported_100rel: bool,
     ) -> ApiResult<CallHandle> {
-        // Check if outgoing calls are supported
-        if !self.config.supports_outgoing_calls() {
-            error!(
-                "Cannot make outgoing call: Outgoing calls not supported in {:?} mode",
-                Self::mode_name(&self.config)
-            );
-            return Err(ApiError::Configuration {
-                message: "Outgoing calls not supported in Server mode".to_string(),
-            });
-        }
-
-        crate::api::unified::validate_initial_invite_options(
-            &crate::api::unified::InviteRequestOptions {
-                from_uri: from_uri.to_string(),
-                to_uri: to_uri.to_string(),
-                sdp: sdp_offer.clone(),
-                call_id: call_id.clone(),
-                from_display: from_display.clone(),
-                contact_uri: contact_override.clone(),
-                precomputed_authorization: None,
-                outbound_proxy_uri: outbound_proxy_uri.clone(),
-                supported_100rel,
-                extra_headers: extra_headers.clone(),
-            },
-        )?;
-
         info!("Making outgoing call with caller and target URIs present");
-
-        // Parse URIs
-        let from_uri: Uri = from_uri.parse().map_err(|_error| {
-            error!("Failed to parse caller URI");
-            ApiError::Configuration {
-                message: "Invalid caller URI".to_string(),
-            }
-        })?;
-        let to_uri: Uri = to_uri.parse().map_err(|_error| {
-            error!("Failed to parse target URI");
-            ApiError::Configuration {
-                message: "Invalid target URI".to_string(),
-            }
-        })?;
-
-        // Create outgoing dialog
-        let dialog_id = self
-            .core
-            .create_outgoing_dialog(from_uri, to_uri, call_id)
-            .await
-            .map_err(|_error| {
-                error!("Failed to create outgoing dialog");
-                ApiError::Dialog {
-                    message: "Outgoing dialog creation failed".to_string(),
-                }
-            })?;
-
-        // Register the session↔dialog mapping BEFORE sending the INVITE.
-        // Otherwise a sub-millisecond RTT failure response (e.g. localhost
-        // 420) can race: the event-processor task may pick up the response
-        // and try to route it to a session while the caller is still inside
-        // this await, before the async `StoreDialogMapping` event has been
-        // processed. Pre-registering closes that window with a write that
-        // is ordered-before the INVITE goes on the wire.
-        if let Some(ref sid) = pre_register_session_id {
-            self.core
-                .session_to_dialog
-                .insert(sid.clone(), dialog_id.clone());
-            self.core
-                .dialog_to_session
-                .insert(dialog_id.clone(), sid.clone());
-        }
-
-        // Update stats
-        {
-            let mut stats = self.stats.write().await;
-            stats.outgoing_calls += 1;
-            stats.active_dialogs += 1;
-        }
-
-        // Emit dialog creation event
-        self.core
-            .emit_dialog_event(DialogEvent::Created {
-                dialog_id: dialog_id.clone(),
-            })
-            .await;
-
-        // Send INVITE request. When the caller supplied extra headers
-        // (P-Asserted-Identity etc.), route through the dedicated
-        // `send_initial_invite_with_extra_headers` path so the headers ride
-        // on the very first wire INVITE; otherwise the generic path is fine.
-        let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
-        let send_result = if extra_headers.is_empty()
-            && from_display.is_none()
-            && contact_override.is_none()
-            && outbound_proxy_uri.is_none()
-            && !supported_100rel
-        {
-            self.core
-                .send_request(&dialog_id, Method::Invite, body_bytes)
-                .await
-        } else {
-            self.core
-                .send_initial_invite_with_extra_headers(
-                    &dialog_id,
-                    body_bytes,
-                    extra_headers,
+        let plan = self
+            .plan_initial_invite(
+                pre_register_session_id,
+                crate::api::unified::InviteRequestOptions {
+                    from_uri: from_uri.to_string(),
+                    to_uri: to_uri.to_string(),
+                    sdp: sdp_offer,
+                    call_id,
                     from_display,
-                    contact_override,
+                    contact_uri: contact_override,
+                    precomputed_authorization: None,
                     outbound_proxy_uri,
                     supported_100rel,
-                )
-                .await
-        };
-        let _transaction_key = match send_result {
-            Ok(tx_key) => tx_key,
-            Err(_error) => {
-                error!("Failed to send INVITE for call {}", dialog_id);
-                // The caller never received a usable handle. Compensate every
-                // allocation made above so a synchronous build/route/transport
-                // failure cannot strand dialog indexes, a pre-registered
-                // session mapping, transactions, or the active-dialog gauge.
-                self.core
-                    .cleanup_dialog_storage_and_transactions(&dialog_id)
-                    .await;
-                {
-                    let mut stats = self.stats.write().await;
-                    stats.active_dialogs = stats.active_dialogs.saturating_sub(1);
-                    stats.failed_calls = stats.failed_calls.saturating_add(1);
+                    extra_headers,
+                },
+            )
+            .await?;
+        let installed = self.install_initial_invite(plan)?;
+        let completion = self.dispatch_initial_invite(installed).wait().await;
+        let (owner, _transaction_key) = match completion.into_result() {
+            Ok(success) => success,
+            Err(error) => {
+                if error.wire_outcome() == InitialInviteWireOutcome::Unknown {
+                    self.supervise_wire_unknown_cleanup(error.owner().clone());
                 }
-                self.core
-                    .emit_dialog_event(DialogEvent::Terminated {
-                        dialog_id: dialog_id.clone(),
-                        reason: "initial INVITE dispatch failed".to_string(),
-                    })
-                    .await;
-                return Err(ApiError::Dialog {
-                    message: "INVITE send failed".to_string(),
-                });
+                return Err(error.into_api_error());
             }
         };
-
-        // Create call handle
+        let dialog_id = owner.dialog_id().clone();
+        self.finish_legacy_sent_owner_handoff(&owner);
         let call_handle = CallHandle::new(dialog_id.clone(), Arc::new(self.core.clone()));
 
         info!(
@@ -1870,5 +3191,748 @@ impl UnifiedDialogManager {
                     message: "ACK send failed".to_string(),
                 }
             })
+    }
+}
+
+#[cfg(test)]
+mod staged_initial_invite_tests {
+    use super::*;
+    use rvoip_sip_transport::error::Result as TransportResult;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    #[derive(Debug)]
+    struct CountingTransport {
+        addr: SocketAddr,
+        sends: AtomicUsize,
+        cancel_sends: AtomicUsize,
+        failures_remaining: AtomicUsize,
+        closed: AtomicBool,
+    }
+
+    impl CountingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addr: "127.0.0.1:5060".parse().expect("test address"),
+                sends: AtomicUsize::new(0),
+                cancel_sends: AtomicUsize::new(0),
+                failures_remaining: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+            })
+        }
+
+        fn sends(&self) -> usize {
+            self.sends.load(Ordering::SeqCst)
+        }
+
+        fn fail_next_sends(&self, count: usize) {
+            self.failures_remaining.store(count, Ordering::SeqCst);
+        }
+
+        fn cancel_sends(&self) -> usize {
+            self.cancel_sends.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for CountingTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            if matches!(
+                &message,
+                rvoip_sip_core::Message::Request(request) if request.method() == Method::Cancel
+            ) {
+                self.cancel_sends.fetch_add(1, Ordering::SeqCst);
+            }
+            if self
+                .failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    (remaining > 0).then(|| remaining - 1)
+                })
+                .is_ok()
+            {
+                return Err(rvoip_sip_transport::error::Error::TransportClosed);
+            }
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn make_test_manager() -> (
+        UnifiedDialogManager,
+        Arc<CountingTransport>,
+        mpsc::Receiver<DialogEvent>,
+    ) {
+        let transport = CountingTransport::new();
+        let (_transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let mut timer_settings = crate::transaction::timer::TimerSettings::default();
+        timer_settings.transaction_timeout = std::time::Duration::from_millis(100);
+        let (transaction_manager, mut transaction_events) = TransactionManager::new_with_config(
+            transport.clone(),
+            transport_rx,
+            Some(16),
+            Some(timer_settings),
+        )
+        .await
+        .expect("transaction manager");
+        // Staged-INVITE tests exercise the dialog lifecycle directly rather
+        // than installing the normal transaction-event dispatcher. Preserve
+        // the primary channel as a live, drained authority: dropping it is a
+        // fail-closed lifecycle event and must not be used as a test shortcut.
+        tokio::spawn(async move { while transaction_events.recv().await.is_some() {} });
+        let config = DialogManagerConfig::client(transport.addr)
+            .with_from_uri("sip:alice@example.com")
+            .build();
+        let manager = UnifiedDialogManager::new(Arc::new(transaction_manager), config)
+            .await
+            .expect("dialog manager");
+        let (event_tx, event_rx) = mpsc::channel(16);
+        *manager.core.dialog_event_sender.write().await = Some(event_tx);
+        (manager, transport, event_rx)
+    }
+
+    fn options(call_id: &str) -> crate::api::unified::InviteRequestOptions {
+        crate::api::unified::InviteRequestOptions {
+            from_uri: "sip:alice@example.com".to_string(),
+            to_uri: "sip:bob@127.0.0.1:5099".to_string(),
+            call_id: Some(call_id.to_string()),
+            ..Default::default()
+        }
+    }
+
+    async fn expect_incomplete_protocol_drain(manager: &UnifiedDialogManager) {
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), manager.stop())
+            .await
+            .expect("manager stop deadline")
+            .expect_err("wire-unknown stop must report incomplete protocol drain");
+        match error {
+            DialogError::InternalError { message, .. } => {
+                assert!(message.contains("protocol drain incomplete"), "{message}");
+                assert!(message.contains("local ownership preserved"), "{message}");
+            }
+            error => panic!("unexpected stop error: {error}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_and_install_have_separate_side_effect_boundaries() {
+        let (manager, transport, mut events) = make_test_manager().await;
+        let plan = manager
+            .plan_initial_invite(Some("session-a".to_string()), options("call-a"))
+            .await
+            .expect("plan");
+
+        assert_eq!(manager.core.dialog_count(), 0);
+        assert_eq!(manager.initial_invite_installs.len(), 0);
+        assert!(!manager.core.session_to_dialog.contains_key("session-a"));
+        assert_eq!(transport.sends(), 0);
+        assert!(events.try_recv().is_err());
+
+        let dialog_id = plan.dialog_id().clone();
+        let mut lifecycle_owner = None;
+        let installed = manager
+            .install_initial_invite_with_sink(plan, |candidate| {
+                assert!(!manager.core.has_dialog(candidate.owner().dialog_id()));
+                assert!(!manager.core.session_to_dialog.contains_key("session-a"));
+                assert!(manager
+                    .initial_invite_installs
+                    .get(candidate.owner().dialog_id())
+                    .is_some_and(|record| {
+                        record.phase.load(Ordering::Acquire) == INITIAL_INVITE_INSTALLING
+                    }));
+                lifecycle_owner = Some(candidate.owner().clone());
+                Ok(())
+            })
+            .expect("install");
+        assert_eq!(lifecycle_owner.as_ref(), Some(installed.owner()));
+        assert!(manager.core.has_dialog(&dialog_id));
+        assert_eq!(
+            manager
+                .core
+                .session_to_dialog
+                .get("session-a")
+                .map(|mapped| mapped.value().clone()),
+            Some(dialog_id)
+        );
+        assert_eq!(transport.sends(), 0);
+        assert!(events.try_recv().is_err());
+
+        assert!(manager.compensate_initial_invite(installed.owner()).await);
+    }
+
+    #[tokio::test]
+    async fn dropping_an_undispatched_install_compensates_exact_local_state() {
+        let (manager, transport, mut events) = make_test_manager().await;
+        let available_before = manager.initial_invite_install_slots.available_permits();
+        let plan = manager
+            .plan_initial_invite(Some("session-drop".to_string()), options("call-drop"))
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let dialog_id = installed.owner().dialog_id().clone();
+        assert!(manager.core.has_dialog(&dialog_id));
+
+        drop(installed);
+
+        assert!(!manager.core.has_dialog(&dialog_id));
+        assert!(!manager.core.session_to_dialog.contains_key("session-drop"));
+        assert!(manager.initial_invite_installs.is_empty());
+        assert_eq!(
+            manager.initial_invite_install_slots.available_permits(),
+            available_before
+        );
+        assert_eq!(transport.sends(), 0);
+        assert!(events.try_recv().is_err());
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn dispatch_sends_once_after_fast_response_indexes_exist() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let plan = manager
+            .plan_initial_invite(Some("session-fast".to_string()), options("call-fast"))
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        assert_eq!(
+            manager.core.get_session_id(owner.dialog_id()).as_deref(),
+            Some("session-fast")
+        );
+        assert_eq!(transport.sends(), 0);
+
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            manager.dispatch_initial_invite(installed).wait(),
+        )
+        .await
+        .expect("dispatch timeout");
+        assert_eq!(completion.wire_outcome(), InitialInviteWireOutcome::Sent);
+        assert!(completion.transaction_id().is_some());
+        assert_eq!(transport.sends(), 1);
+
+        assert!(!manager.compensate_initial_invite(&owner).await);
+        assert!(manager.core.has_dialog(owner.dialog_id()));
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn upper_protocol_teardown_retires_only_the_exact_sent_owner() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let available_before = manager.initial_invite_install_slots.available_permits();
+        let plan = manager
+            .plan_initial_invite(
+                Some("session-upper-teardown".to_string()),
+                options("call-upper-teardown"),
+            )
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        let completion = manager.dispatch_initial_invite(installed).wait().await;
+        assert_eq!(completion.wire_outcome(), InitialInviteWireOutcome::Sent);
+        assert_eq!(transport.sends(), 1);
+        assert!(manager.initial_invite_owner_is_retained(&owner));
+
+        assert!(manager.finish_initial_invite_teardown(&owner).await);
+        assert!(!manager.initial_invite_owner_is_retained(&owner));
+        assert!(!manager.core.has_dialog(owner.dialog_id()));
+        assert!(!manager
+            .core
+            .session_to_dialog
+            .contains_key("session-upper-teardown"));
+        assert_eq!(
+            manager.initial_invite_install_slots.available_permits(),
+            available_before
+        );
+        assert!(!manager.finish_initial_invite_teardown(&owner).await);
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn dropping_dispatch_handle_does_not_cancel_wire_work() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let plan = manager
+            .plan_initial_invite(None, options("call-detached"))
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        drop(manager.dispatch_initial_invite(installed));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while transport.sends() == 0 {
+                tokio::task::yield_now().await;
+            }
+            loop {
+                let phase = manager
+                    .initial_invite_installs
+                    .get(owner.dialog_id())
+                    .map(|record| record.phase.load(Ordering::Acquire));
+                if phase == Some(INITIAL_INVITE_SENT) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached dispatch completion");
+
+        assert_eq!(transport.sends(), 1);
+        assert!(!manager.compensate_initial_invite(&owner).await);
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn panic_after_dispatch_admission_retains_owner_and_starts_cleanup() {
+        let (manager, transport, _events) = make_test_manager().await;
+        manager
+            .initial_invite_dispatch_test_hook
+            .store(1, Ordering::Release);
+        let plan = manager
+            .plan_initial_invite(
+                Some("session-dispatch-panic".to_string()),
+                options("call-dispatch-panic"),
+            )
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        drop(manager.dispatch_initial_invite(installed));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let phase = manager
+                    .initial_invite_installs
+                    .get(owner.dialog_id())
+                    .map(|record| record.phase.load(Ordering::Acquire));
+                if phase == Some(INITIAL_INVITE_WIRE_UNKNOWN)
+                    && manager.initial_invite_dispatch_tasks.is_empty()
+                    && manager.initial_invite_cleanup_tasks.len() == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("panic ownership handoff");
+
+        assert_eq!(transport.sends(), 0);
+        assert!(manager.core.has_dialog(owner.dialog_id()));
+        assert!(!manager.compensate_initial_invite(&owner).await);
+        expect_incomplete_protocol_drain(&manager).await;
+        assert!(manager.initial_invite_dispatch_tasks.is_empty());
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+        assert!(manager
+            .initial_invite_installs
+            .contains_key(owner.dialog_id()));
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_and_joins_dispatch_blocked_after_admission() {
+        let (manager, transport, _events) = make_test_manager().await;
+        manager
+            .initial_invite_dispatch_test_hook
+            .store(2, Ordering::Release);
+        let plan = manager
+            .plan_initial_invite(
+                Some("session-dispatch-stop".to_string()),
+                options("call-dispatch-stop"),
+            )
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        drop(manager.dispatch_initial_invite(installed));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let phase = manager
+                    .initial_invite_installs
+                    .get(owner.dialog_id())
+                    .map(|record| record.phase.load(Ordering::Acquire));
+                if phase == Some(INITIAL_INVITE_DISPATCHING)
+                    && manager.initial_invite_dispatch_tasks.len() == 1
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("blocked dispatch admitted");
+
+        expect_incomplete_protocol_drain(&manager).await;
+
+        assert_eq!(transport.sends(), 0);
+        assert!(manager.initial_invite_dispatch_tasks.is_empty());
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+        assert!(manager
+            .initial_invite_installs
+            .contains_key(owner.dialog_id()));
+    }
+
+    #[tokio::test]
+    async fn wire_unknown_retains_owner_and_refuses_local_compensation() {
+        let (manager, transport, _events) = make_test_manager().await;
+        transport.fail_next_sends(1);
+        let plan = manager
+            .plan_initial_invite(Some("session-unknown".to_string()), options("call-unknown"))
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let owner = installed.owner().clone();
+
+        let completion = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            manager.dispatch_initial_invite(installed).wait(),
+        )
+        .await
+        .expect("dispatch timeout");
+        assert_eq!(completion.wire_outcome(), InitialInviteWireOutcome::Unknown);
+        assert!(completion.error().is_some());
+        assert!(manager.core.has_dialog(owner.dialog_id()));
+        assert_eq!(
+            manager
+                .core
+                .session_to_dialog
+                .get("session-unknown")
+                .map(|mapped| mapped.value().clone()),
+            Some(owner.dialog_id().clone())
+        );
+        assert!(manager
+            .initial_invite_installs
+            .get(owner.dialog_id())
+            .is_some_and(|record| {
+                record.phase.load(Ordering::Acquire) == INITIAL_INVITE_WIRE_UNKNOWN
+            }));
+        assert!(!manager.compensate_initial_invite(&owner).await);
+        assert!(manager.core.has_dialog(owner.dialog_id()));
+        expect_incomplete_protocol_drain(&manager).await;
+        assert!(manager
+            .initial_invite_installs
+            .contains_key(owner.dialog_id()));
+    }
+
+    #[tokio::test]
+    async fn compatibility_failure_supervisor_retains_until_invite_is_terminal() {
+        let (manager, transport, _events) = make_test_manager().await;
+        transport.fail_next_sends(1);
+
+        let result = manager
+            .make_call_for_session(
+                "session-compat-failure",
+                "sip:alice@example.com",
+                "sip:bob@127.0.0.1:5099",
+                None,
+                Some("call-compat-failure".to_string()),
+            )
+            .await;
+        assert!(result.is_err());
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while transport.cancel_sends() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact CANCEL send");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        assert_eq!(transport.sends(), 2, "one INVITE and one exact CANCEL");
+        assert_eq!(transport.cancel_sends(), 1);
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+        assert_eq!(manager.initial_invite_cleanup_tasks.len(), 1);
+        assert_eq!(manager.core.dialog_count(), 1);
+        assert_eq!(manager.core.invite_failover_plans.len(), 1);
+        assert_eq!(
+            manager
+                .core
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            1
+        );
+        assert!(manager
+            .core
+            .session_to_dialog
+            .contains_key("session-compat-failure"));
+        expect_incomplete_protocol_drain(&manager).await;
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn staged_install_capacity_is_atomic_and_owned_by_exact_records() {
+        let (mut manager, transport, mut events) = make_test_manager().await;
+        assert_eq!(
+            manager.initial_invite_install_slots.available_permits(),
+            manager.core.invite_failover_active_plan_capacity
+        );
+
+        // Keep the concurrency proof small while exercising the same owned
+        // semaphore path used with the configured production capacity.
+        const CAPACITY: usize = 4;
+        manager.initial_invite_install_slots = Arc::new(tokio::sync::Semaphore::new(CAPACITY));
+        let barrier = Arc::new(tokio::sync::Barrier::new(CAPACITY + 2));
+        let mut tasks = Vec::new();
+        for index in 0..=CAPACITY {
+            let plan = manager
+                .plan_initial_invite(
+                    Some(format!("capacity-session-{index}")),
+                    options(&format!("capacity-call-{index}")),
+                )
+                .await
+                .expect("plan");
+            let task_manager = manager.clone();
+            let task_barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                task_barrier.wait().await;
+                task_manager.install_initial_invite(plan)
+            }));
+        }
+        barrier.wait().await;
+
+        let mut installed = Vec::new();
+        let mut rejected = 0usize;
+        for task in tasks {
+            match task.await.expect("install task") {
+                Ok(value) => installed.push(value),
+                Err(ApiError::Dialog { message }) => {
+                    assert_eq!(message, "Initial INVITE admission capacity exhausted");
+                    rejected = rejected.saturating_add(1);
+                }
+                Err(error) => panic!("unexpected install error: {error}"),
+            }
+        }
+
+        assert_eq!(installed.len(), CAPACITY);
+        assert_eq!(rejected, 1);
+        assert_eq!(manager.initial_invite_installs.len(), CAPACITY);
+        assert_eq!(manager.initial_invite_install_slots.available_permits(), 0);
+        assert_eq!(transport.sends(), 0);
+        assert!(events.try_recv().is_err());
+
+        for value in installed {
+            assert!(manager.compensate_initial_invite(value.owner()).await);
+        }
+        assert_eq!(
+            manager.initial_invite_install_slots.available_permits(),
+            CAPACITY
+        );
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn ambiguous_cancel_error_is_not_retried_and_retains_exact_owner() {
+        let (manager, transport, _events) = make_test_manager().await;
+        // The INVITE and then the exact CANCEL both cross the transport call
+        // boundary and report an error.
+        transport.fail_next_sends(2);
+
+        let result = manager
+            .make_call_for_session(
+                "session-ambiguous-cancel",
+                "sip:alice@example.com",
+                "sip:bob@127.0.0.1:5099",
+                None,
+                Some("call-ambiguous-cancel".to_string()),
+            )
+            .await;
+        assert!(result.is_err());
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while transport.cancel_sends() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("CANCEL attempt");
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+        assert_eq!(transport.sends(), 2, "one INVITE and one CANCEL only");
+        assert_eq!(
+            transport.cancel_sends(),
+            1,
+            "ambiguous CANCEL is not retried"
+        );
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+        assert_eq!(manager.initial_invite_cleanup_tasks.len(), 1);
+        let owner = manager
+            .initial_invite_installs
+            .iter()
+            .next()
+            .expect("retained exact owner");
+        assert_eq!(
+            owner.phase.load(Ordering::Acquire),
+            INITIAL_INVITE_WIRE_UNKNOWN
+        );
+        assert!(manager.core.has_dialog(owner.key()));
+        assert_eq!(
+            manager
+                .core
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            1
+        );
+        let retained_plan = manager
+            .core
+            .invite_failover_plans
+            .iter()
+            .next()
+            .expect("retained failover plan")
+            .value()
+            .clone();
+        drop(owner);
+        assert_eq!(
+            retained_plan.lock().await.phase,
+            crate::manager::transaction_integration::InviteFailoverPlanPhase::WireUnknown
+        );
+
+        expect_incomplete_protocol_drain(&manager).await;
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_aborts_and_joins_a_blocked_cleanup_task() {
+        let (manager, transport, _events) = make_test_manager().await;
+        transport.fail_next_sends(1);
+        manager
+            .initial_invite_cleanup_test_hook
+            .store(1, Ordering::Release);
+
+        let result = manager
+            .make_call_for_session(
+                "session-blocked-cleanup",
+                "sip:alice@example.com",
+                "sip:bob@127.0.0.1:5099",
+                None,
+                Some("call-blocked-cleanup".to_string()),
+            )
+            .await;
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager.initial_invite_cleanup_tasks.len() != 1
+                || manager
+                    .initial_invite_cleanup_test_hook
+                    .load(Ordering::Acquire)
+                    != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup task entered injected block");
+        assert_eq!(manager.initial_invite_cleanup_tasks.len(), 1);
+
+        expect_incomplete_protocol_drain(&manager).await;
+
+        assert_eq!(transport.cancel_sends(), 1);
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stop_drains_a_real_cancel_attempt_before_preserving_unknown_owner() {
+        let (manager, transport, _events) = make_test_manager().await;
+        transport.fail_next_sends(1);
+        manager
+            .initial_invite_cleanup_test_hook
+            .store(2, Ordering::Release);
+
+        let result = manager
+            .make_call_for_session(
+                "session-stop-protocol-drain",
+                "sip:alice@example.com",
+                "sip:bob@127.0.0.1:5099",
+                None,
+                Some("call-stop-protocol-drain".to_string()),
+            )
+            .await;
+        assert!(result.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while manager
+                .initial_invite_cleanup_test_hook
+                .load(Ordering::Acquire)
+                != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup entered pre-attempt delay");
+        assert_eq!(transport.cancel_sends(), 0);
+
+        expect_incomplete_protocol_drain(&manager).await;
+
+        assert_eq!(transport.cancel_sends(), 1);
+        assert_eq!(manager.initial_invite_installs.len(), 1);
+        assert_eq!(manager.core.dialog_count(), 1);
+        assert_eq!(manager.core.invite_failover_plans.len(), 1);
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_compensation_preserves_replacement_session_mapping() {
+        let (manager, _transport, _events) = make_test_manager().await;
+        let plan = manager
+            .plan_initial_invite(Some("session-reused".to_string()), options("call-old"))
+            .await
+            .expect("plan");
+        let installed = manager.install_initial_invite(plan).expect("install");
+        let old_owner = installed.owner().clone();
+
+        let replacement = Dialog::new_early(
+            "call-new".to_string(),
+            "sip:alice@example.com".parse().expect("local URI"),
+            "sip:carol@127.0.0.1:5098".parse().expect("remote URI"),
+            None,
+            None,
+            true,
+        );
+        let replacement_id = replacement.id.clone();
+        manager
+            .core
+            .dialogs
+            .insert(replacement_id.clone(), replacement);
+        manager
+            .core
+            .session_to_dialog
+            .insert("session-reused".to_string(), replacement_id.clone());
+        manager
+            .core
+            .dialog_to_session
+            .insert(replacement_id.clone(), "session-reused".to_string());
+
+        assert!(manager.compensate_initial_invite(&old_owner).await);
+        assert_eq!(
+            manager
+                .core
+                .session_to_dialog
+                .get("session-reused")
+                .map(|mapped| mapped.value().clone()),
+            Some(replacement_id.clone())
+        );
+        assert!(manager.core.has_dialog(&replacement_id));
+        manager.core.cleanup_dialog_storage(&replacement_id);
     }
 }

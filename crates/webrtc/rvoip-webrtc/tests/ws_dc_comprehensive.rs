@@ -153,6 +153,7 @@ async fn ws_offer_with_data_channel_ping_pong() {
             sdp: offer_sdp,
             connection_id: String::new(),
             candidate: String::new(),
+            request_id: String::new(),
         })
         .unwrap()
         .into(),

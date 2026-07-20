@@ -98,6 +98,30 @@ fn test_embedded_default_table_loads() {
 }
 
 #[test]
+fn active_auth_required_retries_for_uac_and_uas_dialog_roles() {
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
+    for role in [Role::UAC, Role::UAS] {
+        let key = StateKey {
+            role,
+            state: CallState::Active,
+            event: EventType::AuthRequired {
+                status_code: 401,
+                challenge: String::new(),
+                method: "INFO".to_string(),
+            },
+        };
+        let transition = table
+            .get(&key)
+            .unwrap_or_else(|| panic!("Active AuthRequired transition missing for {role:?}"));
+        assert_eq!(
+            transition.actions,
+            vec![Action::StoreAuthChallenge, Action::SendRequestWithAuth],
+            "both dialog roles must use the exact tracked request retry path"
+        );
+    }
+}
+
+#[test]
 fn test_hold_resume_transitions() {
     let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
@@ -192,7 +216,7 @@ fn test_error_handling_transitions() {
     for state in states_to_check {
         let error_key = StateKey {
             role: Role::Both,
-            state: state.clone(),
+            state,
             event: EventType::DialogError(String::new()),
         };
 

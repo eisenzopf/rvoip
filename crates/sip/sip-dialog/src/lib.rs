@@ -152,6 +152,11 @@ pub use config::{ClientBehavior, DialogManagerConfig, HybridBehavior, ServerBeha
 
 // **NEW**: Re-export clean API types
 pub use api::config::{ClientConfig, ServerConfig};
+pub use api::unified::{
+    ExactResponseSendError, FinalResponseCompletionDisposition, InitialInviteDispatch,
+    InitialInviteDispatchCompletion, InitialInviteDispatchError, InitialInviteOwner,
+    InitialInviteWireOutcome, InstalledInitialInvite, PlannedInitialInvite,
+};
 pub use api::{ApiError, ApiResult, DialogStats};
 pub use api::{DialogClient, DialogServer, UnifiedDialogApi};
 

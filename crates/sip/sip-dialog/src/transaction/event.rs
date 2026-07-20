@@ -174,6 +174,12 @@ pub enum TransactionEvent {
     },
     /// An internal error occurred within the transaction state machine or processing logic.
     /// This may indicate a bug or unexpected condition.
+    ///
+    /// When `transaction_id` is present, this is a terminal transaction event:
+    /// the runner has already committed the transaction to `Terminated` and
+    /// fenced its lifecycle against further protocol processing. An error
+    /// without a transaction identifier is an unscoped diagnostic and carries
+    /// no transaction-lifecycle implication.
     Error {
         /// The unique identifier for the transaction, if the error is associated with one.
         transaction_id: Option<TransactionKey>,
@@ -322,6 +328,46 @@ pub enum TransactionEvent {
     ShutdownComplete,
 }
 
+impl TransactionEvent {
+    /// Returns the transaction associated with this event, when one exists.
+    ///
+    /// Stray-message and shutdown events are intentionally not assigned a
+    /// synthetic transaction identifier. An [`TransactionEvent::Error`] is
+    /// transaction-scoped only when its optional identifier is present.
+    #[must_use]
+    pub fn transaction_id(&self) -> Option<&TransactionKey> {
+        match self {
+            Self::AckReceived { transaction_id, .. }
+            | Self::CancelReceived { transaction_id, .. }
+            | Self::ProvisionalResponse { transaction_id, .. }
+            | Self::SuccessResponse { transaction_id, .. }
+            | Self::FailureResponse { transaction_id, .. }
+            | Self::ProvisionalResponseSent { transaction_id, .. }
+            | Self::FinalResponseSent { transaction_id, .. }
+            | Self::TransactionTimeout { transaction_id }
+            | Self::AckTimeout { transaction_id }
+            | Self::TransportError { transaction_id }
+            | Self::TransactionTerminated { transaction_id }
+            | Self::StateChanged { transaction_id, .. }
+            | Self::TimerTriggered { transaction_id, .. }
+            | Self::CancelRequest { transaction_id, .. }
+            | Self::AckRequest { transaction_id, .. }
+            | Self::InviteRequest { transaction_id, .. }
+            | Self::NonInviteRequest { transaction_id, .. } => Some(transaction_id),
+            Self::Error { transaction_id, .. } => transaction_id.as_ref(),
+            Self::StrayRequest { .. }
+            | Self::StrayResponse { .. }
+            | Self::StrayAck { .. }
+            | Self::StrayCancel { .. }
+            | Self::StrayAckRequest { .. }
+            | Self::ShutdownRequested
+            | Self::ShutdownReady
+            | Self::ShutdownNow
+            | Self::ShutdownComplete => None,
+        }
+    }
+}
+
 impl fmt::Debug for TransactionEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         crate::transaction::safe_diagnostics::SafeTransactionEvent::new(self).fmt(f)
@@ -447,5 +493,142 @@ mod tests {
             error: "Something went wrong".to_string(),
         };
         assert!(matches!(event, TransactionEvent::Error { .. }));
+    }
+
+    #[test]
+    fn transaction_id_covers_every_transaction_scoped_event() {
+        let transaction_id =
+            TransactionKey::new("branch-scoped".to_string(), Method::Invite, false);
+        let target_transaction_id =
+            TransactionKey::new("branch-target".to_string(), Method::Invite, false);
+        let request = Request::new(Method::Invite, Uri::sip("example.com"));
+        let cancel_request = Request::new(Method::Cancel, Uri::sip("example.com"));
+        let ack_request = Request::new(Method::Ack, Uri::sip("example.com"));
+        let response = Response::new(StatusCode::Ok);
+        let source = "127.0.0.1:5060".parse().unwrap();
+
+        let events = vec![
+            TransactionEvent::AckReceived {
+                transaction_id: transaction_id.clone(),
+                request: ack_request.clone(),
+            },
+            TransactionEvent::CancelReceived {
+                transaction_id: transaction_id.clone(),
+                cancel_request: cancel_request.clone(),
+            },
+            TransactionEvent::ProvisionalResponse {
+                transaction_id: transaction_id.clone(),
+                response: Response::new(StatusCode::Trying),
+            },
+            TransactionEvent::SuccessResponse {
+                transaction_id: transaction_id.clone(),
+                response: response.clone(),
+                need_ack: true,
+                source,
+            },
+            TransactionEvent::FailureResponse {
+                transaction_id: transaction_id.clone(),
+                response: Response::new(StatusCode::NotFound),
+            },
+            TransactionEvent::ProvisionalResponseSent {
+                transaction_id: transaction_id.clone(),
+                response: Response::new(StatusCode::Trying),
+            },
+            TransactionEvent::FinalResponseSent {
+                transaction_id: transaction_id.clone(),
+                response: response.clone(),
+            },
+            TransactionEvent::TransactionTimeout {
+                transaction_id: transaction_id.clone(),
+            },
+            TransactionEvent::AckTimeout {
+                transaction_id: transaction_id.clone(),
+            },
+            TransactionEvent::TransportError {
+                transaction_id: transaction_id.clone(),
+            },
+            TransactionEvent::Error {
+                transaction_id: Some(transaction_id.clone()),
+                error: "transaction error".to_string(),
+            },
+            TransactionEvent::TransactionTerminated {
+                transaction_id: transaction_id.clone(),
+            },
+            TransactionEvent::StateChanged {
+                transaction_id: transaction_id.clone(),
+                previous_state: TransactionState::Calling,
+                new_state: TransactionState::Proceeding,
+            },
+            TransactionEvent::TimerTriggered {
+                transaction_id: transaction_id.clone(),
+                timer: "A".to_string(),
+            },
+            TransactionEvent::CancelRequest {
+                transaction_id: transaction_id.clone(),
+                target_transaction_id,
+                request: cancel_request,
+                source,
+            },
+            TransactionEvent::AckRequest {
+                transaction_id: transaction_id.clone(),
+                request: ack_request,
+                source,
+            },
+            TransactionEvent::InviteRequest {
+                transaction_id: transaction_id.clone(),
+                request: request.clone(),
+                source,
+            },
+            TransactionEvent::NonInviteRequest {
+                transaction_id: transaction_id.clone(),
+                request,
+                source,
+            },
+        ];
+
+        for event in events {
+            assert_eq!(event.transaction_id(), Some(&transaction_id), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn transaction_id_is_absent_for_unscoped_events() {
+        let request = Request::new(Method::Invite, Uri::sip("example.com"));
+        let ack_request = Request::new(Method::Ack, Uri::sip("example.com"));
+        let cancel_request = Request::new(Method::Cancel, Uri::sip("example.com"));
+        let response = Response::new(StatusCode::Ok);
+        let source = "127.0.0.1:5060".parse().unwrap();
+
+        let events = vec![
+            TransactionEvent::Error {
+                transaction_id: None,
+                error: "global error".to_string(),
+            },
+            TransactionEvent::StrayRequest {
+                request: request.clone(),
+                source,
+            },
+            TransactionEvent::StrayResponse { response, source },
+            TransactionEvent::StrayAck {
+                request: ack_request.clone(),
+                source,
+            },
+            TransactionEvent::StrayCancel {
+                request: cancel_request,
+                source,
+            },
+            TransactionEvent::StrayAckRequest {
+                request: ack_request,
+                source,
+            },
+            TransactionEvent::ShutdownRequested,
+            TransactionEvent::ShutdownReady,
+            TransactionEvent::ShutdownNow,
+            TransactionEvent::ShutdownComplete,
+        ];
+
+        for event in events {
+            assert_eq!(event.transaction_id(), None, "{event:?}");
+        }
     }
 }

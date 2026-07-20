@@ -85,6 +85,12 @@ pub const UCTP_SESSION_SCOPE: &str = "uctp:session";
 pub const UCTP_DATA_SCOPE: &str = "uctp:data";
 /// Scope required for stream subscription changes.
 pub const UCTP_SUBSCRIBE_SCOPE: &str = "uctp:subscribe";
+/// Restriction carried by subscriber-only credentials.
+///
+/// Unlike the command scopes above, this is a negative capability: its exact
+/// presence prevents the peer from offering a stream that could publish media
+/// into the Session. A wildcard scope does not imply this restriction.
+pub const UCTP_RECEIVE_ONLY_SCOPE: &str = "uctp:receive-only";
 
 /// Per-envelope authorization policy evaluated after authentication and
 /// before correlation delivery or command dispatch.
@@ -369,7 +375,7 @@ pub struct UctpCoordinator {
 }
 
 /// Default permissive v0 descriptor — supports the codecs every v0 demo
-/// path exercises (opus 48 kHz mono and PCMU 8 kHz mono). Adapters that
+/// path exercises (Opus 48 kHz mono plus PCMU/PCMA 8 kHz mono). Adapters that
 /// want stricter negotiation should call [`UctpCoordinator::start_with_descriptor`]
 /// with their own descriptor.
 pub fn default_v0_descriptor() -> CapabilityDescriptor {
@@ -383,6 +389,12 @@ pub fn default_v0_descriptor() -> CapabilityDescriptor {
             },
             CodecInfo {
                 name: "g.711-mu".into(),
+                clock_rate_hz: 8_000,
+                channels: 1,
+                fmtp: None,
+            },
+            CodecInfo {
+                name: "g.711-a".into(),
                 clock_rate_hz: 8_000,
                 channels: 1,
                 fmtp: None,
@@ -1086,6 +1098,9 @@ impl UctpCoordinator {
             if !self.require_scope(&env).await? {
                 return Ok(());
             }
+            if !self.require_resource_authorization(&env).await? {
+                return Ok(());
+            }
             if !replay_checked_pre_auth && !self.record_replay_id(&env, false) {
                 return Ok(());
             }
@@ -1111,6 +1126,9 @@ impl UctpCoordinator {
                     return Ok(());
                 }
                 if !self.require_scope(&env).await? {
+                    return Ok(());
+                }
+                if !self.require_resource_authorization(&env).await? {
                     return Ok(());
                 }
                 if !self.record_replay_id(&env, false) {
@@ -1286,6 +1304,38 @@ impl UctpCoordinator {
         )
         .await?;
         Ok(false)
+    }
+
+    /// Revalidate stateful authority for a Session that has already crossed
+    /// the wire-to-core binding boundary. Initial Session invites have no
+    /// binding yet and are authorized by `resolve_session` in their handler.
+    async fn require_resource_authorization(&self, env: &UctpEnvelope) -> Result<bool> {
+        let (Some(bindings), Some(sid)) = (self.resource_bindings.get(), env.sid.as_ref()) else {
+            return Ok(true);
+        };
+        let wire_sid = SessionId::from_string(sid.clone());
+        if bindings.core_session(&wire_sid).is_none() {
+            return Ok(true);
+        }
+        if let Err(error) = bindings.reauthorize_bound_session(&wire_sid) {
+            warn!(
+                transport = %self.transport,
+                envelope = env.msg_type.diagnostic_label(),
+                code = error.code,
+                "uctp.coordinator: bound Session authorization is no longer valid"
+            );
+            self.emit_error_full(
+                env.id.clone(),
+                error.code,
+                "auth",
+                &error.reason,
+                env.sid.clone(),
+                env.connid.clone(),
+            )
+            .await?;
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     fn authenticated_participant(&self) -> Option<String> {
@@ -1851,10 +1901,13 @@ impl UctpCoordinator {
         self.refresh_gauges();
 
         self.emit_event(UctpSessionEvent::InboundInvite {
+            cid: env.cid,
             sid,
             from: payload.from,
             to: payload.to,
             medium: payload.medium,
+            intent: payload.intent,
+            capabilities_offer: payload.capabilities_offer,
         })
         .instrument(span)
         .await
@@ -1922,6 +1975,35 @@ impl UctpCoordinator {
             .clone()
             .ok_or(UctpError::MissingField("connid"))?;
         let connid = ConnectionId::from_string(connid_str.clone());
+
+        // Broadcast subscriber credentials deliberately retain the minimum
+        // `uctp:session` scope needed to establish a receiving Connection.
+        // That must not also make them publishers: reject the complete offer
+        // before creating connection state or allocating media resources when
+        // any stream direction could send media toward the server.
+        let receive_only = self.authenticated_principal().is_some_and(|principal| {
+            principal
+                .scopes
+                .iter()
+                .any(|scope| scope == UCTP_RECEIVE_ONLY_SCOPE)
+        });
+        if receive_only
+            && payload
+                .streams_offered
+                .iter()
+                .any(|stream| stream.direction != "recvonly")
+        {
+            return self
+                .emit_error_full(
+                    env.id.clone(),
+                    403,
+                    "auth",
+                    "receive-only-credential",
+                    env.sid.clone(),
+                    Some(connid_str),
+                )
+                .await;
+        }
 
         if payload.streams_offered.len() > self.caps.max_streams_per_connection {
             return self
@@ -2429,15 +2511,22 @@ impl UctpCoordinator {
                     .chosen_codec
                     .as_ref()
                     .map(|name| rvoip_core::capability::CodecInfo::from_name_with_defaults(name));
-                self.subscription_handler
-                    .register_publisher(super::subscription::PublisherInfo {
-                        sid: &sid,
-                        strm_id: &stream.strm_id,
-                        connection: &connid,
-                        participant: &stream.participant,
-                        kind: &stream.kind,
-                        codec,
-                    });
+                // `recvonly` is the subscriber-side receive path. Registering
+                // it as a publisher would let a receive-only credential
+                // create a misleading shared-registry row even though it is
+                // not authorized to publish media.
+                if stream.direction != "recvonly" {
+                    self.subscription_handler.register_publisher(
+                        super::subscription::PublisherInfo {
+                            sid: &sid,
+                            strm_id: &stream.strm_id,
+                            connection: &connid,
+                            participant: &stream.participant,
+                            kind: &stream.kind,
+                            codec,
+                        },
+                    );
+                }
             }
 
             self.emit_event(UctpSessionEvent::ConnectionConnected { sid, connid })

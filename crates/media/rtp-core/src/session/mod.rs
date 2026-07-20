@@ -24,7 +24,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::error::Error;
 use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{
-    RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, UdpRtpTransport,
+    RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, SymmetricRtpPolicy, UdpRtpTransport,
 };
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
@@ -413,7 +413,15 @@ pub struct RtpSession {
 impl RtpSession {
     /// Create a new RTP session
     pub async fn new(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(config, true).await
+        Self::new_with_receive_queue(config, true, SymmetricRtpPolicy::default()).await
+    }
+
+    /// Create a new RTP session with an explicit symmetric-RTP policy.
+    pub async fn new_with_symmetric_rtp_policy(
+        config: RtpSessionConfig,
+        policy: SymmetricRtpPolicy,
+    ) -> Result<Self> {
+        Self::new_with_receive_queue(config, true, policy).await
     }
 
     /// Create a new RTP session for event-driven consumers.
@@ -422,12 +430,22 @@ impl RtpSession {
     /// but they are not duplicated into the polling queue used by
     /// [`RtpSession::receive_packet`].
     pub async fn new_event_driven(config: RtpSessionConfig) -> Result<Self> {
-        Self::new_with_receive_queue(config, false).await
+        Self::new_with_receive_queue(config, false, SymmetricRtpPolicy::default()).await
+    }
+
+    /// Create an event-driven RTP session with an explicit symmetric-RTP
+    /// learning/rebinding policy.
+    pub async fn new_event_driven_with_symmetric_rtp_policy(
+        config: RtpSessionConfig,
+        policy: SymmetricRtpPolicy,
+    ) -> Result<Self> {
+        Self::new_with_receive_queue(config, false, policy).await
     }
 
     async fn new_with_receive_queue(
         config: RtpSessionConfig,
         receive_queue_enabled: bool,
+        symmetric_rtp_policy: SymmetricRtpPolicy,
     ) -> Result<Self> {
         let session_buffer_config = config.session_buffer_config;
         let transport_buffer_config = config.transport_buffer_config;
@@ -451,7 +469,10 @@ impl RtpSession {
         };
 
         // Create UDP transport
-        let transport = Arc::new(UdpRtpTransport::new(transport_config).await?);
+        let transport = Arc::new(
+            UdpRtpTransport::new_with_symmetric_rtp_policy(transport_config, symmetric_rtp_policy)
+                .await?,
+        );
 
         // Create channels for internal communication.
         let (sender_tx, sender_rx) =
@@ -1594,6 +1615,24 @@ impl RtpSession {
         Err(Error::Transport(
             "Transport is not a UDP transport".to_string(),
         ))
+    }
+}
+
+impl Drop for RtpSession {
+    fn drop(&mut self) {
+        // Cancellation may drop a session before the async `close` path can be
+        // awaited. JoinHandle::abort is synchronous; dropping the transport
+        // then aborts its UDP receive tasks as a second layer.
+        if let Some(handle) = self.recv_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.send_task.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.rtcp_task.take() {
+            handle.abort();
+        }
+        self.active = false;
     }
 }
 

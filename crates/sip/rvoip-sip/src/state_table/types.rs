@@ -43,6 +43,12 @@ impl SessionId {
     }
 }
 
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl From<String> for SessionId {
     fn from(s: String) -> Self {
         Self(s)
@@ -96,6 +102,12 @@ impl DialogId {
     /// Get the inner UUID
     pub fn as_uuid(&self) -> &uuid::Uuid {
         &self.0
+    }
+}
+
+impl Default for DialogId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -887,6 +899,12 @@ pub struct MasterStateTable {
 /// Type alias for external use
 pub type StateTable = MasterStateTable;
 
+impl Default for MasterStateTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MasterStateTable {
     pub fn new() -> Self {
         Self {
@@ -994,7 +1012,7 @@ impl MasterStateTable {
         }
 
         // Collect from wildcard transitions
-        for (_, transition) in &self.wildcard_transitions {
+        for transition in self.wildcard_transitions.values() {
             if let Some(next_state) = &transition.next_state {
                 states.insert(*next_state);
             }

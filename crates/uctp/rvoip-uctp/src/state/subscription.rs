@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use parking_lot::{Mutex, RwLock};
+use rvoip_core::adapter::InboundRoutingHint;
 use rvoip_core::identity::{AuthenticatedPrincipal, PrincipalOwnershipKey};
 
 use crate::ids::{ConnectionId, SessionId};
@@ -135,6 +136,48 @@ pub trait SessionBindingResolver: Send + Sync {
         principal: &AuthenticatedPrincipal,
         wire_session: &SessionId,
     ) -> Result<SessionId, ResourceBindingError>;
+
+    /// Revalidate an already-bound Session without consuming another
+    /// single-use attachment token. Stateful authorities override this to
+    /// enforce revocation, tenant ownership, transport, and expiry for the
+    /// full peer lifetime. Stateless resolvers remain valid by default.
+    fn reauthorize_session(
+        &self,
+        _principal: &AuthenticatedPrincipal,
+        _wire_session: &SessionId,
+        _canonical_session: &SessionId,
+    ) -> Result<(), ResourceBindingError> {
+        Ok(())
+    }
+
+    /// Reauthorize one exact wire Connection before a subscription mutation.
+    /// The default preserves session-only resolvers; deployments whose wire
+    /// Session names encode a connection owner can additionally prevent a
+    /// sibling Connection from consuming that authority.
+    fn reauthorize_connection(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_session: &SessionId,
+        canonical_session: &SessionId,
+        _wire_connection: &ConnectionId,
+        _core_connection: &ConnectionId,
+    ) -> Result<(), ResourceBindingError> {
+        self.reauthorize_session(principal, wire_session, canonical_session)
+    }
+
+    /// Optionally recover one bounded, secret routing hint from an inbound
+    /// Session offer. The default deliberately ignores peer capabilities.
+    /// Deployments must opt in through a resolver installed only on their
+    /// mutually-authenticated private ingress.
+    fn resolve_inbound_routing_hint(
+        &self,
+        _principal: &AuthenticatedPrincipal,
+        _wire_session: &SessionId,
+        _intent: &str,
+        _capabilities_offer: &serde_json::Value,
+    ) -> Result<Option<InboundRoutingHint>, ResourceBindingError> {
+        Ok(None)
+    }
 }
 
 impl<F> SessionBindingResolver for F
@@ -292,6 +335,26 @@ impl PeerResourceBindings {
                 "principal-ownership-change",
             ));
         }
+
+        // Authentication refresh is a transaction over the peer's complete
+        // resource authority. Ownership equality alone is insufficient: a
+        // same-owner credential may have lost the scope, tenant grant, or
+        // other policy that authorized an already-bound Session. Validate the
+        // candidate against every retained binding before publishing either
+        // the new owner or principal. On any failure the previous principal
+        // remains authoritative, matching the coordinator's retryable refresh
+        // contract and preventing existing media routes from inheriting a
+        // reduced-scope credential.
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        for (wire, canonical) in sessions {
+            self.resolver
+                .reauthorize_session(&principal, &wire, &canonical)?;
+        }
+
         *owner = Some(incoming_owner);
         *self.principal.write() = Some(principal);
         Ok(())
@@ -311,12 +374,74 @@ impl PeerResourceBindings {
     ) -> Result<SessionId, ResourceBindingError> {
         let principal = self.active_principal_locked()?;
         if let Some(existing) = self.sessions.get(wire_session) {
-            return Ok(existing.value().clone());
+            let canonical = existing.value().clone();
+            self.resolver
+                .reauthorize_session(&principal, wire_session, &canonical)?;
+            return Ok(canonical);
         }
         let canonical = self.resolver.resolve_session(&principal, wire_session)?;
         self.sessions
             .insert(wire_session.clone(), canonical.clone());
         Ok(canonical)
+    }
+
+    /// Revalidate one existing wire-to-canonical Session binding.
+    pub fn reauthorize_bound_session(
+        &self,
+        wire_session: &SessionId,
+    ) -> Result<(), ResourceBindingError> {
+        let _mutation = self.mutation.lock();
+        let Some(canonical) = self
+            .sessions
+            .get(wire_session)
+            .map(|entry| entry.value().clone())
+        else {
+            return Ok(());
+        };
+        let principal = self.active_principal_locked()?;
+        self.resolver
+            .reauthorize_session(&principal, wire_session, &canonical)
+    }
+
+    /// Resolve an application routing hint only after authentication and an
+    /// exact Session binding have both succeeded.
+    pub fn inbound_routing_hint(
+        &self,
+        wire_session: &SessionId,
+        intent: &str,
+        capabilities_offer: &serde_json::Value,
+    ) -> Result<Option<InboundRoutingHint>, ResourceBindingError> {
+        let _mutation = self.mutation.lock();
+        let principal = self.active_principal_locked()?;
+        let canonical = self.bind_session_locked(wire_session)?;
+        self.resolver
+            .reauthorize_session(&principal, wire_session, &canonical)?;
+        self.resolver.resolve_inbound_routing_hint(
+            &principal,
+            wire_session,
+            intent,
+            capabilities_offer,
+        )
+    }
+
+    /// Revalidate all retained Session grants. An empty pre-auth peer remains
+    /// pending; once any Session is bound, authority loss fails closed.
+    pub fn reauthorize_all_sessions(&self) -> Result<(), ResourceBindingError> {
+        let _mutation = self.mutation.lock();
+        let sessions = self
+            .sessions
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        if sessions.is_empty() {
+            return Ok(());
+        }
+        let principal = self.active_principal_locked()?;
+        for (wire, canonical) in sessions {
+            self.resolver
+                .reauthorize_session(&principal, &wire, &canonical)?;
+        }
+        Ok(())
     }
 
     fn active_principal_locked(&self) -> Result<AuthenticatedPrincipal, ResourceBindingError> {
@@ -500,7 +625,7 @@ impl BoundSubscriptionHandler {
         // removes the mapping, and then cleans the registry; a later request
         // cannot slip between cleanup and mapping removal.
         let _mutation = self.bindings.mutation.lock();
-        self.bindings.active_principal_locked()?;
+        let principal = self.bindings.active_principal_locked()?;
         let core_session = self
             .bindings
             .core_session(sid)
@@ -509,6 +634,13 @@ impl BoundSubscriptionHandler {
             .bindings
             .core_connection(sid, connection)
             .ok_or_else(|| ResourceBindingError::unavailable("connection-binding-not-ready"))?;
+        self.bindings.resolver.reauthorize_connection(
+            &principal,
+            sid,
+            &core_session,
+            connection,
+            &core_connection,
+        )?;
         Ok(operation(&core_session, &core_connection))
     }
 }
@@ -706,10 +838,143 @@ pub fn rejecting_handler() -> Arc<dyn SubscriptionHandler> {
 #[cfg(test)]
 mod namespace_tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RevocableResolver {
+        active: Arc<AtomicBool>,
+        canonical: SessionId,
+    }
+
+    struct ScopeBoundResolver {
+        canonical: SessionId,
+    }
+
+    struct ExactConnectionResolver {
+        canonical: SessionId,
+        allowed_wire_connection: ConnectionId,
+    }
+
+    struct PrivateHintResolver;
+
+    impl SessionBindingResolver for PrivateHintResolver {
+        fn resolve_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            wire_session: &SessionId,
+        ) -> Result<SessionId, ResourceBindingError> {
+            Ok(wire_session.clone())
+        }
+
+        fn resolve_inbound_routing_hint(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+            intent: &str,
+            capabilities_offer: &serde_json::Value,
+        ) -> Result<Option<InboundRoutingHint>, ResourceBindingError> {
+            if intent != "private" {
+                return Err(ResourceBindingError::forbidden("private-intent-required"));
+            }
+            let value = capabilities_offer
+                .get("private_hint")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| ResourceBindingError::forbidden("private-hint-required"))?;
+            InboundRoutingHint::new(value.to_owned())
+                .map(Some)
+                .map_err(|_| ResourceBindingError::forbidden("invalid-private-hint"))
+        }
+    }
+
+    impl SessionBindingResolver for RevocableResolver {
+        fn resolve_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+        ) -> Result<SessionId, ResourceBindingError> {
+            if self.active.load(Ordering::Acquire) {
+                Ok(self.canonical.clone())
+            } else {
+                Err(ResourceBindingError::forbidden("session-revoked"))
+            }
+        }
+
+        fn reauthorize_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+            canonical_session: &SessionId,
+        ) -> Result<(), ResourceBindingError> {
+            if canonical_session != &self.canonical {
+                return Err(ResourceBindingError::forbidden("session-mismatch"));
+            }
+            if self.active.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(ResourceBindingError::forbidden("session-revoked"))
+            }
+        }
+    }
+
+    impl SessionBindingResolver for ScopeBoundResolver {
+        fn resolve_session(
+            &self,
+            principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+        ) -> Result<SessionId, ResourceBindingError> {
+            principal
+                .require_scope("private:forward")
+                .map_err(|_| ResourceBindingError::forbidden("forwarding-scope-required"))?;
+            Ok(self.canonical.clone())
+        }
+
+        fn reauthorize_session(
+            &self,
+            principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+            canonical_session: &SessionId,
+        ) -> Result<(), ResourceBindingError> {
+            if canonical_session != &self.canonical {
+                return Err(ResourceBindingError::forbidden("session-mismatch"));
+            }
+            principal
+                .require_scope("private:forward")
+                .map_err(|_| ResourceBindingError::forbidden("forwarding-scope-required"))
+        }
+    }
+
+    impl SessionBindingResolver for ExactConnectionResolver {
+        fn resolve_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+        ) -> Result<SessionId, ResourceBindingError> {
+            Ok(self.canonical.clone())
+        }
+
+        fn reauthorize_connection(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+            canonical_session: &SessionId,
+            wire_connection: &ConnectionId,
+            _core_connection: &ConnectionId,
+        ) -> Result<(), ResourceBindingError> {
+            if canonical_session == &self.canonical
+                && wire_connection == &self.allowed_wire_connection
+            {
+                Ok(())
+            } else {
+                Err(ResourceBindingError::forbidden(
+                    "exact-connection-authority-required",
+                ))
+            }
+        }
+    }
 
     #[derive(Default)]
     struct RecordingHandler {
         subscriptions: parking_lot::Mutex<Vec<(SessionId, ConnectionId)>>,
+        unsubscriptions: parking_lot::Mutex<Vec<(SessionId, ConnectionId)>>,
         publishers: parking_lot::Mutex<Vec<(SessionId, ConnectionId, String)>>,
         removed_publishers: parking_lot::Mutex<Vec<(SessionId, ConnectionId, String)>>,
         removed: parking_lot::Mutex<Vec<(SessionId, ConnectionId)>>,
@@ -730,10 +995,13 @@ mod namespace_tests {
 
         fn unsubscribe(
             &self,
-            _: &SessionId,
-            _: &ConnectionId,
+            sid: &SessionId,
+            subscriber: &ConnectionId,
             _: &StreamUnsubscribe,
         ) -> SubscriptionOutcome {
+            self.unsubscriptions
+                .lock()
+                .push((sid.clone(), subscriber.clone()));
             SubscriptionOutcome::Ok
         }
 
@@ -770,6 +1038,91 @@ mod namespace_tests {
     }
 
     #[test]
+    fn routing_hints_are_explicitly_opt_in_bounded_and_session_authorized() {
+        let wire_session = SessionId::from_string("private-session");
+        let default = PeerResourceBindings::new(PeerScopedSessionResolver::new("peer"));
+        default
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        assert!(default
+            .inbound_routing_hint(
+                &wire_session,
+                "private",
+                &serde_json::json!({"private_hint": "credential"}),
+            )
+            .unwrap()
+            .is_none());
+
+        let private = PeerResourceBindings::new(Arc::new(PrivateHintResolver));
+        private
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let hint = private
+            .inbound_routing_hint(
+                &wire_session,
+                "private",
+                &serde_json::json!({"private_hint": "credential"}),
+            )
+            .unwrap()
+            .expect("private resolver opted in");
+        assert_eq!(hint.expose_secret(), "credential");
+        assert!(private
+            .inbound_routing_hint(
+                &wire_session,
+                "public",
+                &serde_json::json!({"private_hint": "credential"}),
+            )
+            .is_err());
+        assert!(private
+            .inbound_routing_hint(
+                &wire_session,
+                "private",
+                &serde_json::json!({"private_hint": "x".repeat(rvoip_core::adapter::MAX_INBOUND_ROUTING_HINT_BYTES + 1)}),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn scope_dropping_refresh_is_rejected_before_existing_media_authority_changes() {
+        let wire_session = SessionId::from_string("wire-session");
+        let canonical_session = SessionId::from_string("core-session");
+        let bindings = PeerResourceBindings::new(Arc::new(ScopeBoundResolver {
+            canonical: canonical_session.clone(),
+        }));
+        let mut initial = AuthenticatedPrincipal::anonymous();
+        initial.scopes = vec!["private:forward".into()];
+        bindings.authenticate(initial.clone()).unwrap();
+        assert_eq!(
+            bindings.bind_session(&wire_session).unwrap(),
+            canonical_session
+        );
+
+        let mut reduced = initial;
+        reduced.scopes.clear();
+        assert_eq!(
+            bindings.authenticate(reduced).unwrap_err(),
+            ResourceBindingError::forbidden("forwarding-scope-required")
+        );
+
+        // The rejected candidate never becomes visible to the already-bound
+        // datagram/media route. Its prior principal remains authoritative and
+        // the exact cached binding still reauthorizes successfully.
+        assert_eq!(
+            bindings
+                .principal
+                .read()
+                .as_ref()
+                .expect("prior principal retained")
+                .scopes,
+            vec!["private:forward"]
+        );
+        assert_eq!(
+            bindings.bind_session(&wire_session).unwrap(),
+            canonical_session
+        );
+    }
+
+    #[test]
     fn bound_handler_never_delegates_unbound_wire_ids() {
         let resolver = PeerScopedSessionResolver::new("peer-a");
         let bindings = PeerResourceBindings::new(resolver);
@@ -793,6 +1146,54 @@ mod namespace_tests {
             SubscriptionOutcome::reject(503, "session-binding-not-ready")
         );
         assert!(inner.subscriptions.lock().is_empty());
+    }
+
+    #[test]
+    fn exact_connection_reauthorization_blocks_subscribe_and_unsubscribe_mutations() {
+        let wire_session = SessionId::from_string("wire-session");
+        let allowed_wire_connection = ConnectionId::from_string("allowed-wire-connection");
+        let sibling_wire_connection = ConnectionId::from_string("sibling-wire-connection");
+        let resolver = Arc::new(ExactConnectionResolver {
+            canonical: SessionId::from_string("core-session"),
+            allowed_wire_connection,
+        });
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        bindings
+            .bind_connection(
+                &wire_session,
+                &sibling_wire_connection,
+                ConnectionId::from_string("sibling-core-connection"),
+            )
+            .unwrap();
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings, inner.clone());
+
+        assert_eq!(
+            handler.subscribe(
+                &wire_session,
+                &sibling_wire_connection,
+                &StreamSubscribe {
+                    by_participant: "listener".into(),
+                    subscriptions: Vec::new(),
+                },
+            ),
+            SubscriptionOutcome::reject(403, "exact-connection-authority-required")
+        );
+        assert_eq!(
+            handler.unsubscribe(
+                &wire_session,
+                &sibling_wire_connection,
+                &StreamUnsubscribe {
+                    strm_ids: vec!["audio/main".into()],
+                },
+            ),
+            SubscriptionOutcome::reject(403, "exact-connection-authority-required")
+        );
+        assert!(inner.subscriptions.lock().is_empty());
+        assert!(inner.unsubscriptions.lock().is_empty());
     }
 
     #[test]
@@ -1087,5 +1488,53 @@ mod namespace_tests {
             bindings.authenticate(other).unwrap_err(),
             ResourceBindingError::forbidden("principal-ownership-change")
         );
+    }
+
+    #[test]
+    fn cached_session_and_bound_handler_fail_closed_after_authority_revocation() {
+        let active = Arc::new(AtomicBool::new(true));
+        let canonical = SessionId::from_string("canonical");
+        let resolver = Arc::new(RevocableResolver {
+            active: Arc::clone(&active),
+            canonical: canonical.clone(),
+        });
+        let bindings = PeerResourceBindings::new(resolver);
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        let wire_session = SessionId::from_string("wire");
+        let wire_connection = ConnectionId::from_string("wire-connection");
+        bindings
+            .bind_connection(
+                &wire_session,
+                &wire_connection,
+                ConnectionId::from_string("core-connection"),
+            )
+            .unwrap();
+        assert_eq!(bindings.bind_session(&wire_session).unwrap(), canonical);
+
+        active.store(false, Ordering::Release);
+        assert_eq!(
+            bindings.bind_session(&wire_session).unwrap_err(),
+            ResourceBindingError::forbidden("session-revoked")
+        );
+        assert_eq!(
+            bindings.reauthorize_all_sessions().unwrap_err(),
+            ResourceBindingError::forbidden("session-revoked")
+        );
+        let inner = Arc::new(RecordingHandler::default());
+        let handler = BoundSubscriptionHandler::new(bindings, inner.clone());
+        assert_eq!(
+            handler.subscribe(
+                &wire_session,
+                &wire_connection,
+                &StreamSubscribe {
+                    by_participant: "listener".into(),
+                    subscriptions: Vec::new(),
+                },
+            ),
+            SubscriptionOutcome::reject(403, "session-revoked")
+        );
+        assert!(inner.subscriptions.lock().is_empty());
     }
 }

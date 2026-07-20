@@ -4,7 +4,7 @@
 
 use std::fmt::Write as _;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -222,9 +222,10 @@ fn log_malformed_rtp_packet(
     }
 }
 
-use super::allocator::{GlobalPortAllocator, PairingStrategy};
+use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
+use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
 use super::validation::PlatformSocketStrategy;
-use super::{RtpTransport, RtpTransportConfig};
+use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 use crate::error::Error;
 use crate::packet::rtcp::RtcpPacket;
 use crate::packet::RtpPacket;
@@ -245,6 +246,61 @@ use crate::Result;
 ///
 /// RTCP multiplexing is recommended for WebRTC and modern VoIP applications
 /// as it simplifies NAT traversal and reduces the number of ports required.
+#[derive(Default)]
+struct SymmetricRtpCounters {
+    destination_learned: AtomicBool,
+    accepted_rebindings: AtomicU64,
+    probation_packets: AtomicU64,
+    rejected_packets: AtomicU64,
+}
+
+impl SymmetricRtpCounters {
+    fn snapshot(&self) -> SymmetricRtpDiagnostics {
+        SymmetricRtpDiagnostics {
+            destination_learned: self.destination_learned.load(Ordering::Relaxed),
+            accepted_rebindings: self.accepted_rebindings.load(Ordering::Relaxed),
+            probation_packets: self.probation_packets.load(Ordering::Relaxed),
+            rejected_packets: self.rejected_packets.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Cancellation guard for the narrow interval between reserving allocator
+/// state and handing ownership to a live transport. Tokio cancellation drops
+/// the constructor future; spawning the idempotent release here prevents an
+/// abandoned reservation from shrinking the bounded RTP pool forever.
+struct PortAllocationCancellationGuard {
+    allocator: Arc<PortAllocator>,
+    session_id: Option<String>,
+}
+
+impl PortAllocationCancellationGuard {
+    fn new(allocator: Arc<PortAllocator>, session_id: String) -> Self {
+        Self {
+            allocator,
+            session_id: Some(session_id),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session_id = None;
+    }
+}
+
+impl Drop for PortAllocationCancellationGuard {
+    fn drop(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        let allocator = self.allocator.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = allocator.release_session(&session_id).await;
+            });
+        }
+    }
+}
+
 pub struct UdpRtpTransport {
     /// RTP socket
     rtp_socket: Arc<UdpSocket>,
@@ -254,6 +310,23 @@ pub struct UdpRtpTransport {
 
     /// Transport configuration
     config: RtpTransportConfig,
+
+    /// Bounded source-learning policy. Kept outside `RtpTransportConfig` so
+    /// existing public struct literals remain source-compatible.
+    symmetric_rtp_policy: SymmetricRtpPolicy,
+
+    /// Aggregate-only symmetric-RTP diagnostics.
+    symmetric_rtp_counters: Arc<SymmetricRtpCounters>,
+
+    /// Set before the receive task publishes an inbound-learned destination.
+    /// Outbound sends may seed the destination before that first packet, but
+    /// must never overwrite an established inbound latch.
+    symmetric_rtp_latched: Arc<AtomicBool>,
+
+    /// Incremented by explicit signaling-driven destination changes so the
+    /// receive task starts a fresh latch for a re-INVITE or ICE-less endpoint
+    /// update.
+    symmetric_rtp_generation: Arc<AtomicU64>,
 
     /// Remote RTP address. `ArcSwapOption` so per-packet `send_rtp_bytes`
     /// can update the cached symmetric-RTP target with a single atomic
@@ -269,12 +342,15 @@ pub struct UdpRtpTransport {
 
     /// Receiver task. Only touched on lifecycle (start/stop) so a
     /// `tokio::Mutex` is fine — never on the per-packet path.
-    receiver_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    receiver_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 
     /// Whether the transport is active. Polled once per recv-loop
     /// iteration, so an `AtomicBool` keeps that check off the
     /// scheduler.
     active: Arc<AtomicBool>,
+
+    /// Makes allocator release idempotent across explicit close and Drop.
+    allocator_release_started: AtomicBool,
 
     /// Outbound SRTP context (RFC 4568 / RFC 3711). When `Some`, every
     /// outbound RTP packet is wrapped with `SrtpContext::protect`
@@ -310,6 +386,28 @@ pub struct UdpRtpTransport {
 impl UdpRtpTransport {
     /// Create a new UDP transport for RTP
     pub async fn new(config: RtpTransportConfig) -> Result<Self> {
+        let policy = if config.symmetric_rtp {
+            SymmetricRtpPolicy::default()
+        } else {
+            SymmetricRtpPolicy::disabled()
+        };
+        Self::new_with_symmetric_rtp_policy(config, policy).await
+    }
+
+    /// Create a UDP transport with an explicit symmetric-RTP policy.
+    ///
+    /// This additive constructor leaves [`RtpTransportConfig`] unchanged for
+    /// callers that construct it with a public struct literal.
+    pub async fn new_with_symmetric_rtp_policy(
+        mut config: RtpTransportConfig,
+        mut policy: SymmetricRtpPolicy,
+    ) -> Result<Self> {
+        if !config.symmetric_rtp {
+            policy = SymmetricRtpPolicy::disabled();
+        }
+        policy
+            .validate()
+            .map_err(|detail| Error::Transport(detail.to_string()))?;
         let buffer_config = config.buffer_config;
 
         // Use platform-specific socket strategy
@@ -325,6 +423,9 @@ impl UdpRtpTransport {
                 let random_suffix: u32 = rand::thread_rng().gen();
                 format!("rtp-session-{}", random_suffix)
             });
+            // Persist generated ownership so `close()` releases the exact
+            // reservation made here.
+            config.session_id = Some(session_id.clone());
 
             // Get the global port allocator
             let allocator = GlobalPortAllocator::instance().await;
@@ -343,6 +444,8 @@ impl UdpRtpTransport {
             debug!("Allocating port(s) with strategy: {:?}", pairing_strategy);
             let (rtp_addr, rtcp_addr_opt) =
                 allocator.allocate_port_pair(&session_id, Some(ip)).await?;
+            let mut allocation_guard =
+                PortAllocationCancellationGuard::new(allocator.clone(), session_id);
 
             debug!("Allocated RTP port: {}", rtp_addr);
             if let Some(rtcp_addr) = rtcp_addr_opt {
@@ -357,6 +460,9 @@ impl UdpRtpTransport {
             } else {
                 None
             };
+
+            // The live transport now owns release through `config.session_id`.
+            allocation_guard.disarm();
 
             (socket_rtp, socket_rtcp, rtp_addr, rtcp_addr_opt)
         } else {
@@ -426,11 +532,16 @@ impl UdpRtpTransport {
             rtp_socket: Arc::new(socket_rtp),
             rtcp_socket: socket_rtcp.map(Arc::new),
             config,
+            symmetric_rtp_policy: policy,
+            symmetric_rtp_counters: Arc::new(SymmetricRtpCounters::default()),
+            symmetric_rtp_latched: Arc::new(AtomicBool::new(false)),
+            symmetric_rtp_generation: Arc::new(AtomicU64::new(0)),
             remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
-            receiver_task: Arc::new(Mutex::new(None)),
+            receiver_tasks: Arc::new(Mutex::new(Vec::with_capacity(2))),
             active: Arc::new(AtomicBool::new(false)),
+            allocator_release_started: AtomicBool::new(false),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
@@ -471,6 +582,13 @@ impl UdpRtpTransport {
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
         let dtmf_seen = self.dtmf_seen.clone();
+        let symmetric_rtp_policy = self.symmetric_rtp_policy;
+        let symmetric_rtp_counters = self.symmetric_rtp_counters.clone();
+        let symmetric_rtp_latched = self.symmetric_rtp_latched.clone();
+        let symmetric_rtp_generation = self.symmetric_rtp_generation.clone();
+        let remote_rtp_addr = self.remote_rtp_addr.clone();
+        let remote_rtcp_addr = self.remote_rtcp_addr.clone();
+        let rtcp_mux = self.config.rtcp_mux;
         let srtp_diagnostics = srtp_diagnostics_enabled();
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
@@ -483,6 +601,9 @@ impl UdpRtpTransport {
                 let mut srtp_unprotect_failures = 0_u64;
                 let mut non_rtp_drop_count = 0_u64;
                 let mut malformed_rtp_drop_count = 0_u64;
+                let mut symmetric_rtp = SymmetricRtpLearner::new(symmetric_rtp_policy);
+                let mut observed_symmetric_generation =
+                    symmetric_rtp_generation.load(Ordering::Acquire);
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
                 loop {
@@ -515,6 +636,24 @@ impl UdpRtpTransport {
 
                             // Check if it's RTCP according to RFC 5761
                             if packet_class == RtpMuxPacketClass::Rtcp {
+                                // Once an RTP tuple is latched, multiplexed
+                                // RTCP must arrive on that tuple too. A new
+                                // tuple earns trust through RTP probation,
+                                // never through a single unauthenticated RTCP
+                                // packet.
+                                if rtcp_mux
+                                    && symmetric_rtp_policy.enabled
+                                    && symmetric_rtp_latched.load(Ordering::Acquire)
+                                    && remote_rtp_addr
+                                        .load()
+                                        .as_deref()
+                                        .is_some_and(|expected| *expected != addr)
+                                {
+                                    symmetric_rtp_counters
+                                        .rejected_packets
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
                                 debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
                                 let rtcp_data = Bytes::copy_from_slice(&buffer[..size]);
                                 let event = RtpEvent::RtcpReceived {
@@ -579,6 +718,57 @@ impl UdpRtpTransport {
                                 drop(srtp_guard);
                                 match parse_result {
                                     Ok(packet) => {
+                                        let generation =
+                                            symmetric_rtp_generation.load(Ordering::Acquire);
+                                        if generation != observed_symmetric_generation {
+                                            symmetric_rtp.reset();
+                                            observed_symmetric_generation = generation;
+                                        }
+                                        match symmetric_rtp.observe(
+                                            addr,
+                                            packet.header.ssrc,
+                                            packet.header.sequence_number,
+                                            Instant::now(),
+                                        ) {
+                                            SymmetricRtpDecision::Accept => {}
+                                            SymmetricRtpDecision::LatchInitial => {
+                                                // Publish the guard first so an
+                                                // overlapping outbound send
+                                                // cannot restore its stale SDP
+                                                // destination after this store.
+                                                symmetric_rtp_latched
+                                                    .store(true, Ordering::Release);
+                                                remote_rtp_addr.store(Some(Arc::new(addr)));
+                                                if rtcp_mux {
+                                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
+                                                }
+                                                symmetric_rtp_counters
+                                                    .destination_learned
+                                                    .store(true, Ordering::Relaxed);
+                                            }
+                                            SymmetricRtpDecision::Rebind => {
+                                                remote_rtp_addr.store(Some(Arc::new(addr)));
+                                                if rtcp_mux {
+                                                    remote_rtcp_addr.store(Some(Arc::new(addr)));
+                                                }
+                                                symmetric_rtp_counters
+                                                    .accepted_rebindings
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            SymmetricRtpDecision::Probation => {
+                                                symmetric_rtp_counters
+                                                    .probation_packets
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                continue;
+                                            }
+                                            SymmetricRtpDecision::Reject => {
+                                                symmetric_rtp_counters
+                                                    .rejected_packets
+                                                    .fetch_add(1, Ordering::Relaxed);
+                                                continue;
+                                            }
+                                        }
+
                                         // Log packet reception at transport level (debug only)
                                         debug!(
                                         "Transport received packet with SSRC={:08x}, seq={}, ts={}",
@@ -710,8 +900,8 @@ impl UdpRtpTransport {
         );
 
         // Store task handle
-        let mut receiver_task = self.receiver_task.lock().await;
-        *receiver_task = Some(rtp_receiver);
+        let mut receiver_tasks = self.receiver_tasks.lock().await;
+        receiver_tasks.push(rtp_receiver);
 
         // If we have a separate RTCP socket, start that receiver too
         if let Some(rtcp_socket) = &self.rtcp_socket {
@@ -769,8 +959,7 @@ impl UdpRtpTransport {
                     }
                 });
 
-            // Store in the same place - we only care about tracking any active tasks
-            *receiver_task = Some(rtcp_receiver);
+            receiver_tasks.push(rtcp_receiver);
         }
 
         info!("Started UDP transport receiver tasks");
@@ -783,8 +972,8 @@ impl UdpRtpTransport {
         self.active.store(false, Ordering::Release);
 
         // Wait for receiver task to complete
-        let mut receiver_task = self.receiver_task.lock().await;
-        if let Some(task) = receiver_task.take() {
+        let mut receiver_tasks = self.receiver_tasks.lock().await;
+        for task in receiver_tasks.drain(..) {
             task.abort();
             let _ = task.await;
         }
@@ -794,7 +983,9 @@ impl UdpRtpTransport {
 
     /// Set the remote RTP address
     pub async fn set_remote_rtp_addr(&self, addr: SocketAddr) {
+        self.symmetric_rtp_latched.store(false, Ordering::Release);
         self.remote_rtp_addr.store(Some(Arc::new(addr)));
+        self.symmetric_rtp_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Set the remote RTCP address
@@ -810,6 +1001,12 @@ impl UdpRtpTransport {
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtcp_addr.load().as_deref().copied()
+    }
+
+    /// Aggregate-only symmetric-RTP diagnostics. Peer addresses and SSRCs are
+    /// intentionally omitted.
+    pub fn symmetric_rtp_diagnostics(&self) -> SymmetricRtpDiagnostics {
+        self.symmetric_rtp_counters.snapshot()
     }
 
     /// Subscribe to transport events
@@ -907,9 +1104,10 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        if self.config.symmetric_rtp {
-            // Update remote address if using symmetric RTP (lock-free
-            // atomic swap; no .await).
+        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+            // Seed the pre-latch target for callers that send before media is
+            // received. Once a validated inbound tuple is latched, outbound
+            // calls must not restore a stale SDP destination.
             self.remote_rtp_addr.store(Some(Arc::new(dest)));
         }
 
@@ -933,9 +1131,8 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        if self.config.symmetric_rtp {
-            // Update remote RTCP address if using symmetric RTP
-            // (lock-free atomic swap; no .await).
+        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+            // Same pre-latch seeding rule as RTP.
             self.remote_rtcp_addr.store(Some(Arc::new(dest)));
         }
 
@@ -981,7 +1178,12 @@ impl RtpTransport for UdpRtpTransport {
         self.stop_receiver().await?;
 
         // If we used the port allocator, release the ports
-        if self.config.use_port_allocator {
+        if self.config.use_port_allocator
+            && self
+                .allocator_release_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
             if let Some(session_id) = &self.config.session_id {
                 // Get the global allocator
                 let allocator = GlobalPortAllocator::instance().await;
@@ -997,6 +1199,34 @@ impl RtpTransport for UdpRtpTransport {
 
         // UDP sockets don't need explicit closing
         Ok(())
+    }
+}
+
+impl Drop for UdpRtpTransport {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+        if let Ok(mut tasks) = self.receiver_tasks.try_lock() {
+            for task in tasks.drain(..) {
+                task.abort();
+            }
+        }
+
+        if self.config.use_port_allocator
+            && self
+                .allocator_release_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            if let (Some(session_id), Ok(runtime)) = (
+                self.config.session_id.clone(),
+                tokio::runtime::Handle::try_current(),
+            ) {
+                runtime.spawn(async move {
+                    let allocator = GlobalPortAllocator::instance().await;
+                    let _ = allocator.release_session(&session_id).await;
+                });
+            }
+        }
     }
 }
 
@@ -1276,6 +1506,115 @@ mod tests {
         // Check if remote address was updated in transport1
         let remote_addr = transport1.remote_rtp_addr().await;
         assert_eq!(remote_addr, Some(addr2));
+    }
+
+    #[tokio::test]
+    async fn symmetric_rtp_latches_valid_source_and_bounds_rebinding() {
+        async fn send_packet(socket: &UdpSocket, destination: SocketAddr, seq: u16, ssrc: u32) {
+            let packet = RtpPacket::new(
+                RtpHeader::new(0, seq, u32::from(seq) * 160, ssrc),
+                Bytes::from_static(b"audio"),
+            )
+            .serialize()
+            .expect("serialize RTP");
+            socket
+                .send_to(&packet, destination)
+                .await
+                .expect("send RTP");
+        }
+
+        let config = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("symmetric-rebind".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+        let policy = SymmetricRtpPolicy {
+            probation_packets: 3,
+            max_rebindings: 1,
+            ..SymmetricRtpPolicy::default()
+        };
+        let transport = UdpRtpTransport::new_with_symmetric_rtp_policy(config, policy)
+            .await
+            .unwrap();
+        let destination = transport.local_rtp_addr().unwrap();
+        let original = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rebound = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rejected = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let original_addr = original.local_addr().unwrap();
+        let rebound_addr = rebound.local_addr().unwrap();
+        let mut events = transport.subscribe();
+
+        // SDP seeds an address, but the first parsed RTP packet is the
+        // authoritative symmetric tuple.
+        transport.set_remote_rtp_addr(original_addr).await;
+        send_packet(&original, destination, 100, 0x1020_3040).await;
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("initial RTP timeout")
+            .expect("initial RTP event");
+        assert_eq!(transport.remote_rtp_addr().await, Some(original_addr));
+
+        // Two packets cannot redirect the call; they remain in probation and
+        // are not delivered as media.
+        send_packet(&rebound, destination, 101, 0x1020_3040).await;
+        send_packet(&rebound, destination, 102, 0x1020_3040).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.remote_rtp_addr().await, Some(original_addr));
+
+        // The third consecutive, sequence-plausible packet completes the
+        // bounded same-IP rebind.
+        send_packet(&rebound, destination, 103, 0x1020_3040).await;
+        tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("rebound RTP timeout")
+            .expect("rebound RTP event");
+        assert_eq!(transport.remote_rtp_addr().await, Some(rebound_addr));
+
+        // max_rebindings=1: a later source cannot move the established tuple.
+        send_packet(&rejected, destination, 104, 0x1020_3040).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), events.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(transport.remote_rtp_addr().await, Some(rebound_addr));
+
+        let diagnostics = transport.symmetric_rtp_diagnostics();
+        assert!(diagnostics.destination_learned);
+        assert_eq!(diagnostics.accepted_rebindings, 1);
+        assert_eq!(diagnostics.probation_packets, 2);
+        assert_eq!(diagnostics.rejected_packets, 1);
+        let rendered = format!("{diagnostics:?}");
+        assert!(!rendered.contains("127.0.0.1"));
+        assert!(!rendered.contains("10203040"));
+    }
+
+    #[tokio::test]
+    async fn close_aborts_both_rtp_and_separate_rtcp_receivers() {
+        let config = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: Some("127.0.0.1:0".parse().unwrap()),
+            symmetric_rtp: true,
+            rtcp_mux: false,
+            session_id: Some("receiver-drain".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+        let transport = UdpRtpTransport::new(config).await.unwrap();
+        assert_eq!(transport.receiver_tasks.lock().await.len(), 2);
+
+        transport.close().await.unwrap();
+
+        assert!(transport.receiver_tasks.lock().await.is_empty());
+        assert!(!transport.active.load(Ordering::Acquire));
     }
 
     #[tokio::test]
@@ -1982,9 +2321,16 @@ mod tests {
         };
         let peer_a = UdpRtpTransport::new(mk_cfg("dtmf-peer-a")).await.unwrap();
         let peer_b = UdpRtpTransport::new(mk_cfg("dtmf-peer-b")).await.unwrap();
-        let receiver = UdpRtpTransport::new(mk_cfg("dtmf-multi-peer-rx"))
-            .await
-            .unwrap();
+        // This test intentionally admits two independent peers to one socket
+        // so it can isolate the peer component of the DTMF dedup key. A
+        // symmetric-RTP receiver is single-peer by design: after the first
+        // packet latches its source, another source must pass rebinding
+        // probation and an identical sequence number is rejected.
+        // Peer-admission behavior is covered by the dedicated symmetric-RTP
+        // tests.
+        let mut receiver_config = mk_cfg("dtmf-multi-peer-rx");
+        receiver_config.symmetric_rtp = false;
+        let receiver = UdpRtpTransport::new(receiver_config).await.unwrap();
 
         let mut events = receiver.subscribe();
         let receiver_addr = receiver.local_rtp_addr().unwrap();

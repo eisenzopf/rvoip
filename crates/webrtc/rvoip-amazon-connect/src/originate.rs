@@ -380,11 +380,7 @@ impl Drop for AmazonConnectOriginateContext {
 pub(crate) fn validate_start_contact_request(
     request: &StartContactRequest,
 ) -> Result<(), AmazonConnectOriginateContextError> {
-    validate_resource_id(
-        &request.instance_id,
-        AmazonConnectOriginateContextError::InvalidInstanceId,
-        AmazonConnectOriginateContextError::InstanceIdTooLarge,
-    )?;
+    validate_connect_instance_id(&request.instance_id)?;
     validate_resource_id(
         &request.contact_flow_id,
         AmazonConnectOriginateContextError::InvalidContactFlowId,
@@ -397,6 +393,18 @@ pub(crate) fn validate_start_contact_request(
         None => return Err(AmazonConnectOriginateContextError::InvalidClientToken),
     }
     validate_attributes(&request.attributes)
+}
+
+/// Validate a persisted instance identifier before issuing an exact
+/// StopContact outside the full originate context.
+pub(crate) fn validate_connect_instance_id(
+    value: &str,
+) -> Result<(), AmazonConnectOriginateContextError> {
+    validate_resource_id(
+        value,
+        AmazonConnectOriginateContextError::InvalidInstanceId,
+        AmazonConnectOriginateContextError::InstanceIdTooLarge,
+    )
 }
 
 fn validate_profile_id(value: &str) -> Result<(), AmazonConnectOriginateContextError> {

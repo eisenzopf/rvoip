@@ -1,8 +1,9 @@
 use rvoip_core_traits::error::RvoipError;
 
 use crate::{
-    LocError, MoqCatalogSubscriberConfigError, MoqCatalogSubscriberFailure, MoqCompatibilityError,
-    MoqGroupIdAllocationError, MoqNamespaceError, MoqSanitizedEventsConfigError, MsfCatalogError,
+    LocError, MoqAudioSubscriberConfigError, MoqCatalogSubscriberConfigError,
+    MoqCatalogSubscriberFailure, MoqCompatibilityError, MoqGroupIdAllocationError,
+    MoqNamespaceError, MoqSanitizedEventsConfigError, MsfCatalogError,
 };
 
 /// Bounded, non-sensitive relay failure categories.
@@ -64,6 +65,8 @@ pub enum MoqError {
     InvalidConfig(&'static str),
     #[error(transparent)]
     CatalogSubscriberConfig(#[from] MoqCatalogSubscriberConfigError),
+    #[error(transparent)]
+    AudioSubscriberConfig(#[from] MoqAudioSubscriberConfigError),
     #[error("MOQT catalog subscriber failed: {0}")]
     CatalogSubscriber(MoqCatalogSubscriberFailure),
     #[error("MOQT publisher construction requires an active Tokio runtime")]

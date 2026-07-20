@@ -466,6 +466,9 @@ pub enum SipAuthDecision {
 
 /// Listener-oriented authentication result retaining the complete canonical
 /// principal alongside the compatibility [`AuthIdentity`] view.
+// Boxing the principal would break the public decision shape used by listener
+// policies, so retain the source-compatible enum layout.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 pub enum SipPrincipalAuthDecision {
     /// The request authenticated successfully.
@@ -905,6 +908,7 @@ enum SipAuthEvaluation {
     RateLimited { retry_after: Option<Duration> },
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum SipPrincipalAuthEvaluation {
     Decision(SipPrincipalAuthDecision),
     RateLimited { retry_after: Option<Duration> },
@@ -1051,7 +1055,7 @@ impl SipAuthPolicy {
     fn scheme_allowed(&self, scheme: SipAuthScheme) -> bool {
         self.enabled_schemes
             .as_ref()
-            .is_none_or(|schemes| schemes.iter().any(|candidate| *candidate == scheme))
+            .is_none_or(|schemes| schemes.contains(&scheme))
     }
 
     fn digest_algorithm_allowed(&self, algorithm: DigestAlgorithm) -> bool {
@@ -1389,6 +1393,16 @@ impl SipClientAuth {
                     )
                 })?;
                 let challenge = rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge)?;
+                if credentials
+                    .realm
+                    .as_deref()
+                    .is_some_and(|expected| expected != challenge.realm)
+                {
+                    return Err(SessionError::AuthError(
+                        "Digest challenge realm does not match the configured credential realm"
+                            .to_string(),
+                    ));
+                }
                 let computed = rvoip_auth_core::DigestClient::compute_response_with_state(
                     &credentials.username,
                     &credentials.password,
@@ -1951,6 +1965,7 @@ impl SipAuthService {
 
     /// Validate an optional inbound auth header with non-secret context for
     /// audit and rate-limit providers.
+    #[allow(clippy::too_many_arguments)]
     pub async fn authenticate_authorization_with_context(
         &self,
         authorization: Option<&str>,
@@ -1975,6 +1990,7 @@ impl SipAuthService {
 
     /// Validate an optional inbound auth header with audit/rate-limit context
     /// and transport-truth security context.
+    #[allow(clippy::too_many_arguments)]
     pub async fn authenticate_authorization_with_context_and_transport(
         &self,
         authorization: Option<&str>,
@@ -2005,6 +2021,7 @@ impl SipAuthService {
     /// canonical principal. Digest identities are promoted into a canonical
     /// SIP-Digest principal; Bearer validators retain issuer, tenant, expiry,
     /// method, assurance, and scopes from `validate_principal`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn authenticate_principal_with_context_and_transport(
         &self,
         authorization: Option<&str>,
@@ -2029,6 +2046,7 @@ impl SipAuthService {
             .into_legacy_decision())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn evaluate_principal_with_context_and_transport(
         &self,
         authorization: Option<&str>,
@@ -2078,6 +2096,7 @@ impl SipAuthService {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn authenticate_authorization_with_context_and_transport_internal(
         &self,
         authorization: Option<&str>,
@@ -2132,13 +2151,9 @@ impl SipAuthService {
                     let trimmed = authorization.trim();
                     match attempt {
                         AuthAttemptScheme::Digest => {
-                            if !self.policy.scheme_allowed(SipAuthScheme::Digest) {
-                                Ok((
-                                    self.rejected_async(source).await?,
-                                    Some(AuthFailureReason::PolicyRejected),
-                                ))
-                            } else if self.policy.require_digest_replay_store
-                                && self.digest_replay_store.is_none()
+                            if !self.policy.scheme_allowed(SipAuthScheme::Digest)
+                                || (self.policy.require_digest_replay_store
+                                    && self.digest_replay_store.is_none())
                             {
                                 Ok((
                                     self.rejected_async(source).await?,
@@ -2174,12 +2189,9 @@ impl SipAuthService {
                             }
                         }
                         AuthAttemptScheme::Bearer => {
-                            if !self.policy.scheme_allowed(SipAuthScheme::Bearer) {
-                                Ok((
-                                    self.rejected_async(source).await?,
-                                    Some(AuthFailureReason::PolicyRejected),
-                                ))
-                            } else if !transport.is_secure() && !self.allow_bearer_over_cleartext {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Bearer)
+                                || (!transport.is_secure() && !self.allow_bearer_over_cleartext)
+                            {
                                 Ok((
                                     self.rejected_async(source).await?,
                                     Some(AuthFailureReason::PolicyRejected),
@@ -2195,12 +2207,9 @@ impl SipAuthService {
                             }
                         }
                         AuthAttemptScheme::Basic => {
-                            if !self.policy.scheme_allowed(SipAuthScheme::Basic) {
-                                Ok((
-                                    self.rejected_async(source).await?,
-                                    Some(AuthFailureReason::PolicyRejected),
-                                ))
-                            } else if !transport.is_secure() && !self.allow_basic_over_cleartext {
+                            if !self.policy.scheme_allowed(SipAuthScheme::Basic)
+                                || (!transport.is_secure() && !self.allow_basic_over_cleartext)
+                            {
                                 Ok((
                                     self.rejected_async(source).await?,
                                     Some(AuthFailureReason::PolicyRejected),
@@ -2322,6 +2331,7 @@ impl SipAuthService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn complete_rate_reservation_or_audit_unavailable(
         &self,
         reservation: Option<&AuthAttemptReservation>,
@@ -2980,6 +2990,9 @@ impl std::fmt::Debug for SipAuthService {
     }
 }
 
+type DigestNonceCountKey = (String, String, String);
+type DigestNonceCounts = Arc<RwLock<HashMap<DigestNonceCountKey, u32>>>;
+
 #[derive(Clone)]
 struct DigestProviderAuthStore {
     authenticator: DigestAuthenticator,
@@ -2987,7 +3000,7 @@ struct DigestProviderAuthStore {
     realm: String,
     provider: Arc<dyn DigestSecretProvider>,
     nonces: Arc<RwLock<HashMap<String, Instant>>>,
-    nonce_counts: Arc<RwLock<HashMap<(String, String, String), u32>>>,
+    nonce_counts: DigestNonceCounts,
     nonce_ttl: Duration,
     replay_store: Option<Arc<dyn DigestReplayStore>>,
 }
@@ -3567,7 +3580,7 @@ fn extract_digest_challenge(value: &str) -> Option<String> {
         let strength = digest_algorithm_strength(parsed.algorithm);
         if best
             .as_ref()
-            .map_or(true, |(best_strength, _)| strength > *best_strength)
+            .is_none_or(|(best_strength, _)| strength > *best_strength)
         {
             best = Some((strength, challenge));
         }
@@ -3747,7 +3760,7 @@ pub struct SipDigestAuthService {
     realm: String,
     users: Arc<RwLock<HashMap<String, DigestVerifierSet>>>,
     nonces: Arc<RwLock<HashMap<String, Instant>>>,
-    nonce_counts: Arc<RwLock<HashMap<(String, String, String), u32>>>,
+    nonce_counts: DigestNonceCounts,
     nonce_ttl: Duration,
 }
 

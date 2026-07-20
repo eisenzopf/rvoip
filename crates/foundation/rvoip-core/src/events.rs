@@ -1,4 +1,4 @@
-use crate::adapter::{EndReason, TransferTarget};
+use crate::adapter::{EndReason, TransferStatus, TransferTarget};
 use crate::identity::{AuthenticatedPrincipal, IdentityAssurance};
 use crate::ids::{
     AiAttachmentId, BridgeId, ConnectionId, ConversationId, IdentityId, ListenerId, MessageId,
@@ -120,9 +120,18 @@ pub enum Event {
     },
 
     // --- Transfer ---
+    /// Legacy compatibility event indicating that an adapter accepted the
+    /// transfer command for submission. It is not a final transfer outcome;
+    /// use [`Self::ConnectionTransferStatus`] for authoritative completion.
     ConnectionTransferred {
         connection_id: ConnectionId,
         target: TransferTarget,
+        at: DateTime<Utc>,
+    },
+    /// Protocol-authoritative asynchronous transfer progress or completion.
+    ConnectionTransferStatus {
+        connection_id: ConnectionId,
+        status: TransferStatus,
         at: DateTime<Utc>,
     },
 
@@ -357,6 +366,10 @@ impl fmt::Debug for Event {
             Self::ConnectionsBridged { .. } => formatter.write_str("ConnectionsBridged"),
             Self::ConnectionsUnbridged { .. } => formatter.write_str("ConnectionsUnbridged"),
             Self::ConnectionTransferred { .. } => formatter.write_str("ConnectionTransferred"),
+            Self::ConnectionTransferStatus { status, .. } => formatter
+                .debug_struct("ConnectionTransferStatus")
+                .field("status", status)
+                .finish(),
             Self::ParticipantJoined { .. } => formatter.write_str("ParticipantJoined"),
             Self::ParticipantLeft { .. } => formatter.write_str("ParticipantLeft"),
             Self::AiAttached { provider_ref, .. } => formatter
@@ -509,6 +522,7 @@ impl fmt::Debug for SessionQualityReport {
 pub enum ConnectionProgressKind {
     Trying,
     Ringing,
+    EarlyMedia,
     Busy,
     NoAnswer,
     AnsweringMachine,
@@ -641,6 +655,14 @@ impl Event {
             } => RvoipCoreCrossCrateEvent::ConnectionTransferred {
                 connection_id: connection_id.to_string(),
                 target: format!("{:?}", target),
+            },
+            ConnectionTransferStatus {
+                connection_id,
+                status,
+                ..
+            } => RvoipCoreCrossCrateEvent::ConnectionProgress {
+                connection_id: connection_id.to_string(),
+                kind: format!("transfer:{status:?}"),
             },
             ParticipantJoined {
                 session_id,

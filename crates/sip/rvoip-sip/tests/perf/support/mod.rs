@@ -39,5 +39,7 @@ pub use call_setup_diag::CallSetupDiagnostics;
 pub use histogram::LatencyHistogram;
 pub use load::LoadProfile;
 pub use report::ScenarioReport;
-pub use sampler::{ResourceSample, ResourceSampler, ResourceSummary};
+pub use sampler::{
+    ResourceSample, ResourceSampler, ResourceSummary, ResourceWindowSpec, ResourceWindowSummary,
+};
 pub use sweep::{parse_sweep_env, SweepRunner};

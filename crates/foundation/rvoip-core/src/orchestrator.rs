@@ -13,9 +13,11 @@
 use crate::adapter::{
     AdapterEvent, AdapterLifecycleSink, ConnectionAdapter, ConnectionHandle, EndReason,
     InboundConnectionContext, OrchestratorAdapterEvent, OriginateRequest, PlaybackHandle,
-    RejectReason, TransferTarget,
+    RejectReason, TransferAttemptId, TransferTarget,
 };
-use crate::bridge::{codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle};
+use crate::bridge::{
+    codec_to_pt, frame_pump, BridgeManager, CrossBridgeHandle, DirectionalMediaBridgePlan,
+};
 use crate::capability::{CapabilityDescriptor, CapabilityIntersection};
 use crate::commands::{AudioSource, InboundAction, MuteDirection};
 use crate::config::Config;
@@ -30,6 +32,7 @@ use crate::ids::{
 };
 use crate::inbound_admission::{
     InboundAdmission, InboundAdmissionDecision, InboundAdmissionDisposition, InboundAdmissionGate,
+    ProvisionalMediaRoute, StagedInboundDataPolicy,
 };
 use crate::media_graph::{
     start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
@@ -44,7 +47,10 @@ use crate::operational_events::{
 };
 use crate::participant::{Participant, ParticipantKind, ParticipantRole};
 use crate::session::{ConnectionRef, Session, SessionMedium, SessionState};
-use crate::stream::StreamKind;
+use crate::stream::{
+    BridgedDataMessageDecision, DataMessageBridgePolicy, MediaReceiverReservation,
+    PassThroughDataMessageBridgePolicy, StreamKind,
+};
 use crate::vcon::VconBuilderHandle;
 use crate::DataMessage;
 use bytes::Bytes;
@@ -56,6 +62,7 @@ use rvoip_media_core::codec::transcoding::Transcoder;
 use rvoip_media_core::processing::format::FormatConverter;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -72,6 +79,7 @@ use tracing::{debug, instrument, warn};
 const CROSS_CRATE_EVENT_QUEUE_CAPACITY: usize = 256;
 const INBOUND_ADMISSION_ADAPTER_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(1);
+const STAGED_INBOUND_DATA_SEND_TIMEOUT: Duration = Duration::from_secs(2);
 const PREPARED_OUTBOUND_PENDING: u8 = 0;
 const PREPARED_OUTBOUND_COMMITTING: u8 = 1;
 const PREPARED_OUTBOUND_ABORTING: u8 = 2;
@@ -80,6 +88,10 @@ const PREPARED_OUTBOUND_ABORTED: u8 = 4;
 /// Bounds active lifecycle identities plus process-lifetime retired IDs.
 /// Roughly tens of MiB at typical DashMap/UUID overhead per worker.
 const DEFAULT_CONNECTION_ID_BUDGET: usize = 262_144;
+/// Per-direction application-data queue for a two-connection bridge. The two
+/// directions have independent workers so a slow peer cannot stall its
+/// opposite direction.
+pub const DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY: usize = 32;
 
 #[async_trait::async_trait]
 trait CrossCrateEventSink: Send + Sync {
@@ -176,12 +188,38 @@ struct ConnectionEntry {
     inbound_context: Option<InboundConnectionContext>,
     inbound_context_retired: bool,
     inbound_publication: InboundPublicationState,
+    /// Exact-generation, reserved-label control path available only while an
+    /// inbound admission remains pending. Removed before final publication or
+    /// rejection and never consulted by ordinary application data routing.
+    staged_inbound_data: Option<Arc<StagedInboundDataEntry>>,
     /// Sticky visibility bit retained across `Published -> Rejecting` so a
     /// concurrent direct terminal fallback still closes a lifecycle that was
     /// already exposed to consumers.
     normalized_lifecycle_was_visible: bool,
     deferred_authentication: Option<DeferredAuthentication>,
     deferred_principal_authentication: Option<DeferredPrincipalAuthentication>,
+}
+
+struct StagedInboundDataEntry {
+    lifecycle_generation: u64,
+    policy: StagedInboundDataPolicy,
+    incoming: mpsc::Sender<DataMessage>,
+    active: AtomicBool,
+    /// Linearizes an in-flight adapter send against admission resolution.
+    gate: TokioRwLock<()>,
+}
+
+impl std::fmt::Debug for StagedInboundDataEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedInboundDataEntry")
+            .field("lifecycle_generation", &self.lifecycle_generation)
+            .field("send_label_count", &self.policy.send_labels.len())
+            .field("receive_label_count", &self.policy.receive_labels.len())
+            .field("capacity", &self.policy.capacity)
+            .field("active", &self.active.load(Ordering::Acquire))
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -847,6 +885,189 @@ impl Drop for BridgeReservation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BridgedDataTerminalReason {
+    PolicyPanicked,
+}
+
+struct BridgedDataEnvelope {
+    source: ConnectionId,
+    target: ConnectionId,
+    message: DataMessage,
+}
+
+/// Bridge-owned bounded application-data routes. Media remains owned by the
+/// two reusable MediaGraphs; this route never asks either MediaStream for an
+/// inbound receiver.
+struct CrossBridgeDataRoute {
+    a: ConnectionId,
+    b: ConnectionId,
+    a_to_b: mpsc::Sender<BridgedDataEnvelope>,
+    b_to_a: mpsc::Sender<BridgedDataEnvelope>,
+    workers: Vec<tokio::task::JoinHandle<()>>,
+    terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
+}
+
+impl CrossBridgeDataRoute {
+    fn new(
+        a: ConnectionId,
+        b: ConnectionId,
+        a_adapter: Arc<dyn ConnectionAdapter>,
+        b_adapter: Arc<dyn ConnectionAdapter>,
+        policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Self {
+        let (a_to_b, a_to_b_rx) = mpsc::channel(DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY);
+        let (b_to_a, b_to_a_rx) = mpsc::channel(DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY);
+        let (terminal_tx, terminal) = tokio::sync::watch::channel(None);
+        let a_to_b_worker = tokio::spawn(run_bridged_data_worker(
+            a_to_b_rx,
+            b_adapter,
+            Arc::clone(&policy),
+            terminal_tx.clone(),
+        ));
+        let b_to_a_worker = tokio::spawn(run_bridged_data_worker(
+            b_to_a_rx,
+            a_adapter,
+            policy,
+            terminal_tx,
+        ));
+        Self {
+            a,
+            b,
+            a_to_b,
+            b_to_a,
+            workers: vec![a_to_b_worker, b_to_a_worker],
+            terminal,
+        }
+    }
+
+    fn terminal_status(&self) -> tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>> {
+        self.terminal.clone()
+    }
+
+    fn try_forward(&self, source: &ConnectionId, message: DataMessage) {
+        let (target, sender) = if source == &self.a {
+            (self.b.clone(), &self.a_to_b)
+        } else if source == &self.b {
+            (self.a.clone(), &self.b_to_a)
+        } else {
+            metrics::counter!(
+                "rvoip_core_bridged_data_messages_dropped_total",
+                "reason" => "source_mismatch"
+            )
+            .increment(1);
+            return;
+        };
+        let envelope = BridgedDataEnvelope {
+            source: source.clone(),
+            target,
+            message,
+        };
+        match sender.try_send(envelope) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!(
+                    "rvoip_core_bridged_data_messages_dropped_total",
+                    "reason" => "queue_full"
+                )
+                .increment(1);
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "rvoip_core_bridged_data_messages_dropped_total",
+                    "reason" => "queue_closed"
+                )
+                .increment(1);
+            }
+        }
+    }
+
+    async fn stop(&mut self) {
+        for worker in &self.workers {
+            worker.abort();
+        }
+        for worker in self.workers.drain(..) {
+            let _ = worker.await;
+        }
+    }
+}
+
+impl Drop for CrossBridgeDataRoute {
+    fn drop(&mut self) {
+        for worker in &self.workers {
+            worker.abort();
+        }
+    }
+}
+
+async fn run_bridged_data_worker(
+    mut receiver: mpsc::Receiver<BridgedDataEnvelope>,
+    target_adapter: Arc<dyn ConnectionAdapter>,
+    policy: Arc<dyn DataMessageBridgePolicy>,
+    terminal: tokio::sync::watch::Sender<Option<BridgedDataTerminalReason>>,
+) {
+    while let Some(envelope) = receiver.recv().await {
+        let decision = catch_unwind(AssertUnwindSafe(|| {
+            policy.decide(&envelope.source, &envelope.target, envelope.message)
+        }));
+        let message = match decision {
+            Ok(BridgedDataMessageDecision::Forward(message)) => message,
+            Ok(BridgedDataMessageDecision::Drop) => {
+                metrics::counter!(
+                    "rvoip_core_bridged_data_messages_dropped_total",
+                    "reason" => "policy"
+                )
+                .increment(1);
+                continue;
+            }
+            Err(_) => {
+                metrics::counter!(
+                    "rvoip_core_bridged_data_messages_dropped_total",
+                    "reason" => "policy_panic"
+                )
+                .increment(1);
+                let _ = terminal.send(Some(BridgedDataTerminalReason::PolicyPanicked));
+                break;
+            }
+        };
+        if message.validate().is_err() {
+            metrics::counter!(
+                "rvoip_core_bridged_data_messages_dropped_total",
+                "reason" => "invalid_transform"
+            )
+            .increment(1);
+            continue;
+        }
+        if target_adapter
+            .send_data_message(envelope.target, message)
+            .await
+            .is_err()
+        {
+            metrics::counter!(
+                "rvoip_core_bridged_data_messages_dropped_total",
+                "reason" => "target_error"
+            )
+            .increment(1);
+        } else {
+            metrics::counter!("rvoip_core_bridged_data_messages_forwarded_total").increment(1);
+        }
+    }
+}
+
+struct DirectionalGraphSource {
+    is_a: bool,
+    connection_id: ConnectionId,
+    stream: Arc<dyn crate::stream::MediaStream>,
+    codec: crate::capability::CodecInfo,
+}
+
+struct ReservedDirectionalGraphSource {
+    source: DirectionalGraphSource,
+    transport: Transport,
+    lifecycle: ConnectionLifecycleTicket,
+    receiver: MediaReceiverReservation,
+}
+
 pub struct Orchestrator {
     pub config: Config,
     pub bridges: BridgeManager,
@@ -854,6 +1075,8 @@ pub struct Orchestrator {
     /// SIP-fast-path `BridgeHandle`s from media-core). Dropping a handle
     /// from this map aborts its two pump tasks.
     cross_bridges: Arc<DashMap<BridgeId, CrossBridgeHandle>>,
+    /// Bounded data-message routes paired one-to-one with cross bridges.
+    cross_bridge_data_routes: Arc<DashMap<BridgeId, CrossBridgeDataRoute>>,
     /// Atomic connection ownership for both pending and active cross bridges.
     cross_bridge_owners: Arc<DashMap<ConnectionId, BridgeId>>,
     bridge_ownership_lock: Arc<Mutex<()>>,
@@ -1217,15 +1440,59 @@ pub(crate) struct AiAttachmentHandle {
     pub _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
+struct TtsPlaybackCancelGuard {
+    playback: Arc<dyn crate::harness::TtsPlayback>,
+    completed: bool,
+}
+
+impl TtsPlaybackCancelGuard {
+    fn new(playback: Box<dyn crate::harness::TtsPlayback>) -> Self {
+        Self {
+            playback: Arc::from(playback),
+            completed: false,
+        }
+    }
+
+    fn playback(&self) -> &dyn crate::harness::TtsPlayback {
+        self.playback.as_ref()
+    }
+
+    fn complete(&mut self) {
+        self.completed = true;
+    }
+
+    async fn cancel(&mut self) {
+        if self.playback.cancel().await.is_ok() {
+            self.completed = true;
+        }
+    }
+}
+
+impl Drop for TtsPlaybackCancelGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let playback = Arc::clone(&self.playback);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = playback.cancel().await;
+            });
+        }
+    }
+}
+
 impl Orchestrator {
     pub fn new(config: Config) -> Arc<Self> {
         let setup_capacity = config.max_concurrent_setups;
+        let max_direct_subscribers = config.max_direct_subscribers;
         let admission = Arc::new(Semaphore::new(setup_capacity));
         let (events, _rx) = broadcast::channel(1024);
         let orchestrator = Arc::new(Self {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            cross_bridge_data_routes: Arc::new(DashMap::new()),
             cross_bridge_owners: Arc::new(DashMap::new()),
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
@@ -1251,7 +1518,11 @@ impl Orchestrator {
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
             events,
             cross_crate_publisher: None,
-            subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
+            subscriptions: Arc::new(
+                crate::subscriptions::SubscriptionRegistry::with_direct_listener_limit(
+                    max_direct_subscribers,
+                ),
+            ),
             publisher_registry: std::sync::OnceLock::new(),
             subscriber_streams: Arc::new(DashMap::new()),
             conversations: Arc::new(DashMap::new()),
@@ -1285,12 +1556,14 @@ impl Orchestrator {
         coordinator: Arc<GlobalEventCoordinator>,
     ) -> Arc<Self> {
         let setup_capacity = config.max_concurrent_setups;
+        let max_direct_subscribers = config.max_direct_subscribers;
         let admission = Arc::new(Semaphore::new(setup_capacity));
         let (events, _rx) = broadcast::channel(1024);
         let orchestrator = Arc::new(Self {
             config,
             bridges: BridgeManager::new(),
             cross_bridges: Arc::new(DashMap::new()),
+            cross_bridge_data_routes: Arc::new(DashMap::new()),
             cross_bridge_owners: Arc::new(DashMap::new()),
             bridge_ownership_lock: Arc::new(Mutex::new(())),
             media_graphs: Arc::new(DashMap::new()),
@@ -1316,7 +1589,11 @@ impl Orchestrator {
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
             events,
             cross_crate_publisher: Some(Arc::new(CrossCrateEventPublisher::new(coordinator))),
-            subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
+            subscriptions: Arc::new(
+                crate::subscriptions::SubscriptionRegistry::with_direct_listener_limit(
+                    max_direct_subscribers,
+                ),
+            ),
             publisher_registry: std::sync::OnceLock::new(),
             subscriber_streams: Arc::new(DashMap::new()),
             conversations: Arc::new(DashMap::new()),
@@ -2253,6 +2530,507 @@ impl Orchestrator {
         Ok(context)
     }
 
+    fn pending_inbound_lifecycle(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+    ) -> Result<ConnectionLifecycleTicket> {
+        let mut tickets =
+            self.capture_connection_lifecycles(std::slice::from_ref(connection_id))?;
+        let ticket = tickets
+            .pop()
+            .expect("one pending inbound lifecycle was captured");
+        if ticket.generation != lifecycle_generation {
+            return Err(RvoipError::ConnectionNotFound(connection_id.clone()));
+        }
+        let entry = self
+            .connections
+            .get(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        if entry.transport != transport
+            || entry.direction != Direction::Inbound
+            || entry.inbound_publication != InboundPublicationState::Pending(lifecycle_generation)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "inbound admission is no longer pending",
+            ));
+        }
+        Ok(ticket)
+    }
+
+    pub(crate) fn install_staged_inbound_data(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        policy: StagedInboundDataPolicy,
+    ) -> Result<mpsc::Receiver<DataMessage>> {
+        policy.validate()?;
+        let (incoming, receiver) = mpsc::channel(policy.capacity);
+        let staged = Arc::new(StagedInboundDataEntry {
+            lifecycle_generation,
+            policy,
+            incoming,
+            active: AtomicBool::new(true),
+            gate: TokioRwLock::new(()),
+        });
+
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = self
+            .connection_lifecycles
+            .get(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        let lifecycle = lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.active || lifecycle.retired || lifecycle.generation != lifecycle_generation {
+            return Err(RvoipError::ConnectionNotFound(connection_id.clone()));
+        }
+        let mut entry = self
+            .connections
+            .get_mut(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        if entry.transport != transport
+            || entry.direction != Direction::Inbound
+            || entry.inbound_publication != InboundPublicationState::Pending(lifecycle_generation)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "inbound admission is no longer pending",
+            ));
+        }
+        if entry.staged_inbound_data.is_some() {
+            return Err(RvoipError::InvalidState(
+                "inbound admission already has staged data",
+            ));
+        }
+        entry.staged_inbound_data = Some(staged);
+        Ok(receiver)
+    }
+
+    fn current_staged_inbound_data(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+    ) -> Result<Arc<StagedInboundDataEntry>> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lifecycle = self
+            .connection_lifecycles
+            .get(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        let lifecycle = lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !lifecycle.active || lifecycle.retired || lifecycle.generation != lifecycle_generation {
+            return Err(RvoipError::ConnectionNotFound(connection_id.clone()));
+        }
+        let entry = self
+            .connections
+            .get(connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))?;
+        if entry.transport != transport
+            || entry.direction != Direction::Inbound
+            || entry.inbound_publication != InboundPublicationState::Pending(lifecycle_generation)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "staged inbound data is no longer active",
+            ));
+        }
+        let staged = entry
+            .staged_inbound_data
+            .as_ref()
+            .filter(|staged| staged.lifecycle_generation == lifecycle_generation)
+            .cloned()
+            .ok_or(RvoipError::AdmissionRejected(
+                "staged inbound data is not configured",
+            ))?;
+        Ok(staged)
+    }
+
+    fn staged_inbound_data_is_current(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        expected: &Arc<StagedInboundDataEntry>,
+    ) -> bool {
+        self.current_staged_inbound_data(connection_id, transport, lifecycle_generation)
+            .is_ok_and(|current| Arc::ptr_eq(&current, expected))
+    }
+
+    async fn reject_staged_inbound_data_violation(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        result: &'static str,
+    ) {
+        let Ok(expected) =
+            self.pending_inbound_lifecycle(connection_id, transport, lifecycle_generation)
+        else {
+            return;
+        };
+        let Some(claimed) =
+            self.claim_pending_inbound_rejection(connection_id, transport, Some(&expected))
+        else {
+            return;
+        };
+        let Some(orchestrator) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        orchestrator
+            .reject_claimed_unadmitted_connection(claimed, RejectReason::ServerError, result)
+            .await;
+    }
+
+    pub(crate) async fn send_staged_inbound_data(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+        message: DataMessage,
+    ) -> Result<()> {
+        let staged =
+            self.current_staged_inbound_data(connection_id, transport, lifecycle_generation)?;
+        if message.validate().is_err() || !staged.policy.send_labels.contains(&message.label) {
+            self.reject_staged_inbound_data_violation(
+                connection_id,
+                transport,
+                lifecycle_generation,
+                "staged_data_send_policy",
+            )
+            .await;
+            return Err(RvoipError::AdmissionRejected(
+                "staged inbound data send was rejected",
+            ));
+        }
+
+        let _gate = staged.gate.read().await;
+        if !staged.active.load(Ordering::Acquire)
+            || !self.staged_inbound_data_is_current(
+                connection_id,
+                transport,
+                lifecycle_generation,
+                &staged,
+            )
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "staged inbound data is no longer active",
+            ));
+        }
+        let adapter = self.adapter(transport)?;
+        if !adapter.is_connection_live(connection_id) {
+            return Err(RvoipError::ConnectionNotFound(connection_id.clone()));
+        }
+        let sent = tokio::time::timeout(
+            STAGED_INBOUND_DATA_SEND_TIMEOUT,
+            adapter.send_data_message(connection_id.clone(), message),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok());
+        drop(_gate);
+        if sent {
+            metrics::counter!(
+                "rvoip_core_staged_inbound_data_total",
+                "direction" => "send",
+                "result" => "delivered",
+                "transport" => format!("{transport:?}")
+            )
+            .increment(1);
+            return Ok(());
+        }
+
+        self.reject_staged_inbound_data_violation(
+            connection_id,
+            transport,
+            lifecycle_generation,
+            "staged_data_send_failed",
+        )
+        .await;
+        Err(RvoipError::AdmissionRejected(
+            "staged inbound data send failed",
+        ))
+    }
+
+    fn try_deliver_staged_inbound_data(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        message: &DataMessage,
+    ) -> bool {
+        if message.validate().is_err() {
+            return false;
+        }
+        let lifecycle_generation = match self.connections.get(connection_id) {
+            Some(entry) if entry.transport == transport => match entry.inbound_publication {
+                InboundPublicationState::Pending(generation) => generation,
+                _ => return false,
+            },
+            _ => return false,
+        };
+        let Ok(staged) =
+            self.current_staged_inbound_data(connection_id, transport, lifecycle_generation)
+        else {
+            return false;
+        };
+        if !staged.policy.receive_labels.contains(&message.label) {
+            return false;
+        }
+        let Ok(_gate) = staged.gate.try_read() else {
+            return false;
+        };
+        if !staged.active.load(Ordering::Acquire)
+            || !self.staged_inbound_data_is_current(
+                connection_id,
+                transport,
+                lifecycle_generation,
+                &staged,
+            )
+        {
+            return false;
+        }
+        match staged.incoming.try_send(message.clone()) {
+            Ok(()) => {
+                metrics::counter!(
+                    "rvoip_core_staged_inbound_data_total",
+                    "direction" => "receive",
+                    "result" => "delivered",
+                    "transport" => format!("{transport:?}")
+                )
+                .increment(1);
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!(
+                    "rvoip_core_staged_inbound_data_total",
+                    "direction" => "receive",
+                    "result" => "queue_full",
+                    "transport" => format!("{transport:?}")
+                )
+                .increment(1);
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!(
+                    "rvoip_core_staged_inbound_data_total",
+                    "direction" => "receive",
+                    "result" => "receiver_closed",
+                    "transport" => format!("{transport:?}")
+                )
+                .increment(1);
+                false
+            }
+        }
+    }
+
+    async fn revoke_staged_inbound_data(
+        &self,
+        connection_id: &ConnectionId,
+        transport: Transport,
+        lifecycle_generation: u64,
+    ) {
+        let staged = {
+            let _registry = self
+                .connection_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(mut entry) = self.connections.get_mut(connection_id) else {
+                return;
+            };
+            if entry.transport != transport
+                || entry.direction != Direction::Inbound
+                || !matches!(
+                    entry.inbound_publication,
+                    InboundPublicationState::Pending(generation)
+                        | InboundPublicationState::Rejecting(generation)
+                        if generation == lifecycle_generation
+                )
+            {
+                return;
+            }
+            let Some(staged) = entry.staged_inbound_data.take() else {
+                return;
+            };
+            if staged.lifecycle_generation != lifecycle_generation {
+                entry.staged_inbound_data = Some(staged);
+                return;
+            }
+            staged
+        };
+        staged.active.store(false, Ordering::Release);
+        let _gate = staged.gate.write().await;
+    }
+
+    fn validate_provisional_media_lifecycles(
+        &self,
+        tickets: &[ConnectionLifecycleTicket],
+        target_connection_id: &ConnectionId,
+        target_transport: Transport,
+        target_generation: u64,
+    ) -> Result<()> {
+        let _registry = self
+            .connection_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guards = self.lock_connection_lifecycles(tickets)?;
+        let target = self
+            .connections
+            .get(target_connection_id)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(target_connection_id.clone()))?;
+        if target.transport != target_transport
+            || target.direction != Direction::Inbound
+            || target.inbound_publication != InboundPublicationState::Pending(target_generation)
+        {
+            return Err(RvoipError::AdmissionRejected(
+                "inbound admission changed during provisional media setup",
+            ));
+        }
+        drop(target);
+        drop(guards);
+        Ok(())
+    }
+
+    /// Build a one-way source-to-pending-inbound graph route for an exact
+    /// admission lifecycle. Called only through
+    /// [`InboundAdmission::bridge_early_media_from`], which owns the
+    /// generation token and enforces one route per admission.
+    pub(crate) async fn bridge_early_media_to_pending_inbound(
+        &self,
+        source_connection_id: ConnectionId,
+        target_connection_id: ConnectionId,
+        target_transport: Transport,
+        target_generation: u64,
+    ) -> Result<ProvisionalMediaRoute> {
+        if source_connection_id == target_connection_id {
+            return Err(RvoipError::AdmissionRejected(
+                "provisional media source and target must differ",
+            ));
+        }
+        self.ensure_operational_event_stream_healthy()?;
+        let source_adapter = self.adapter_for(&source_connection_id)?;
+        let target_lifecycle = self.pending_inbound_lifecycle(
+            &target_connection_id,
+            target_transport,
+            target_generation,
+        )?;
+        let target_adapter = self.adapter(target_transport)?;
+        if !source_adapter.is_connection_live(&source_connection_id)
+            || !target_adapter.is_connection_live(&target_connection_id)
+        {
+            return Err(RvoipError::ConnectionNotFound(
+                if !source_adapter.is_connection_live(&source_connection_id) {
+                    source_connection_id
+                } else {
+                    target_connection_id
+                },
+            ));
+        }
+        let mut lifecycles = self.capture_connection_lifecycles(&[
+            source_connection_id.clone(),
+            target_connection_id.clone(),
+        ])?;
+        if lifecycles
+            .iter()
+            .find(|ticket| ticket.connection_id == target_connection_id)
+            .is_none_or(|ticket| {
+                ticket.generation != target_lifecycle.generation
+                    || !Arc::ptr_eq(&ticket.state, &target_lifecycle.state)
+            })
+        {
+            return Err(RvoipError::ConnectionNotFound(target_connection_id));
+        }
+
+        target_adapter
+            .start_inbound_early_media(target_connection_id.clone())
+            .await?;
+        self.validate_provisional_media_lifecycles(
+            &lifecycles,
+            &target_connection_id,
+            target_transport,
+            target_generation,
+        )?;
+
+        // Provisional SDP and media-driver binding can complete on separate
+        // adapter tasks. Wait for the source codec/producer and target writer
+        // before reading descriptors or consuming the source receiver.
+        let deadline = std::time::Instant::now() + self.config.bridge_stream_deadline;
+        let (target_codec, target_out) = loop {
+            self.validate_provisional_media_lifecycles(
+                &lifecycles,
+                &target_connection_id,
+                target_transport,
+                target_generation,
+            )?;
+            let source_audio = source_adapter
+                .streams(source_connection_id.clone())
+                .await?
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            let target_audio = target_adapter
+                .streams(target_connection_id.clone())
+                .await?
+                .into_iter()
+                .find(|stream| stream.kind() == StreamKind::Audio);
+            if let (Some(source_audio), Some(target_audio)) = (source_audio, target_audio) {
+                // Early media is deliberately source-to-target only. Do not use
+                // the source's outbound writer as a readiness probe: staged SIP
+                // keeps that direction disabled until final answer. The
+                // non-destructive source probe instead guarantees that codec()
+                // is final before the graph permanently acquires frames_in.
+                if source_audio.source_ready() {
+                    if let Ok(target_out) = target_audio.try_frames_out() {
+                        let source_codec = source_audio.codec();
+                        let target_codec = target_audio.codec();
+                        validate_media_graph_codec(&source_codec)?;
+                        validate_media_graph_codec(&target_codec)?;
+                        break (target_codec, target_out);
+                    }
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(RvoipError::AdmissionRejected(
+                    "provisional media streams did not become ready before deadline",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        let graph = self
+            .media_graph_for_connection(source_connection_id.clone())
+            .await?;
+        let route = graph.add_managed_sink(target_codec, target_out)?;
+        if route.wait_active().await.is_err() {
+            let _ = route.remove().await;
+            return Err(RvoipError::InvalidState(
+                "provisional media route terminated during setup",
+            ));
+        }
+        if let Err(error) = self.validate_provisional_media_lifecycles(
+            &lifecycles,
+            &target_connection_id,
+            target_transport,
+            target_generation,
+        ) {
+            let _ = route.remove().await;
+            return Err(error);
+        }
+        // Avoid retaining the vector's capacity (and make it explicit that no
+        // lifecycle guard escapes in the returned owned media lease).
+        lifecycles.clear();
+        Ok(ProvisionalMediaRoute::new(
+            source_connection_id,
+            target_connection_id,
+            route,
+        ))
+    }
+
     fn track_connection(
         &self,
         conn: &ConnectionId,
@@ -2291,6 +3069,7 @@ impl Orchestrator {
                     inbound_context,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    staged_inbound_data: None,
                     normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
                     deferred_principal_authentication: None,
@@ -2462,6 +3241,7 @@ impl Orchestrator {
                     inbound_context: None,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    staged_inbound_data: None,
                     normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
                     deferred_principal_authentication: None,
@@ -2704,6 +3484,7 @@ impl Orchestrator {
                 inbound_context: None,
                 inbound_context_retired: true,
                 inbound_publication: InboundPublicationState::NotInbound,
+                staged_inbound_data: None,
                 normalized_lifecycle_was_visible: false,
                 deferred_authentication: None,
                 deferred_principal_authentication: None,
@@ -3168,6 +3949,23 @@ impl Orchestrator {
         })
     }
 
+    /// Offers one validated inbound application data message to the exact
+    /// bridge route that owns its source connection. This path performs no
+    /// await and never invokes an application policy on adapter-event ingest.
+    fn forward_bridged_data_message(&self, source: &ConnectionId, message: DataMessage) {
+        let Some(bridge_id) = self
+            .cross_bridge_owners
+            .get(source)
+            .map(|owner| owner.value().clone())
+        else {
+            return;
+        };
+        let Some(route) = self.cross_bridge_data_routes.get(&bridge_id) else {
+            return;
+        };
+        route.try_forward(source, message);
+    }
+
     fn reserve_cross_bridge(
         &self,
         bridge_id: BridgeId,
@@ -3218,68 +4016,104 @@ impl Orchestrator {
 
     async fn remove_cross_bridge_internal(&self, bridge_id: &BridgeId) -> Result<bool> {
         let Some((_, mut handle)) = self.cross_bridges.remove(bridge_id) else {
+            if let Some((_, mut data_route)) = self.cross_bridge_data_routes.remove(bridge_id) {
+                data_route.stop().await;
+            }
             return Ok(false);
         };
         let a = handle.a.clone();
         let b = handle.b.clone();
-        let result = handle.stop().await;
+        let data_route = self.cross_bridge_data_routes.remove(bridge_id);
+        let (result, ()) = tokio::join!(handle.stop(), async move {
+            if let Some((_, mut data_route)) = data_route {
+                data_route.stop().await;
+            }
+        });
         self.release_cross_bridge_ownership(bridge_id, &a, &b);
         result.map(|_| true)
+    }
+
+    fn spawn_cross_bridge_terminal_supervisor<F>(&self, bridge_id: BridgeId, terminal: F)
+    where
+        F: Future<Output = bool> + Send + 'static,
+    {
+        let cross_bridges = Arc::clone(&self.cross_bridges);
+        let data_routes = Arc::clone(&self.cross_bridge_data_routes);
+        let owners = Arc::clone(&self.cross_bridge_owners);
+        let ownership_lock = Arc::clone(&self.bridge_ownership_lock);
+        let events = self.events.clone();
+        let cross_crate_publisher = self.cross_crate_publisher.clone();
+        tokio::spawn(async move {
+            if !terminal.await {
+                return;
+            }
+            let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
+                return;
+            };
+            let a = handle.a.clone();
+            let b = handle.b.clone();
+            let data_route = data_routes.remove(&bridge_id);
+            let (result, ()) = tokio::join!(handle.stop(), async move {
+                if let Some((_, mut data_route)) = data_route {
+                    data_route.stop().await;
+                }
+            });
+            {
+                let _guard = ownership_lock
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                for connection_id in [&a, &b] {
+                    let owned = owners
+                        .get(connection_id)
+                        .is_some_and(|owner| owner.value() == &bridge_id);
+                    if owned {
+                        owners.remove(connection_id);
+                    }
+                }
+            }
+            match result {
+                Ok(()) => {
+                    let event = Event::ConnectionsUnbridged {
+                        bridge_id,
+                        at: Utc::now(),
+                    };
+                    let _ =
+                        Self::emit_to_channels(&events, cross_crate_publisher.as_deref(), event);
+                }
+                Err(error) => warn!(
+                    %bridge_id,
+                    %error,
+                    "failed to converge bridge after a route terminated"
+                ),
+            }
+        });
     }
 
     fn supervise_cross_bridge_routes(
         &self,
         bridge_id: BridgeId,
-        statuses: (MediaGraphRouteStatus, MediaGraphRouteStatus),
+        statuses: Vec<MediaGraphRouteStatus>,
+        mut data_terminal: tokio::sync::watch::Receiver<Option<BridgedDataTerminalReason>>,
     ) {
-        for status in [statuses.0, statuses.1] {
-            let cross_bridges = Arc::clone(&self.cross_bridges);
-            let owners = Arc::clone(&self.cross_bridge_owners);
-            let ownership_lock = Arc::clone(&self.bridge_ownership_lock);
-            let events = self.events.clone();
-            let cross_crate_publisher = self.cross_crate_publisher.clone();
-            let bridge_id = bridge_id.clone();
-            tokio::spawn(async move {
+        for status in statuses {
+            self.spawn_cross_bridge_terminal_supervisor(bridge_id.clone(), async move {
                 let _ = status.wait_terminal().await;
-                let Some((_, mut handle)) = cross_bridges.remove(&bridge_id) else {
-                    return;
-                };
-                let a = handle.a.clone();
-                let b = handle.b.clone();
-                let result = handle.stop().await;
-                {
-                    let _guard = ownership_lock
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    for connection_id in [&a, &b] {
-                        let owned = owners
-                            .get(connection_id)
-                            .is_some_and(|owner| owner.value() == &bridge_id);
-                        if owned {
-                            owners.remove(connection_id);
-                        }
-                    }
-                }
-                match result {
-                    Ok(()) => {
-                        let event = Event::ConnectionsUnbridged {
-                            bridge_id,
-                            at: Utc::now(),
-                        };
-                        let _ = Self::emit_to_channels(
-                            &events,
-                            cross_crate_publisher.as_deref(),
-                            event,
-                        );
-                    }
-                    Err(error) => warn!(
-                        %bridge_id,
-                        %error,
-                        "failed to converge bridge after media route terminated"
-                    ),
-                }
+                true
             });
         }
+        self.spawn_cross_bridge_terminal_supervisor(bridge_id, async move {
+            loop {
+                if matches!(
+                    *data_terminal.borrow_and_update(),
+                    Some(BridgedDataTerminalReason::PolicyPanicked)
+                ) {
+                    return true;
+                }
+                if data_terminal.changed().await.is_err() {
+                    return false;
+                }
+            }
+        });
     }
 
     /// Remove observer attachments that name an abruptly-ended Connection.
@@ -3514,6 +4348,12 @@ impl Orchestrator {
             }
             self.connections.remove(conn)
         };
+        if let Some(staged) = removed
+            .as_ref()
+            .and_then(|(_, entry)| entry.staged_inbound_data.as_ref())
+        {
+            staged.active.store(false, Ordering::Release);
+        }
         let was_tracked = removed.is_some();
         let normalized_lifecycle_was_visible =
             removed.is_some_and(|(_, entry)| entry.normalized_lifecycle_was_visible);
@@ -3563,6 +4403,9 @@ impl Orchestrator {
             removed.1.inbound_publication,
             InboundPublicationState::Rejecting(_)
         ));
+        if let Some(staged) = removed.1.staged_inbound_data.as_ref() {
+            staged.active.store(false, Ordering::Release);
+        }
         self.drop_connection_subscriptions(&claimed.connection_id);
         Some(ForgottenConnection {
             was_tracked: true,
@@ -4387,6 +5230,44 @@ impl Orchestrator {
         table.add(publisher, strm_id, subscriber);
     }
 
+    /// Atomically admit a validated batch of direct subscriber routes against
+    /// the Orchestrator-wide worker limit.
+    pub fn try_add_direct_subscriptions(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        routes: &[(ConnectionId, StreamId)],
+    ) -> std::result::Result<(), crate::subscriptions::DirectSubscriptionAdmissionError> {
+        self.subscriptions.try_add_direct(sid, subscriber, routes)
+    }
+
+    /// Number of distinct direct subscriber Connections currently holding a
+    /// worker permit across every UCTP ingress substrate.
+    pub fn active_direct_listener_count(&self) -> usize {
+        self.subscriptions.active_direct_listener_count()
+    }
+
+    /// Configured process-wide ceiling for direct fanout listeners.
+    pub fn direct_listener_limit(&self) -> usize {
+        self.subscriptions.direct_listener_limit()
+    }
+
+    /// Remove one exact publisher Stream route and release direct-listener
+    /// permits whose final route depended on it.
+    pub fn drop_publisher_stream_subscriptions(
+        &self,
+        sid: &SessionId,
+        publisher: &ConnectionId,
+        stream: &StreamId,
+    ) {
+        self.subscriptions
+            .drop_publisher_stream(sid, publisher, stream);
+        self.subscriber_streams
+            .retain(|(session, _, route_publisher, route_stream), _| {
+                session != sid || route_publisher != publisher || route_stream != stream
+            });
+    }
+
     /// Remove a single subscription. Idempotent — removing a
     /// subscription that doesn't exist is a no-op (returns `false`).
     pub fn remove_subscription(
@@ -4396,8 +5277,8 @@ impl Orchestrator {
         publisher: &ConnectionId,
         strm_id: &StreamId,
     ) -> bool {
-        let table = self.subscriptions.for_session(sid);
-        table.remove(publisher, strm_id, subscriber)
+        self.subscriptions
+            .remove_direct(sid, subscriber, publisher, strm_id)
     }
 
     /// Snapshot the set of Connections subscribed to `(publisher,
@@ -4418,10 +5299,13 @@ impl Orchestrator {
     /// used by authenticated transport coordinators during abrupt teardown,
     /// before their asynchronous terminal adapter event is delivered.
     pub fn drop_connection_subscriptions(&self, conn: &ConnectionId) {
-        self.subscriptions.drop_connection(conn);
+        // Publisher authority is retired first. Subscription admission holds
+        // that registry's mutation lock through route insertion, so teardown
+        // either prevents the insert or follows it and removes the route.
         if let Some(registry) = self.publisher_registry.get() {
             registry.drop_publisher(conn);
         }
+        self.subscriptions.drop_connection(conn);
         self.subscriber_streams
             .retain(|(_, subscriber, publisher, _), _| subscriber != conn && publisher != conn);
     }
@@ -4429,7 +5313,6 @@ impl Orchestrator {
     /// Drop the entire subscription table for a Session. Called on
     /// `session.ended`. Idempotent.
     pub fn drop_session_subscriptions(&self, sid: &SessionId) {
-        self.subscriptions.drop_session(sid);
         // Same mirror as `forget_connection`: clear publisher rows for
         // this Session so a `from_participant` subscribe issued after a
         // late peer joins on a recycled SessionId can't resolve to a
@@ -4437,6 +5320,7 @@ impl Orchestrator {
         if let Some(reg) = self.publisher_registry.get() {
             reg.drop_session(sid);
         }
+        self.subscriptions.drop_session(sid);
         // MP3c: drop all per-subscription MediaStreams owned by this
         // Session.
         self.subscriber_streams.retain(|(s, _, _, _), _| s != sid);
@@ -4542,7 +5426,14 @@ impl Orchestrator {
             let Some(stream) = target else {
                 continue;
             };
-            let tx = stream.frames_out();
+            let Ok(tx) = stream.try_frames_out() else {
+                metrics::counter!(
+                    "rvoip_fanout_drops_total",
+                    "reason" => "subscriber-not-writable"
+                )
+                .increment(1);
+                continue;
+            };
             match tx.try_send(frame.clone()) {
                 Ok(()) => delivered += 1,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
@@ -4855,6 +5746,15 @@ impl Orchestrator {
         _permit: tokio::sync::OwnedSemaphorePermit,
     ) {
         let decision = tokio::time::timeout(decision_timeout, decision).await;
+        // The private pre-answer channel is an admission-generation lease, not
+        // an application connection. Quiesce every in-flight staged send and
+        // close its receiver before either final publication or teardown.
+        self.revoke_staged_inbound_data(
+            &pending.connection_id,
+            pending.transport,
+            pending.lifecycle.generation,
+        )
+        .await;
         match decision {
             Ok(Ok(InboundAdmissionDecision {
                 disposition: InboundAdmissionDisposition::Accept,
@@ -5612,10 +6512,12 @@ impl Orchestrator {
         let needs_authoritative_order = matches!(
             &event,
             AdapterEvent::Connected { .. }
+                | AdapterEvent::Progress { .. }
                 | AdapterEvent::Ended { .. }
                 | AdapterEvent::Failed { .. }
                 | AdapterEvent::Dtmf { .. }
                 | AdapterEvent::DataMessage { .. }
+                | AdapterEvent::TransferStatus { .. }
         );
         let _operational_order =
             if needs_authoritative_order && self.operational_event_stream.get().is_some() {
@@ -5626,12 +6528,14 @@ impl Orchestrator {
         let scoped_connection_id = match &event {
             AdapterEvent::InboundConnection { connection } => Some(&connection.id),
             AdapterEvent::Connected { connection_id }
+            | AdapterEvent::Progress { connection_id, .. }
             | AdapterEvent::Authenticated { connection_id, .. }
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
+            | AdapterEvent::TransferStatus { connection_id, .. }
             | AdapterEvent::StepUpResponse { connection_id, .. } => Some(connection_id),
             // Terminal events arrive after the adapter removes its route.
             // Native events are not connection-scoped.
@@ -5700,6 +6604,18 @@ impl Orchestrator {
                 return;
             }
 
+            // One exact pending admission may opt into a private, bounded set
+            // of reserved DataMessage labels. Successfully staged messages are
+            // consumed here and deliberately never reach operational events,
+            // normalized events, bridges, context projection, or sessions.
+            // Every other pre-admission operational message continues through
+            // the existing fail-closed rejection below.
+            if let AdapterEvent::DataMessage { message, .. } = &event {
+                if self.try_deliver_staged_inbound_data(connection_id, transport, message) {
+                    return;
+                }
+            }
+
             match &event {
                 AdapterEvent::InboundConnection { .. } => {}
                 AdapterEvent::Authenticated {
@@ -5751,10 +6667,12 @@ impl Orchestrator {
                     }
                 },
                 AdapterEvent::Connected { .. }
+                | AdapterEvent::Progress { .. }
                 | AdapterEvent::Dtmf { .. }
                 | AdapterEvent::Quality { .. }
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
+                | AdapterEvent::TransferStatus { .. }
                 | AdapterEvent::StepUpResponse { .. } => {
                     match self.decide_operational_adapter_event(
                         connection_id,
@@ -5833,6 +6751,43 @@ impl Orchestrator {
                     )
                     .await;
                 self.emit(Event::ConnectionConnected { connection_id, at });
+                if !authoritative {
+                    return;
+                }
+            }
+            AdapterEvent::Progress {
+                connection_id,
+                status_code,
+                reason: _,
+                early_media,
+            } => {
+                let at = Utc::now();
+                let authoritative = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::Progress {
+                            status_code,
+                            early_media,
+                        },
+                    )
+                    .await;
+                let kind = if early_media {
+                    crate::events::ConnectionProgressKind::EarlyMedia
+                } else {
+                    match status_code {
+                        180 => crate::events::ConnectionProgressKind::Ringing,
+                        408 | 480 => crate::events::ConnectionProgressKind::NoAnswer,
+                        486 => crate::events::ConnectionProgressKind::Busy,
+                        _ => crate::events::ConnectionProgressKind::Trying,
+                    }
+                };
+                self.emit(Event::ConnectionProgress {
+                    connection_id,
+                    kind,
+                    at,
+                });
                 if !authoritative {
                     return;
                 }
@@ -6179,6 +7134,11 @@ impl Orchestrator {
                     return;
                 }
 
+                // Data-channel forwarding is bridge-scoped and bounded. The
+                // exact peer and policy were fixed at bridge creation; fields
+                // inside the application message are never routing input.
+                self.forward_bridged_data_message(&connection_id, message.clone());
+
                 if !matches!(message.label.as_str(), "rvoip-chat" | "rvoip-messages") {
                     return;
                 }
@@ -6242,6 +7202,32 @@ impl Orchestrator {
                     conversation_id,
                     at: now,
                 });
+            }
+            AdapterEvent::TransferStatus {
+                connection_id,
+                attempt_id,
+                status,
+            } => {
+                let at = Utc::now();
+                let authoritative = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::TransferStatus {
+                            attempt_id,
+                            status: status.clone(),
+                        },
+                    )
+                    .await;
+                self.emit(Event::ConnectionTransferStatus {
+                    connection_id,
+                    status,
+                    at,
+                });
+                if !authoritative {
+                    return;
+                }
             }
             AdapterEvent::StepUpResponse {
                 connection_id,
@@ -6886,18 +7872,58 @@ impl Orchestrator {
         adapter.resume(connection_id).await
     }
 
+    /// Submit a transfer command to the owning adapter.
+    ///
+    /// `Ok(())` confirms command submission, not target completion. Subscribe
+    /// to [`Event::ConnectionTransferStatus`] (or the authoritative operational
+    /// stream) for asynchronous protocol progress and final outcomes.
     #[instrument(skip(self), fields(connection_id = %connection_id, target = ?target))]
     pub async fn transfer_connection(
         &self,
         connection_id: ConnectionId,
         target: TransferTarget,
     ) -> Result<()> {
+        self.transfer_connection_inner(connection_id, None, target)
+            .await
+    }
+
+    /// Submit a transfer command with an exact application-owned attempt ID.
+    ///
+    /// Adapters that support correlated protocol status echo `attempt_id` in
+    /// their asynchronous transfer updates. The authoritative operational
+    /// stream carries it on both submission and status events.
+    #[instrument(
+        skip(self, attempt_id),
+        fields(connection_id = %connection_id, attempt_id_present = true, target = ?target)
+    )]
+    pub async fn transfer_connection_with_attempt(
+        &self,
+        connection_id: ConnectionId,
+        attempt_id: TransferAttemptId,
+        target: TransferTarget,
+    ) -> Result<()> {
+        self.transfer_connection_inner(connection_id, Some(attempt_id), target)
+            .await
+    }
+
+    async fn transfer_connection_inner(
+        &self,
+        connection_id: ConnectionId,
+        attempt_id: Option<TransferAttemptId>,
+        target: TransferTarget,
+    ) -> Result<()> {
         let adapter = self.adapter_for(&connection_id)?;
         let transport = self.connection_transport(&connection_id)?;
         let has_authoritative_stream = self.operational_event_stream.get().is_some();
-        let result = adapter
-            .transfer(connection_id.clone(), target.clone())
-            .await;
+        let result = if let Some(attempt_id) = attempt_id.as_ref() {
+            adapter
+                .transfer_with_attempt(connection_id.clone(), attempt_id.clone(), target.clone())
+                .await
+        } else {
+            adapter
+                .transfer(connection_id.clone(), target.clone())
+                .await
+        };
         if has_authoritative_stream {
             // Never hold the ordering lock across an adapter await: an
             // adapter may need its terminal event loop to make progress
@@ -6905,7 +7931,7 @@ impl Orchestrator {
             let _operational_order = self.operational_event_order.lock().await;
             let at = Utc::now();
             let outcome = if result.is_ok() {
-                OperationalTransferOutcome::Succeeded
+                OperationalTransferOutcome::Submitted
             } else {
                 OperationalTransferOutcome::Failed
             };
@@ -6915,6 +7941,7 @@ impl Orchestrator {
                     transport,
                     at,
                     OperationalEventKind::Transfer {
+                        attempt_id,
                         target: OperationalTransferTarget::from(&target),
                         outcome,
                     },
@@ -7751,32 +8778,54 @@ impl Orchestrator {
                                 Ok(p) => p,
                                 Err(_) => continue,
                             };
+                            let mut playback = TtsPlaybackCancelGuard::new(playback);
                             let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
                             *speak_cancel_for_task.lock().await = Some(cancel_tx);
                             speaking_for_task.store(true, std::sync::atomic::Ordering::Relaxed);
 
-                            if let Ok(adapter) = me.adapter_for(&connection_id) {
-                                if let Ok(streams) = adapter.streams(connection_id.clone()).await {
-                                    let out =
-                                        streams.into_iter().find(|s| s.kind() == StreamKind::Audio);
-                                    if let Some(audio) = out {
-                                        let tx = audio.frames_out();
-                                        loop {
-                                            tokio::select! {
-                                                _ = &mut cancel_rx => {
-                                                    let _ = playback.cancel().await;
-                                                    break;
-                                                }
-                                                frame_opt = playback.next_frame() => {
-                                                    let Some(frame) = frame_opt else {
-                                                        break;
-                                                    };
-                                                    let _ = tx.send(frame).await;
-                                                }
+                            let mut playback_completed = false;
+                            'playback: {
+                                let Ok(adapter) = me.adapter_for(&connection_id) else {
+                                    break 'playback;
+                                };
+                                let Ok(streams) = adapter.streams(connection_id.clone()).await
+                                else {
+                                    break 'playback;
+                                };
+                                let Some(audio) =
+                                    streams.into_iter().find(|s| s.kind() == StreamKind::Audio)
+                                else {
+                                    break 'playback;
+                                };
+                                let Ok(tx) = audio.try_frames_out() else {
+                                    break 'playback;
+                                };
+                                loop {
+                                    tokio::select! {
+                                        _ = &mut cancel_rx => {
+                                            break 'playback;
+                                        }
+                                        frame_opt = playback.playback().next_frame() => {
+                                            let Some(frame) = frame_opt else {
+                                                playback_completed = true;
+                                                break 'playback;
+                                            };
+                                            if tx.send(frame).await.is_err() {
+                                                break 'playback;
                                             }
                                         }
                                     }
                                 }
+                            }
+                            // Once synthesis succeeds, every exit other than
+                            // the provider's natural end-of-stream must cancel
+                            // the provider explicitly. `TtsPlayback` has no
+                            // Drop-cancels contract, so merely dropping it can
+                            // otherwise leave remote synthesis work running.
+                            if !playback_completed {
+                                playback.cancel().await;
+                            } else {
+                                playback.complete();
                             }
                             speaking_for_task.store(false, std::sync::atomic::Ordering::Relaxed);
                             // Drain any stale cancel sender (defensive).
@@ -8014,80 +9063,84 @@ impl Orchestrator {
         // touches the direction whose PT actually moved.
         if let Some(peer) = self.bridge_peer_of(&connection_id) {
             if let Some(audio) = negotiated.audio.as_ref() {
-                if let Some(new_pt) = codec_to_pt(&audio.name) {
-                    // A2 — snapshot the bridge handle's relevant state
-                    // (orientation + swap channel availability) WITHOUT
-                    // holding the DashMap iterator guard across any
-                    // .await. Extract bridge_id first, then re-fetch
-                    // by id inside a tight non-async scope.
-                    let bridge_id_opt: Option<BridgeId> = {
-                        self.cross_bridges
-                            .iter()
-                            .find(|e| e.value().a == connection_id || e.value().b == connection_id)
-                            .map(|e| e.key().clone())
+                let new_pt = codec_to_pt(&audio.name)
+                    .ok_or_else(|| RvoipError::UnsupportedCodec(audio.name.clone()))?;
+                // A2 — snapshot the bridge handle's relevant state
+                // (orientation + swap channel availability) WITHOUT
+                // holding the DashMap iterator guard across any
+                // .await. Extract bridge_id first, then re-fetch
+                // by id inside a tight non-async scope.
+                let bridge_id_opt: Option<BridgeId> = {
+                    self.cross_bridges
+                        .iter()
+                        .find(|e| e.value().a == connection_id || e.value().b == connection_id)
+                        .map(|e| e.key().clone())
+                };
+                if let Some(bridge_id) = bridge_id_opt {
+                    // Snapshot orientation (no .await held).
+                    let orientation_this_is_a = self
+                        .cross_bridges
+                        .get(&bridge_id)
+                        .map(|e| e.value().a == connection_id);
+                    let Some(orientation_this_is_a) = orientation_this_is_a else {
+                        return Ok(negotiated);
                     };
-                    if let Some(bridge_id) = bridge_id_opt {
-                        // Snapshot orientation (no .await held).
-                        let orientation_this_is_a = self
-                            .cross_bridges
-                            .get(&bridge_id)
-                            .map(|e| e.value().a == connection_id);
-                        let Some(orientation_this_is_a) = orientation_this_is_a else {
-                            return Ok(negotiated);
-                        };
 
-                        // A2 — direct .await for the peer's stream
-                        // lookup (was `block_in_place + block_on`).
-                        let peer_pt = if let Ok(adp) = self.adapter_for(&peer) {
-                            adp.streams(peer.clone())
-                                .await
-                                .ok()
-                                .and_then(|streams| {
-                                    streams
-                                        .into_iter()
-                                        .find(|s| s.kind() == StreamKind::Audio)
-                                        .map(|s| s.codec().name)
-                                })
-                                .and_then(|n| codec_to_pt(&n))
-                                .unwrap_or(new_pt)
-                        } else {
-                            new_pt
-                        };
+                    // A2 — direct .await for the peer's stream
+                    // lookup (was `block_in_place + block_on`).
+                    let peer_pt = if let Ok(adp) = self.adapter_for(&peer) {
+                        adp.streams(peer.clone())
+                            .await
+                            .ok()
+                            .and_then(|streams| {
+                                streams
+                                    .into_iter()
+                                    .find(|s| s.kind() == StreamKind::Audio)
+                                    .map(|s| s.codec().name)
+                            })
+                            .and_then(|n| codec_to_pt(&n))
+                            .unwrap_or(new_pt)
+                    } else {
+                        new_pt
+                    };
 
-                        // Build per-direction swap messages.
-                        let (a_swap, b_swap) = if orientation_this_is_a {
-                            // a is "this" connection (new_pt), b is peer (peer_pt).
-                            (make_swap(new_pt, peer_pt), make_swap(peer_pt, new_pt))
-                        } else {
-                            (make_swap(peer_pt, new_pt), make_swap(new_pt, peer_pt))
-                        };
-                        // Snapshot only cloneable swap state while the map
-                        // entry is guarded. Channel backpressure, pump acks,
-                        // and graph updates all happen after the guard drops.
-                        let swap_controller = self
-                            .cross_bridges
-                            .get(&bridge_id)
-                            .map(|entry| entry.value().swap_controller());
-                        let swap_result = match swap_controller {
-                            Some(Ok(controller)) => {
-                                controller.swap_transcoders(a_swap, b_swap).await
-                            }
-                            Some(Err(error)) => Err(error),
-                            None => Ok(()),
-                        };
-                        if let Err(e) = swap_result {
-                            warn!(
-                                ?connection_id,
-                                error = %e,
-                                "orchestrator: bridge transcoder hot-swap failed; bridge may carry stale codecs"
-                            );
-                        } else {
-                            metrics::counter!(
-                                "uctp_renegotiations_completed_total",
-                                "outcome" => "hot-swapped",
-                            )
-                            .increment(1);
-                        }
+                    // Build per-direction swap messages.
+                    let (a_swap, b_swap) = if orientation_this_is_a {
+                        // a is "this" connection (new_pt), b is peer (peer_pt).
+                        (make_swap(new_pt, peer_pt), make_swap(peer_pt, new_pt))
+                    } else {
+                        (make_swap(peer_pt, new_pt), make_swap(new_pt, peer_pt))
+                    };
+                    // Snapshot only cloneable swap state while the map
+                    // entry is guarded. Channel backpressure, pump acks,
+                    // and graph updates all happen after the guard drops.
+                    let swap_controller = self
+                        .cross_bridges
+                        .get(&bridge_id)
+                        .map(|entry| entry.value().swap_controller());
+                    let swap_result = match swap_controller {
+                        Some(Ok(controller)) => controller.swap_transcoders(a_swap, b_swap).await,
+                        Some(Err(error)) => Err(error),
+                        None => Ok(()),
+                    };
+                    if let Err(e) = swap_result {
+                        metrics::counter!(
+                            "uctp_renegotiations_completed_total",
+                            "outcome" => "bridge-swap-failed",
+                        )
+                        .increment(1);
+                        warn!(
+                            ?connection_id,
+                            error = %e,
+                            "orchestrator: bridge transcoder hot-swap failed"
+                        );
+                        return Err(e);
+                    } else {
+                        metrics::counter!(
+                            "uctp_renegotiations_completed_total",
+                            "outcome" => "hot-swapped",
+                        )
+                        .increment(1);
                     }
                 }
             }
@@ -8146,6 +9199,68 @@ impl Orchestrator {
     /// - `UnsupportedCodec(name)` if a negotiated codec has no PT mapping.
     #[instrument(skip(self), fields(a = %a, b = %b, bridge_id))]
     pub async fn bridge_connections(&self, a: ConnectionId, b: ConnectionId) -> Result<BridgeId> {
+        self.bridge_connections_directional_with_data_policy(
+            a,
+            b,
+            DirectionalMediaBridgePlan::bidirectional(),
+            Arc::new(PassThroughDataMessageBridgePolicy),
+        )
+        .await
+    }
+
+    /// Bridge media and application data between two exact connections.
+    ///
+    /// Media uses the same one-source-per-connection graphs as
+    /// [`Self::bridge_connections`]. Application data uses independent,
+    /// bounded per-direction workers. Adapter-event ingest never waits for
+    /// the policy or the target transport, and transformed messages are
+    /// validated before dispatch.
+    #[instrument(skip(self, data_policy), fields(a = %a, b = %b, bridge_id))]
+    pub async fn bridge_connections_with_data_policy(
+        &self,
+        a: ConnectionId,
+        b: ConnectionId,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<BridgeId> {
+        self.bridge_connections_directional_with_data_policy(
+            a,
+            b,
+            DirectionalMediaBridgePlan::bidirectional(),
+            data_policy,
+        )
+        .await
+    }
+
+    /// Bridge only the explicitly enabled media directions while retaining
+    /// the standard pass-through application-data route.
+    pub async fn bridge_connections_directional(
+        &self,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+    ) -> Result<BridgeId> {
+        self.bridge_connections_directional_with_data_policy(
+            a,
+            b,
+            media_plan,
+            Arc::new(PassThroughDataMessageBridgePolicy),
+        )
+        .await
+    }
+
+    /// Bridge explicitly enabled media directions plus application data.
+    ///
+    /// Both Connection streams, codecs, requested destination senders, and
+    /// lifecycle tickets are validated before either source receiver is
+    /// acquired. A disabled source half is never consumed.
+    #[instrument(skip(self, data_policy), fields(a = %a, b = %b, bridge_id))]
+    pub async fn bridge_connections_directional_with_data_policy(
+        &self,
+        a: ConnectionId,
+        b: ConnectionId,
+        media_plan: DirectionalMediaBridgePlan,
+        data_policy: Arc<dyn DataMessageBridgePolicy>,
+    ) -> Result<BridgeId> {
         if a == b {
             return Err(RvoipError::AdmissionRejected(
                 "cannot bridge a connection to itself",
@@ -8188,68 +9303,282 @@ impl Orchestrator {
             }
         };
 
-        // Validate codecs before either graph consumes a single-take source.
-        codec_to_pt(&a_audio.codec().name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(a_audio.codec().name.clone()))?;
-        codec_to_pt(&b_audio.codec().name)
-            .ok_or_else(|| RvoipError::UnsupportedCodec(b_audio.codec().name.clone()))?;
+        // Resolve and validate the complete directional plan before either
+        // graph consumes a single-take source. Even a one-way route needs the
+        // source and destination codec identities, but it must validate only
+        // (and later acquire only) the sink/source halves that are enabled.
+        let a_codec = a_audio.codec();
+        let b_codec = b_audio.codec();
+        codec_to_pt(&a_codec.name)
+            .ok_or_else(|| RvoipError::UnsupportedCodec(a_codec.name.clone()))?;
+        codec_to_pt(&b_codec.name)
+            .ok_or_else(|| RvoipError::UnsupportedCodec(b_codec.name.clone()))?;
 
-        let a_graph = self
-            .media_graph_for_stream(a.clone(), Arc::clone(&a_audio))
-            .await?;
-        let b_graph = self
-            .media_graph_for_stream(b.clone(), Arc::clone(&b_audio))
-            .await?;
-        let a_to_b = a_graph.add_managed_sink(b_audio.codec(), b_audio.frames_out())?;
-        if a_to_b.wait_active().await.is_err() {
-            let _ = a_to_b.remove().await;
-            return Err(RvoipError::InvalidState(
-                "first bridge route terminated during setup",
-            ));
-        }
-        let b_to_a = match b_graph.add_managed_sink(a_audio.codec(), a_audio.frames_out()) {
-            Ok(route) => route,
-            Err(error) => {
-                let _ = a_to_b.remove().await;
-                return Err(error);
-            }
+        // Deferred transports such as SIP return a typed activation error
+        // here instead of consuming a source and later discovering that its
+        // peer sink cannot accept media.
+        let a_out = if media_plan.b_to_a() {
+            Some(a_audio.try_frames_out()?)
+        } else {
+            None
         };
-        if b_to_a.wait_active().await.is_err() {
-            let (a_result, b_result) = tokio::join!(a_to_b.remove(), b_to_a.remove());
-            let _ = (a_result, b_result);
+        let b_out = if media_plan.a_to_b() {
+            Some(b_audio.try_frames_out()?)
+        } else {
+            None
+        };
+        if [a_out.as_ref(), b_out.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(tokio::sync::mpsc::Sender::is_closed)
+        {
             return Err(RvoipError::InvalidState(
-                "second bridge route terminated during setup",
+                "bridge media target is already closed",
             ));
         }
 
-        let mut handle = CrossBridgeHandle::with_managed_media_graphs(
+        // A bidirectional bridge may need to create both source graphs. Take
+        // their per-connection initialization locks in stable ID order and
+        // reserve every missing receiver before committing either one. If the
+        // second source is unavailable, dropping the first reservation puts
+        // its receiver back instead of leaving a half-created graph behind.
+        let (a_source_graph, b_source_graph) = self
+            .media_graphs_for_directional_bridge(
+                a.clone(),
+                Arc::clone(&a_audio),
+                b.clone(),
+                Arc::clone(&b_audio),
+                media_plan,
+            )
+            .await?;
+
+        let mut a_to_b = None;
+        if let Some(b_out) = b_out {
+            let a_graph =
+                a_source_graph.expect("validated A-to-B plan initializes the A source graph");
+            let route = a_graph.add_managed_sink(b_codec.clone(), b_out)?;
+            if route.wait_active().await.is_err() {
+                let _ = route.remove().await;
+                return Err(RvoipError::InvalidState(
+                    "A-to-B bridge route terminated during setup",
+                ));
+            }
+            a_to_b = Some((a_graph, route));
+        }
+
+        let mut b_to_a = None;
+        if let Some(a_out) = a_out {
+            let b_graph =
+                b_source_graph.expect("validated B-to-A plan initializes the B source graph");
+            let route = match b_graph.add_managed_sink(a_codec, a_out) {
+                Ok(route) => route,
+                Err(error) => {
+                    if let Some((_, route)) = a_to_b.take() {
+                        let _ = route.remove().await;
+                    }
+                    return Err(error);
+                }
+            };
+            if route.wait_active().await.is_err() {
+                let a_route = a_to_b.take().map(|(_, route)| route);
+                let (a_result, b_result) = tokio::join!(
+                    async move {
+                        match a_route {
+                            Some(route) => route.remove().await,
+                            None => Ok(false),
+                        }
+                    },
+                    route.remove()
+                );
+                let _ = (a_result, b_result);
+                return Err(RvoipError::InvalidState(
+                    "B-to-A bridge route terminated during setup",
+                ));
+            }
+            b_to_a = Some((b_graph, route));
+        }
+
+        let mut handle = CrossBridgeHandle::with_directional_managed_media_graphs(
             id.clone(),
             a.clone(),
             b.clone(),
-            a_graph,
-            b_graph,
             a_to_b,
             b_to_a,
         );
-        let statuses = handle
-            .media_route_statuses()
-            .expect("media-graph bridge exposes route statuses");
+        let statuses = handle.managed_media_route_statuses();
+        debug_assert!(!statuses.is_empty(), "validated bridge has a media route");
+        let mut data_route = CrossBridgeDataRoute::new(
+            a.clone(),
+            b.clone(),
+            Arc::clone(&a_adapter),
+            Arc::clone(&b_adapter),
+            data_policy,
+        );
+        let data_terminal = data_route.terminal_status();
         if let Err(error) = self.validate_connection_lifecycles(&lifecycle_tickets) {
-            let _ = handle.stop().await;
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
             return Err(error);
         }
-        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
-        self.cross_bridges.insert(id.clone(), handle);
-        reservation.commit();
-        self.emit(Event::ConnectionsBridged {
-            bridge_id: id.clone(),
-            a,
-            b,
-            at: Utc::now(),
-        });
-        drop(lifecycle_guards);
-        self.supervise_cross_bridge_routes(id.clone(), statuses);
+        // Keep the non-Send std::sync lifecycle guards inside this entirely
+        // synchronous scope. In particular, the lock-error cleanup awaits
+        // below must not retain the Result temporary whose Ok variant contains
+        // those guards; public bridge futures are required to remain Send.
+        let commit = match self.lock_connection_lifecycles(&lifecycle_tickets) {
+            Ok(lifecycle_guards) => {
+                self.cross_bridges.insert(id.clone(), handle);
+                self.cross_bridge_data_routes.insert(id.clone(), data_route);
+                reservation.commit();
+                self.emit(Event::ConnectionsBridged {
+                    bridge_id: id.clone(),
+                    a,
+                    b,
+                    at: Utc::now(),
+                });
+                drop(lifecycle_guards);
+                Ok(())
+            }
+            Err(error) => Err((error, handle, data_route)),
+        };
+        if let Err((error, mut handle, mut data_route)) = commit {
+            let (_media, ()) = tokio::join!(handle.stop(), data_route.stop());
+            return Err(error);
+        }
+        self.supervise_cross_bridge_routes(id.clone(), statuses, data_terminal);
         Ok(id)
+    }
+
+    async fn media_graphs_for_directional_bridge(
+        &self,
+        a: ConnectionId,
+        a_stream: Arc<dyn crate::stream::MediaStream>,
+        b: ConnectionId,
+        b_stream: Arc<dyn crate::stream::MediaStream>,
+        media_plan: DirectionalMediaBridgePlan,
+    ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
+        let mut sources = Vec::with_capacity(2);
+        if media_plan.a_to_b() {
+            sources.push(DirectionalGraphSource {
+                is_a: true,
+                connection_id: a,
+                codec: a_stream.codec(),
+                stream: a_stream,
+            });
+        }
+        if media_plan.b_to_a() {
+            sources.push(DirectionalGraphSource {
+                is_a: false,
+                connection_id: b,
+                codec: b_stream.codec(),
+                stream: b_stream,
+            });
+        }
+        sources.sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
+
+        // Owned guards avoid self-referential lock/guard storage and remain
+        // Send while a later stable-order lock is awaited.
+        let init_locks = sources
+            .iter()
+            .map(|source| {
+                self.media_graph_inits
+                    .entry(source.connection_id.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        let mut _init_guards = Vec::with_capacity(init_locks.len());
+        for lock in init_locks {
+            _init_guards.push(lock.lock_owned().await);
+        }
+
+        // A concurrent broadcast or listener may have installed one of the
+        // graphs before these locks were acquired. Recheck under the locks and
+        // reserve only the still-missing sources.
+        let mut a_graph = None;
+        let mut b_graph = None;
+        let mut missing = Vec::with_capacity(sources.len());
+        for source in sources {
+            if let Some(graph) = self
+                .media_graphs
+                .get(&source.connection_id)
+                .map(|entry| entry.value().clone())
+            {
+                if source.is_a {
+                    a_graph = Some(graph);
+                } else {
+                    b_graph = Some(graph);
+                }
+            } else {
+                validate_media_graph_codec(&source.codec)?;
+                missing.push(source);
+            }
+        }
+        if missing.is_empty() {
+            return Ok((a_graph, b_graph));
+        }
+
+        let missing_ids = missing
+            .iter()
+            .map(|source| source.connection_id.clone())
+            .collect::<Vec<_>>();
+        let lifecycle_tickets = self.capture_connection_lifecycles(&missing_ids)?;
+        self.ensure_operational_event_stream_healthy()?;
+
+        let mut reserved = Vec::with_capacity(missing.len());
+        for source in missing {
+            let transport = self.connection_transport(&source.connection_id)?;
+            let lifecycle = lifecycle_tickets
+                .iter()
+                .find(|ticket| ticket.connection_id == source.connection_id)
+                .cloned()
+                .expect("captured lifecycle exists for each missing graph source");
+            // Every reservation remains rollback-capable in this vector until
+            // all missing sources have been reserved successfully.
+            let receiver = source.stream.reserve_frames_in()?;
+            reserved.push(ReservedDirectionalGraphSource {
+                source,
+                transport,
+                lifecycle,
+                receiver,
+            });
+        }
+
+        // Prevent a terminal lifecycle transition from racing graph ownership
+        // commit. No await occurs while these std::sync guards are held.
+        let lifecycle_guards = self.lock_connection_lifecycles(&lifecycle_tickets)?;
+        let mut created = Vec::with_capacity(reserved.len());
+        for reserved_source in reserved {
+            let connection_id = reserved_source.source.connection_id.clone();
+            let codec = reserved_source.source.codec;
+            let receiver = reserved_source.receiver.commit();
+            let graph = start_media_graph(receiver, codec, MediaGraphPolicy::default())
+                .expect("directional graph codec was validated before receiver commit");
+            self.media_graphs
+                .insert(connection_id.clone(), graph.clone());
+            if let Err(error) = self.supervise_media_activity(
+                connection_id.clone(),
+                reserved_source.transport,
+                reserved_source.lifecycle,
+                graph.subscribe_activity(),
+            ) {
+                for created_id in created {
+                    if let Some((_, stale)) = self.media_graphs.remove(&created_id) {
+                        stale.shutdown();
+                    }
+                }
+                if let Some((_, stale)) = self.media_graphs.remove(&connection_id) {
+                    stale.shutdown();
+                }
+                return Err(error);
+            }
+            if reserved_source.source.is_a {
+                a_graph = Some(graph);
+            } else {
+                b_graph = Some(graph);
+            }
+            created.push(connection_id);
+        }
+        drop(lifecycle_guards);
+        Ok((a_graph, b_graph))
     }
 
     /// Return the reusable media graph for a Connection, creating it from the
@@ -8449,6 +9778,32 @@ impl Orchestrator {
         Ok((MediaTapRoute::new(route), receiver))
     }
 
+    /// Return the latest retained operational snapshot for a connection's
+    /// reusable source graph. The snapshot is aggregate-safe and contains no
+    /// tenant, participant, or packet payload data.
+    pub fn media_graph_latest_snapshot(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<crate::media_graph::MediaGraphSnapshot> {
+        self.media_graphs
+            .get(connection_id)
+            .map(|graph| graph.value().latest_snapshot())
+    }
+
+    /// Place a barrier on the graph actor and return a current operational
+    /// snapshot. The handle is cloned before awaiting so no route-table guard
+    /// is held across the asynchronous boundary.
+    pub async fn media_graph_snapshot(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Option<crate::media_graph::MediaGraphSnapshot> {
+        let graph = self
+            .media_graphs
+            .get(connection_id)
+            .map(|entry| entry.value().clone())?;
+        Some(graph.snapshot().await)
+    }
+
     /// Attach an arbitrary destination to a Connection's source graph.
     pub async fn attach_media_sink(
         &self,
@@ -8495,6 +9850,36 @@ impl Orchestrator {
         source_connection_id: ConnectionId,
         descriptor: crate::virtual_publisher::VirtualPublisherDescriptor,
     ) -> Result<crate::virtual_publisher::ManagedVirtualPublisher> {
+        self.register_virtual_publisher_inner(source_connection_id, descriptor, None)
+            .await
+    }
+
+    /// Publish a Connection's reusable audio source using an explicit target
+    /// codec for the logical publisher.
+    ///
+    /// The target is installed as a normal MediaGraph sink. Publishers with
+    /// the same target codec therefore reuse the graph's codec group and each
+    /// source frame is transcoded at most once for that group. The publisher
+    /// registry advertises the target codec, not the source codec.
+    pub async fn register_virtual_publisher_with_codec(
+        self: &Arc<Self>,
+        source_connection_id: ConnectionId,
+        descriptor: crate::virtual_publisher::VirtualPublisherDescriptor,
+        target_codec: crate::capability::CodecInfo,
+    ) -> Result<crate::virtual_publisher::ManagedVirtualPublisher> {
+        // Reject an unsupported target before creating the source graph. A
+        // first graph creation consumes the MediaStream's single receiver.
+        validate_media_graph_codec(&target_codec)?;
+        self.register_virtual_publisher_inner(source_connection_id, descriptor, Some(target_codec))
+            .await
+    }
+
+    async fn register_virtual_publisher_inner(
+        self: &Arc<Self>,
+        source_connection_id: ConnectionId,
+        descriptor: crate::virtual_publisher::VirtualPublisherDescriptor,
+        target_codec: Option<crate::capability::CodecInfo>,
+    ) -> Result<crate::virtual_publisher::ManagedVirtualPublisher> {
         if descriptor.session_id.as_str().is_empty()
             || descriptor.stream_id.as_str().is_empty()
             || descriptor.participant.trim().is_empty()
@@ -8510,7 +9895,7 @@ impl Orchestrator {
         let graph = self
             .media_graph_for_connection(source_connection_id.clone())
             .await?;
-        let codec = graph.latest_snapshot().source_codec;
+        let codec = target_codec.unwrap_or_else(|| graph.latest_snapshot().source_codec);
         let (target, frames) = tokio::sync::mpsc::channel(
             crate::virtual_publisher::DEFAULT_VIRTUAL_PUBLISHER_QUEUE_CAPACITY,
         );
@@ -8525,15 +9910,44 @@ impl Orchestrator {
             return Err(error);
         }
 
-        let lifecycle_guards = match self.lock_connection_lifecycles(&lifecycle_tickets) {
-            Ok(guards) => guards,
-            Err(error) => {
+        // Keep every std::sync lifecycle guard inside a synchronous helper.
+        // A failed finalization returns only Send-owned values, so cleanup can
+        // be awaited without retaining a lock guard (or its Result temporary)
+        // in this public future.
+        match self.finalize_virtual_publisher_registration(
+            source_connection_id,
+            descriptor,
+            route,
+            frames,
+            codec,
+            &lifecycle_tickets,
+        ) {
+            Ok(publisher) => Ok(publisher),
+            Err((route, error)) => {
                 let _ = route.remove().await;
-                return Err(error);
+                Err(error)
             }
+        }
+    }
+
+    fn finalize_virtual_publisher_registration(
+        self: &Arc<Self>,
+        source_connection_id: ConnectionId,
+        descriptor: crate::virtual_publisher::VirtualPublisherDescriptor,
+        route: crate::media_graph::ManagedMediaRoute,
+        frames: tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
+        codec: crate::capability::CodecInfo,
+        lifecycle_tickets: &[ConnectionLifecycleTicket],
+    ) -> std::result::Result<
+        crate::virtual_publisher::ManagedVirtualPublisher,
+        (crate::media_graph::ManagedMediaRoute, RvoipError),
+    > {
+        let lifecycle_guards = match self.lock_connection_lifecycles(lifecycle_tickets) {
+            Ok(guards) => guards,
+            Err(error) => return Err((route, error)),
         };
         let registry = self.publisher_registry();
-        let registration = registry.register_managed(
+        let registration_id = match registry.register_managed(
             descriptor.session_id.clone(),
             descriptor.stream_id.to_string(),
             crate::subscriptions::PublisherEntry {
@@ -8542,14 +9956,12 @@ impl Orchestrator {
                 kind: "audio".to_string(),
                 codec: Some(codec),
             },
-        );
-        let registration_id = match registration {
+        ) {
             Ok(registration_id) => registration_id,
             Err(_) => {
-                drop(lifecycle_guards);
-                let _ = route.remove().await;
-                return Err(RvoipError::AdmissionRejected(
-                    "virtual publisher stream is already registered",
+                return Err((
+                    route,
+                    RvoipError::AdmissionRejected("virtual publisher stream is already registered"),
                 ));
             }
         };

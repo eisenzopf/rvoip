@@ -1,4 +1,5 @@
-//! WebSocket JSON signaler for [`WebRtcClient`] → [`WebRtcServer`](crate::server::WebRtcServer).
+//! Legacy per-operation WebSocket JSON signaler for
+//! [`WebRtcClient`] → [`WebRtcServer`](crate::server::WebRtcServer).
 //!
 //! Supports both directions:
 //! - **Offerer flow**: `send_offer` connects, ships the offer, awaits the
@@ -6,6 +7,10 @@
 //! - **Answerer flow**: `send_answer` connects, ships
 //!   `{type:"answer", sdp, connection_id}`, awaits the `{type:"ack"}` reply.
 //! - **Trickle ICE**: `send_ice` sends `{type:"ice-candidate", candidate, connection_id}`.
+//!
+//! This compatibility wrapper does not retain a route socket: offer, answer,
+//! and ICE methods each create their own exchange. New adapter-driven
+//! originations use the persistent target-contacting session instead.
 //!
 //! Set [`WsSignalerConfig::retry_max_attempts`] > 1 to enable exponential
 //! backoff retry on WS connect failure.
@@ -187,6 +192,7 @@ impl Signaler for WsSignaler {
                 sdp: answer.sdp.clone(),
                 connection_id,
                 candidate: String::new(),
+                request_id: String::new(),
             },
         )
         .await?;

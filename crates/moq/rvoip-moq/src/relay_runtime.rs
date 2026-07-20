@@ -23,7 +23,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::{MoqNamespace, MoqProtocolVersion, MoqRelayAdmissionSubstrate, RvoipMoqRelayAdmission};
+use crate::{
+    MoqNamespace, MoqProtocolVersion, MoqRelayAdmissionSubstrate, RvoipMoqPublisherAdmission,
+    RvoipMoqRelayAdmission,
+};
+
+// The currently pinned relay revision only supervises expiring token leases.
+// Flip this guard in the same reviewed change that pins a relay revision which
+// also revalidates expiry-bearing mTLS publisher leases before activation and
+// throughout the active session.
+const EXPIRING_PUBLISHER_LEASE_REVALIDATION_SUPPORTED: bool = false;
 
 /// How the relay runtime is hosted by its owning application.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -215,6 +224,17 @@ pub enum MoqRelayRuntimeSecurity {
         bindings: Vec<MoqRelayCertificateBinding>,
         max_active_sessions_per_certificate: usize,
     },
+    /// Publish-only mTLS listener whose exact namespace is authorized against
+    /// an application-owned active-publication authority.
+    ///
+    /// The policy retains an exact or tenant-prefix certificate ceiling, so
+    /// the application authority can only narrow certificate rights.
+    ///
+    /// Startup remains fail-closed until rvoip pins a reviewed relay revision
+    /// with continuous expiry-bearing publisher-lease revalidation.
+    PublisherMutualTlsDynamic {
+        admission: Arc<RvoipMoqPublisherAdmission>,
+    },
     /// Subscribe-only raw-QUIC listener for a downstream relay.
     ///
     /// This role is intentionally separate from publisher mTLS. Its admitted
@@ -235,7 +255,9 @@ pub enum MoqRelayRuntimeSecurity {
 impl MoqRelayRuntimeSecurity {
     pub const fn listener_kind(&self) -> MoqRelayListenerKind {
         match self {
-            Self::PublisherMutualTls { .. } => MoqRelayListenerKind::PublisherMutualTls,
+            Self::PublisherMutualTls { .. } | Self::PublisherMutualTlsDynamic { .. } => {
+                MoqRelayListenerKind::PublisherMutualTls
+            }
             Self::RelaySubscriberMutualTls { .. } => MoqRelayListenerKind::RelaySubscriberMutualTls,
             Self::SubscriberWebTransport { .. } => MoqRelayListenerKind::SubscriberWebTransport,
             Self::SubscriberRawQuic { .. } => MoqRelayListenerKind::SubscriberRawQuic,
@@ -257,6 +279,9 @@ impl std::fmt::Debug for MoqRelayRuntimeSecurity {
                     max_active_sessions_per_certificate,
                 )
                 .finish(),
+            Self::PublisherMutualTlsDynamic { .. } => {
+                formatter.write_str("PublisherMutualTlsDynamic { admission: <redacted> }")
+            }
             Self::RelaySubscriberMutualTls {
                 bindings,
                 max_active_sessions_per_certificate,
@@ -788,6 +813,7 @@ impl MoqRelayRuntime {
         if matches!(
             &config.security,
             MoqRelayRuntimeSecurity::PublisherMutualTls { .. }
+                | MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic { .. }
         ) && (topology.coordinator.advertised_endpoint != config.advertised_endpoint
             || topology.coordinator.advertised_socket_addr != config.advertised_socket_addr)
         {
@@ -1175,6 +1201,18 @@ fn validate_config(config: &MoqRelayRuntimeConfig) -> Result<(), MoqRelayRuntime
                 ));
             }
         }
+        MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic { .. } => {
+            if !EXPIRING_PUBLISHER_LEASE_REVALIDATION_SUPPORTED {
+                return Err(MoqRelayRuntimeError::InvalidConfig(
+                    "dynamic publisher admission requires a reviewed relay revision with expiring publisher lease revalidation",
+                ));
+            }
+            if config.tls.publisher_client_ca_certificates.is_empty() {
+                return Err(MoqRelayRuntimeError::InvalidConfig(
+                    "dynamic publisher mTLS requires at least one explicit client CA",
+                ));
+            }
+        }
         MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
             bindings,
             max_active_sessions_per_certificate,
@@ -1239,6 +1277,7 @@ fn load_tls(
 ) -> Result<moq_native_ietf::tls::Config, MoqRelayRuntimeError> {
     let client_auth = match config.security {
         MoqRelayRuntimeSecurity::PublisherMutualTls { .. }
+        | MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic { .. }
         | MoqRelayRuntimeSecurity::RelaySubscriberMutualTls { .. } => {
             moq_native_ietf::tls::ClientAuthMode::Required
         }
@@ -1279,6 +1318,10 @@ fn admission_for(
             .map_err(|_| MoqRelayRuntimeError::InvalidConfig("invalid publisher mTLS binding"))?;
             Ok((ListenerSecurityPolicy::MutualTlsPublisher, admission))
         }
+        MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic { admission } => Ok((
+            ListenerSecurityPolicy::MutualTlsPublisher,
+            admission.clone(),
+        )),
         MoqRelayRuntimeSecurity::RelaySubscriberMutualTls {
             bindings,
             max_active_sessions_per_certificate,
@@ -1972,6 +2015,41 @@ impl Coordinator for LocalCoordinator {
 mod tests {
     use super::*;
 
+    struct DenyPublisherAuthority;
+
+    #[async_trait]
+    impl crate::MoqPublisherPublicationAuthority for DenyPublisherAuthority {
+        async fn active_publication(
+            &self,
+            _request: &crate::MoqPublisherPublicationRequest,
+            _now: chrono::DateTime<chrono::Utc>,
+        ) -> Result<
+            Option<crate::MoqPublisherPublicationGrant>,
+            crate::MoqPublisherPublicationAuthorityError,
+        > {
+            Ok(None)
+        }
+    }
+
+    fn dynamic_publisher_security() -> MoqRelayRuntimeSecurity {
+        MoqRelayRuntimeSecurity::PublisherMutualTlsDynamic {
+            admission: Arc::new(
+                crate::RvoipMoqPublisherAdmission::new(
+                    [crate::MoqPublisherCertificateBinding {
+                        certificate_sha256: "ab".repeat(32),
+                        namespace_ceiling: crate::MoqPublisherNamespaceCeiling::tenant_prefix(
+                            "tenant",
+                        )
+                        .unwrap(),
+                    }],
+                    Arc::new(DenyPublisherAuthority),
+                    crate::MoqPublisherAdmissionConfig::new(Duration::from_secs(1), 2).unwrap(),
+                )
+                .unwrap(),
+            ),
+        }
+    }
+
     struct TestFiles {
         directory: PathBuf,
         certificate: PathBuf,
@@ -2300,8 +2378,10 @@ mod tests {
             bindings: vec![binding],
             max_active_sessions_per_certificate: 2,
         };
+        let dynamic_publisher = dynamic_publisher_security();
 
         let (publisher_policy, _) = admission_for(&publisher).unwrap();
+        let (dynamic_publisher_policy, _) = admission_for(&dynamic_publisher).unwrap();
         let (relay_policy, _) = admission_for(&relay_subscriber).unwrap();
         assert_eq!(
             publisher.listener_kind(),
@@ -2313,10 +2393,40 @@ mod tests {
         );
         assert_eq!(publisher_policy, ListenerSecurityPolicy::MutualTlsPublisher);
         assert_eq!(
+            dynamic_publisher.listener_kind(),
+            MoqRelayListenerKind::PublisherMutualTls
+        );
+        assert_eq!(
+            dynamic_publisher_policy,
+            ListenerSecurityPolicy::MutualTlsPublisher
+        );
+        assert_eq!(
             relay_policy,
             ListenerSecurityPolicy::MutualTlsRelaySubscriber
         );
         assert_ne!(publisher_policy, relay_policy);
+    }
+
+    #[test]
+    fn dynamic_publisher_runtime_refuses_unreviewed_relay_engine() {
+        let files = TestFiles::new();
+        let config = MoqRelayRuntimeConfig {
+            deployment: MoqRelayDeploymentMode::Standalone,
+            bind: "127.0.0.1:0".parse().unwrap(),
+            advertised_endpoint: Url::parse("moqt://localhost:4444").unwrap(),
+            advertised_socket_addr: None,
+            tls: files.tls(),
+            security: dynamic_publisher_security(),
+            limits: MoqRelayRuntimeLimits::default(),
+            timeouts: MoqRelayRuntimeTimeouts::default(),
+        };
+
+        assert_eq!(
+            validate_config(&config),
+            Err(MoqRelayRuntimeError::InvalidConfig(
+                "dynamic publisher admission requires a reviewed relay revision with expiring publisher lease revalidation",
+            ))
+        );
     }
 
     #[tokio::test]

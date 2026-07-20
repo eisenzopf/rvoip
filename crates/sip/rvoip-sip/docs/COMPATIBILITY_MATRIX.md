@@ -44,7 +44,7 @@ revision `865430d4`.
 | REGISTER | Supported | Supported | Supported | Interop tested | `registration_test.rs`, `register_423_retry.rs`, PBX registration rows. |
 | OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. |
 | re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
-| UPDATE | Supported | Supported | Supported | Supported | Update send tests and glare/session-timer coverage. |
+| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
 | REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |

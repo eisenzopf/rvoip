@@ -18,7 +18,10 @@ bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 rvoip-infra-common.workspace = true
-rvoip-media-core.workspace = true
+# `MediaGraph` provides production G.711 <-> Opus transcoding directly, so
+# Opus cannot depend on a downstream crate accidentally unifying an optional
+# feature. Keep the codec available whenever core's media graph is available.
+rvoip-media-core = { workspace = true, features = ["opus"] }
 # V2.A — the pure-type/trait surface that consumer crates depend on.
 # rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
 # and `use rvoip_core::identity::*` call sites keep working unchanged.
@@ -57,7 +60,6 @@ rvoip-webrtc = { path = "../../webrtc/rvoip-webrtc" }
 rvoip-quic = { path = "../../uctp/rvoip-quic" }
 rvoip-uctp = { path = "../../uctp/rvoip-uctp" }
 rvoip-auth-core.workspace = true
-rvoip-media-core = { workspace = true, features = ["opus"] }
 quinn = { workspace = true }
 rustls = { workspace = true }
 parking_lot = { workspace = true }

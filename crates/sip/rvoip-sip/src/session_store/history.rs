@@ -509,7 +509,12 @@ impl SessionHistory {
     /// Create new session history
     pub fn new(config: HistoryConfig) -> Self {
         Self {
-            transitions: VecDeque::with_capacity(config.max_transitions),
+            // The configured limit is a logical retention bound, not a
+            // startup reservation. A default 50-record reservation is large
+            // enough to enter mimalloc's 14 KiB size class, and every SIP
+            // session used to allocate one even when it retained only a few
+            // transitions. Let the deque grow with observed history instead.
+            transitions: VecDeque::new(),
             config,
             next_sequence: 0,
             total_transitions: 0,
@@ -686,6 +691,11 @@ mod tests {
         };
 
         let mut history = SessionHistory::new(config);
+        assert_eq!(
+            history.transitions.capacity(),
+            0,
+            "the transition retention limit must not be eagerly reserved"
+        );
 
         // Add 5 transitions to a buffer with max 3
         for i in 0..5 {

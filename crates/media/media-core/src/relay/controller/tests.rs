@@ -9,7 +9,9 @@ mod tests {
     use bytes::Bytes;
     use rvoip_rtp_core::packet::RtpPacket;
     use rvoip_rtp_core::session::RtpSessionEvent;
-    use rvoip_rtp_core::transport::AllocationStrategy;
+    use rvoip_rtp_core::transport::{
+        AllocationStrategy, PairingStrategy, PortAllocator, PortAllocatorConfig,
+    };
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
     use std::sync::Arc;
@@ -42,6 +44,46 @@ mod tests {
         // Check session is removed
         let session_info = controller.get_session_info(&DialogId::new("dialog1")).await;
         assert!(session_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_start_releases_reserved_port_for_reuse() {
+        let allocator = Arc::new(PortAllocator::with_config(PortAllocatorConfig {
+            port_range_start: 15_500,
+            port_range_end: 15_500,
+            allocation_strategy: AllocationStrategy::Incremental,
+            pairing_strategy: PairingStrategy::Muxed,
+            prefer_port_reuse: false,
+            default_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            allocation_retries: 1,
+            validate_ports: false,
+            capacity_hint: 1,
+        }));
+        let session_id = "cancelled-dialog".to_string();
+        allocator
+            .allocate_port_pair(&session_id, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .expect("reserve sole port");
+        assert_eq!(allocator.allocated_count().await, 1);
+
+        // Dropping this armed guard is the exact path taken when the
+        // start_media future is cancelled before map commit.
+        drop(MediaPortReservationGuard::new(
+            allocator.clone(),
+            session_id,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while allocator.allocated_count().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation cleanup timeout");
+
+        allocator
+            .allocate_port_pair("replacement-dialog", Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .expect("released sole port should be reusable");
     }
 
     #[tokio::test]
@@ -111,6 +153,42 @@ mod tests {
             .await
             .expect("dtmf receiver should close");
         assert!(closed.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_dialog_cleanup_cannot_remove_rebound_session_mapping() {
+        let controller = MediaSessionController::new();
+        let old_dialog = DialogId::new("rebound-old-dialog");
+        let new_dialog = DialogId::new("rebound-new-dialog");
+        let session_id = "reused-session".to_string();
+        let old_media = MediaSessionId::from_dialog(&old_dialog);
+        let new_media = MediaSessionId::from_dialog(&new_dialog);
+
+        // Preserve the old reverse entry to model delayed cleanup while the
+        // application-facing forward key has already been rebound.
+        controller.store_session_mapping(session_id.clone(), old_media.clone());
+        controller.store_session_mapping(session_id.clone(), new_media.clone());
+        assert_eq!(
+            controller.get_media_id(&session_id),
+            Some(new_media.clone())
+        );
+        assert_eq!(
+            controller.get_session_id(&old_media),
+            Some(session_id.clone())
+        );
+
+        controller
+            .stop_media(&old_dialog)
+            .await
+            .expect("stale stop remains idempotent");
+
+        assert_eq!(
+            controller.get_media_id(&session_id),
+            Some(new_media.clone()),
+            "old dialog cleanup must not remove the newer forward binding"
+        );
+        assert_eq!(controller.get_session_id(&new_media), Some(session_id));
+        assert_eq!(controller.get_session_id(&old_media), None);
     }
 
     #[tokio::test]

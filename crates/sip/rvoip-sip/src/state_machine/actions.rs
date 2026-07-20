@@ -1,4 +1,6 @@
 use crate::adapters::dialog_adapter::RegisterAttemptOutcome;
+use crate::adapters::outbound_request_tracker::{TrackedInDialogMethod, TrackedInDialogOptions};
+use crate::state_machine::executor::{PendingOptionsSlot, StageDispatchClaim};
 use crate::state_table::types::{EventType, SessionId};
 use rvoip_sip_core::types::{HeaderName, TypedHeader};
 use std::fmt;
@@ -14,6 +16,17 @@ use crate::{
 };
 
 const SIP_RESPONSE_DISPATCH_JOIN_FAILURE: &str = "SIP response dispatch task failed (class=join)";
+const DIALOG_CLEANUP_JOIN_FAILURE: &str = "SIP dialog cleanup task failed (class=join)";
+
+fn negotiated_audio_shape(codec: &str) -> (u32, u8) {
+    if codec.eq_ignore_ascii_case("opus") {
+        // The SIP SDP profile advertises `opus/48000/2`; preserve that exact
+        // negotiated clock/channel shape in durable session state.
+        (48_000, 2)
+    } else {
+        (8_000, 1)
+    }
+}
 
 /// Owns a spawned SIP response task and cancels it unless it has been joined.
 ///
@@ -84,6 +97,18 @@ async fn send_sip_response_on_fresh_task(
     join_sip_response_task(task).await
 }
 
+async fn cleanup_dialog_on_fresh_task(
+    dialog_adapter: Arc<DialogAdapter>,
+    session_id: SessionId,
+) -> crate::errors::Result<()> {
+    let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
+        dialog_adapter.cleanup_session(&session_id).await
+    }));
+    task.join().await.map_err(|_| {
+        crate::errors::SessionError::InternalError(DIALOG_CLEANUP_JOIN_FAILURE.to_string())
+    })?
+}
+
 /// Result of a state-table action.
 ///
 /// Actions may enqueue internal follow-up events, but they must not call
@@ -107,6 +132,80 @@ enum RegisterActionMode {
     Register,
     RegisterWithAuth,
     Unregister,
+}
+
+/// Narrow copy of fields that dialog-side REGISTER processing may mutate
+/// while an action awaits the wire response.
+///
+/// The executor owns an event-local `SessionState`, while `DialogAdapter`
+/// atomically advances registration identity, digest nonce-count, transport,
+/// and outcome fields in the store.  Reloading the complete session after
+/// every attempt cloned all call/media/SDP/history state.  This projection
+/// keeps the two views coherent without paying that unrelated cost.
+struct RegistrationStateProjection {
+    registration_expires: Option<u32>,
+    registration_call_id: Option<String>,
+    registration_cseq: u32,
+    registration_accepted_expires: Option<u32>,
+    registration_registered_at: Option<std::time::Instant>,
+    registration_next_refresh_at: Option<std::time::Instant>,
+    registration_last_failure: Option<String>,
+    registration_service_route: Option<Vec<String>>,
+    registration_pub_gruu: Option<String>,
+    registration_temp_gruu: Option<String>,
+    is_registered: bool,
+    registration_retry_count: u32,
+    pending_auth_transport: Option<crate::auth::SipTransportSecurityContext>,
+    digest_nc: std::collections::HashMap<(String, String), u32>,
+}
+
+impl RegistrationStateProjection {
+    fn capture(session: &SessionState) -> Self {
+        Self {
+            registration_expires: session.registration_expires,
+            registration_call_id: session.registration_call_id.clone(),
+            registration_cseq: session.registration_cseq,
+            registration_accepted_expires: session.registration_accepted_expires,
+            registration_registered_at: session.registration_registered_at,
+            registration_next_refresh_at: session.registration_next_refresh_at,
+            registration_last_failure: session.registration_last_failure.clone(),
+            registration_service_route: session.registration_service_route.clone(),
+            registration_pub_gruu: session.registration_pub_gruu.clone(),
+            registration_temp_gruu: session.registration_temp_gruu.clone(),
+            is_registered: session.is_registered,
+            registration_retry_count: session.registration_retry_count,
+            pending_auth_transport: session.pending_auth_transport.clone(),
+            digest_nc: session.digest_nc.clone(),
+        }
+    }
+
+    fn apply(self, session: &mut SessionState) {
+        session.registration_expires = self.registration_expires;
+        session.registration_call_id = self.registration_call_id;
+        session.registration_cseq = self.registration_cseq;
+        session.registration_accepted_expires = self.registration_accepted_expires;
+        session.registration_registered_at = self.registration_registered_at;
+        session.registration_next_refresh_at = self.registration_next_refresh_at;
+        session.registration_last_failure = self.registration_last_failure;
+        session.registration_service_route = self.registration_service_route;
+        session.registration_pub_gruu = self.registration_pub_gruu;
+        session.registration_temp_gruu = self.registration_temp_gruu;
+        session.is_registered = self.is_registered;
+        session.registration_retry_count = self.registration_retry_count;
+        session.pending_auth_transport = self.pending_auth_transport;
+        session.digest_nc = self.digest_nc;
+    }
+}
+
+fn sync_registration_state(
+    store: &SessionStore,
+    session_id: &SessionId,
+    session: &mut SessionState,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    store
+        .with_session(session_id, RegistrationStateProjection::capture)?
+        .apply(session);
+    Ok(())
 }
 
 /// Redacted validation error for SIP-owned INVITE option materialization.
@@ -242,7 +341,7 @@ async fn execute_register_action(
                         metadata,
                     )
                     .await?;
-                *session = session_store.get_session(&session_id).await?;
+                sync_registration_state(session_store, &session_id, session)?;
                 return Ok(ActionOutcome::with_event(EventType::Registration200OK));
             }
             RegisterAttemptOutcome::Unregistered => {
@@ -250,7 +349,7 @@ async fn execute_register_action(
                     dialog_adapter
                         .apply_unregistration_success(&session_id, &registrar_uri)
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
                 }
 
@@ -262,7 +361,7 @@ async fn execute_register_action(
                         "REGISTER returned an unregistration success while registering",
                     )
                     .await?;
-                *session = session_store.get_session(&session_id).await?;
+                sync_registration_state(session_store, &session_id, session)?;
                 return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                     200,
                 )));
@@ -284,20 +383,20 @@ async fn execute_register_action(
                             ),
                         )
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
                 }
 
-                let retry_count = session_store
-                    .get_session(&session_id)
-                    .await?
-                    .registration_retry_count;
-                let previous_nonce = session_store
-                    .get_session(&session_id)
-                    .await?
-                    .auth_challenge
-                    .as_ref()
-                    .map(|challenge| challenge.nonce.clone());
+                let (retry_count, previous_nonce) =
+                    session_store.with_session(&session_id, |latest| {
+                        (
+                            latest.registration_retry_count,
+                            latest
+                                .auth_challenge
+                                .as_ref()
+                                .map(|challenge| challenge.nonce.clone()),
+                        )
+                    })?;
                 let stale_recovery = retry_count == 1
                     && challenge_details
                         .as_ref()
@@ -320,16 +419,20 @@ async fn execute_register_action(
                             "REGISTER authentication failed",
                         )
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                         status_code,
                     )));
                 }
 
-                let mut latest = session_store.get_session(&session_id).await?;
-                latest.registration_retry_count += 1;
-                session_store.update_session(latest.clone()).await?;
-                *session = latest;
+                let retry_count = session_store
+                    .update_session_with(&session_id, |latest| {
+                        latest.registration_retry_count += 1;
+                        latest.registration_retry_count
+                    })
+                    .await?;
+                sync_registration_state(session_store, &session_id, session)?;
+                session.registration_retry_count = retry_count;
                 return Ok(ActionOutcome::with_event(EventType::AuthRequired {
                     status_code,
                     challenge,
@@ -348,15 +451,16 @@ async fn execute_register_action(
                             ),
                         )
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
                 }
 
-                let latest = session_store.get_session(&session_id).await?;
-                if latest.registration_retry_count >= 2 {
+                let retry_count = session_store
+                    .with_session(&session_id, |latest| latest.registration_retry_count)?;
+                if retry_count >= 2 {
                     tracing::error!(
                         "❌ Registration failed with repeated 423 — giving up (retry count {})",
-                        latest.registration_retry_count
+                        retry_count
                     );
                     dialog_adapter
                         .apply_registration_failure(
@@ -366,7 +470,7 @@ async fn execute_register_action(
                             "Registration failed with repeated 423 Interval Too Brief responses",
                         )
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                         423,
                     )));
@@ -376,11 +480,15 @@ async fn execute_register_action(
                     "🔄 423 Interval Too Brief — retrying REGISTER with Expires={} (server required min)",
                     min_expires
                 );
-                let mut latest = latest;
-                latest.registration_expires = Some(min_expires);
-                latest.registration_retry_count += 1;
-                session_store.update_session(latest.clone()).await?;
-                *session = latest;
+                let (retry_count, registration_expires) = session_store
+                    .update_session_with(&session_id, |latest| {
+                        latest.registration_expires = Some(min_expires);
+                        latest.registration_retry_count += 1;
+                        (latest.registration_retry_count, latest.registration_expires)
+                    })
+                    .await?;
+                session.registration_retry_count = retry_count;
+                session.registration_expires = registration_expires;
                 expires = min_expires;
             }
             RegisterAttemptOutcome::Failure {
@@ -395,14 +503,14 @@ async fn execute_register_action(
                             format!("{} (status {})", reason, status_code),
                         )
                         .await?;
-                    *session = session_store.get_session(&session_id).await?;
+                    sync_registration_state(session_store, &session_id, session)?;
                     return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
                 }
 
                 dialog_adapter
                     .apply_registration_failure(&session_id, &registrar_uri, status_code, reason)
                     .await?;
-                *session = session_store.get_session(&session_id).await?;
+                sync_registration_state(session_store, &session_id, session)?;
                 return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                     status_code,
                 )));
@@ -556,14 +664,114 @@ pub(crate) fn materialize_invite_options(
 }
 
 /// Execute an action from the state table
+async fn claim_tracked_request_staging(
+    session: &mut SessionState,
+    session_store: &SessionStore,
+    method: TrackedInDialogMethod,
+    dispatch_claim: Option<&StageDispatchClaim>,
+) -> crate::errors::Result<TrackedInDialogOptions> {
+    let fallback_slot = match method {
+        TrackedInDialogMethod::Refer => session
+            .pending_refer_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Refer(Arc::clone(options))),
+        TrackedInDialogMethod::Notify => session
+            .pending_notify_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Notify(Arc::clone(options))),
+        TrackedInDialogMethod::Info => session
+            .pending_info_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Info(Arc::clone(options))),
+        TrackedInDialogMethod::Update => session
+            .pending_update_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Update(Arc::clone(options))),
+    };
+    let fallback_claim = fallback_slot.map(StageDispatchClaim::new);
+    let claim = dispatch_claim.or(fallback_claim.as_ref()).ok_or_else(|| {
+        crate::errors::SessionError::InvalidTransition(format!(
+            "outbound {} dispatch requires exact staged options",
+            method.as_sip_method()
+        ))
+    })?;
+    if claim.method() != method.as_sip_method() {
+        return Err(crate::errors::SessionError::InvalidTransition(format!(
+            "outbound {} dispatch received a mismatched stage claim",
+            method.as_sip_method()
+        )));
+    }
+
+    let claimed = session_store
+        .update_session_with(&session.session_id, |stored| claim.claim_exact(stored))
+        .await
+        .map_err(|_| {
+            crate::errors::SessionError::InternalError(
+                "failed to atomically claim outbound request staging".to_string(),
+            )
+        })??;
+    claimed.clear_if_exact(session);
+
+    match (method, claimed) {
+        (TrackedInDialogMethod::Refer, PendingOptionsSlot::Refer(options)) => {
+            Ok(TrackedInDialogOptions::Refer(options))
+        }
+        (TrackedInDialogMethod::Notify, PendingOptionsSlot::Notify(options)) => {
+            Ok(TrackedInDialogOptions::Notify(options))
+        }
+        (TrackedInDialogMethod::Info, PendingOptionsSlot::Info(options)) => {
+            Ok(TrackedInDialogOptions::Info(options))
+        }
+        (TrackedInDialogMethod::Update, PendingOptionsSlot::Update(options)) => {
+            Ok(TrackedInDialogOptions::Update(options))
+        }
+        _ => Err(crate::errors::SessionError::InvalidTransition(
+            "outbound request stage claim changed method".to_string(),
+        )),
+    }
+}
+
+async fn advance_tracked_auth_owner(
+    session: &mut SessionState,
+    session_store: &SessionStore,
+    method: TrackedInDialogMethod,
+    challenged_transaction: &rvoip_sip_dialog::transaction::TransactionKey,
+    retry_transaction: &rvoip_sip_dialog::transaction::TransactionKey,
+    request_uri: &str,
+) {
+    let challenged_id = challenged_transaction.to_string();
+    let retry_id = retry_transaction.to_string();
+    let method_name = method.as_sip_method().to_string();
+
+    session.pending_auth_transaction_id = Some(retry_id.clone());
+    session.pending_auth_request_uri = Some(request_uri.to_string());
+    session.pending_auth_method = Some(method_name.clone());
+
+    // Do not overwrite a concurrently recorded challenge for another exact
+    // request. The retry is already on the wire, so its tracker entry remains
+    // authoritative; this compatibility projection advances only while it
+    // still owns the challenged transaction.
+    let _ = session_store
+        .update_session_with(&session.session_id, |stored| {
+            if stored.pending_auth_transaction_id.as_deref() == Some(challenged_id.as_str()) {
+                stored.pending_auth_transaction_id = Some(retry_id);
+                stored.pending_auth_request_uri = Some(request_uri.to_string());
+                stored.pending_auth_method = Some(method_name);
+            }
+        })
+        .await;
+}
+
 pub(crate) async fn execute_action(
     action: &Action,
+    triggering_event: &EventType,
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
     session_store: &Arc<SessionStore>,
     auto_180_ringing: bool,
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
+    stage_claim: Option<&StageDispatchClaim>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
 
@@ -635,7 +843,11 @@ pub(crate) async fn execute_action(
             // Persist before SendINVITE. A fast 401/407 can re-enter the
             // state machine while SendINVITE is still awaiting, and the auth
             // retry needs the original SDP offer from the store.
-            session_store.update_session(session.clone()).await?;
+            session_store
+                .update_session_with(&session.session_id, |stored| {
+                    stored.local_sdp = session.local_sdp.clone();
+                })
+                .await?;
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session.session_id,
@@ -845,7 +1057,7 @@ pub(crate) async fn execute_action(
             {
                 // Convert RvoipDialogId to our DialogId type
                 let dialog_id: crate::types::DialogId = real_dialog_id.value().clone().into();
-                session.dialog_id = Some(dialog_id.clone());
+                session.dialog_id = Some(dialog_id);
                 info!("INVITE sent successfully with dialog ID {:?}", dialog_id);
             } else {
                 warn!("Failed to get dialog ID after sending INVITE");
@@ -1014,46 +1226,54 @@ pub(crate) async fn execute_action(
             );
         }
         Action::SendBYE => {
-            // SIP_API_DESIGN_2 §7.4 — application-staged
-            // `pending_bye_options` (from `coord.bye(..).send()`) wins
-            // over the auto-emit headers; when the stash is empty we
-            // fall back to `Config.auto_emit_extra_headers` (operators
-            // use it to stamp tenant identifiers / trace headers onto
-            // every teardown the stack initiates).
+            // Materialize one immutable BYE snapshot before the first wire
+            // write. The state transition has already published Terminating,
+            // so a fast 401/407 can re-enter the state machine immediately;
+            // persist the snapshot first so that retry observes the exact
+            // headers/reason used by this generation.
             let reason = session.pending_bye_reason.take();
-
-            if let Some(opts_arc) = session.pending_bye_options.take() {
-                // Stash wins — extras already validated at the
-                // DialogAdapter mirror boundary when the builder
-                // dispatched.
-                let opts = (*opts_arc).clone();
-                dialog_adapter
-                    .send_bye_with_options(&session.session_id, opts)
-                    .await?;
+            let snapshot = if let Some(opts) = session.pending_bye_options.as_ref() {
+                (**opts).clone()
             } else {
-                let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
-                if auto_extras.is_empty() {
-                    // Preserve the legacy fast path so the existing flat
-                    // helpers stay observable as the canonical entries.
-                    if let Some((protocol, cause, text)) = reason {
-                        let reason =
-                            rvoip_sip_core::types::reason::Reason::new(protocol, cause, text);
-                        dialog_adapter
-                            .send_bye_session_with_reason(&session.session_id, reason)
-                            .await?;
-                    } else {
-                        dialog_adapter.send_bye_session(&session.session_id).await?;
-                    }
-                } else {
-                    let opts = rvoip_sip_dialog::api::unified::ByeRequestOptions {
-                        reason: reason.and_then(|(_p, _c, text)| text),
-                        extra_headers: auto_extras,
-                    };
-                    dialog_adapter
-                        .send_bye_with_options(&session.session_id, opts)
-                        .await?;
+                let mut extra_headers = dialog_adapter.auto_emit_extra_headers.clone();
+                if let Some((protocol, cause, text)) = reason {
+                    extra_headers.push(TypedHeader::Reason(
+                        rvoip_sip_core::types::reason::Reason::new(protocol, cause, text),
+                    ));
                 }
+                let materialized = Arc::new(rvoip_sip_dialog::api::unified::ByeRequestOptions {
+                    reason: None,
+                    extra_headers,
+                });
+                // If a builder raced legacy hangup before Terminating became
+                // visible, its already-staged immutable snapshot wins rather
+                // than being overwritten by automatic options.
+                let retained = session_store
+                    .update_session_with(&session.session_id, |stored| {
+                        stored
+                            .pending_bye_options
+                            .get_or_insert_with(|| Arc::clone(&materialized))
+                            .clone()
+                    })
+                    .await?;
+                session.pending_bye_options = Some(Arc::clone(&retained));
+                (*retained).clone()
+            };
+            if let Err(error) = dialog_adapter
+                .send_bye_with_options(&session.session_id, snapshot)
+                .await
+            {
+                // An immediate zero-wire failure has no exact final-response
+                // owner to release the retained builder slot.
+                session.pending_bye_options = None;
+                let _ = session_store
+                    .update_session_with(&session.session_id, |stored| {
+                        stored.pending_bye_options = None;
+                    })
+                    .await;
+                return Err(error.into());
             }
+            // Retain through 401/407 and release with exact BYE finalization.
         }
         // Action::SendCANCEL deleted per SIP_API_DESIGN_2.md Phase 5 —
         // consolidated into Action::SendCANCELWithOptions which honors
@@ -1146,12 +1366,13 @@ pub(crate) async fn execute_action(
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
+                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate: 8000, // Default for PCMU
-                    channels: 1,
+                    sample_rate,
+                    channels,
                 };
                 session.negotiated_config = Some(session_config);
                 session.local_media_direction = config.local_direction;
@@ -1179,12 +1400,13 @@ pub(crate) async fn execute_action(
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
+                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate: 8000, // Default for PCMU
-                    channels: 1,
+                    sample_rate,
+                    channels,
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
@@ -1207,12 +1429,13 @@ pub(crate) async fn execute_action(
                 let (local_sdp, config) = media_adapter
                     .negotiate_sdp_as_uas(&session.session_id, &remote_sdp)
                     .await?;
+                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate: 8000,
-                    channels: 1,
+                    sample_rate,
+                    channels,
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
@@ -1335,7 +1558,10 @@ pub(crate) async fn execute_action(
             // handler's `ScheduleReinviteRetry` reads `pending_reinvite` from
             // the store to know what kind of re-INVITE to reissue.
             session_store
-                .update_session(session.clone())
+                .update_session_with(&session.session_id, |stored| {
+                    stored.local_sdp = session.local_sdp.clone();
+                    stored.pending_reinvite = session.pending_reinvite.clone();
+                })
                 .await
                 .map_err(|e| format!("persist pending_reinvite failed: {}", e))?;
             debug!(
@@ -1723,14 +1949,14 @@ pub(crate) async fn execute_action(
             // already populated session.auth_challenge directly (Phase 2 will
             // remove that path). If pending_auth is None and auth_challenge is
             // already set, treat this action as a no-op.
-            if let Some((_, ref challenge_str)) = session.pending_auth {
+            if let Some((_, challenge_str)) = session.pending_auth.clone() {
                 let previous_nonce = session
                     .auth_challenge
                     .as_ref()
                     .map(|challenge| challenge.nonce.clone());
                 session.auth_challenge_raw = Some(challenge_str.clone());
                 if let Ok(parsed) =
-                    rvoip_auth_core::DigestAuthenticator::parse_challenge_details(challenge_str)
+                    rvoip_auth_core::DigestAuthenticator::parse_challenge_details(&challenge_str)
                 {
                     info!(
                         "Stored digest auth challenge for session {} (realm_present={}, realm_bytes={}, nonce_present={}, nonce_bytes={})",
@@ -1755,9 +1981,19 @@ pub(crate) async fn execute_action(
                 // Persist so the next action — `SendREGISTERWithAuth` or
                 // `SendINVITEWithAuth` — sees the challenge when it re-reads
                 // the session from the store inside the dialog adapter.
-                // Actions share a mutable local `session` but the adapter
-                // calls `store.get_session` which reads the persisted copy.
-                session_store.update_session(session.clone()).await?;
+                // Actions share a mutable local `session`, while the adapter
+                // reads the persisted exact cell. Publish only the fields
+                // this action owns so concurrent transport/session metadata
+                // is not replaced by a stale full-session clone.
+                session_store
+                    .update_session_with(&session.session_id, |stored| {
+                        stored.auth_challenge_raw = session.auth_challenge_raw.clone();
+                        stored.auth_challenge_stale = session.auth_challenge_stale;
+                        stored.auth_challenge_replaces_nonce =
+                            session.auth_challenge_replaces_nonce.clone();
+                        stored.auth_challenge = session.auth_challenge.clone();
+                    })
+                    .await?;
             } else if session.auth_challenge.is_some() {
                 debug!("Auth challenge already stored (legacy path); continuing");
             } else {
@@ -1908,6 +2144,7 @@ pub(crate) async fn execute_action(
                 let credential = InviteAuthorizationCredential {
                     kind: credential_kind,
                     protection_target,
+                    challenge_raw: challenge_raw.clone(),
                     realm,
                     nonce: challenge_nonce,
                     stale_refreshes,
@@ -2025,21 +2262,67 @@ pub(crate) async fn execute_action(
                     .unwrap_or("unset")
             );
             const CAP: u8 = 1;
+            // Resolve exact method ownership before evaluating the retry
+            // budget. INFO/REFER/NOTIFY/UPDATE carry an independent budget in
+            // their tracker entry; BYE and legacy OOB methods retain the
+            // compatibility session-level counter.
+            let method = resolve_auth_method(session);
+            let tracked_method = TrackedInDialogMethod::from_label(&method);
+            let challenged_transaction = if tracked_method.is_some() {
+                let transaction_id = session.pending_auth_transaction_id.as_deref().ok_or_else(
+                    || {
+                        crate::errors::SessionError::InvalidTransition(format!(
+                            "SendRequestWithAuth({method}): exact challenged transaction is unavailable"
+                        ))
+                    },
+                )?;
+                Some(
+                    transaction_id
+                        .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+                        .map_err(|_| {
+                            crate::errors::SessionError::InvalidTransition(format!(
+                                "SendRequestWithAuth({method}): challenged transaction is invalid"
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            };
+            let (retry_count, tracked_last_nonce) =
+                if let (Some(tracked_method), Some(transaction)) =
+                    (tracked_method, challenged_transaction.as_ref())
+                {
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .auth_retry_state_for_transaction(
+                            &session.session_id,
+                            tracked_method,
+                            transaction,
+                        )?
+                } else {
+                    (session.request_auth_retry_count, None)
+                };
+            let replaces_nonce = if tracked_method.is_some() {
+                tracked_last_nonce.as_deref()
+            } else {
+                session.auth_challenge_replaces_nonce.as_deref()
+            };
             if !auth_retry_allowed(
-                session.request_auth_retry_count,
+                retry_count,
                 CAP,
                 session.auth_challenge.as_ref(),
                 session.auth_challenge_stale,
-                session.auth_challenge_replaces_nonce.as_deref(),
+                replaces_nonce,
             ) {
-                let method = resolve_auth_method(session);
                 return Err(Box::new(
                     crate::errors::SessionError::RequestAuthRetryExhausted {
                         method: auth_method_for_error(&method),
                     },
                 ));
             }
-            session.request_auth_retry_count += 1;
+            if tracked_method.is_none() {
+                session.request_auth_retry_count += 1;
+            }
 
             let (status, challenge_raw) = session
                 .pending_auth
@@ -2057,19 +2340,12 @@ pub(crate) async fn execute_action(
                 .clone()
                 .or_else(|| session.credentials.clone().map(Into::into))
                 .ok_or_else(|| {
-                    let method = resolve_auth_method(session);
                     Box::new(
                         crate::errors::SessionError::MissingCredentialsForRequestAuth {
                             method: auth_method_for_error(&method),
                         },
                     ) as Box<dyn std::error::Error + Send + Sync>
                 })?;
-
-            // Resolve the method. Prefer the explicit field; fall back
-            // to inspecting which stash is set. The conflict guard
-            // guarantees at most one non-INVITE/non-REGISTER stash is
-            // populated per session.
-            let method = resolve_auth_method(session);
 
             session.pending_auth.take();
             let header_name = if status == 407 {
@@ -2078,16 +2354,25 @@ pub(crate) async fn execute_action(
                 "Authorization"
             };
 
-            // Method-specific request URI. In-dialog methods use the
-            // remote URI (= the remote target URI per RFC 3261); OOB
-            // methods (SUBSCRIBE, MESSAGE, OPTIONS) use the stash's
-            // explicit target.
-            let request_uri = resolve_auth_request_uri(session, &method).ok_or_else(|| {
-                format!(
-                    "SendRequestWithAuth: no request_uri for method {} on session {}",
-                    method, session.session_id
-                )
-            })?;
+            // Digest HA2 must use the exact challenged request URI. The typed
+            // dialog event supplies it for every tracked in-dialog request and
+            // BYE; never reconstruct those targets from mutable dialog/session
+            // metadata. OOB compatibility methods retain their target in the
+            // authoritative builder stash.
+            let request_uri = if tracked_method.is_some() || method == "BYE" {
+                session.pending_auth_request_uri.clone().ok_or_else(|| {
+                    crate::errors::SessionError::InvalidTransition(format!(
+                        "SendRequestWithAuth({method}): exact challenged request URI is unavailable"
+                    ))
+                })?
+            } else {
+                resolve_auth_request_uri(session, &method).ok_or_else(|| {
+                    format!(
+                        "SendRequestWithAuth: no request_uri for method {} on session {}",
+                        method, session.session_id
+                    )
+                })?
+            };
 
             // RFC 7616 §3.4.5 — per-(realm, nonce) NC counter.
             let digest_challenge_for_nc = session.auth_challenge.clone().or_else(|| {
@@ -2104,18 +2389,31 @@ pub(crate) async fn execute_action(
                 1
             };
 
-            // Most non-INVITE methods don't carry a body that's folded
-            // into HA2 under qop=auth-int. The exceptions are MESSAGE
-            // (which has a body) and re-INVITE (handled by the INVITE
-            // path). Pull the body from the stash for MESSAGE.
-            let body_bytes_owned: Option<Vec<u8>> = match method.as_str() {
-                "MESSAGE" => session
-                    .pending_message_options
-                    .as_ref()
-                    .map(|opts| opts.body.to_vec())
-                    .filter(|b| !b.is_empty()),
-                _ => None,
-            };
+            // RFC 7616 auth-int signs the exact challenged entity body. For
+            // tracked in-dialog requests read immutable INFO/NOTIFY/UPDATE
+            // bytes from the exact transaction-owned snapshot; never rebuild
+            // them from mutable SessionState. Legacy OOB MESSAGE retains its
+            // authoritative body in its compatibility stash.
+            let body_bytes_owned: Option<bytes::Bytes> =
+                if let (Some(tracked_method), Some(transaction)) =
+                    (tracked_method, challenged_transaction.as_ref())
+                {
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .request_body_for_transaction(
+                            &session.session_id,
+                            tracked_method,
+                            transaction,
+                        )?
+                } else {
+                    match method.as_str() {
+                        "MESSAGE" => session
+                            .pending_message_options
+                            .as_ref()
+                            .map(|options| options.body.clone()),
+                        _ => None,
+                    }
+                };
             let body_bytes_ref = body_bytes_owned.as_deref();
 
             let transport_context = session
@@ -2138,6 +2436,10 @@ pub(crate) async fn execute_action(
                     )
                 })?;
             let header_value = selected_auth.value;
+            let challenge_nonce = session
+                .auth_challenge
+                .as_ref()
+                .map(|challenge| challenge.nonce.clone());
             session.pending_auth_transport = None;
 
             // Dispatch per method. Each branch reads the matching
@@ -2149,70 +2451,172 @@ pub(crate) async fn execute_action(
                         .pending_bye_options
                         .as_ref()
                         .map(|a| (**a).clone())
-                        .unwrap_or_default();
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(BYE): no pending_bye_options for session {}",
+                                session.session_id
+                            )
+                        })?;
                     dialog_adapter
                         .send_bye_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "REFER" => {
-                    let opts = session
-                        .pending_refer_options
-                        .as_ref()
-                        .map(|a| (**a).clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "SendRequestWithAuth(REFER): no pending_refer_options for session {}",
-                                session.session_id
-                            )
-                        })?;
-                    dialog_adapter
-                        .send_refer_with_auth(&session.session_id, opts, header_name, header_value)
+                    let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
+                        crate::errors::SessionError::InvalidTransition(
+                            "SendRequestWithAuth(REFER): exact challenged transaction is unavailable"
+                                .to_string(),
+                        )
+                    })?;
+                    let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
+                        &session.session_id,
+                        TrackedInDialogMethod::Refer,
+                        challenged_transaction,
+                        challenge_nonce.clone(),
+                    )?;
+                    let TrackedInDialogOptions::Refer(options) = options else {
+                        return Err(
+                            "SendRequestWithAuth(REFER): tracker option type mismatch".into()
+                        );
+                    };
+                    let transaction_id = dialog_adapter
+                        .send_refer_with_auth(
+                            &session.session_id,
+                            (*options).clone(),
+                            header_name,
+                            header_value,
+                        )
                         .await?;
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .activate(lease, transaction_id.clone())?;
+                    advance_tracked_auth_owner(
+                        session,
+                        session_store,
+                        TrackedInDialogMethod::Refer,
+                        challenged_transaction,
+                        &transaction_id,
+                        &request_uri,
+                    )
+                    .await;
                 }
                 "NOTIFY" => {
-                    let opts = session
-                        .pending_notify_options
-                        .as_ref()
-                        .map(|a| (**a).clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "SendRequestWithAuth(NOTIFY): no pending_notify_options for session {}",
-                                session.session_id
-                            )
-                        })?;
-                    dialog_adapter
-                        .send_notify_with_auth(&session.session_id, opts, header_name, header_value)
+                    let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
+                        crate::errors::SessionError::InvalidTransition(
+                            "SendRequestWithAuth(NOTIFY): exact challenged transaction is unavailable"
+                                .to_string(),
+                        )
+                    })?;
+                    let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
+                        &session.session_id,
+                        TrackedInDialogMethod::Notify,
+                        challenged_transaction,
+                        challenge_nonce.clone(),
+                    )?;
+                    let TrackedInDialogOptions::Notify(options) = options else {
+                        return Err(
+                            "SendRequestWithAuth(NOTIFY): tracker option type mismatch".into()
+                        );
+                    };
+                    let transaction_id = dialog_adapter
+                        .send_notify_with_auth(
+                            &session.session_id,
+                            (*options).clone(),
+                            header_name,
+                            header_value,
+                        )
                         .await?;
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .activate(lease, transaction_id.clone())?;
+                    advance_tracked_auth_owner(
+                        session,
+                        session_store,
+                        TrackedInDialogMethod::Notify,
+                        challenged_transaction,
+                        &transaction_id,
+                        &request_uri,
+                    )
+                    .await;
                 }
                 "INFO" => {
-                    let opts = session
-                        .pending_info_options
-                        .as_ref()
-                        .map(|a| (**a).clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "SendRequestWithAuth(INFO): no pending_info_options for session {}",
-                                session.session_id
-                            )
+                    let challenged_transaction =
+                        challenged_transaction.as_ref().ok_or_else(|| {
+                            crate::errors::SessionError::InvalidTransition(
+                            "SendRequestWithAuth(INFO): exact challenged transaction is unavailable"
+                                .to_string(),
+                        )
                         })?;
-                    dialog_adapter
-                        .send_info_with_auth(&session.session_id, opts, header_name, header_value)
+                    let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
+                        &session.session_id,
+                        TrackedInDialogMethod::Info,
+                        challenged_transaction,
+                        challenge_nonce.clone(),
+                    )?;
+                    let TrackedInDialogOptions::Info(options) = options else {
+                        return Err(
+                            "SendRequestWithAuth(INFO): tracker option type mismatch".into()
+                        );
+                    };
+                    let transaction_id = dialog_adapter
+                        .send_info_with_auth(
+                            &session.session_id,
+                            (*options).clone(),
+                            header_name,
+                            header_value,
+                        )
                         .await?;
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .activate(lease, transaction_id.clone())?;
+                    advance_tracked_auth_owner(
+                        session,
+                        session_store,
+                        TrackedInDialogMethod::Info,
+                        challenged_transaction,
+                        &transaction_id,
+                        &request_uri,
+                    )
+                    .await;
                 }
                 "UPDATE" => {
-                    let opts = session
-                        .pending_update_options
-                        .as_ref()
-                        .map(|a| (**a).clone())
-                        .ok_or_else(|| {
-                            format!(
-                                "SendRequestWithAuth(UPDATE): no pending_update_options for session {}",
-                                session.session_id
-                            )
-                        })?;
-                    dialog_adapter
-                        .send_update_with_auth(&session.session_id, opts, header_name, header_value)
+                    let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
+                        crate::errors::SessionError::InvalidTransition(
+                            "SendRequestWithAuth(UPDATE): exact challenged transaction is unavailable"
+                                .to_string(),
+                        )
+                    })?;
+                    let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
+                        &session.session_id,
+                        TrackedInDialogMethod::Update,
+                        challenged_transaction,
+                        challenge_nonce,
+                    )?;
+                    let TrackedInDialogOptions::Update(options) = options else {
+                        return Err(
+                            "SendRequestWithAuth(UPDATE): tracker option type mismatch".into()
+                        );
+                    };
+                    let transaction_id = dialog_adapter
+                        .send_update_with_auth(
+                            &session.session_id,
+                            (*options).clone(),
+                            header_name,
+                            header_value,
+                        )
                         .await?;
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .activate(lease, transaction_id.clone())?;
+                    advance_tracked_auth_owner(
+                        session,
+                        session_store,
+                        TrackedInDialogMethod::Update,
+                        challenged_transaction,
+                        &transaction_id,
+                        &request_uri,
+                    )
+                    .await;
                 }
                 "MESSAGE" => {
                     let opts = session
@@ -2274,7 +2678,10 @@ pub(crate) async fn execute_action(
 
             info!(
                 "Auth-retry {} sent for session {} (retry #{}, header {})",
-                method, session.session_id, session.request_auth_retry_count, header_name
+                method,
+                session.session_id,
+                retry_count.saturating_add(1),
+                header_name
             );
         }
 
@@ -2458,7 +2865,11 @@ pub(crate) async fn execute_action(
         Action::CleanupDialog => {
             debug!("Cleaning up dialog for session {}", session.session_id);
             if session.dialog_id.is_some() {
-                dialog_adapter.cleanup_session(&session.session_id).await?;
+                cleanup_dialog_on_fresh_task(
+                    Arc::clone(dialog_adapter),
+                    session.session_id.clone(),
+                )
+                .await?;
             }
         }
         Action::CleanupMedia => {
@@ -2719,13 +3130,33 @@ pub(crate) async fn execute_action(
         // still sweeps the slot on session teardown if a dispatch errors
         // out unexpectedly.
         Action::SendBYEWithOptions => {
-            if let Some(opts) = session.pending_bye_options.as_ref() {
-                let snapshot = (**opts).clone();
-                dialog_adapter
-                    .send_bye_with_options(&session.session_id, snapshot)
-                    .await?;
+            let snapshot = session
+                .pending_bye_options
+                .as_ref()
+                .map(|opts| (**opts).clone())
+                .ok_or_else(|| {
+                    format!(
+                        "SendBYEWithOptions: no pending_bye_options for session {}",
+                        session.session_id
+                    )
+                })?;
+            if let Err(error) = dialog_adapter
+                .send_bye_with_options(&session.session_id, snapshot)
+                .await
+            {
+                // No exact transaction exists to drive terminal cleanup when
+                // dispatch itself fails. Release the builder slot immediately.
                 session.pending_bye_options = None;
+                let _ = session_store
+                    .update_session_with(&session.session_id, |stored| {
+                        stored.pending_bye_options = None;
+                    })
+                    .await;
+                return Err(error.into());
             }
+            // Keep the immutable options until the exact BYE final-response
+            // owner releases the session. A 401/407 retry must reproduce the
+            // same application extras before adding stack-owned auth.
         }
         Action::SendCANCELWithOptions => {
             // Phase 5 — single CANCEL action: stash wins; otherwise fall
@@ -2754,31 +3185,70 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendREFERWithOptions => {
-            if let Some(opts) = session.pending_refer_options.as_ref() {
-                let snapshot = (**opts).clone();
-                dialog_adapter
-                    .send_refer_with_options(&session.session_id, snapshot)
-                    .await?;
-                session.pending_refer_options = None;
-            }
+            let TrackedInDialogOptions::Refer(options) = claim_tracked_request_staging(
+                session,
+                session_store,
+                TrackedInDialogMethod::Refer,
+                stage_claim,
+            )
+            .await?
+            else {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "SendREFERWithOptions claimed the wrong method".to_string(),
+                )
+                .into());
+            };
+            let lease = dialog_adapter.outbound_request_tracker.prepare(
+                &session.session_id,
+                TrackedInDialogOptions::Refer(Arc::clone(&options)),
+            )?;
+            let transaction_id = dialog_adapter
+                .send_refer_with_options(&session.session_id, (*options).clone())
+                .await?;
+            dialog_adapter
+                .outbound_request_tracker
+                .activate(lease, transaction_id)?;
         }
         Action::SendNOTIFYWithOptions => {
             // Phase 5 — single NOTIFY action: stash wins; otherwise
             // consult `Config.auto_emit_extra_headers` so operator
             // headers ride every stack-emitted NOTIFY. Consolidated from
             // the deleted `Action::SendNOTIFY`.
-            if let Some(opts_arc) = session.pending_notify_options.as_ref() {
-                let opts = (**opts_arc).clone();
-                dialog_adapter
-                    .send_notify_with_options(&session.session_id, opts)
+            if stage_claim.is_some() || session.pending_notify_options.is_some() {
+                let TrackedInDialogOptions::Notify(options) = claim_tracked_request_staging(
+                    session,
+                    session_store,
+                    TrackedInDialogMethod::Notify,
+                    stage_claim,
+                )
+                .await?
+                else {
+                    return Err(crate::errors::SessionError::InvalidTransition(
+                        "SendNOTIFYWithOptions claimed the wrong method".to_string(),
+                    )
+                    .into());
+                };
+                let lease = dialog_adapter.outbound_request_tracker.prepare(
+                    &session.session_id,
+                    TrackedInDialogOptions::Notify(Arc::clone(&options)),
+                )?;
+                let transaction_id = dialog_adapter
+                    .send_notify_with_options(&session.session_id, (*options).clone())
                     .await?;
-                session.pending_notify_options = None;
+                dialog_adapter
+                    .outbound_request_tracker
+                    .activate(lease, transaction_id)?;
+            } else if matches!(triggering_event, EventType::SendOutboundNotify) {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "SendNOTIFYWithOptions requires exact staged options".to_string(),
+                )
+                .into());
             } else {
                 let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
                 let event_package = "presence";
                 let body = session.local_sdp.clone();
                 if auto_extras.is_empty() {
-                    dialog_adapter
+                    let _ = dialog_adapter
                         .send_notify(&session.session_id, event_package, body, None)
                         .await?;
                 } else {
@@ -2790,29 +3260,61 @@ pub(crate) async fn execute_action(
                         subscription_id: None,
                         extra_headers: auto_extras,
                     };
-                    dialog_adapter
+                    let _ = dialog_adapter
                         .send_notify_with_options(&session.session_id, opts)
                         .await?;
                 }
             }
         }
         Action::SendINFOWithOptions => {
-            if let Some(opts) = session.pending_info_options.as_ref() {
-                let snapshot = (**opts).clone();
-                dialog_adapter
-                    .send_info_with_options(&session.session_id, snapshot)
-                    .await?;
-                session.pending_info_options = None;
-            }
+            let TrackedInDialogOptions::Info(options) = claim_tracked_request_staging(
+                session,
+                session_store,
+                TrackedInDialogMethod::Info,
+                stage_claim,
+            )
+            .await?
+            else {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "SendINFOWithOptions claimed the wrong method".to_string(),
+                )
+                .into());
+            };
+            let lease = dialog_adapter.outbound_request_tracker.prepare(
+                &session.session_id,
+                TrackedInDialogOptions::Info(Arc::clone(&options)),
+            )?;
+            let transaction_id = dialog_adapter
+                .send_info_with_options(&session.session_id, (*options).clone())
+                .await?;
+            dialog_adapter
+                .outbound_request_tracker
+                .activate(lease, transaction_id)?;
         }
         Action::SendUPDATEWithOptions => {
-            if let Some(opts) = session.pending_update_options.as_ref() {
-                let snapshot = (**opts).clone();
-                dialog_adapter
-                    .send_update_with_options(&session.session_id, snapshot)
-                    .await?;
-                session.pending_update_options = None;
-            }
+            let TrackedInDialogOptions::Update(options) = claim_tracked_request_staging(
+                session,
+                session_store,
+                TrackedInDialogMethod::Update,
+                stage_claim,
+            )
+            .await?
+            else {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "SendUPDATEWithOptions claimed the wrong method".to_string(),
+                )
+                .into());
+            };
+            let lease = dialog_adapter.outbound_request_tracker.prepare(
+                &session.session_id,
+                TrackedInDialogOptions::Update(Arc::clone(&options)),
+            )?;
+            let transaction_id = dialog_adapter
+                .send_update_with_options(&session.session_id, (*options).clone())
+                .await?;
+            dialog_adapter
+                .outbound_request_tracker
+                .activate(lease, transaction_id)?;
         }
         Action::SendReINVITEWithOptions => {
             if let Some(opts) = session.pending_reinvite_options.as_ref() {
@@ -2920,18 +3422,16 @@ pub(crate) async fn execute_action(
                                 metadata,
                             )
                             .await?;
-                        *session = session_store.get_session(&session_id).await?;
+                        sync_registration_state(session_store, &session_id, session)?;
                         session.pending_register_options = None;
-                        session_store.update_session(session.clone()).await?;
                         return Ok(ActionOutcome::with_event(EventType::Registration200OK));
                     }
                     RegisterAttemptOutcome::Unregistered => {
                         dialog_adapter
                             .apply_unregistration_success(&session_id, &registrar_uri)
                             .await?;
-                        *session = session_store.get_session(&session_id).await?;
+                        sync_registration_state(session_store, &session_id, session)?;
                         session.pending_register_options = None;
-                        session_store.update_session(session.clone()).await?;
                         return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
                     }
                     RegisterAttemptOutcome::AuthChallenge {
@@ -2939,9 +3439,7 @@ pub(crate) async fn execute_action(
                         challenge,
                     } => {
                         let retry_count = session_store
-                            .get_session(&session_id)
-                            .await?
-                            .registration_retry_count;
+                            .with_session(&session_id, |latest| latest.registration_retry_count)?;
                         if retry_count >= 1 {
                             dialog_adapter
                                 .apply_registration_failure(
@@ -2951,18 +3449,20 @@ pub(crate) async fn execute_action(
                                     "REGISTER authentication failed",
                                 )
                                 .await?;
-                            *session = session_store.get_session(&session_id).await?;
+                            sync_registration_state(session_store, &session_id, session)?;
                             session.pending_register_options = None;
-                            session_store.update_session(session.clone()).await?;
                             return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                                 status_code,
                             )));
                         }
 
-                        let mut latest = session_store.get_session(&session_id).await?;
-                        latest.registration_retry_count += 1;
-                        session_store.update_session(latest.clone()).await?;
-                        *session = latest;
+                        let retry_count = session_store
+                            .update_session_with(&session_id, |latest| {
+                                latest.registration_retry_count += 1;
+                                latest.registration_retry_count
+                            })
+                            .await?;
+                        session.registration_retry_count = retry_count;
                         return Ok(ActionOutcome::with_event(EventType::AuthRequired {
                             status_code,
                             challenge,
@@ -2970,8 +3470,9 @@ pub(crate) async fn execute_action(
                         }));
                     }
                     RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
-                        let mut latest = session_store.get_session(&session_id).await?;
-                        if latest.registration_retry_count >= 2 {
+                        let retry_count = session_store
+                            .with_session(&session_id, |latest| latest.registration_retry_count)?;
+                        if retry_count >= 2 {
                             dialog_adapter
                                 .apply_registration_failure(
                                     &session_id,
@@ -2980,21 +3481,27 @@ pub(crate) async fn execute_action(
                                     "Registration failed with repeated 423 Interval Too Brief responses",
                                 )
                                 .await?;
-                            *session = session_store.get_session(&session_id).await?;
+                            sync_registration_state(session_store, &session_id, session)?;
                             session.pending_register_options = None;
-                            session_store.update_session(session.clone()).await?;
                             return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                                 423,
                             )));
                         }
 
-                        latest.registration_expires = Some(min_expires);
-                        latest.registration_retry_count += 1;
                         let mut retry_opts = opts;
                         retry_opts.expires = min_expires;
-                        latest.pending_register_options = Some(Arc::new(retry_opts));
-                        session_store.update_session(latest.clone()).await?;
-                        *session = latest;
+                        let retry_opts = Arc::new(retry_opts);
+                        let retry_count = session_store
+                            .update_session_with(&session_id, |latest| {
+                                latest.registration_expires = Some(min_expires);
+                                latest.registration_retry_count += 1;
+                                latest.pending_register_options = Some(Arc::clone(&retry_opts));
+                                latest.registration_retry_count
+                            })
+                            .await?;
+                        session.registration_expires = Some(min_expires);
+                        session.registration_retry_count = retry_count;
+                        session.pending_register_options = Some(retry_opts);
                         return Ok(ActionOutcome::with_event(EventType::SendOutboundRegister));
                     }
                     RegisterAttemptOutcome::Failure {
@@ -3009,9 +3516,8 @@ pub(crate) async fn execute_action(
                                     format!("{} (status {})", reason, status_code),
                                 )
                                 .await?;
-                            *session = session_store.get_session(&session_id).await?;
+                            sync_registration_state(session_store, &session_id, session)?;
                             session.pending_register_options = None;
-                            session_store.update_session(session.clone()).await?;
                             return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
                         }
 
@@ -3023,9 +3529,8 @@ pub(crate) async fn execute_action(
                                 reason,
                             )
                             .await?;
-                        *session = session_store.get_session(&session_id).await?;
+                        sync_registration_state(session_store, &session_id, session)?;
                         session.pending_register_options = None;
-                        session_store.update_session(session.clone()).await?;
                         return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
                             status_code,
                         )));
@@ -3082,6 +3587,16 @@ pub(crate) async fn execute_action(
                         !suppress_global_proxy,
                     )
                     .await?;
+                if let Some(real_dialog_id) =
+                    dialog_adapter.session_to_dialog.get(&session.session_id)
+                {
+                    session.dialog_id = Some(real_dialog_id.value().clone().into());
+                } else {
+                    return Err(crate::errors::SessionError::InternalError(
+                        "initial INVITE committed without an exact dialog mapping".to_string(),
+                    )
+                    .into());
+                }
                 #[cfg(feature = "perf-call-setup-diagnostics")]
                 crate::call_setup_diag::record_stage(
                     &session.session_id,
@@ -3109,7 +3624,13 @@ pub(crate) async fn execute_action(
         // ──────────────────────────────────────────────────────────────
         Action::ClearPendingINVITEOptions => {
             session.pending_invite_options = None;
-            session.invite_authorization_credentials.clear();
+            // Keep the credentials negotiated by the successful initial
+            // INVITE for method-specific requests in this exact dialog. BYE,
+            // MESSAGE, and other listener-authenticated requests cannot reuse
+            // the INVITE header verbatim, but they must retain its challenge
+            // protection space so the adapter can recompute HA2 for the new
+            // method/URI/body. Redirect and terminal cleanup remain the
+            // authorities that zeroize these credentials.
             session.invite_auth_retry_count = 0;
         }
         Action::ClearPendingReINVITEOptions => {
@@ -3222,7 +3743,7 @@ fn safe_outbound_auth_method_label(method: &str) -> &'static str {
     }
 }
 
-fn auth_retry_allowed(
+pub(crate) fn auth_retry_allowed(
     retry_count: u8,
     cap: u8,
     challenge: Option<&crate::auth::DigestChallenge>,
@@ -3330,6 +3851,51 @@ fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event)
             tracing::warn!("Failed to publish Transfer* event (class=coordination)");
         }
     });
+}
+
+#[cfg(test)]
+mod negotiated_audio_shape_tests {
+    use super::negotiated_audio_shape;
+
+    #[test]
+    fn negotiated_shape_preserves_opus_and_g711_clocks() {
+        assert_eq!(negotiated_audio_shape("PCMU"), (8_000, 1));
+        assert_eq!(negotiated_audio_shape("PCMA"), (8_000, 1));
+        assert_eq!(negotiated_audio_shape("opus"), (48_000, 2));
+        assert_eq!(negotiated_audio_shape("OPUS"), (48_000, 2));
+    }
+}
+
+#[cfg(test)]
+mod registration_projection_tests {
+    use super::*;
+    use crate::state_table::Role;
+    use crate::types::CallState;
+
+    #[test]
+    fn registration_projection_does_not_replace_unrelated_call_state() {
+        let mut stored = SessionState::new(SessionId::new(), Role::UAC);
+        stored.registration_call_id = Some("registration-call".into());
+        stored.registration_cseq = 17;
+        stored.registration_retry_count = 2;
+        stored.is_registered = true;
+
+        let mut event_local = SessionState::new(stored.session_id.clone(), Role::UAC);
+        event_local.call_state = CallState::Active;
+        event_local.local_sdp = Some("v=0\r\n".into());
+
+        RegistrationStateProjection::capture(&stored).apply(&mut event_local);
+
+        assert_eq!(event_local.call_state, CallState::Active);
+        assert_eq!(event_local.local_sdp.as_deref(), Some("v=0\r\n"));
+        assert_eq!(
+            event_local.registration_call_id.as_deref(),
+            Some("registration-call")
+        );
+        assert_eq!(event_local.registration_cseq, 17);
+        assert_eq!(event_local.registration_retry_count, 2);
+        assert!(event_local.is_registered);
+    }
 }
 
 #[cfg(test)]
@@ -3530,8 +4096,10 @@ mod invite_option_diagnostic_tests {
 
     #[test]
     fn caller_sdp_is_the_authoritative_initial_and_auth_int_body() {
-        let mut snapshot = OutboundCallOptionsSnapshot::default();
-        snapshot.sdp = Some("v=0\r\na=x-caller-byte-for-byte\r\n".into());
+        let mut snapshot = OutboundCallOptionsSnapshot {
+            sdp: Some("v=0\r\na=x-caller-byte-for-byte\r\n".into()),
+            ..Default::default()
+        };
         let generated = "v=0\r\na=x-generated-different\r\n";
         assert_eq!(
             authoritative_invite_sdp(Some(&snapshot), Some(generated)),
@@ -3590,6 +4158,7 @@ mod invite_option_diagnostic_tests {
         let proxy = InviteAuthorizationCredential {
             kind: InviteCredentialKind::Proxy,
             protection_target: "proxy.example".into(),
+            challenge_raw: "Digest realm=\"edge\", nonce=\"nonce-one\"".into(),
             realm: "edge".into(),
             nonce: Some("nonce-one".into()),
             stale_refreshes: 0,
@@ -3633,6 +4202,7 @@ mod invite_option_diagnostic_tests {
             .map(|index| InviteAuthorizationCredential {
                 kind: InviteCredentialKind::Origin,
                 protection_target: format!("target-{index}"),
+                challenge_raw: format!("Digest realm=\"realm-{index}\""),
                 realm: format!("realm-{index}"),
                 nonce: None,
                 stale_refreshes: 0,

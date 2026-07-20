@@ -10,13 +10,10 @@
 //! 2. Transfer-leg UAC transitions (`Dialog180Ringing`,
 //!    `Dialog200OK` on `Initiating`, `Dialog200OK` on `Ringing`)
 //!    include the corresponding `SendTransferNotify*` action. Failure
-//!    (4xx/5xx/6xx) NOTIFYs are emitted at the adapter level in
-//!    `session_event_handler::handle_call_failed`, not through the YAML
-//!    state table — the yaml loader maps `Dialog4xxFailure` via
-//!    `MediaEvent` fallback and the Initiating failure transitions
-//!    don't match the runtime-dispatched `Dialog4xxFailure(status)`
-//!    events. Integration coverage for the failure path belongs with
-//!    the b2bua crate's three-peer fixtures.
+//!    (4xx/5xx/6xx) NOTIFYs are emitted exactly once at the adapter level in
+//!    `session_event_handler::handle_call_failed`, where the exact response
+//!    status is still available. The YAML failure transitions must not also
+//!    emit the legacy coarse-500 action.
 //! 3. `SendTransferNotify*` actions land **after** media/state-commit
 //!    actions (`NegotiateSDPAsUAC`, `SendACK`, `StartMediaSession`)
 //!    so a NOTIFY-send failure cannot roll back dialog / media
@@ -54,6 +51,16 @@ fn assert_contains(actions: &[Action], target: &Action, ctx: &str) {
     assert!(
         position(actions, target).is_some(),
         "{} — expected {:?} in action list, got {:?}",
+        ctx,
+        target,
+        actions
+    );
+}
+
+fn assert_not_contains(actions: &[Action], target: &Action, ctx: &str) {
+    assert!(
+        position(actions, target).is_none(),
+        "{} — did not expect {:?} in action list, got {:?}",
         ctx,
         target,
         actions
@@ -172,6 +179,38 @@ fn uac_early_media_200_fires_transfer_notify_success() {
         &Action::SendTransferNotifySuccess,
         "UAC/EarlyMedia/Dialog200OK ordering",
     );
+}
+
+#[test]
+fn failure_transitions_leave_exact_status_notify_to_adapter() {
+    let table = load_default();
+    for state in [
+        CallState::Initiating,
+        CallState::Ringing,
+        CallState::EarlyMedia,
+    ] {
+        for event in [
+            EventType::Dialog4xxFailure(400),
+            EventType::Dialog5xxFailure(500),
+            EventType::Dialog6xxFailure(600),
+        ] {
+            let key = StateKey {
+                role: if state == CallState::Initiating {
+                    Role::Both
+                } else {
+                    Role::UAC
+                },
+                state,
+                event,
+            };
+            let actions = actions_at(&table, &key);
+            assert_not_contains(
+                &actions,
+                &Action::SendTransferNotifyFailure,
+                "terminal transfer failure",
+            );
+        }
+    }
 }
 
 #[test]

@@ -11,7 +11,8 @@ use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterLifecycleSinkSlot, EndReason, OrchestratorAdapterEvent, TerminalDelivery,
+    AdapterEvent, AdapterLifecycleSinkSlot, EndReason, InboundConnectionContext,
+    InboundSignalingMetadata, OrchestratorAdapterEvent, TerminalDelivery,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -32,7 +33,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-pub struct UctpQuicServer {}
+pub struct UctpQuicServer {
+    admission_cancel: CancellationToken,
+}
 
 impl UctpQuicServer {
     /// Spawn the accept loop. Returns a handle that owns no state — the
@@ -46,6 +49,7 @@ impl UctpQuicServer {
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
+        inbound_contexts: Arc<DashMap<ConnectionId, InboundConnectionContext>>,
         max_concurrent: usize,
         quinn_stats_interval: Duration,
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
@@ -54,9 +58,18 @@ impl UctpQuicServer {
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
     ) -> Arc<Self> {
+        let admission_cancel = CancellationToken::new();
+        let accept_cancel = admission_cancel.clone();
         tokio::spawn(async move {
             let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-            while let Some(conn) = accept_rx.recv().await {
+            loop {
+                let conn = tokio::select! {
+                    _ = accept_cancel.cancelled() => break,
+                    conn = accept_rx.recv() => match conn {
+                        Some(conn) => conn,
+                        None => break,
+                    },
+                };
                 let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
@@ -79,6 +92,7 @@ impl UctpQuicServer {
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
+                let inbound_contexts = Arc::clone(&inbound_contexts);
                 let subscription_handler = subscription_handler.clone();
                 let session_binding_resolver = session_binding_resolver.clone();
                 let orchestrator = orchestrator.clone();
@@ -96,6 +110,7 @@ impl UctpQuicServer {
                         by_connection,
                         by_uctp_sid,
                         routes,
+                        inbound_contexts,
                         quinn_stats_interval,
                         subscription_handler,
                         session_binding_resolver,
@@ -110,7 +125,18 @@ impl UctpQuicServer {
             }
             debug!("rvoip-quic::server: accept loop exiting");
         });
-        Arc::new(Self {})
+        Arc::new(Self { admission_cancel })
+    }
+
+    /// Stop accepting new physical peers. Existing peer sessions continue
+    /// until their normal close/drain path, which preserves active media while
+    /// a worker is draining.
+    pub fn begin_drain(&self) {
+        self.admission_cancel.cancel();
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.admission_cancel.is_cancelled()
     }
 }
 
@@ -337,6 +363,7 @@ async fn spawn_peer_session(
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
+    inbound_contexts: Arc<DashMap<ConnectionId, InboundConnectionContext>>,
     quinn_stats_interval: Duration,
     subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
     session_binding_resolver: Option<Arc<dyn rvoip_uctp::state::SessionBindingResolver>>,
@@ -447,6 +474,10 @@ async fn spawn_peer_session(
     let pending = coord.pending();
     let auth_guard =
         rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
+    let resource_guard = rvoip_uctp::state::spawn_resource_authorization_guard(
+        Arc::clone(&resource_bindings),
+        Duration::from_millis(250),
+    );
 
     // Inbound substrate → coordinator pump.
     let in_tx_for_pump = in_tx.clone();
@@ -565,7 +596,14 @@ async fn spawn_peer_session(
                             detail: "bearer".into(),
                         })
                     }
-                    UctpSessionEvent::InboundInvite { sid, from, .. } => {
+                    UctpSessionEvent::InboundInvite {
+                        cid,
+                        sid,
+                        from,
+                        intent,
+                        capabilities_offer,
+                        ..
+                    } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
                             warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
@@ -599,6 +637,39 @@ async fn spawn_peer_session(
                             core_session_id.clone(),
                             from,
                         );
+                        let inbound_context = match resource_bindings.inbound_routing_hint(
+                            &sid,
+                            &intent,
+                            &capabilities_offer,
+                        ) {
+                            Ok(Some(routing_hint)) => InboundConnectionContext::new(
+                                id.clone(),
+                                Transport::Quic,
+                                &principal,
+                                Some(routing_hint),
+                                InboundSignalingMetadata::default(),
+                            )
+                            .ok(),
+                            Ok(None) => None,
+                            Err(error) => {
+                                warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), %error, "rvoip-quic: refusing unauthorized inbound routing hint");
+                                let rejection = UctpEnvelope::new(
+                                    rvoip_uctp::types::MessageType::SessionReject,
+                                    serde_json::to_value(
+                                        rvoip_uctp::payloads::session::SessionReject {
+                                            by: "system:rvoip".into(),
+                                            reason_code: error.code,
+                                            reason: error.reason,
+                                        },
+                                    )
+                                    .expect("SessionReject is serializable"),
+                                )
+                                .with_sid(sid.to_string());
+                                let _ = route_out_tx.try_send(rejection);
+                                resource_bindings.remove_session(&sid);
+                                continue;
+                            }
+                        };
                         // Media is created only after capability negotiation
                         // asks for an external all-or-nothing binding.
                         let route_cancel = media_cancel.child_token();
@@ -609,6 +680,7 @@ async fn spawn_peer_session(
                         routes.insert(
                             id.clone(),
                             Route {
+                                cid,
                                 sid: sid.to_string(),
                                 core_session_id,
                                 core_connection_id: id.clone(),
@@ -622,6 +694,9 @@ async fn spawn_peer_session(
                                 coordinator: Arc::clone(&coord_for_translator),
                             },
                         );
+                        if let Some(context) = inbound_context {
+                            inbound_contexts.insert(id.clone(), context);
+                        }
                         if !rvoip_uctp::state::try_deliver_orchestrator_event(
                             &events_tx,
                             OrchestratorAdapterEvent::AuthenticatedInboundConnection {
@@ -634,6 +709,7 @@ async fn spawn_peer_session(
                             if let Some((_, route)) = routes.remove(&id) {
                                 close_route_media(&route).await;
                             }
+                            inbound_contexts.remove(&id);
                             by_connection.remove(&id);
                             if by_uctp_sid
                                 .get(sid.as_str())
@@ -965,6 +1041,7 @@ async fn spawn_peer_session(
             outbound_pump,
             event_pump,
             auth_guard,
+            resource_guard,
             media_guard,
         ],
         drain_grace,

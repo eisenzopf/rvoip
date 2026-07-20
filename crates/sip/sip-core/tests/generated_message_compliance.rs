@@ -201,16 +201,22 @@ fn generated_message_compliance_rejects_malformed_messages() {
         .push(TypedHeader::ContentLength(ContentLength::new(0)));
     let error = validate_generated_request(&duplicate_content_length).unwrap_err();
     assert!(
-        error
-            .to_string()
-            .contains("duplicate Content-Length headers"),
+        matches!(
+            &error,
+            rvoip_sip_core::Error::ValidationError(detail)
+                if detail.contains("duplicate Content-Length headers")
+        ),
         "{error}"
     );
+    assert_eq!(error.diagnostic_class(), "validation");
 
     let mut body_without_content_type = base_request(Method::Message).build();
     body_without_content_type.body = Bytes::from_static(b"hello");
-    assert!(validate_generated_request(&body_without_content_type)
-        .unwrap_err()
-        .to_string()
-        .contains("mismatch"));
+    let error = validate_generated_request(&body_without_content_type).unwrap_err();
+    assert!(matches!(
+        &error,
+        rvoip_sip_core::Error::ValidationError(detail)
+            if detail.contains("Content-Length mismatch")
+    ));
+    assert_eq!(error.diagnostic_class(), "validation");
 }

@@ -73,7 +73,7 @@ impl PrackHandler for DialogManager {
             }
         };
 
-        if !self.try_ack_reliable_provisional(&dialog_id, &rack) {
+        if !self.try_ack_reliable_provisional(&dialog_id, &rack).await? {
             debug!(
                 "PRACK with RAck {} {} {} does not match any unacked reliable provisional — sending 481",
                 rack.rseq, rack.cseq, method_class(&rack.method)
@@ -119,16 +119,17 @@ impl DialogManager {
     /// The `RAck.cseq` should equal the dialog's stored `invite_cseq`; if it
     /// doesn't we still look up by `rseq` alone because CSeq match on the
     /// dialog is implicit (only one INVITE per dialog from a given side).
-    pub(crate) fn try_ack_reliable_provisional(
+    pub(crate) async fn try_ack_reliable_provisional(
         &self,
         dialog_id: &crate::dialog::DialogId,
         rack: &RAck,
-    ) -> bool {
-        let key = (dialog_id.clone(), rack.rseq);
-        let Some((_, abort)) = self.reliable_provisional_tasks.remove(&key) else {
-            return false;
-        };
-        abort.abort();
-        true
+    ) -> DialogResult<bool> {
+        self.reliable_provisional_tasks
+            .cancel_prack(dialog_id, rack.rseq)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "Reliable provisional cancellation did not complete".to_string(),
+                context: None,
+            })
     }
 }

@@ -416,9 +416,7 @@ impl OutboundCallBuilder {
         // PAI, transfer leg, extra headers land on SessionState before
         // the event enters the machine. The state-table `CreateDialog`
         // action picks them up.
-        let session_id = self
-            .session_id
-            .unwrap_or_else(crate::state_table::SessionId::new);
+        let session_id = self.session_id.unwrap_or_default();
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let create_session_started = std::time::Instant::now();
         self.coord

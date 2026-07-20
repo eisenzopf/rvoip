@@ -3,9 +3,11 @@
 use std::sync::Arc;
 
 use rvoip_sip_core::types::Method;
+use rvoip_sip_dialog::transaction::TransactionKey;
 
 use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
+use crate::api::incoming::ExactResponseObligation;
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 
@@ -16,6 +18,8 @@ pub struct GenericResponseBuilder {
     method: Method,
     status: u16,
     reason: Option<String>,
+    exact_transaction: Option<TransactionKey>,
+    response_obligation: Option<Arc<ExactResponseObligation>>,
     state: BuilderHeaderState,
 }
 
@@ -43,6 +47,42 @@ impl GenericResponseBuilder {
             method,
             status,
             reason: None,
+            exact_transaction: None,
+            response_obligation: None,
+            state: BuilderHeaderState::default(),
+        })
+    }
+
+    pub(crate) fn new_in_dialog(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        method: Method,
+        transaction_id: TransactionKey,
+        status: u16,
+        response_obligation: Arc<ExactResponseObligation>,
+    ) -> Result<Self> {
+        if !(200..=699).contains(&status) {
+            return Err(SessionError::InvalidInput(format!(
+                "exact in-dialog response status must be 2xx/3xx/4xx/5xx/6xx, got {status}"
+            )));
+        }
+        if !transaction_id.is_server()
+            || transaction_id.method() != &method
+            || method == Method::Invite
+        {
+            return Err(SessionError::InvalidInput(
+                "exact in-dialog response requires the matching non-INVITE server transaction"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            coord,
+            call_id,
+            method,
+            status,
+            reason: None,
+            exact_transaction: Some(transaction_id),
+            response_obligation: Some(response_obligation),
             state: BuilderHeaderState::default(),
         })
     }
@@ -58,6 +98,55 @@ impl GenericResponseBuilder {
     pub async fn send(mut self) -> Result<()> {
         let reason = self.reason.unwrap_or_else(|| "OK".to_string());
         let extras = take_staged(&mut self.state);
+
+        if let Some(transaction_id) = self.exact_transaction.take() {
+            let obligation = self.response_obligation.take().ok_or_else(|| {
+                SessionError::InternalError(
+                    "exact in-dialog response has no response obligation".to_string(),
+                )
+            })?;
+            let claim = obligation.claim()?;
+            let result = self
+                .coord
+                .dialog_adapter()
+                .send_response_with_options_for_transaction_classified(
+                    &self.call_id,
+                    &transaction_id,
+                    self.status,
+                    None,
+                    extras,
+                )
+                .await;
+            return match result {
+                Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => {
+                    claim.complete();
+                    Ok(())
+                }
+                Ok(disposition) => {
+                    claim.complete();
+                    Err(SessionError::InternalError(format!(
+                        "exact response returned nonterminal success disposition: {disposition:?}"
+                    )))
+                }
+                Err(error)
+                    if error.disposition
+                        == rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable =>
+                {
+                    claim.release_after_failure();
+                    Err(SessionError::DialogError(format!(
+                        "Failed to send exact in-dialog response: {}",
+                        error.source
+                    )))
+                }
+                Err(error) => {
+                    claim.complete();
+                    Err(SessionError::DialogError(format!(
+                        "Exact in-dialog response became wire-unknown and will not be retried: {}",
+                        error.source
+                    )))
+                }
+            };
+        }
 
         // 3xx → redirect path; 4xx/5xx/6xx → reject path.
         if (300..=399).contains(&self.status) {

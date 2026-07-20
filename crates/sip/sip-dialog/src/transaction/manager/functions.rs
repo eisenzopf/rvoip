@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rvoip_sip_core::prelude::*;
-use tracing::{debug, trace, warn};
+use tracing::debug;
 
 use crate::diagnostics;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
@@ -12,13 +12,207 @@ use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::ServerTransaction;
 use crate::transaction::server::TransactionExt as ServerTransactionExt;
 use crate::transaction::{
-    InternalTransactionCommand, TransactionEvent, TransactionKey, TransactionLifecycle,
-    TransactionState,
+    InternalTransactionCommand, TransactionKey, TransactionLifecycle, TransactionState,
 };
 
 use super::TransactionManager;
 
+/// Exact transaction generation accepted by an explicit termination request.
+///
+/// Keeping the transaction `Arc` in the manager-owned job also keeps its
+/// admission owner alive. A delayed cleanup job can therefore never terminate
+/// a later transaction that happens to reuse the same SIP wire key.
+enum ExplicitTerminationTarget {
+    Client(super::ArcClientTransaction),
+    Server(std::sync::Arc<dyn ServerTransaction>),
+}
+
+/// Cancellation-safe completion owned by the manager cleanup worker after
+/// queue admission. The public waiter may be dropped at any point without
+/// cancelling exact transaction cleanup.
+pub(crate) struct ExplicitTerminationOperation {
+    transaction_id: TransactionKey,
+    target: ExplicitTerminationTarget,
+    result: std::sync::Mutex<Option<Result<()>>>,
+    completed: std::sync::atomic::AtomicBool,
+    execution_claimed: std::sync::atomic::AtomicBool,
+    notify: tokio::sync::Notify,
+    manager_operation: std::sync::Mutex<Option<super::TransactionManagerAdmissionGuard>>,
+}
+
+struct ExplicitTerminationExecution {
+    operation: std::sync::Arc<ExplicitTerminationOperation>,
+}
+
+impl Drop for ExplicitTerminationExecution {
+    fn drop(&mut self) {
+        self.operation.complete(Err(Error::Other(
+            "explicit transaction termination worker stopped before completion".into(),
+        )));
+    }
+}
+
+impl ExplicitTerminationOperation {
+    fn new(
+        transaction_id: TransactionKey,
+        target: ExplicitTerminationTarget,
+        manager_operation: super::TransactionManagerAdmissionGuard,
+    ) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            transaction_id,
+            target,
+            result: std::sync::Mutex::new(None),
+            completed: std::sync::atomic::AtomicBool::new(false),
+            execution_claimed: std::sync::atomic::AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+            manager_operation: std::sync::Mutex::new(Some(manager_operation)),
+        })
+    }
+
+    pub(super) fn transaction_id(&self) -> &TransactionKey {
+        &self.transaction_id
+    }
+
+    fn client_transaction(&self) -> Option<super::ArcClientTransaction> {
+        match &self.target {
+            ExplicitTerminationTarget::Client(transaction) => Some(transaction.clone()),
+            ExplicitTerminationTarget::Server(_) => None,
+        }
+    }
+
+    fn server_transaction(&self) -> Option<std::sync::Arc<dyn ServerTransaction>> {
+        match &self.target {
+            ExplicitTerminationTarget::Client(_) => None,
+            ExplicitTerminationTarget::Server(transaction) => Some(transaction.clone()),
+        }
+    }
+
+    fn begin_execution(self: &std::sync::Arc<Self>) -> Result<ExplicitTerminationExecution> {
+        self.execution_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map_err(|_| Error::Other("explicit transaction termination ran twice".into()))?;
+        diagnostics::record_explicit_termination_in_flight(1);
+        Ok(ExplicitTerminationExecution {
+            operation: std::sync::Arc::clone(self),
+        })
+    }
+
+    fn complete(&self, result: Result<()>) {
+        if self
+            .completed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        if self
+            .execution_claimed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            diagnostics::record_explicit_termination_in_flight(-1);
+        }
+        diagnostics::record_explicit_termination_completed(result.is_ok());
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+        // Release shutdown admission at manager completion, not when a slow
+        // or abandoned public waiter eventually drops its Arc.
+        self.manager_operation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        self.notify.notify_waiters();
+    }
+
+    pub(super) async fn execute(self: &std::sync::Arc<Self>, manager: &TransactionManager) {
+        let execution = match self.begin_execution() {
+            Ok(execution) => execution,
+            // A duplicate queue key can share a cleanup batch, but it must
+            // never steal completion from the exact execution already in
+            // progress.
+            Err(_) => return,
+        };
+        let result = manager.terminate_transaction_supervised(self).await;
+        self.complete(result);
+        drop(execution);
+    }
+
+    async fn wait(&self) -> Result<()> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+async fn wait_for_atomic_state(
+    state: std::sync::Arc<crate::transaction::AtomicTransactionState>,
+    target_state: TransactionState,
+    timeout_duration: Duration,
+) -> bool {
+    let mut changes = state.subscribe();
+    let wait = async {
+        loop {
+            let current = state.get();
+            if current == target_state {
+                return true;
+            }
+            if current == TransactionState::Terminated {
+                return false;
+            }
+            if changes.changed().await.is_err() {
+                return state.get() == target_state;
+            }
+        }
+    };
+    tokio::time::timeout(timeout_duration, wait)
+        .await
+        .unwrap_or(false)
+}
+
 impl TransactionManager {
+    /// Clone the exact state authority retained by a compact Timer J/K
+    /// tombstone. The returned `Arc` remains waitable after the deadline
+    /// worker removes the tombstone from the public existence index.
+    pub(super) fn compact_non_invite_state(
+        &self,
+        tx_id: &TransactionKey,
+    ) -> Option<std::sync::Arc<crate::transaction::AtomicTransactionState>> {
+        self.compact_non_invite_tombstones
+            .get(tx_id)
+            .map(|entry| match entry.value() {
+                crate::transaction::lifecycle_scheduler::CompactNonInviteTombstone::Client {
+                    state,
+                    ..
+                }
+                | crate::transaction::lifecycle_scheduler::CompactNonInviteTombstone::Server {
+                    state,
+                    ..
+                } => std::sync::Arc::clone(state),
+            })
+    }
+
     pub(super) fn request_transaction_runner_stop(&self, tx_id: &TransactionKey) {
         if let Some(tx) = self
             .client_transactions
@@ -89,13 +283,23 @@ impl TransactionManager {
                 return Ok(server_tx.original_request().await);
             }
         }
-        if let Some(retired) = self.retired_client_transaction(tx_id) {
-            return Ok(Some(retired.request));
+        if let Some(retired) = self.retired_client_original_request(tx_id)? {
+            return Ok(Some(retired));
         }
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "original_request - transaction not found",
         ))
+    }
+
+    /// Resolve the exact Request-URI retained for a 401/407 challenge.
+    ///
+    /// Non-INVITE runners may compact into Timer K state before dialog-core
+    /// consumes their lossless event. The completion record preserves this
+    /// one challenge-only value without retaining every parsed request.
+    pub(crate) fn auth_challenge_request_uri(&self, tx_id: &TransactionKey) -> Option<Uri> {
+        self.client_completion(tx_id)
+            .and_then(|completion| completion.auth_challenge_request_uri())
     }
 
     /// Retrieves the last response from a transaction.
@@ -137,6 +341,26 @@ impl TransactionManager {
                 return Ok(ServerTransaction::last_response(&*server_tx));
             }
         }
+        if let Some((wire, _)) = self
+            .compact_non_invite_tombstones
+            .get(tx_id)
+            .and_then(|entry| {
+                entry
+                    .value()
+                    .server_replay()
+                    .map(|(wire, route)| (wire.clone(), route.clone()))
+            })
+        {
+            return match rvoip_sip_core::parse_message(&wire)? {
+                Message::Response(response) => Ok(Some(response)),
+                Message::Request(_) => Err(Error::Other(
+                    "compact Timer J response bytes parsed as a request".into(),
+                )),
+            };
+        }
+        if let Some(completion) = self.client_completion(tx_id) {
+            return completion.last_response();
+        }
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "last_response - transaction not found",
@@ -170,6 +394,18 @@ impl TransactionManager {
         }
         if let Some(entry) = self.server_transactions.get(tx_id) {
             return Ok(entry.value().remote_addr());
+        }
+        if let Some(entry) = self.compact_non_invite_tombstones.get(tx_id) {
+            if let Some((_, route)) = entry.value().server_replay() {
+                return Ok(route.destination);
+            }
+            if entry.value().is_client() {
+                if let Some(destination) =
+                    self.with_client_response_route_state(tx_id, |state| state.route().destination)
+                {
+                    return Ok(destination);
+                }
+            }
         }
         Err(Error::transaction_not_found(
             tx_id.clone(),
@@ -229,85 +465,32 @@ impl TransactionManager {
         target_state: TransactionState,
         timeout_duration: Duration,
     ) -> Result<bool> {
-        // Subscribe to transaction events
-        let mut rx = self.subscribe();
-
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?target_state, "Waiting for transaction state");
-
-        // Check if the transaction is already in the target state
-        let current_state = match self.transaction_state(tx_id).await {
-            Ok(state) => state,
-            Err(e) => {
-                warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction state");
-                return Err(e);
-            }
+        // Capture a compact Timer J/K state authority first. If expiry removes
+        // the map entry after this clone, the waiter still observes the exact
+        // terminal write. A lookup beginning after removal correctly reports
+        // TransactionNotFound instead of reviving an expired tombstone.
+        if let Some(state) = self.compact_non_invite_state(tx_id) {
+            return Ok(wait_for_atomic_state(state, target_state, timeout_duration).await);
+        }
+        if let Some(completion) = self.client_completion(tx_id) {
+            return Ok(completion
+                .wait_for_state(target_state, timeout_duration)
+                .await);
+        }
+        let state = if let Some(transaction) = self
+            .server_transactions
+            .get(tx_id)
+            .map(|entry| entry.value().clone())
+        {
+            transaction.data().state.clone()
+        } else {
+            return Err(Error::transaction_not_found(
+                tx_id.clone(),
+                "wait_for_transaction_state - transaction not found",
+            ));
         };
-
-        if current_state == target_state {
-            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?current_state, "Transaction already in target state");
-            return Ok(true);
-        }
-
-        // Start a timeout
-        let start_time = std::time::Instant::now();
-
-        // Wait for state change events with polling fallback
-        loop {
-            // Check if we've exceeded the timeout
-            let elapsed = start_time.elapsed();
-            if elapsed >= timeout_duration {
-                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?current_state, ?target_state, elapsed=?elapsed, "Timeout waiting for state");
-                return Ok(false);
-            }
-
-            // Calculate remaining time for this iteration
-            let remaining = timeout_duration.saturating_sub(elapsed);
-            let poll_interval = Duration::from_millis(50);
-            let wait_time = std::cmp::min(remaining, poll_interval);
-
-            // Check transaction state again to catch state changes that might have occurred
-            // without receiving an event
-            match self.transaction_state(tx_id).await {
-                Ok(state) if state == target_state => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?state, "Transaction reached target state (detected by polling)");
-                    return Ok(true);
-                }
-                Ok(_) => {} // Not in target state yet, continue waiting
-                Err(e) => {
-                    // If transaction is not found, return false (it may have been terminated)
-                    if matches!(e, Error::TransactionNotFound { .. }) {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction not found while waiting for state change, likely terminated");
-                        return Ok(false);
-                    }
-                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction state");
-                }
-            }
-
-            // Wait for an event or a timeout
-            match tokio::time::timeout(wait_time, rx.recv()).await {
-                // Got an event
-                Ok(Some(TransactionEvent::StateChanged {
-                    transaction_id,
-                    new_state,
-                    ..
-                })) if transaction_id == *tx_id && new_state == target_state => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?new_state, "Transaction reached target state (from event)");
-                    return Ok(true);
-                }
-                // Transaction terminated, will never reach target state
-                Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. }))
-                    if transaction_id == *tx_id =>
-                {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated while waiting for state change");
-                    return Ok(false);
-                }
-                // Any other event or no event yet
-                Ok(Some(_)) | Ok(None) | Err(_) => {
-                    // Continue the loop, polling the transaction state again
-                    trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), ?target_state, elapsed=?elapsed, "Still waiting for state change");
-                }
-            }
-        }
+        Ok(wait_for_atomic_state(state, target_state, timeout_duration).await)
     }
 
     /// Wait for a transaction to receive a final response.
@@ -356,103 +539,34 @@ impl TransactionManager {
         tx_id: &TransactionKey,
         timeout_duration: Duration,
     ) -> Result<Option<Response>> {
-        // Subscribe to transaction events
-        let mut rx = self.subscribe();
-
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Waiting for final response");
-
-        // Check if the transaction already has a final response
-        match self.last_response(tx_id).await {
-            Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Transaction already has final response");
-                return Ok(Some(response));
-            }
-            Ok(_) => {} // No response or non-final response
-            Err(e) => {
-                warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction last response");
-                return Err(e);
-            }
-        };
-
-        // Start a timeout
-        let start_time = std::time::Instant::now();
-
-        // Poll periodically for a response
-        loop {
-            // Check if we've exceeded the timeout
-            let elapsed = start_time.elapsed();
-            if elapsed >= timeout_duration {
-                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), elapsed=?elapsed, "Timeout waiting for final response");
-                return Ok(None);
-            }
-
-            // Calculate remaining time for this iteration
-            let remaining = timeout_duration.saturating_sub(elapsed);
-            let poll_interval = Duration::from_millis(100);
-            let wait_time = std::cmp::min(remaining, poll_interval);
-
-            // Poll for a final response
-            match self.last_response(tx_id).await {
-                Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received final response (detected by polling)");
-                    return Ok(Some(response));
+        Ok(
+            match self
+                .wait_for_client_transaction_outcome(tx_id, timeout_duration)
+                .await?
+            {
+                Some(crate::transaction::ClientTransactionOutcome::FinalResponse(response)) => {
+                    Some(response)
                 }
-                Ok(_) => {} // No final response yet
-                Err(e) => {
-                    // If transaction is gone, we'll never get a response
-                    if matches!(e, Error::TransactionNotFound { .. }) {
-                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction not found while waiting for final response");
-                        return Ok(None);
-                    }
-                    warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error checking transaction last response");
-                }
-            }
+                Some(crate::transaction::ClientTransactionOutcome::Failure(_)) | None => None,
+            },
+        )
+    }
 
-            // Wait for events with timeout
-            match tokio::time::timeout(wait_time, rx.recv()).await {
-                // Received a success response event
-                Ok(Some(TransactionEvent::SuccessResponse {
-                    transaction_id,
-                    response,
-                    ..
-                })) if transaction_id == *tx_id => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received success response event");
-                    return Ok(Some(response));
-                }
-                // Received a failure response event
-                Ok(Some(TransactionEvent::FailureResponse {
-                    transaction_id,
-                    response,
-                    ..
-                })) if transaction_id == *tx_id => {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Received failure response event");
-                    return Ok(Some(response));
-                }
-                // Transaction terminated with possible final response
-                Ok(Some(TransactionEvent::TransactionTerminated { transaction_id, .. }))
-                    if transaction_id == *tx_id =>
-                {
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Transaction terminated, checking for final response before returning");
-
-                    // Last attempt to get a final response
-                    match self.last_response(tx_id).await {
-                        Ok(Some(response)) if response.status().as_u16() >= 200 => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "Found final response after termination");
-                            return Ok(Some(response));
-                        }
-                        _ => {
-                            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "No final response after termination");
-                            return Ok(None);
-                        }
-                    }
-                }
-                // Any other event or no event yet
-                Ok(Some(_)) | Ok(None) | Err(_) => {
-                    // Continue the loop, will poll again
-                    trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), elapsed=?elapsed, "Still waiting for final response");
-                }
-            }
-        }
+    /// Wait for the exact typed outcome of a client transaction without
+    /// allocating a public event subscription.
+    pub async fn wait_for_client_transaction_outcome(
+        &self,
+        tx_id: &TransactionKey,
+        timeout_duration: Duration,
+    ) -> Result<Option<crate::transaction::ClientTransactionOutcome>> {
+        let completion = self.client_completion(tx_id).ok_or_else(|| {
+            Error::transaction_not_found(
+                tx_id.clone(),
+                "wait_for_client_transaction_outcome - transaction not found",
+            )
+        })?;
+        completion.wait_for_outcome(timeout_duration).await
     }
 
     /// Get the total number of active transactions.
@@ -498,72 +612,325 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or an error if the transaction doesn't exist
     pub async fn terminate_transaction(&self, tx_id: &TransactionKey) -> Result<()> {
-        let mut terminated = false;
+        // Acquire the shutdown fence before resolving the exact generation.
+        // The transaction Arc captured below owns its wire-key admission
+        // generation until the manager worker completes the request.
+        let manager_operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| {
+                Error::Other(
+                    "transaction manager is stopping; termination admission is closed".into(),
+                )
+            })?;
 
-        self.request_transaction_runner_stop(tx_id);
-
-        if self.retire_and_remove_client_transaction(tx_id).await {
-            terminated = true;
+        // A compact Timer J/K generation has already terminated the active
+        // runner and owns response-before-wait observability through its RFC
+        // retention horizon. External termination is idempotent here.
+        if self.compact_non_invite_tombstones.contains_key(tx_id) {
+            return Ok(());
         }
-        if !terminated && self.server_transactions.remove(tx_id).is_some() {
+
+        let target = if let Some(transaction) = self
+            .client_transactions
+            .get(tx_id)
+            .map(|entry| entry.value().clone())
+        {
+            ExplicitTerminationTarget::Client(transaction)
+        } else if let Some(transaction) = self
+            .server_transactions
+            .get(tx_id)
+            .map(|entry| entry.value().clone())
+        {
+            ExplicitTerminationTarget::Server(transaction)
+        } else {
+            // Compact retirement can race the first lookup. Retired client
+            // completion is likewise a successful, already-finished exact
+            // generation rather than TransactionNotFound.
+            if self.compact_non_invite_tombstones.contains_key(tx_id)
+                || self.client_completion(tx_id).is_some()
+            {
+                return Ok(());
+            }
+            return Err(Error::transaction_not_found(
+                tx_id.clone(),
+                "terminate_transaction - transaction not found",
+            ));
+        };
+
+        let operation = ExplicitTerminationOperation::new(tx_id.clone(), target, manager_operation);
+        let cleanup_tx = self.terminated_cleanup_tx.as_ref().ok_or_else(|| {
+            Error::Other("transaction manager cleanup worker is unavailable".into())
+        })?;
+
+        // Waiting for bounded queue capacity is cancellation-safe: no work is
+        // published until the permit is acquired. Once `send` returns, the
+        // manager queue owns the operation and its admission guard, so dropping
+        // this public future cannot cancel protocol cleanup.
+        let permit = cleanup_tx
+            .reserve()
+            .await
+            .map_err(|_| Error::Other("transaction manager cleanup worker is closed".into()))?;
+        self.explicit_termination_operations
+            .entry(tx_id.clone())
+            .or_default()
+            .push(std::sync::Arc::clone(&operation));
+        permit.send(tx_id.clone());
+        diagnostics::record_explicit_termination_enqueued();
+        operation.wait().await
+    }
+
+    async fn terminate_transaction_supervised(
+        &self,
+        operation: &ExplicitTerminationOperation,
+    ) -> Result<()> {
+        let tx_id = operation.transaction_id();
+        // A compact Timer J/K generation has already terminated the active
+        // runner and owns both retransmission absorption and the exact client
+        // completion. External termination is therefore idempotent; shortening
+        // its RFC deadline would lose response-before-wait observability.
+        if self.compact_non_invite_tombstones.contains_key(tx_id) {
+            return Ok(());
+        }
+
+        let client_transaction = operation.client_transaction();
+        let server_transaction = operation.server_transaction();
+
+        // Record the exact result before the runner can snapshot a compact
+        // successor. The completion cell is first-writer-wins, so a response
+        // or more-specific failure that arrived first remains authoritative.
+        if let Some(transaction) = client_transaction.as_ref() {
+            transaction.data().completion.record_forced_termination();
+        }
+
+        let command_result = if let Some(transaction) = client_transaction.as_ref() {
+            transaction
+                .data()
+                .cmd_tx
+                .try_send(InternalTransactionCommand::Terminate)
+        } else {
+            server_transaction
+                .as_ref()
+                .expect("one transaction kind was selected")
+                .data()
+                .cmd_tx
+                .try_send(InternalTransactionCommand::Terminate)
+        };
+
+        if command_result.is_ok() {
+            let initial_send_in_flight = client_transaction
+                .as_ref()
+                .is_some_and(|transaction| transaction.data().initial_send_in_flight());
+            let handle = if let Some(transaction) = client_transaction.as_ref() {
+                transaction.data().event_loop_handle.lock().await.take()
+            } else {
+                server_transaction
+                    .as_ref()
+                    .expect("one transaction kind was selected")
+                    .data()
+                    .event_loop_handle
+                    .lock()
+                    .await
+                    .take()
+            };
+            if let Some(mut handle) = handle {
+                if initial_send_in_flight {
+                    // The runner set the conservative wire boundary before
+                    // awaiting the transport. It cannot consume Terminate until
+                    // that await returns, so waiting here only delays fail-closed
+                    // cleanup. Abort immediately; the takeover path below keeps
+                    // the INVITE route for CANCEL/late-response handling.
+                    handle.abort();
+                    let _ = handle.await;
+                } else if tokio::time::timeout(Duration::from_secs(1), &mut handle)
+                    .await
+                    .is_err()
+                {
+                    handle.abort();
+                    let _ = handle.await;
+                }
+            }
+            // A successful enqueue or even a terminal RFC state is not a
+            // cleanup/publication guarantee. Continue through exact map
+            // cleanup and publish only if the joined runner did not deliver.
+        }
+
+        // A CompactRetire command may have published the authoritative
+        // generation immediately after the first lookup. Preserve its natural
+        // deadline for retransmission absorption and exact completion waits.
+        if self.compact_non_invite_tombstones.contains_key(tx_id) {
+            return Ok(());
+        }
+
+        // Full or a successful-but-unprocessed enqueue proves the runner may
+        // be inside message/timer processing; Closed can still race its final
+        // publication. Quiesce
+        // and join that producer before the synthetic fallback can claim or
+        // emit any terminal event, so TransactionTerminated remains final.
+        if let Some(transaction) = client_transaction.as_ref() {
+            if let Some(handle) = transaction.data().event_loop_handle.lock().await.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+        } else if let Some(transaction) = server_transaction.as_ref() {
+            if let Some(handle) = transaction.data().event_loop_handle.lock().await.take() {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+
+        // A compact generation may have been installed while the runner was
+        // quiescing. It owns the shared batch claim and remains authoritative
+        // until its protocol deadline.
+        if self.compact_non_invite_tombstones.contains_key(tx_id) {
+            return Ok(());
+        }
+
+        #[cfg(test)]
+        {
+            let gate = super::TERMINATION_TAKEOVER_TEST_GATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+                .filter(|gate| gate.transaction_id == *tx_id);
+            if let Some(gate) = gate {
+                gate.runner_joined.notify_one();
+                gate.release.notified().await;
+            }
+        }
+
+        // Full/Closed is the only synthetic fallback. Claim the entire event
+        // sequence before changing state; if the runner already claimed it,
+        // that runner remains authoritative and this path publishes nothing.
+        let (publication, terminal_owner, state, previous_lifecycle_is_active) =
+            if let Some(transaction) = client_transaction.as_ref() {
+                let data = transaction.data();
+                (
+                    std::sync::Arc::clone(&data.terminal_event_publication),
+                    data.transaction_admission_owner(),
+                    std::sync::Arc::clone(&data.state),
+                    data.get_lifecycle() == TransactionLifecycle::Active,
+                )
+            } else {
+                let data = server_transaction
+                    .as_ref()
+                    .expect("one transaction kind was selected")
+                    .data();
+                (
+                    std::sync::Arc::clone(&data.terminal_event_publication),
+                    data.transaction_admission_owner(),
+                    std::sync::Arc::clone(&data.state),
+                    data.get_lifecycle() == TransactionLifecycle::Active,
+                )
+            };
+        let previous_state = state.set(TransactionState::Terminated);
+        if previous_state != TransactionState::Terminated && previous_lifecycle_is_active {
+            publication.record_prefix(previous_state);
+        }
+        if let Some(transaction) = client_transaction.as_ref() {
+            transaction
+                .data()
+                .completion
+                .record_state(TransactionState::Terminated);
+            transaction
+                .data()
+                .set_lifecycle(TransactionLifecycle::Destroyed);
+        } else if let Some(transaction) = server_transaction.as_ref() {
+            transaction
+                .data()
+                .set_lifecycle(TransactionLifecycle::Destroyed);
+            // The state is terminal before this barrier. Any response writer
+            // already inside the serializer finishes first; a waiter that
+            // acquires afterward observes Terminated and is rejected.
+            drop(transaction.data().last_response.lock().await);
+        }
+
+        let mut publication_claim = if publication.is_delivered() {
+            None
+        } else {
+            publication.try_claim()
+        };
+
+        let mut prefix_delivered = true;
+        if let (Some(claim), Some(prefix_previous_state)) =
+            (publication_claim.as_ref(), publication.pending_prefix())
+        {
+            let delivery = self.events_tx.send_terminal_prefix(
+                crate::transaction::TransactionEvent::StateChanged {
+                    transaction_id: tx_id.clone(),
+                    previous_state: prefix_previous_state,
+                    new_state: TransactionState::Terminated,
+                },
+                claim,
+            );
+            if !matches!(
+                tokio::time::timeout(Duration::from_secs(1), delivery).await,
+                Ok(Ok(()))
+            ) {
+                self.events_tx.fail_closed_terminal_batch();
+                publication_claim
+                    .take()
+                    .expect("terminal publication claim is live")
+                    .mark_failed_closed();
+                prefix_delivered = false;
+            }
+        }
+
+        if client_transaction.is_some() {
+            self.retire_and_remove_client_transaction(tx_id).await;
+        } else if let Some(transaction) = server_transaction.as_ref() {
+            self.server_transactions.remove_if(tx_id, |_, current| {
+                std::sync::Arc::ptr_eq(current, transaction)
+            });
             self.retire_server_invite_dialog_index_for(tx_id);
-            terminated = true;
         }
         self.terminated_transactions.remove(tx_id);
-        if !terminated || tx_id.is_server() {
+        if tx_id.is_server() {
             self.transaction_destinations
-                .remove_if(tx_id, |_, state| state.is_active());
+                .remove_if(tx_id, |_, route| route.is_active());
         }
         self.pending_inbound_bytes.remove(tx_id);
         self.pending_inbound_inserted_at.remove(tx_id);
         self.pending_inbound_transport.remove(tx_id);
         self.pending_inbound_timing.remove(tx_id);
+        self.timer_manager.unregister_transaction(tx_id).await;
 
-        // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
-        if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
-            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
-            for subscriber_id in subscriber_ids {
-                let mut empty = false;
-                if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
-                    let tx_list = entry.value_mut();
-                    tx_list.retain(|id| id != tx_id);
-                    empty = tx_list.is_empty();
+        if prefix_delivered {
+            let Some(publication_claim) = publication_claim else {
+                return Ok(());
+            };
+            let mut delivery = std::pin::pin!(self.events_tx.send_terminal(
+                crate::transaction::TransactionEvent::TransactionTerminated {
+                    transaction_id: tx_id.clone(),
+                },
+                None,
+                terminal_owner,
+            ));
+            let delivered = tokio::select! {
+                result = &mut delivery => {
+                    if result.is_err() {
+                        self.events_tx.fail_closed_terminal_batch();
+                        false
+                    } else {
+                        true
+                    }
                 }
-                if empty {
-                    self.subscriber_to_transactions.remove(&subscriber_id);
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_id, "Removed empty subscriber mapping");
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                    // `delivery` still owns its exact sidecar/admission owner
+                    // while this closes admission. It is dropped only after
+                    // the select branch completes, eliminating the ABA gap.
+                    self.events_tx.fail_closed_terminal_batch();
+                    false
                 }
+            };
+            drop(delivery);
+            if delivered {
+                publication_claim.mark_delivered();
+            } else {
+                publication_claim.mark_failed_closed();
             }
         }
-
-        // Unregister from timer manager
-        self.timer_manager.unregister_transaction(tx_id).await;
-        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Unregistered transaction from timer manager");
-
-        if terminated {
-            // Broadcast a transaction terminated event
-            let event = TransactionEvent::TransactionTerminated {
-                transaction_id: tx_id.clone(),
-            };
-
-            // Use the broadcast_event utility
-            Self::broadcast_event(
-                event,
-                &self.events_tx,
-                &self.event_subscribers,
-                Some(&self.subscriber_to_transactions),
-                Some(&self.transaction_to_subscribers),
-                None,
-            )
-            .await;
-
-            Ok(())
-        } else {
-            Err(Error::transaction_not_found(
-                tx_id.clone(),
-                "terminate_transaction - transaction not found",
-            ))
-        }
+        Ok(())
     }
 
     /// Cleanup terminated transactions.
@@ -587,10 +954,25 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<usize>` - The number of transactions cleaned up
     pub async fn cleanup_indexed_terminated_transactions(&self) -> Result<usize> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => Ok(0),
+            result = self.cleanup_indexed_terminated_transactions_within_operation() => result,
+        }
+    }
+
+    pub(super) async fn cleanup_indexed_terminated_transactions_within_operation(
+        &self,
+    ) -> Result<usize> {
         let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let terminated_keys: Vec<TransactionKey> = self
             .terminated_transactions
             .iter()
+            .take(super::TERMINATED_CLEANUP_BATCH_MAX)
             .map(|entry| entry.key().clone())
             .collect();
         let scanned_keys = terminated_keys.len();
@@ -616,7 +998,25 @@ impl TransactionManager {
         cleaned
     }
 
+    /// Perform an explicit diagnostic repair sweep over all transaction maps.
+    ///
+    /// Normal runtime cleanup is event-driven and bounded by the terminated
+    /// index. This compatibility API deliberately remains available to repair
+    /// state after fault injection or to audit invariants, but the manager does
+    /// not invoke it from a periodic task because it is O(all transactions).
     pub async fn cleanup_terminated_transactions(&self) -> Result<usize> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => Ok(0),
+            result = self.cleanup_terminated_transactions_within_operation() => result,
+        }
+    }
+
+    async fn cleanup_terminated_transactions_within_operation(&self) -> Result<usize> {
         let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let mut cleaned_count = 0;
 
@@ -663,7 +1063,7 @@ impl TransactionManager {
                         && !self.client_transactions.contains_key(k)
                         && !self.server_transactions.contains_key(k)
                 })
-                .map(|entry| entry.key().clone())
+                .map(|entry| entry.key().as_ref().clone())
                 .collect();
             debug!("Found {} orphaned destination entries", orphaned_keys.len());
             for key in orphaned_keys {
@@ -775,7 +1175,8 @@ impl TransactionManager {
         for tx_id in &terminated_transaction_ids {
             if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
-                subscriber_ids_to_clean.extend(subscriber_ids);
+                subscriber_ids_to_clean
+                    .extend(subscriber_ids.into_iter().map(|subscriber| subscriber.id));
             }
         }
 
@@ -901,6 +1302,20 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or an error if retry isn't possible
     pub async fn retry_request(&self, tx_id: &TransactionKey) -> Result<()> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped request retry".into()))
+            }
+            result = self.retry_request_within_operation(tx_id) => result,
+        }
+    }
+
+    async fn retry_request_within_operation(&self, tx_id: &TransactionKey) -> Result<()> {
         if tx_id.is_server() {
             return Err(Error::Other(
                 "Cannot retry a server transaction".to_string(),
@@ -955,6 +1370,24 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or an error if the transaction doesn't exist or processing fails
     pub async fn process_request(&self, tx_id: &TransactionKey, request: Request) -> Result<()> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped request processing".into()))
+            }
+            result = self.process_request_within_operation(tx_id, request) => result,
+        }
+    }
+
+    async fn process_request_within_operation(
+        &self,
+        tx_id: &TransactionKey,
+        request: Request,
+    ) -> Result<()> {
         if !tx_id.is_server() {
             return Err(Error::Other(
                 "Cannot process request for client transaction".to_string(),
@@ -965,14 +1398,37 @@ impl TransactionManager {
         let tx = self
             .server_transactions
             .get(tx_id)
-            .map(|r| r.value().clone())
-            .ok_or_else(|| {
-                Error::transaction_not_found(
-                    tx_id.clone(),
-                    "process_request - transaction not found",
-                )
-            })?;
+            .map(|r| r.value().clone());
 
-        tx.process_request(request).await
+        if let Some(tx) = tx {
+            return tx.process_request(request).await;
+        }
+
+        if let Some((wire, route)) =
+            self.compact_non_invite_tombstones
+                .get(tx_id)
+                .and_then(|entry| {
+                    entry
+                        .value()
+                        .server_replay()
+                        .map(|(wire, route)| (wire.clone(), route.clone()))
+                })
+        {
+            return self
+                .transport
+                .send_message_raw_via(wire, route)
+                .await
+                .map_err(|error| {
+                    Error::transport_error(
+                        error,
+                        "Failed to replay compact non-INVITE server response",
+                    )
+                });
+        }
+
+        Err(Error::transaction_not_found(
+            tx_id.clone(),
+            "process_request - transaction not found",
+        ))
     }
 }

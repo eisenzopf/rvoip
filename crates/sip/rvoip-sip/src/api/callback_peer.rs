@@ -76,13 +76,19 @@ use crate::errors::{Result, SessionError};
 
 // ===== ShutdownHandle =====
 
-/// Cloneable handle for stopping a [`CallbackPeer`] from another task.
+/// Cloneable handle for stopping a peer or coordinator from another task.
 ///
 /// Obtained via [`CallbackPeer::shutdown_handle()`] **before** calling
 /// [`run()`](CallbackPeer::run).
 #[derive(Clone)]
 pub struct ShutdownHandle {
-    tx: tokio::sync::watch::Sender<bool>,
+    target: ShutdownTarget,
+}
+
+#[derive(Clone)]
+enum ShutdownTarget {
+    EventLoop(tokio::sync::watch::Sender<bool>),
+    Coordinator(std::sync::Weak<UnifiedCoordinator>),
 }
 
 impl ShutdownHandle {
@@ -97,7 +103,16 @@ impl ShutdownHandle {
     /// # }
     /// ```
     pub fn shutdown(&self) {
-        let _ = self.tx.send(true);
+        match &self.target {
+            ShutdownTarget::EventLoop(tx) => {
+                let _ = tx.send(true);
+            }
+            ShutdownTarget::Coordinator(coordinator) => {
+                if let Some(coordinator) = coordinator.upgrade() {
+                    coordinator.shutdown();
+                }
+            }
+        }
     }
 
     /// Internal constructor for peers that want to mint a shutdown handle
@@ -105,7 +120,15 @@ impl ShutdownHandle {
     /// callers go through [`CallbackPeer::shutdown_handle`] /
     /// [`StreamPeer::shutdown_handle`].
     pub(crate) fn from_sender(tx: tokio::sync::watch::Sender<bool>) -> Self {
-        Self { tx }
+        Self {
+            target: ShutdownTarget::EventLoop(tx),
+        }
+    }
+
+    pub(crate) fn from_coordinator(coordinator: std::sync::Weak<UnifiedCoordinator>) -> Self {
+        Self {
+            target: ShutdownTarget::Coordinator(coordinator),
+        }
     }
 }
 
@@ -176,6 +199,9 @@ impl From<String> for EndReason {
 }
 
 type CallbackFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+#[cfg(test)]
+type CoordinatorShutdownHook =
+    Arc<dyn Fn(Arc<UnifiedCoordinator>) -> CallbackFuture<Result<()>> + Send + Sync>;
 type EventHook = Arc<dyn Fn(Event) -> CallbackFuture<Result<()>> + Send + Sync>;
 type IncomingHook = Arc<dyn Fn(IncomingCall) -> CallbackFuture<CallHandlerDecision> + Send + Sync>;
 type EstablishedHook = Arc<dyn Fn(SessionHandle) -> CallbackFuture<Result<()>> + Send + Sync>;
@@ -1274,12 +1300,27 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_refer_received(&self, request: crate::api::incoming::IncomingRequest) {}
 
-    /// SIP_API_DESIGN_2 Phase E — typed inbound INFO hook. Today's
-    /// stack drops INFO at the dialog layer; this hook surfaces it so
-    /// SIP-INFO DTMF (`application/dtmf-relay`), fax flow control,
-    /// and other application-layer signalling can be observed.
+    /// SIP_API_DESIGN_2 Phase E — typed inbound INFO hook. This hook surfaces
+    /// SIP-INFO DTMF (`application/dtmf-relay`), fax flow control, and other
+    /// application-layer signalling. The default implementation sends an
+    /// exact `501 Not Implemented`, so handlers that support INFO must author
+    /// and await their own final response before returning.
     #[allow(unused_variables)]
-    async fn on_info_received(&self, request: crate::api::incoming::IncomingRequest) {}
+    async fn on_info_received(&self, request: crate::api::incoming::IncomingRequest) {
+        match request.respond(501) {
+            Ok(response) => {
+                if response.send().await.is_err() {
+                    tracing::warn!(method = "INFO", "Default inbound INFO response failed");
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    method = "INFO",
+                    "Default inbound INFO response could not be constructed"
+                );
+            }
+        }
+    }
 
     /// SIP_API_DESIGN_2 Phase E — typed inbound MESSAGE hook (RFC 3428).
     #[allow(unused_variables)]
@@ -1524,9 +1565,16 @@ pub struct CallbackPeer<H: CallHandler> {
     established_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
     terminal_callbacks: Arc<tokio::sync::Mutex<BoundedCallDedupe>>,
     deferred_calls: Arc<tokio::sync::Mutex<HashMap<CallId, IncomingCallGuard>>>,
+    #[cfg(test)]
+    coordinator_shutdown_hook: Option<CoordinatorShutdownHook>,
 }
 
 const TERMINAL_CALLBACK_DEDUPE_CAPACITY: usize = 8192;
+const CONTROL_HANDLER_CONCURRENCY: usize = 64;
+#[cfg(not(test))]
+const CALLBACK_HANDLER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const CALLBACK_HANDLER_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 struct BoundedCallDedupe {
     set: HashSet<CallId>,
@@ -1628,6 +1676,8 @@ impl<H: CallHandler> CallbackPeer<H> {
                 BoundedCallDedupe::with_capacity(TERMINAL_CALLBACK_DEDUPE_CAPACITY),
             )),
             deferred_calls: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            coordinator_shutdown_hook: None,
         })
     }
 
@@ -1787,9 +1837,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     ///
     /// [`run()`]: Self::run
     pub fn shutdown_handle(&self) -> ShutdownHandle {
-        ShutdownHandle {
-            tx: self.shutdown_tx.clone(),
-        }
+        ShutdownHandle::from_sender(self.shutdown_tx.clone())
     }
 
     /// Start the event loop.
@@ -1827,8 +1875,10 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// ```
     pub async fn run(self) -> Result<()> {
         let mut event_rx = self.coordinator.subscribe_events().await?;
+        let mut control_rx = self.coordinator.claim_session_control_events().await?;
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut handlers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let control_slots = Arc::new(tokio::sync::Semaphore::new(CONTROL_HANDLER_CONCURRENCY));
 
         loop {
             reap_ready_handlers(&mut handlers, "completed");
@@ -1853,6 +1903,18 @@ impl<H: CallHandler> CallbackPeer<H> {
                         }
                     }
                 }
+                control = control_rx.recv(), if control_slots.available_permits() > 0 => {
+                    let Some(event) = control else {
+                        tracing::info!("[CallbackPeer] Control-event channel closed, stopping");
+                        break;
+                    };
+                    let permit = Arc::clone(&control_slots)
+                        .acquire_owned()
+                        .await
+                        .expect("callback control semaphore remains open");
+                    self.dispatch(event, &mut handlers, Some(permit)).await;
+                    reap_ready_handlers(&mut handlers, "post-control-dispatch");
+                }
                 // Process next event
                 raw = event_rx.recv() => {
                     let Some(raw_event) = raw else {
@@ -1869,7 +1931,12 @@ impl<H: CallHandler> CallbackPeer<H> {
                     };
 
                     let event = session_event.event.clone();
-                    self.dispatch(event, &mut handlers).await;
+                    if matches!(&event, Event::InfoReceived { .. }) {
+                        // Response-bearing INFO is delivered exactly once by
+                        // the private authoritative control channel above.
+                        continue;
+                    }
+                    self.dispatch(event, &mut handlers, None).await;
                     reap_ready_handlers(&mut handlers, "post-dispatch");
                 }
             }
@@ -1878,16 +1945,11 @@ impl<H: CallHandler> CallbackPeer<H> {
         // Wait for all in-flight handler invocations to return before we tear
         // down the coordinator. This is the whole point of the JoinSet: user
         // code should never be interrupted mid-handler by a shutdown.
-        while let Some(join_result) = handlers.join_next().await {
-            if let Err(error) = join_result {
-                if !error.is_cancelled() {
-                    tracing::warn!(
-                        error_class = "handler_task_failed",
-                        phase = "drain",
-                        "CallbackPeer handler task failed"
-                    );
-                }
-            }
+        if !drain_callback_handlers(&mut handlers, CALLBACK_HANDLER_DRAIN_TIMEOUT).await {
+            tracing::warn!(
+                error_class = "handler_drain_timeout",
+                "CallbackPeer handler drain timed out; aborting retained callbacks"
+            );
         }
 
         {
@@ -1902,22 +1964,35 @@ impl<H: CallHandler> CallbackPeer<H> {
         // transports to close before `run()` returns. Tests and services may
         // immediately restart a peer on the same port after this future
         // resolves.
-        if let Err(_error) = self
-            .coordinator
-            .shutdown_gracefully(Some(Duration::ZERO))
-            .await
-        {
+        let shutdown_result = self.shutdown_coordinator().await;
+        if shutdown_result.is_err() {
             tracing::warn!(
                 error_class = "coordinator_shutdown_failed",
                 "CallbackPeer coordinator shutdown failed"
             );
         }
-        Ok(())
+        shutdown_result
+    }
+
+    async fn shutdown_coordinator(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(shutdown) = self.coordinator_shutdown_hook.as_ref() {
+            return shutdown(Arc::clone(&self.coordinator)).await;
+        }
+
+        self.coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
     }
 
     /// Dispatch a single event to the appropriate handler method. Each spawn
     /// is tracked in `handlers` so `run()` can drain them on shutdown.
-    async fn dispatch(&self, event: Event, handlers: &mut tokio::task::JoinSet<()>) {
+    async fn dispatch(
+        &self,
+        event: Event,
+        handlers: &mut tokio::task::JoinSet<()>,
+        control_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    ) {
         let handler = self.handler.clone();
         let coordinator = self.coordinator.clone();
         let established_callbacks = self.established_callbacks.clone();
@@ -1926,6 +2001,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let fast_auto_accept_incoming_calls = coordinator.fast_auto_accept_incoming_calls();
 
         handlers.spawn(async move {
+            let _control_permit = control_permit;
             let dispatch_guard = cleanup_diag::stage_guard(
                 callback_stage_for_event(&event),
                 callback_label_for_event(&event),
@@ -1946,14 +2022,9 @@ impl<H: CallHandler> CallbackPeer<H> {
                     //
                     // SIP_API_DESIGN_2 Phase A: prefer the parsed
                     // `Arc<Request>` view when the bus enriched it.
-                    let parsed = coordinator
-                        .session_registry
-                        .peek_pending_incoming_request()
-                        .await;
-                    let transport = coordinator
-                        .session_registry
-                        .peek_pending_incoming_transport()
-                        .await;
+                    let pending = coordinator.pending_incoming_bundle_exact(&call_id);
+                    let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+                    let transport = pending.and_then(|bundle| bundle.transport);
                     let incoming = match parsed {
                         Some(req) => IncomingCall::with_request(
                             call_id.clone(),
@@ -2456,6 +2527,32 @@ fn reap_ready_handlers(handlers: &mut tokio::task::JoinSet<()>, context: &str) {
     }
 }
 
+async fn drain_callback_handlers(
+    handlers: &mut tokio::task::JoinSet<()>,
+    timeout: Duration,
+) -> bool {
+    let drained = tokio::time::timeout(timeout, async {
+        while let Some(join_result) = handlers.join_next().await {
+            if let Err(error) = join_result {
+                if !error.is_cancelled() {
+                    tracing::warn!(
+                        error_class = "handler_task_failed",
+                        phase = "drain",
+                        "CallbackPeer handler task failed"
+                    );
+                }
+            }
+        }
+    })
+    .await
+    .is_ok();
+    if !drained {
+        handlers.abort_all();
+        while handlers.join_next().await.is_some() {}
+    }
+    drained
+}
+
 fn callback_stage_for_event(event: &Event) -> CleanupStage {
     match event {
         Event::IncomingCall { .. } => CleanupStage::CallbackIncomingDispatch,
@@ -2628,10 +2725,12 @@ mod tests {
             recv_buffer_size: 2048,
             rtcp_recv_buffer_size: 1024,
         };
-        let mut media_config = MediaSessionControllerConfig::default();
-        media_config.rtp_buffer_size = 960;
-        media_config.rtp_buffer_initial_count = 5;
-        media_config.rtp_buffer_max_count = 20;
+        let media_config = MediaSessionControllerConfig {
+            rtp_buffer_size: 960,
+            rtp_buffer_initial_count: 5,
+            rtp_buffer_max_count: 20,
+            ..Default::default()
+        };
 
         let builder = CallbackPeer::builder(Config::local("callback-builder", 15444))
             .media_session_controller_config(media_config)
@@ -2831,6 +2930,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hung_callback_handler_drain_is_bounded_and_aborted() {
+        struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut handlers = JoinSet::new();
+        let probe = DropProbe(Arc::clone(&dropped));
+        handlers.spawn(async move {
+            let _probe = probe;
+            std::future::pending::<()>().await;
+        });
+
+        assert!(
+            !drain_callback_handlers(&mut handlers, Duration::from_millis(20)).await,
+            "hung callback unexpectedly drained normally"
+        );
+        assert!(handlers.is_empty());
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
     async fn callback_dispatch_invokes_typed_hooks_for_public_events() {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler = RecordingHandler {
@@ -2967,7 +3091,7 @@ mod tests {
         ];
 
         for event in events {
-            peer.dispatch(event, &mut handlers).await;
+            peer.dispatch(event, &mut handlers, None).await;
         }
         drain(handlers).await;
 
@@ -3102,7 +3226,7 @@ mod tests {
                 reason: "normal".into(),
             },
         ] {
-            peer.dispatch(event, &mut handlers).await;
+            peer.dispatch(event, &mut handlers, None).await;
         }
         drain(handlers).await;
 
@@ -3143,26 +3267,86 @@ mod tests {
             }
         }
 
-        let peer = CallbackPeer::new(NoopHandler, Config::local("callback-control", 15442))
-            .await
-            .unwrap();
+        eprintln!("callback-control phase=construct start");
+        let peer = tokio::time::timeout(
+            Duration::from_secs(3),
+            CallbackPeer::new(NoopHandler, Config::local("callback-control", 15442)),
+        )
+        .await
+        .expect("CallbackPeer construction completed")
+        .expect("CallbackPeer construction succeeded");
+        eprintln!("callback-control phase=construct complete");
         let control = peer.control();
         let stop = peer.shutdown_handle();
         let run_task = tokio::spawn(async move { peer.run().await });
 
-        let call_id = control
-            .invite("sip:unreachable@127.0.0.1:15443")
-            .send()
-            .await
-            .unwrap();
+        eprintln!("callback-control phase=invite start");
+        let call_id = tokio::time::timeout(
+            Duration::from_secs(3),
+            control.invite("sip:unreachable@127.0.0.1:15443").send(),
+        )
+        .await
+        .expect("CallbackPeer outbound INVITE dispatch completed")
+        .expect("CallbackPeer outbound INVITE dispatch succeeded");
+        eprintln!("callback-control phase=invite complete");
         assert!(!call_id.to_string().is_empty());
 
+        eprintln!("callback-control phase=shutdown start");
         control.shutdown();
         stop.shutdown();
-        tokio::time::timeout(std::time::Duration::from_secs(2), run_task)
+        tokio::time::timeout(Duration::from_secs(3), run_task)
             .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+            .expect("CallbackPeer run completed after shutdown")
+            .expect("CallbackPeer run task joined")
+            .expect("CallbackPeer shutdown succeeded");
+        eprintln!("callback-control phase=shutdown complete");
+    }
+
+    #[tokio::test]
+    async fn callback_run_propagates_coordinator_shutdown_failure() {
+        struct NoopHandler;
+
+        #[async_trait]
+        impl CallHandler for NoopHandler {
+            async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
+                CallHandlerDecision::Reject {
+                    status: 486,
+                    reason: "Busy Here".into(),
+                }
+            }
+        }
+
+        const INJECTED_FAILURE: &str = "injected callback coordinator shutdown failure";
+        let mut peer = CallbackPeer::new(
+            NoopHandler,
+            Config::local("callback-shutdown-propagation", 0),
+        )
+        .await
+        .expect("callback peer");
+        let coordinator = Arc::clone(peer.coordinator());
+        peer.coordinator_shutdown_hook = Some(Arc::new(|_coordinator| {
+            Box::pin(async move { Err(SessionError::InternalError(INJECTED_FAILURE.to_string())) })
+        }));
+
+        let stop = peer.shutdown_handle();
+        let run_task = tokio::spawn(async move { peer.run().await });
+        stop.shutdown();
+
+        let result = tokio::time::timeout(Duration::from_secs(3), run_task)
+            .await
+            .expect("CallbackPeer::run completed")
+            .expect("CallbackPeer::run task joined");
+        assert!(
+            matches!(result, Err(SessionError::InternalError(detail)) if detail == INJECTED_FAILURE),
+            "CallbackPeer::run must return the coordinator shutdown failure"
+        );
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            coordinator.shutdown_gracefully(Some(Duration::ZERO)),
+        )
+        .await
+        .expect("coordinator cleanup completed")
+        .expect("coordinator cleanup succeeded");
     }
 }

@@ -75,8 +75,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match outcome {
         Ok(Ok(())) => {
-            println!("[BOB] Observed expected NotifyReceived — exiting 0.");
-            std::process::exit(0);
+            // Keep the dialog alive long enough to receive and answer Alice's
+            // BYE. Exiting immediately after NOTIFY used to race teardown and
+            // made Alice's confirmed hangup fail even though NOTIFY succeeded.
+            let ended = timeout(Duration::from_secs(8), async {
+                loop {
+                    match events.next().await {
+                        Some(Event::CallEnded { .. }) => return true,
+                        Some(_) => continue,
+                        None => return false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+            if ended {
+                println!("[BOB] Observed expected NotifyReceived and clean teardown — exiting 0.");
+                std::process::exit(0);
+            }
+            eprintln!("[BOB] NOTIFY arrived, but call teardown did not complete");
+            std::process::exit(1);
         }
         Ok(Err(e)) => {
             eprintln!("[BOB] assertion failed: {}", e);

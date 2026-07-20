@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_core::adapter::{AdapterEvent, ConnectionAdapter};
+use rvoip_core::adapter::ConnectionAdapter;
+use rvoip_core::ids::ConnectionId;
+use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::signaling::whip;
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig};
 
@@ -27,51 +29,85 @@ async fn whep_post_patch_reaches_connected() {
             .expect("whip serve")
     });
 
-    let mut events = adapter.subscribe_events();
-
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
     let base = format!("http://{addr}");
 
-    let offer_resp = client
+    let player = RvoipPeerConnection::new(&WebRtcConfig::loopback(), PeerRole::Offerer)
+        .await
+        .expect("player peer");
+    player
+        .prepare_receive_only_offer()
+        .await
+        .expect("recvonly player");
+    let player_offer = player
+        .create_offer_and_gather()
+        .await
+        .expect("player offer");
+    let answer_resp = client
         .post(format!("{base}/whep/subscriber"))
+        .header("content-type", "application/sdp")
+        .body(player_offer)
         .send()
         .await
         .expect("whep post");
-    assert_eq!(offer_resp.status(), reqwest::StatusCode::CREATED);
-    let offer_sdp = offer_resp.text().await.expect("offer body");
-    assert!(offer_sdp.contains("m=audio"));
-
-    let conn_id = adapter
-        .routes()
-        .iter()
-        .next()
-        .map(|e| e.key().clone())
-        .expect("whep route");
-
-    let answerer = WebRtcAdapter::new(WebRtcConfig::loopback());
-    let inbound_id = answerer
-        .apply_remote_offer(&offer_sdp)
+    assert_eq!(answer_resp.status(), reqwest::StatusCode::CREATED);
+    let location = answer_resp
+        .headers()
+        .get("location")
+        .expect("location")
+        .to_str()
+        .expect("location ascii")
+        .to_owned();
+    let etag = answer_resp
+        .headers()
+        .get("etag")
+        .expect("etag")
+        .to_str()
+        .expect("etag ascii")
+        .to_owned();
+    let answer_sdp = answer_resp.text().await.expect("answer body");
+    assert!(answer_sdp.contains("m=audio"));
+    assert!(answer_sdp.contains("a=sendonly"));
+    player
+        .set_remote_answer(&answer_sdp)
         .await
-        .expect("apply whep offer");
-    let answer_sdp = answerer.local_sdp(&inbound_id).expect("answer sdp");
+        .expect("apply WHEP answer");
 
-    let patch_resp = client
-        .patch(format!("{base}/whep/{conn_id}"))
+    let connection_id =
+        ConnectionId::from_string(location.rsplit('/').next().expect("WHEP connection id"));
+    let (server_connected, player_connected) = tokio::join!(
+        adapter.accept(connection_id.clone()),
+        player.wait_connected(Duration::from_secs(10)),
+    );
+    server_connected.expect("server connected");
+    player_connected.expect("player connected");
+
+    let forbidden_renegotiation = client
+        .patch(format!("{base}{location}"))
         .header("content-type", "application/sdp")
+        .header("if-match", &etag)
         .body(answer_sdp)
         .send()
         .await
-        .expect("whep patch");
-    assert_eq!(patch_resp.status(), reqwest::StatusCode::NO_CONTENT);
+        .expect("WHEP renegotiation PATCH");
+    assert_eq!(
+        forbidden_renegotiation.status(),
+        reqwest::StatusCode::CONFLICT
+    );
 
-    let event = tokio::time::timeout(Duration::from_secs(5), events.recv())
+    let delete = client
+        .delete(format!("{base}{location}"))
+        .header("if-match", &etag)
+        .send()
         .await
-        .expect("event timeout")
-        .expect("event channel");
-    assert!(matches!(event, AdapterEvent::Connected { .. }));
+        .expect("WHEP DELETE");
+    assert_eq!(delete.status(), reqwest::StatusCode::OK);
+    assert!(!adapter.is_connection_live(&connection_id));
+    assert_eq!(adapter.metrics().active_http_resources, 0);
 
+    player.close().await.expect("close player");
     server.abort();
 }

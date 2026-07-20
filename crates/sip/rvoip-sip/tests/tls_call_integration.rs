@@ -132,7 +132,7 @@ async fn sips_call_establishes_through_tls_transport() {
     // MultiplexedTransport must observe the scheme and route through
     // the TLS listener rather than UDP.
     let target = format!("sips:bob@127.0.0.1:{}", bob_tls_port);
-    let _alice_session = alice
+    let alice_session = alice
         .invite(
             Some(format!(
                 "sips:alice@127.0.0.1:{};transport=tls",
@@ -172,9 +172,22 @@ async fn sips_call_establishes_through_tls_transport() {
         "alice did not observe CallAnswered after TLS sips: call setup"
     );
 
-    // Hang up cleanly so we don't leak background tasks.
-    bob.terminate_current_session().await.ok();
-    alice.terminate_current_session().await.ok();
+    // A successful TLS hangup now means the peer's final BYE response was
+    // observed, not merely that the request was queued before the TLS flow was
+    // reclaimed. Bob must therefore have processed the BYE by the time Alice
+    // reports success.
+    alice
+        .hangup(&alice_session)
+        .await
+        .expect("Alice confirms the TLS BYE transaction");
+    let bob_ended = wait_for(&mut bob_events, Duration::from_secs(2), |event| {
+        matches!(event, Event::CallEnded { .. })
+    })
+    .await;
+    assert!(
+        bob_ended.is_some(),
+        "Alice acknowledged TLS teardown before Bob processed the BYE"
+    );
 
     // Drain any final events so background tasks can exit.
     tokio::time::sleep(Duration::from_millis(200)).await;

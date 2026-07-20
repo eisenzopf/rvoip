@@ -116,7 +116,7 @@ fn invite(sid: &str) -> UctpEnvelope {
     .with_sid(sid)
 }
 
-fn offer(sid: &str, connid: &str, stream_id: &str) -> UctpEnvelope {
+fn offer_with_codec(sid: &str, connid: &str, stream_id: &str, codec: &str) -> UctpEnvelope {
     UctpEnvelope::new(
         MessageType::ConnectionOffer,
         serde_json::json!({
@@ -127,7 +127,7 @@ fn offer(sid: &str, connid: &str, stream_id: &str) -> UctpEnvelope {
                 "id": stream_id,
                 "kind": "audio",
                 "direction": "sendrecv",
-                "codec_preferences": ["opus"]
+                "codec_preferences": [codec]
             }],
             "substrate_setup": null
         }),
@@ -181,7 +181,21 @@ async fn negotiate_stream(
     connid: &str,
     stream_id: &str,
 ) -> u16 {
-    client.send(offer(sid, connid, stream_id)).await.unwrap();
+    negotiate_stream_with_codec(client, inbound, sid, connid, stream_id, "opus").await
+}
+
+async fn negotiate_stream_with_codec(
+    client: &Arc<UctpQuicClient>,
+    inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
+    sid: &str,
+    connid: &str,
+    stream_id: &str,
+    codec: &str,
+) -> u16 {
+    client
+        .send(offer_with_codec(sid, connid, stream_id, codec))
+        .await
+        .unwrap();
     client
         .send(
             UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
@@ -295,4 +309,87 @@ async fn two_sessions_on_one_peer_get_distinct_exact_media_routes() {
     assert_eq!(frame_two.payload, Bytes::from_static(b"session-two"));
     assert_eq!(frame_one.stream_id.as_str(), "strm_one");
     assert_eq!(frame_two.stream_id.as_str(), "strm_two");
+}
+
+#[tokio::test]
+async fn pcma_negotiates_over_real_quic_and_keeps_pcma_media_identity() {
+    install_crypto_provider();
+    let (server_endpoint, certificate) = server_endpoint("127.0.0.1:0".parse().unwrap());
+    let server_addr = server_endpoint.local_addr().unwrap();
+    let mut alpn =
+        dispatch_by_alpn(Arc::clone(&server_endpoint), &[UCTP_RAW_QUIC_ALPN_BYTES]).unwrap();
+    let accept_rx = alpn.take(UCTP_RAW_QUIC_ALPN_BYTES).unwrap();
+    let adapter = UctpQuicAdapter::new(UctpQuicConfig::new(
+        Arc::clone(&server_endpoint),
+        accept_rx,
+        bearer_stub(),
+    ))
+    .await
+    .unwrap();
+    let mut events = adapter.subscribe_events();
+
+    let client_endpoint = client_endpoint();
+    let client_tls = rvoip_uctp::substrate::dev_client_config_trusting(&certificate).unwrap();
+    let client = UctpQuicClient::connect(
+        &client_endpoint,
+        server_addr,
+        "localhost",
+        Arc::new(client_tls),
+    )
+    .await
+    .unwrap();
+    let mut inbound = client.take_inbound().unwrap();
+    authenticate(&client, &mut inbound).await;
+
+    client.send(invite("sess_pcma")).await.unwrap();
+    let core_connection = wait_for_inbound_connection(&mut events, "sess_pcma").await;
+    let local_stream = negotiate_stream_with_codec(
+        &client,
+        &mut inbound,
+        "sess_pcma",
+        "conn_pcma",
+        "strm_pcma",
+        "g.711-a",
+    )
+    .await;
+    let server_stream = adapter
+        .streams(core_connection)
+        .await
+        .unwrap()
+        .pop()
+        .expect("negotiated PCMA stream");
+    assert_eq!(server_stream.codec().name, "g.711-a");
+    assert_eq!(server_stream.codec().clock_rate_hz, 8_000);
+    assert_eq!(server_stream.codec().channels, 1);
+    let mut received = server_stream.frames_in();
+
+    let codec = rvoip_core::capability::CodecInfo::from_name_with_defaults("g.711-a");
+    let client_stream = QuicDatagramMediaStream::start(
+        StreamId::from_string("strm_pcma"),
+        StreamKind::Audio,
+        codec,
+        rvoip_core::connection::Direction::Outbound,
+        local_stream,
+        client.connection.clone(),
+    );
+    let alaw = Bytes::from_static(&[0xd5, 0x55, 0x00, 0x80]);
+    client_stream
+        .frames_out()
+        .send(MediaFrame {
+            stream_id: client_stream.id(),
+            kind: StreamKind::Audio,
+            payload: alaw.clone(),
+            timestamp_rtp: 160,
+            captured_at: Utc::now(),
+            payload_type: Some(8),
+        })
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), received.recv())
+        .await
+        .expect("PCMA media timeout")
+        .expect("PCMA stream closed");
+    assert_eq!(frame.payload, alaw);
+    assert_eq!(frame.payload_type, Some(8));
+    assert_eq!(frame.timestamp_rtp, 160);
 }

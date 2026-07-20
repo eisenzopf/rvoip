@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision};
 use rvoip_sip::api::headers::options::SipRequestOptions;
-use rvoip_sip::api::incoming::IncomingCall;
+use rvoip_sip::api::incoming::{IncomingCall, IncomingRequest};
 use rvoip_sip::api::unified::UnifiedCoordinator;
 use rvoip_sip::HeaderName;
 
@@ -16,6 +16,50 @@ pub struct AutoAccept;
 
 #[async_trait::async_trait]
 impl CallHandler for AutoAccept {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        let _ = call.accept().await;
+        CallHandlerDecision::Accept
+    }
+
+    async fn on_info_received(&self, request: IncomingRequest) {
+        let status = request
+            .raw_request()
+            .is_some_and(|request| {
+                request
+                    .body()
+                    .windows(12)
+                    .any(|part| part == b"Response=488")
+            })
+            .then_some(488)
+            .unwrap_or(200);
+        if status == 200 {
+            request
+                .respond(status)
+                .expect("inbound INFO exact response builder")
+                .send()
+                .await
+                .expect("send 200 response to inbound INFO");
+        } else {
+            request
+                .respond_builder(status)
+                .expect("inbound INFO exact rejection builder")
+                .with_raw_header(
+                    HeaderName::Other("X-Exact-Info-Response".to_string()),
+                    "transaction-local",
+                )
+                .expect("stage exact INFO response header")
+                .send()
+                .await
+                .expect("send final rejection to inbound INFO");
+        }
+    }
+}
+
+/// Auto-accepts INVITEs and uses [`CallHandler`]'s default exact 501 for INFO.
+pub struct AutoAcceptUnsupportedInfo;
+
+#[async_trait::async_trait]
+impl CallHandler for AutoAcceptUnsupportedInfo {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
         let _ = call.accept().await;
         CallHandlerDecision::Accept

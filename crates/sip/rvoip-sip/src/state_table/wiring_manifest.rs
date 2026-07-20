@@ -85,7 +85,7 @@ pub const EVENT_WIRINGS: &[EventWiring] = &[
         yaml_event: "SendOutboundBye / HangupCall",
         actions: &["SendBYEWithOptions", "SendBYE"],
         kind: WiringKind::StateTable,
-        notes: "Local hangup uses BYE once the dialog is established.",
+        notes: "Local hangup sends BYE once the dialog is established; terminal confirmation or the retained exact-release fallback owns cleanup.",
     },
     EventWiring {
         sip_message: "BYE inbound",

@@ -50,18 +50,21 @@ impl InfoBuilder {
             body,
             extra_headers,
         });
-        self.coord
-            .stage_outbound_options(
+        let staging = self
+            .coord
+            .stage_outbound_options_guarded(
                 &self.session_id,
                 crate::state_machine::executor::PendingOptionsSlot::Info(opts),
             )
             .await?;
         self.coord
-            .dispatch_outbound(
+            .dispatch_outbound_guarded(
                 &self.session_id,
                 crate::state_table::EventType::SendOutboundInfo,
+                &staging,
             )
             .await?;
+        staging.confirm_consumed().await?;
         Ok(())
     }
 }

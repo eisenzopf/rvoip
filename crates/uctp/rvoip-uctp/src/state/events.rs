@@ -23,10 +23,15 @@ pub enum UctpSessionEvent {
 
     /// Inbound `session.invite` arrived.
     InboundInvite {
+        /// Peer-selected Conversation ID retained as part of the exact wire
+        /// route. Session-scoped replies must never infer or substitute it.
+        cid: Option<String>,
         sid: SessionId,
         from: String,
         to: Vec<String>,
         medium: String,
+        intent: String,
+        capabilities_offer: serde_json::Value,
     },
 
     /// Session reached `Active` (per §7.3 boundary rule).

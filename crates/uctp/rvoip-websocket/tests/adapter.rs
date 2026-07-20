@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, RejectReason};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason, RejectReason};
 use rvoip_core::connection::Transport;
 use rvoip_core::events::Event;
 use rvoip_core::{Config, Orchestrator};
@@ -207,6 +207,142 @@ async fn ws_adapter_emits_inbound_connection_on_session_invite() {
     .expect("DataMessage timeout");
     assert_eq!(received_connection, core_connection_id);
     assert_ne!(received_connection.as_str(), wire_connection_id);
+
+    client
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::SessionInvite,
+            id: "env_inv_other".into(),
+            ts: Utc::now(),
+            cid: Some("conv_y".into()),
+            sid: Some("sess_ws_adapter_other".into()),
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::to_value(SessionInvite {
+                from: "part_alice".into(),
+                to: vec!["part_bob".into()],
+                medium: "voice".into(),
+                intent: "synchronous-engagement".into(),
+                capabilities_offer: serde_json::Value::Object(Default::default()),
+            })
+            .unwrap(),
+            signature: None,
+        })
+        .await
+        .expect("send second invite");
+    let second_core_connection_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AdapterEvent::InboundConnection { connection } =
+                events.recv().await.expect("event channel closed")
+            {
+                if connection
+                    .session_id
+                    .as_str()
+                    .ends_with("sess_ws_adapter_other")
+                {
+                    break connection.id;
+                }
+            }
+        }
+    })
+    .await
+    .expect("second inbound connection timeout");
+    assert_ne!(second_core_connection_id, core_connection_id);
+
+    let second_wire_connection_id = "conn_ws_wire_other";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "websocket".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_ws_data_other".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_ws_adapter_other")
+            .with_connid(second_wire_connection_id),
+        )
+        .await
+        .expect("bind second wire connection");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("event channel closed"),
+                AdapterEvent::Native { kind: "uctp.connection_bound", detail }
+                    if detail == second_wire_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("second connection binding timeout");
+
+    adapter
+        .send_data_message(
+            core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "first route payload"),
+        )
+        .await
+        .expect("send first route data");
+    adapter
+        .send_data_message(
+            second_core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "second route payload"),
+        )
+        .await
+        .expect("send second route data");
+
+    for (cid, sid, connid, body) in [
+        (
+            "conv_x",
+            "sess_ws_adapter_test",
+            wire_connection_id,
+            "first route payload",
+        ),
+        (
+            "conv_y",
+            "sess_ws_adapter_other",
+            second_wire_connection_id,
+            "second route payload",
+        ),
+    ] {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let envelope = inbound.recv().await.expect("client inbound closed");
+                if envelope.msg_type == MessageType::MessageSend {
+                    break envelope;
+                }
+            }
+        })
+        .await
+        .expect("outbound data timeout");
+        let payload = envelope
+            .decode_payload::<rvoip_uctp::payloads::message::MessageSend>()
+            .expect("decode outbound message");
+        assert_eq!(envelope.cid.as_deref(), Some(cid));
+        assert_eq!(envelope.sid.as_deref(), Some(sid));
+        assert_eq!(envelope.connid.as_deref(), Some(connid));
+        assert_eq!(payload.body, body);
+    }
+
+    adapter
+        .end(core_connection_id, EndReason::Normal)
+        .await
+        .expect("end first route");
+    adapter
+        .end(second_core_connection_id, EndReason::Normal)
+        .await
+        .expect("end second route");
 }
 
 #[tokio::test]

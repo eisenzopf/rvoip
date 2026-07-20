@@ -4,6 +4,7 @@
 //! crate. The draft-specific `moq-rs` implementation is kept behind a private
 //! wire adapter so a future, wire-incompatible MOQT draft is contained here.
 
+mod audio_subscription;
 mod authorization;
 mod catalog;
 mod catalog_subscriber;
@@ -17,6 +18,8 @@ mod loc;
 mod namespace;
 mod publisher;
 #[cfg(feature = "relay-admission")]
+mod publisher_admission;
+#[cfg(feature = "relay-admission")]
 mod relay_admission;
 #[cfg(feature = "relay-runtime")]
 mod relay_runtime;
@@ -24,6 +27,12 @@ mod replay;
 mod session_lease;
 mod wire;
 
+pub use audio_subscription::{
+    MoqAudioObjectReceiver, MoqAudioReceiveError, MoqAudioSubscriberConfig,
+    MoqAudioSubscriberConfigError, MoqAudioSubscriberFailure, MoqAudioSubscriberLifecycle,
+    MoqAudioSubscriptionSnapshot, MoqReceivedAudioObject, DEFAULT_AUDIO_QUEUE_OBJECTS,
+    DEFAULT_MAX_AUDIO_OBJECT_BYTES, MAX_AUDIO_OBJECT_BYTES, MAX_AUDIO_QUEUE_OBJECTS,
+};
 pub use authorization::{
     MoqAction, MoqAuthorizationError, MoqAuthorizationGrant, MoqAuthorizationRequest,
     MoqAuthorizer, MoqPeerIdentity, MoqResource, MoqRevocationChecker, MoqRevocationError,
@@ -40,7 +49,9 @@ pub use catalog_subscriber::{
     MAX_CATALOG_RECONNECT_ATTEMPTS, MAX_CATALOG_RECONNECT_BACKOFF, MAX_CATALOG_RECONNECT_DEADLINE,
     MAX_MOQ_SUBSCRIBER_CREDENTIAL_BYTES,
 };
-pub use catalog_subscription::{MoqCatalogSubscriber, MoqCatalogSubscriberTlsConfig};
+pub use catalog_subscription::{
+    MoqAudioSubscriber, MoqCatalogSubscriber, MoqCatalogSubscriberTlsConfig,
+};
 pub use compatibility::{
     MoqCompatibility, MoqCompatibilityError, MoqProtocolVersion, LOC_DRAFT, LOC_DRAFT_NUMBER,
     MOQT_DRAFT, MOQT_DRAFT_NUMBER, MOQT_NEGOTIATED_PROTOCOL, MSF_DRAFT, MSF_DRAFT_NUMBER,
@@ -65,6 +76,13 @@ pub use publisher::{
     MoqBroadcastPublisher, MoqPublisherConfig, MoqRelayClient, MoqRelayConnectionPolicy,
     MoqRelayHealthIssue, MoqRelayHealthSnapshot, MoqRelayPeerIdentity, MoqRelayPublication,
     MoqRelaySubstratePolicy, MoqRelayTlsConfig,
+};
+#[cfg(feature = "relay-admission")]
+pub use publisher_admission::{
+    MoqPublisherAdmissionConfig, MoqPublisherAdmissionError, MoqPublisherCertificateBinding,
+    MoqPublisherNamespaceCeiling, MoqPublisherPublicationAuthority,
+    MoqPublisherPublicationAuthorityError, MoqPublisherPublicationGrant,
+    MoqPublisherPublicationRequest, RvoipMoqPublisherAdmission,
 };
 #[cfg(feature = "relay-admission")]
 pub use relay_admission::{

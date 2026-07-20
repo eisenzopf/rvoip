@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
 PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
+CARGO_ARTIFACT_HELPER="${SCRIPT_DIR}/perf_cargo_artifact.py"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 
@@ -63,43 +64,65 @@ elif [[ "${RVOIP_PERF_SYSTEM_ALLOCATOR}" == "1" ]]; then
   append_perf_feature "perf-system-allocator"
 fi
 
-echo "Building burst test binaries (features: ${PERF_FEATURES})..."
-cargo test \
-  -p rvoip-sip \
-  --release \
-  --features "${PERF_FEATURES}" \
-  --test perf_burst_receiver \
-  --no-run
-cargo test \
-  -p rvoip-sip \
-  --release \
-  --features "${PERF_FEATURES}" \
-  --test perf_burst_caller \
-  --no-run
+ROOT_RUN_DIR="${PERF_DIR}/perf_burst_matrix/burst_$(date +%Y%m%d_%H%M%S)_$$"
+BUILD_DIR="${ROOT_RUN_DIR}/build"
+SOURCE_AT_BUILD="${BUILD_DIR}/source-at-build.json"
+SOURCE_AFTER_BUILD="${BUILD_DIR}/source-after-build.json"
+SOURCE_AT_FINALIZE="${BUILD_DIR}/source-at-finalize.json"
+mkdir -p "${BUILD_DIR}"
 
-find_test_bin() {
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AT_BUILD}" >/dev/null
+
+build_exact_test_bin() {
   local name="$1"
-  local bins=()
-  shopt -s nullglob
-  for candidate in "${WORKSPACE_ROOT}"/target/release/deps/"${name}"-*; do
-    if [[ -f "${candidate}" && -x "${candidate}" ]]; then
-      bins+=("${candidate}")
-    fi
-  done
-  shopt -u nullglob
+  local messages="${BUILD_DIR}/${name}-cargo-messages.jsonl"
+  local manifest="${BUILD_DIR}/${name}-artifact.json"
+  local target_source="${CRATE_DIR}/tests/perf/${name}.rs"
 
-  if (( ${#bins[@]} == 0 )); then
-    echo "Could not locate compiled ${name} test binary" >&2
+  echo "Building exact ${name} artifact (features: ${PERF_FEATURES})..." >&2
+  if ! cargo test \
+      -p rvoip-sip \
+      --release \
+      --features "${PERF_FEATURES}" \
+      --test "${name}" \
+      --no-run \
+      --message-format=json-render-diagnostics \
+      >"${messages}"; then
+    echo "Cargo failed while building ${name}; refusing any existing binary" >&2
     return 1
   fi
 
-  ls -t "${bins[@]}" | head -n 1
+  python3 "${CARGO_ARTIFACT_HELPER}" resolve \
+    --messages "${messages}" \
+    --manifest "${manifest}" \
+    --workspace-root "${WORKSPACE_ROOT}" \
+    --source-at-build "${SOURCE_AT_BUILD}" \
+    --target "${name}" \
+    --target-source "${target_source}" \
+    --package rvoip-sip \
+    --profile release \
+    --features "${PERF_FEATURES}" \
+    --default-features enabled
 }
+
+RECEIVER_BIN="$(build_exact_test_bin perf_burst_receiver)"
+CALLER_BIN="$(build_exact_test_bin perf_burst_caller)"
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AFTER_BUILD}" >/dev/null
+python3 "${CARGO_ARTIFACT_HELPER}" assert-source \
+  --expected "${SOURCE_AT_BUILD}" \
+  --actual "${SOURCE_AFTER_BUILD}" \
+  --label "while building burst executables" >/dev/null
+printf 'receiver=%s\ncaller=%s\n' "${RECEIVER_BIN}" "${CALLER_BIN}" \
+  >"${BUILD_DIR}/executables.txt"
 
 normalise_scenarios() {
   local raw="$1"
   if [[ "${raw}" == "all" ]]; then
-    echo "carrier-smoke access-edge-microburst contact-center-flash shift-change-long-hold overload-recovery high-density-media-burst"
+    echo "carrier-smoke access-edge-microburst contact-center-flash shift-change-long-hold overload-recovery high-density-media-burst buffer-ab-legacy"
   else
     echo "${raw//,/ }"
   fi
@@ -182,11 +205,6 @@ write_host_udp_delta() {
     done
   } > "${out}"
 }
-
-RECEIVER_BIN="$(find_test_bin perf_burst_receiver)"
-CALLER_BIN="$(find_test_bin perf_burst_caller)"
-ROOT_RUN_DIR="${PERF_DIR}/perf_burst_matrix/burst_$(date +%Y%m%d_%H%M%S)_$$"
-mkdir -p "${ROOT_RUN_DIR}"
 
 receiver_pid=""
 caller_pid=""
@@ -293,7 +311,9 @@ import sys
 root = pathlib.Path(sys.argv[1])
 print("| Scenario | Caller ASR | Caller overload | Caller retained | Caller RSS MB/hr | Receiver calls | Receiver retained | Receiver audio after drain | Receiver RSS MB/hr |")
 print("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
-for scenario_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+for scenario_dir in sorted(
+    p for p in root.iterdir() if p.is_dir() and p.name != "build"
+):
     scenario = scenario_dir.name
     caller_file = scenario_dir / f"perf_burst_caller_{scenario}.json"
     receiver_file = scenario_dir / f"perf_burst_receiver_{scenario}.json"
@@ -341,6 +361,15 @@ PY
 echo "Burst matrix reports:"
 echo "  run dir : ${ROOT_RUN_DIR}"
 echo "  summary : ${AGG_MD}"
+echo "  build evidence: ${BUILD_DIR}"
+
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AT_FINALIZE}" >/dev/null
+python3 "${CARGO_ARTIFACT_HELPER}" assert-source \
+  --expected "${SOURCE_AT_BUILD}" \
+  --actual "${SOURCE_AT_FINALIZE}" \
+  --label "during the burst-matrix run" >/dev/null
 
 if (( failures != 0 )); then
   echo "Burst matrix failed with ${failures} scenario failure(s)" >&2

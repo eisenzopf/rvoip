@@ -23,8 +23,9 @@
 //! - **Event Filtering**: Send only relevant events to avoid session-core overload
 
 use super::core::DialogManager;
-use crate::errors::DialogResult;
+use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
+use rvoip_sip_core::Method;
 use tokio::sync::mpsc;
 
 /// Trait for session coordination operations
@@ -64,6 +65,31 @@ impl SessionCoordinator for DialogManager {
     }
 
     async fn notify_session_layer(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
+        if matches!(
+            &event,
+            SessionCoordinationEvent::ReInvite { request, .. }
+                if request.method() == Method::Info
+        ) {
+            let hub = self.event_hub.read().await.clone().ok_or_else(|| {
+                DialogError::routing_error(
+                    "authoritative INFO dispatch requires a dialog event hub",
+                )
+            })?;
+            let acknowledged = hub
+                .publish_session_coordination_authoritative(event)
+                .await
+                .map_err(|_| {
+                    DialogError::routing_error(
+                        "authoritative INFO dispatch was rejected by session-core",
+                    )
+                })?;
+            if !acknowledged {
+                return Err(DialogError::routing_error(
+                    "authoritative INFO dispatch had no session-core handler",
+                ));
+            }
+            return Ok(());
+        }
         // Use the emit_session_coordination_event method which properly uses GlobalEventCoordinator
         self.emit_session_coordination_event(event).await;
         Ok(())

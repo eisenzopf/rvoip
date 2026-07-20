@@ -9,6 +9,7 @@
 pub mod accept;
 pub mod challenge;
 pub mod generic;
+pub mod in_dialog;
 pub mod provisional;
 pub mod redirect;
 pub mod register_response;
@@ -17,6 +18,7 @@ pub mod reject;
 pub use accept::AcceptBuilder;
 pub use challenge::{AuthChallengeBuilder, AuthScheme};
 pub use generic::GenericResponseBuilder;
+pub use in_dialog::InDialogResponseBuilder;
 pub use provisional::ProvisionalBuilder;
 pub use redirect::RedirectBuilder;
 pub use register_response::RegisterResponseBuilder;

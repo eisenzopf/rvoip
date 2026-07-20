@@ -21,7 +21,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use tokio::sync::{mpsc, watch};
 
-use crate::adapter::{EndReason, TransferTarget};
+use crate::adapter::{EndReason, TransferAttemptId, TransferStatus, TransferTarget};
 use crate::connection::Transport;
 use crate::ids::ConnectionId;
 use crate::DataMessage;
@@ -174,6 +174,8 @@ impl From<&TransferTarget> for OperationalTransferTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OperationalTransferOutcome {
+    /// The adapter accepted the command for asynchronous processing.
+    Submitted,
     Succeeded,
     Failed,
 }
@@ -187,6 +189,15 @@ pub enum OperationalTransferOutcome {
 #[non_exhaustive]
 pub enum OperationalEventKind {
     Connected,
+    /// Provisional signaling for this exact connection lifecycle.
+    ///
+    /// `early_media` means the adapter has received a media-bearing
+    /// provisional response and can expose its negotiated media stream. It
+    /// does not mean the connection has been finally answered.
+    Progress {
+        status_code: u16,
+        early_media: bool,
+    },
     /// Coalesced proof that core consumed media from this exact live
     /// Connection. `generation` is consecutive for the Connection lifecycle
     /// even when lower-level graph observations were overwritten under
@@ -208,8 +219,16 @@ pub enum OperationalEventKind {
         message: DataMessage,
     },
     Transfer {
+        /// Exact transfer submission when the caller used the correlated API.
+        /// `None` identifies the legacy uncorrelated submission path.
+        attempt_id: Option<TransferAttemptId>,
         target: OperationalTransferTarget,
         outcome: OperationalTransferOutcome,
+    },
+    /// Protocol-authoritative asynchronous transfer progress or completion.
+    TransferStatus {
+        attempt_id: Option<TransferAttemptId>,
+        status: TransferStatus,
     },
 }
 
@@ -217,6 +236,14 @@ impl fmt::Debug for OperationalEventKind {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Connected => formatter.write_str("Connected"),
+            Self::Progress {
+                status_code,
+                early_media,
+            } => formatter
+                .debug_struct("Progress")
+                .field("status_code", status_code)
+                .field("early_media", early_media)
+                .finish(),
             Self::MediaActivity { generation } => formatter
                 .debug_struct("MediaActivity")
                 .field("generation", generation)
@@ -243,11 +270,19 @@ impl fmt::Debug for OperationalEventKind {
                 .field("reliability", &message.reliability)
                 .finish(),
             Self::Transfer {
-                target, outcome, ..
+                attempt_id,
+                target,
+                outcome,
             } => formatter
                 .debug_struct("Transfer")
+                .field("attempt_id_present", &attempt_id.is_some())
                 .field("target", &RedactedTransferTarget(target))
                 .field("outcome", outcome)
+                .finish(),
+            Self::TransferStatus { attempt_id, status } => formatter
+                .debug_struct("TransferStatus")
+                .field("attempt_id_present", &attempt_id.is_some())
+                .field("status", status)
                 .finish(),
         }
     }
@@ -473,8 +508,16 @@ mod tests {
             },
             OperationalEventKind::DataMessage { message },
             OperationalEventKind::Transfer {
+                attempt_id: Some(TransferAttemptId::from_string(secret)),
                 target: OperationalTransferTarget::Uri,
                 outcome: OperationalTransferOutcome::Succeeded,
+            },
+            OperationalEventKind::TransferStatus {
+                attempt_id: Some(TransferAttemptId::from_string(secret)),
+                status: TransferStatus::Failed {
+                    status_code: 503,
+                    reason: secret.into(),
+                },
             },
         ];
         for value in values {

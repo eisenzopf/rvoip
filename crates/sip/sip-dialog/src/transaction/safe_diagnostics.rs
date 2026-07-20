@@ -195,12 +195,16 @@ impl fmt::Debug for SafeTransactionCommand<'_> {
                 .debug_tuple("ProcessMessage")
                 .field(&SafeSipMessage::new(message))
                 .finish(),
+            InternalTransactionCommand::SupervisedServerResponse(_) => {
+                f.write_str("SupervisedServerResponse")
+            }
             InternalTransactionCommand::Timer(timer) => f
                 .debug_struct("Timer")
                 .field("name_len", &timer.len())
                 .finish(),
             InternalTransactionCommand::TransportError => f.write_str("TransportError"),
             InternalTransactionCommand::Terminate => f.write_str("Terminate"),
+            InternalTransactionCommand::CompactRetire => f.write_str("CompactRetire"),
             InternalTransactionCommand::CancelTimer100 => f.write_str("CancelTimer100"),
         }
     }
@@ -432,6 +436,7 @@ impl fmt::Display for SafeTransactionError<'_> {
             Io(_) => f.write_str("io"),
             ChannelError { .. } => f.write_str("channel"),
             TransactionCreationError { .. } => f.write_str("transaction_creation"),
+            TransactionCapacityExhausted { .. } => f.write_str("transaction_capacity"),
             MessageProcessingError { .. } => f.write_str("message_processing"),
             Transport(_) => f.write_str("transport_manager"),
             Other(_) => f.write_str("other"),

@@ -4,7 +4,8 @@
 
 use rvoip_sip::{
     Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, SessionError, SipContactMode, SipTlsMode,
+    RtpTransportBufferConfig, SessionError, SipContactMode, SipNatConfig, SipTlsMode,
+    SymmetricRtpPolicy,
 };
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
@@ -129,10 +130,12 @@ fn test_config_graduated_perf_knobs_are_configurable() {
         recv_buffer_size: 2048,
         rtcp_recv_buffer_size: 1024,
     };
-    let mut media_controller_config = MediaSessionControllerConfig::default();
-    media_controller_config.rtp_buffer_size = 960;
-    media_controller_config.rtp_buffer_initial_count = 8;
-    media_controller_config.rtp_buffer_max_count = 32;
+    let media_controller_config = MediaSessionControllerConfig {
+        rtp_buffer_size: 960,
+        rtp_buffer_initial_count: 8,
+        rtp_buffer_max_count: 32,
+        ..Default::default()
+    };
 
     let c = Config::local("alice", 5060)
         .with_auto_180_ringing(false)
@@ -372,6 +375,48 @@ fn test_config_lan_pbx_profile_sets_advertised_addresses() {
         0,
         "LAN PBX media public address must not reuse the SIP port; SDP should advertise the allocated RTP port"
     );
+}
+
+#[test]
+fn advertised_address_builders_separate_private_bind_and_public_wire_addresses() {
+    let signaling: SocketAddr = "203.0.113.10:5060".parse().unwrap();
+    let media: SocketAddr = "203.0.113.10:0".parse().unwrap();
+    let c = Config::on("bridge", "10.0.0.10".parse().unwrap(), 5060)
+        .with_sip_advertised_addr(signaling)
+        .with_media_public_addr(media);
+
+    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse().unwrap());
+    assert_eq!(c.sip_advertised_addr, Some(signaling));
+    assert_eq!(c.media_public_addr, Some(media));
+    c.validate().expect("valid split bind/advertise config");
+
+    // Config diagnostics expose only presence, never routable addresses.
+    let rendered = format!("{c:?}");
+    assert!(rendered.contains("media_public_address_configured: true"));
+    assert!(!rendered.contains("203.0.113.10"));
+    assert!(!rendered.contains("10.0.0.10"));
+}
+
+#[test]
+fn unspecified_advertised_addresses_fail_startup_validation() {
+    let signaling =
+        Config::local("bridge", 5060).with_sip_advertised_addr("0.0.0.0:5060".parse().unwrap());
+    assert!(signaling.validate().is_err());
+
+    let media = Config::local("bridge", 5060).with_media_public_addr("0.0.0.0:0".parse().unwrap());
+    assert!(media.validate().is_err());
+}
+
+#[test]
+fn nat_policy_is_a_source_compatible_sidecar() {
+    let policy = SymmetricRtpPolicy {
+        probation_packets: 5,
+        max_rebindings: 1,
+        ..SymmetricRtpPolicy::default()
+    };
+    let nat = SipNatConfig::default().with_symmetric_rtp_policy(policy);
+    assert_eq!(nat.symmetric_rtp, policy);
+    assert_eq!(Config::local("bridge", 5060).sip_port, 5060);
 }
 
 #[test]

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use super::UctpCoordinator;
+use super::{PeerResourceBindings, UctpCoordinator};
 
 /// Nonblocking adapter-event delivery policy for peer event pumps. Quality
 /// snapshots and native diagnostics are lossy under pressure; lifecycle,
@@ -117,6 +117,25 @@ pub fn spawn_auth_lifecycle_guard(
     })
 }
 
+/// Couple stateful Session authorization to the physical peer lifetime.
+/// Revocation or any fail-closed authority error ends this task; the common
+/// peer supervisor then drains the coordinator and releases all routes,
+/// streams, and direct-listener capacity held by the peer.
+pub fn spawn_resource_authorization_guard(
+    bindings: Arc<PeerResourceBindings>,
+    validation_interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(validation_interval);
+        loop {
+            interval.tick().await;
+            if bindings.reauthorize_all_sessions().is_err() {
+                return;
+            }
+        }
+    })
+}
+
 /// Result of supervising a substrate peer's coupled tasks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PeerSessionExit {
@@ -193,7 +212,36 @@ async fn supervise_peer_tasks_inner(
 mod tests {
     use super::*;
     use crate::state::ENVELOPE_CHANNEL_CAP;
+    use crate::state::{PeerResourceBindings, ResourceBindingError, SessionBindingResolver};
+    use rvoip_core::identity::AuthenticatedPrincipal;
+    use rvoip_core::ids::SessionId;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::mpsc;
+
+    struct RevocableResolver(Arc<AtomicBool>);
+
+    impl SessionBindingResolver for RevocableResolver {
+        fn resolve_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            wire_session: &SessionId,
+        ) -> Result<SessionId, ResourceBindingError> {
+            Ok(wire_session.clone())
+        }
+
+        fn reauthorize_session(
+            &self,
+            _principal: &AuthenticatedPrincipal,
+            _wire_session: &SessionId,
+            _canonical_session: &SessionId,
+        ) -> Result<(), ResourceBindingError> {
+            if self.0.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(ResourceBindingError::forbidden("session-revoked"))
+            }
+        }
+    }
 
     #[tokio::test]
     async fn first_task_exit_drains_coordinator_and_aborts_sibling() {
@@ -275,5 +323,24 @@ mod tests {
             .await
             .expect("cancellation must wake the peer supervisor")
             .expect("supervisor task should not panic");
+    }
+
+    #[tokio::test]
+    async fn resource_guard_exits_when_a_bound_session_is_revoked() {
+        let active = Arc::new(AtomicBool::new(true));
+        let bindings = PeerResourceBindings::new(Arc::new(RevocableResolver(Arc::clone(&active))));
+        bindings
+            .authenticate(AuthenticatedPrincipal::anonymous())
+            .unwrap();
+        bindings
+            .bind_session(&SessionId::from_string("broadcast"))
+            .unwrap();
+        let guard = spawn_resource_authorization_guard(bindings, Duration::from_millis(5));
+        tokio::task::yield_now().await;
+        active.store(false, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(1), guard)
+            .await
+            .expect("resource guard should fail closed after revocation")
+            .expect("resource guard must not panic");
     }
 }

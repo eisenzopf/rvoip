@@ -182,59 +182,54 @@ impl RegistrationAdapter {
                 match receiver.recv().await {
                     Some(event_arc) => {
                         // Use trait-based downcasting via as_any()
-                        if let Some(concrete) =
-                            event_arc.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+                        if let Some(RvoipCrossCrateEvent::DialogToSession(
+                            DialogToSessionEvent::IncomingRegister {
+                                transaction_id,
+                                from_uri,
+                                contact_uri,
+                                expires,
+                                authorization,
+                                raw_request,
+                                ..
+                            },
+                        )) = event_arc.as_any().downcast_ref::<RvoipCrossCrateEvent>()
                         {
-                            // Check if it's an IncomingRegister event
-                            if let RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::IncomingRegister {
-                                    transaction_id,
-                                    from_uri,
-                                    contact_uri,
-                                    expires,
-                                    authorization,
-                                    raw_request,
-                                    ..
-                                },
-                            ) = concrete
-                            {
-                                debug!(
-                                    from_present = !from_uri.is_empty(),
-                                    from_len = from_uri.len(),
-                                    authorization_present = authorization.is_some(),
-                                    "Received IncomingRegister"
-                                );
+                            debug!(
+                                from_present = !from_uri.is_empty(),
+                                from_len = from_uri.len(),
+                                authorization_present = authorization.is_some(),
+                                "Received IncomingRegister"
+                            );
 
-                                let request_uri = raw_request
-                                    .as_ref()
-                                    .and_then(|bytes| {
-                                        rvoip_sip_core::parse_message_with_mode(
-                                            bytes,
-                                            rvoip_sip_core::ParseMode::Strict,
-                                        )
-                                        .ok()
-                                    })
-                                    .and_then(|message| match message {
-                                        rvoip_sip_core::Message::Request(request) => {
-                                            Some(request.uri().to_string())
-                                        }
-                                        rvoip_sip_core::Message::Response(_) => None,
-                                    })
-                                    .unwrap_or_else(|| from_uri.clone());
-
-                                if let Err(e) = handler
-                                    .handle_incoming_register(
-                                        transaction_id.clone(),
-                                        from_uri.clone(),
-                                        request_uri,
-                                        contact_uri.clone(),
-                                        *expires,
-                                        authorization.clone(),
+                            let request_uri = raw_request
+                                .as_ref()
+                                .and_then(|bytes| {
+                                    rvoip_sip_core::parse_message_with_mode(
+                                        bytes,
+                                        rvoip_sip_core::ParseMode::Strict,
                                     )
-                                    .await
-                                {
-                                    warn!("Failed to handle REGISTER: {}", e);
-                                }
+                                    .ok()
+                                })
+                                .and_then(|message| match message {
+                                    rvoip_sip_core::Message::Request(request) => {
+                                        Some(request.uri().to_string())
+                                    }
+                                    rvoip_sip_core::Message::Response(_) => None,
+                                })
+                                .unwrap_or_else(|| from_uri.clone());
+
+                            if let Err(e) = handler
+                                .handle_incoming_register(
+                                    transaction_id.clone(),
+                                    from_uri.clone(),
+                                    request_uri,
+                                    contact_uri.clone(),
+                                    *expires,
+                                    authorization.clone(),
+                                )
+                                .await
+                            {
+                                warn!("Failed to handle REGISTER: {}", e);
                             }
                         }
                     }

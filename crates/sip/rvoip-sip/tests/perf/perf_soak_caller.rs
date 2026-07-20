@@ -38,7 +38,9 @@ fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
         "dialog_manager": {
             "invite_failover_plans": 3,
             "active_invite_failover_by_dialog": 5,
+            "invite_failover_plans_by_dialog": 17,
             "invite_failover_attempts": 7,
+            "invite_failover_attempts_by_dialog": 19,
             "invite_failover_plan_reservations": 11,
             "invite_failover_attempt_reservations": 13,
         },
@@ -47,9 +49,9 @@ fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
     assert_eq!(support::soak::endpoint_live_ownership_total(&snapshot), 29);
     assert_eq!(
         support::soak::endpoint_bounded_tombstone_total(&snapshot),
-        12
+        48
     );
-    assert_eq!(support::soak::endpoint_retained_total(&snapshot), 41);
+    assert_eq!(support::soak::endpoint_retained_total(&snapshot), 77);
 
     let summary = support::soak::endpoint_summary(&snapshot);
     assert_eq!(
@@ -62,13 +64,13 @@ fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
         summary
             .pointer("/retention_totals/bounded_tombstones")
             .and_then(serde_json::Value::as_u64),
-        Some(12)
+        Some(48)
     );
     assert_eq!(
         summary
             .pointer("/retention_totals/retained")
             .and_then(serde_json::Value::as_u64),
-        Some(41)
+        Some(77)
     );
 }
 

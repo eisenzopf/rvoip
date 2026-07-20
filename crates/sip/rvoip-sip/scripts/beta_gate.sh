@@ -30,9 +30,17 @@ TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 ARTIFACT_DIR="${BETA_GATE_ARTIFACT_DIR:-$WORKSPACE_ROOT/target/beta-gate/$TIMESTAMP}"
 SUMMARY="$ARTIFACT_DIR/summary.md"
 ENV_REPORT="$ARTIFACT_DIR/environment/environment.md"
+BETA_SOURCE_AT_START="$ARTIFACT_DIR/environment/source-at-beta-start.json"
+CANONICAL_2K_EVIDENCE_HELPER="$SCRIPT_DIR/canonical_2k_evidence.py"
 FAILURES=0
 SKIPS=0
 SIPP_LISTENER_PID=""
+PBX_RESTORE_ARMED=0
+PBX_RESTORE_ENABLED=0
+PBX_RESTORE_INITIAL_ASTERISK=0
+PBX_RESTORE_INITIAL_FREESWITCH=0
+PBX_RESTORE_ASTERISK_DIR=""
+PBX_RESTORE_FREESWITCH_DIR=""
 
 cleanup_background() {
   if [ -n "$SIPP_LISTENER_PID" ] && kill -0 "$SIPP_LISTENER_PID" >/dev/null 2>&1; then
@@ -40,7 +48,36 @@ cleanup_background() {
     wait "$SIPP_LISTENER_PID" >/dev/null 2>&1 || true
   fi
 }
-trap cleanup_background EXIT
+
+cleanup_local_pbx_state() {
+  if [ "$PBX_RESTORE_ARMED" != "1" ]; then
+    return
+  fi
+  # Disarm first so a failure or signal during restoration cannot recurse.
+  PBX_RESTORE_ARMED=0
+  if [ "$PBX_RESTORE_ENABLED" != "1" ]; then
+    return
+  fi
+
+  if [ "$PBX_RESTORE_INITIAL_ASTERISK" = "1" ]; then
+    "$PBX_RESTORE_FREESWITCH_DIR/scripts/down.sh" >/dev/null 2>&1 || true
+    "$PBX_RESTORE_ASTERISK_DIR/scripts/up.sh" >/dev/null 2>&1 || true
+  elif [ "$PBX_RESTORE_INITIAL_FREESWITCH" = "1" ]; then
+    "$PBX_RESTORE_ASTERISK_DIR/scripts/down.sh" >/dev/null 2>&1 || true
+    "$PBX_RESTORE_FREESWITCH_DIR/scripts/up.sh" >/dev/null 2>&1 || true
+  else
+    "$PBX_RESTORE_ASTERISK_DIR/scripts/down.sh" >/dev/null 2>&1 || true
+    "$PBX_RESTORE_FREESWITCH_DIR/scripts/down.sh" >/dev/null 2>&1 || true
+  fi
+}
+
+cleanup_on_exit() {
+  local status=$?
+  cleanup_background
+  cleanup_local_pbx_state
+  return "$status"
+}
+trap cleanup_on_exit EXIT
 
 usage() {
   cat <<'EOF'
@@ -61,6 +98,12 @@ Environment:
   BETA_DENY_WARNINGS=0           Allow Rust warnings during beta gates. Defaults to 1.
   BETA_TEST_LOG_FILTER           Runtime tracing filter for cargo test/build gates.
                                   Defaults to off for clean release evidence.
+  BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1
+                                  Require exactly three pre-run canonical clean PASS artifacts.
+                                  Defaults to 0 for development gates.
+  BETA_CANONICAL_2K_RUN_DIRS     Three chronological run directories separated by `:`. Required
+                                  when canonical evidence is enabled; paths are copied into the
+                                  beta report after fingerprint and gate revalidation.
   BETA_RUN_PBX=1                 Run examples/pbx/run.sh when PBX configs are present.
   BETA_RUN_LOCAL_PBX=1           Manage ~/Developer/asterisk and ~/Developer/freeswitch sequentially.
   BETA_RESTORE_LOCAL_PBX=0       Do not restore the PBX container that was running before the gate.
@@ -81,6 +124,15 @@ Environment:
                                   release latency measurements.
   BETA_PERF_PROFILE_MATRIX       Perf profile:CPS matrix. Defaults to endpoint, pbx-media-server,
                                   and signaling-only-server-high-performance.
+  BETA_RUN_PERF_ALL=1            Run every registered perf/resiliency test, including ignored
+                                  media-churn and monolithic-soak tests. Requires the full burst
+                                  matrix and split soak to be enabled so paired ignored tests run.
+                                  The untuned endpoint profile remains a 30-CPS compatibility gate;
+                                  high-CPS tiers are qualified by the server profiles.
+  BETA_PERF_MEDIA_CHURN_DURATION_SECS
+                                  Isolated media-churn duration. Defaults to 120 seconds.
+  BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS
+                                  Legacy monolithic-soak duration. Defaults to 1800 seconds.
   BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
   BETA_PERF_INFRA_MEMORY_DIAGNOSTICS=1
                                   Compile SIP/infra memory diagnostics for perf gates.
@@ -148,7 +200,18 @@ while [ "$#" -gt 0 ]; do
   shift
 done
 
-mkdir -p "$ARTIFACT_DIR"
+# Capture the source before creating any beta artifact. This keeps a custom
+# artifact directory inside the checkout from changing the identity it is
+# supposed to record; the final source fence will reject that unsafe topology.
+source_at_start_tmp="$(mktemp "${TMPDIR:-/tmp}/rvoip-beta-source.XXXXXX")"
+if ! python3 "$CANONICAL_2K_EVIDENCE_HELPER" fingerprint \
+  --workspace-root "$WORKSPACE_ROOT" \
+  --out "$source_at_start_tmp"; then
+  rm -f "$source_at_start_tmp"
+  exit 1
+fi
+mkdir -p "$ARTIFACT_DIR/environment"
+mv "$source_at_start_tmp" "$BETA_SOURCE_AT_START"
 cat > "$SUMMARY" <<EOF
 # rvoip-sip Beta Gate Summary
 
@@ -268,6 +331,14 @@ perf_features() {
   fi
 
   printf '%s' "$features"
+}
+
+perf_profile_matrix() {
+  if [ -n "${BETA_PERF_PROFILE_MATRIX:-}" ]; then
+    printf '%s' "$BETA_PERF_PROFILE_MATRIX"
+  else
+    printf '%s' "endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000"
+  fi
 }
 
 capture_command() {
@@ -479,6 +550,8 @@ write_environment_report() {
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
+- source_at_beta_start: \`environment/source-at-beta-start.json\`
+- beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
@@ -543,10 +616,16 @@ write_summary_gate_table_header() {
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
+- source_at_beta_start: \`environment/source-at-beta-start.json\`
+- beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
+- beta_canonical_2k_run_dirs: \`${BETA_CANONICAL_2K_RUN_DIRS:-not supplied}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
-- beta_profile_matrix: \`${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}\`
+- beta_profile_matrix: \`$(perf_profile_matrix)\`
+- beta_run_perf_all: \`${BETA_RUN_PERF_ALL:-0}\`
+- beta_perf_media_churn_duration_secs: \`${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}\`
+- beta_perf_monolithic_soak_duration_secs: \`${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
 - beta_perf_features: \`$(perf_features)\`
 - beta_perf_infra_memory_diagnostics: \`${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}\`
@@ -635,6 +714,8 @@ write_report_manifest() {
 - \`security/fuzz/\`
 - \`perf-results/\`
 - \`perf-audit.md\` (current-vs-previous perf regression audit)
+- \`canonical-2k/index.json\` and \`canonical-2k/run-{1,2,3}/\`
+  (required release evidence when enabled)
 
 The report directory is a packaged copy of the beta-gate artifact tree plus
 the current raw perf result files. Logs, matrices, redacted
@@ -724,6 +805,12 @@ run_local_pbx_gate() {
 
   if container_running rvoip-asterisk; then initially_asterisk=1; fi
   if container_running rvoip-freeswitch; then initially_freeswitch=1; fi
+  PBX_RESTORE_ENABLED="$restore"
+  PBX_RESTORE_INITIAL_ASTERISK="$initially_asterisk"
+  PBX_RESTORE_INITIAL_FREESWITCH="$initially_freeswitch"
+  PBX_RESTORE_ASTERISK_DIR="$asterisk_dir"
+  PBX_RESTORE_FREESWITCH_DIR="$freeswitch_dir"
+  PBX_RESTORE_ARMED=1
   mkdir -p "$pbx_output_root"
   rm -f "$pbx_output_root/matrix.tsv" "$pbx_output_root/summary.md"
   capture_docker_snapshot before-local-pbx
@@ -780,6 +867,7 @@ run_local_pbx_gate() {
   fi
 
   restore_local_pbx
+  PBX_RESTORE_ARMED=0
 }
 
 start_managed_sipp_target() {
@@ -1009,6 +1097,11 @@ run_security_gates() {
 
 run_local_gates() {
   run_gate "format check" cargo fmt --all -- --check
+  run_gate "beta evidence helper tests" python3 -m unittest \
+    crates/sip/rvoip-sip/scripts/test_perf_audit.py \
+    crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py \
+    crates/sip/rvoip-sip/scripts/test_perf_2k_acceptance.py \
+    crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py
   run_gate "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
   run_gate "claimed lower-crate check" cargo check \
     -p rvoip-sip-core \
@@ -1032,6 +1125,7 @@ run_local_gates() {
   run_gate "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
   run_gate "rvoip-sip doctests" cargo test -p rvoip-sip --doc
   run_gate "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls
+  run_gate "PBX analyzer unit tests" cargo test -p rvoip-sip --example pbx_analyze --features dev-insecure-tls
   run_gate "rvoip-sip rustdoc" env RUSTDOCFLAGS="-D warnings" cargo doc -p rvoip-sip --no-deps --features generated-validation,dev-insecure-tls
   run_gate "sip-core RFC 4475 torture tests" cargo test -p rvoip-sip-core --features lenient_parsing --test torture_tests
   run_gate "sip-core generated message validation" cargo test -p rvoip-sip-core --features generated-validation --test generated_message_compliance
@@ -1110,11 +1204,59 @@ run_perf_regression_audit() {
   fi
 }
 
+canonical_2k_evidence_requested() {
+  bool_env_enabled "${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}" \
+    || [ -n "${BETA_CANONICAL_2K_RUN_DIRS:-}" ]
+}
+
+run_canonical_2k_evidence_gate() {
+  local encoded="${BETA_CANONICAL_2K_RUN_DIRS:-}"
+  local -a run_dirs=()
+  local -a arguments=(
+    import
+    --workspace-root "$WORKSPACE_ROOT"
+    --beta-start "$BETA_SOURCE_AT_START"
+    --artifact-dir "$ARTIFACT_DIR"
+  )
+  if [ -n "$encoded" ]; then
+    IFS=':' read -r -a run_dirs <<< "$encoded"
+  fi
+  local run_dir
+  for run_dir in "${run_dirs[@]}"; do
+    if [ -n "$run_dir" ]; then
+      arguments+=(--run-dir "$run_dir")
+    fi
+  done
+  run_gate "canonical 2k three-pass evidence" \
+    python3 "$CANONICAL_2K_EVIDENCE_HELPER" "${arguments[@]}"
+}
+
 run_perf_gates() {
   local profile_spec
   local features
   features="$(perf_features)"
-  for profile_spec in ${BETA_PERF_PROFILE_MATRIX:-endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000}; do
+  if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
+    run_gate "literal-all perf configuration" env \
+      BETA_RUN_BURST_MATRIX="${BETA_RUN_BURST_MATRIX:-0}" \
+      BETA_BURST_MATRIX="${BETA_BURST_MATRIX:-all}" \
+      BETA_RUN_LONG_SOAK="${BETA_RUN_LONG_SOAK:-1}" \
+      bash -c '
+        set -euo pipefail
+        [ "$BETA_RUN_BURST_MATRIX" = "1" ] || {
+          echo "BETA_RUN_PERF_ALL=1 requires BETA_RUN_BURST_MATRIX=1" >&2
+          exit 1
+        }
+        [ "$BETA_BURST_MATRIX" = "all" ] || {
+          echo "BETA_RUN_PERF_ALL=1 requires BETA_BURST_MATRIX=all" >&2
+          exit 1
+        }
+        [ "$BETA_RUN_LONG_SOAK" = "1" ] || {
+          echo "BETA_RUN_PERF_ALL=1 requires BETA_RUN_LONG_SOAK=1" >&2
+          exit 1
+        }
+      '
+  fi
+  for profile_spec in $(perf_profile_matrix); do
     local profile="${profile_spec%%:*}"
     local cps="${profile_spec#*:}"
     local perf_env=(
@@ -1134,17 +1276,73 @@ run_perf_gates() {
   run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features "$features" --test perf_rtp_steady_state -- --nocapture
   run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features "$features" --test perf_backpressure_step -- --nocapture
   run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features "$features" --test perf_transport_recovery -- --nocapture
+  if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
+    local all_features
+    all_features="$(append_feature "$features" "dev-insecure-tls")"
+    # The standard gates above cover call setup, registration, active calls,
+    # RTP, backpressure, and transport recovery. These are the remaining
+    # registered non-paired perf targets plus the perf-only resiliency target.
+    run_gate "all registered resiliency tests" cargo test -p rvoip-sip --release --features "$all_features" --test 'resilien*' -- --nocapture
+    run_gate "perf mid-call signaling under media" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mid_call_signal_under_media -- --nocapture
+    run_gate "perf TLS overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_tls_overhead -- --nocapture
+    run_gate "perf SRTP overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_srtp_overhead -- --nocapture
+    run_gate "perf PDD with 180 first" cargo test -p rvoip-sip --release --features "$all_features" --test perf_pdd_with_180_first -- --nocapture
+    run_gate "perf sustained long-duration calls" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sustained_long_duration_calls -- --nocapture
+    run_gate "perf registrar binding scale" cargo test -p rvoip-sip --release --features "$all_features" --test perf_registrar_binding_scale -- --nocapture
+    run_gate "perf mixed workload" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mixed_workload -- --nocapture
+    run_gate "perf B2BUA forwarding" cargo test -p rvoip-sip --release --features "$all_features" --test perf_b2bua_forwarding -- --nocapture
+    run_gate "perf AI-agent load" cargo test -p rvoip-sip --release --features "$all_features" --test perf_ai_agent_load -- --nocapture
+    run_gate "perf contact-center transfers" cargo test -p rvoip-sip --release --features "$all_features" --test perf_contact_center_transfers -- --nocapture
+    run_gate "perf SIPp parity" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sipp_parity -- --nocapture
+    # Exercise non-ignored invariant/unit checks in the paired soak targets.
+    run_gate "perf soak target invariant tests" cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_caller --test perf_soak_30min -- --nocapture
+    # The remaining ignored paired tests run through the burst and split-soak
+    # scripts below. These two ignored standalone tests need explicit gates.
+    # Do not let the split-soak duration leak into these standalone targets.
+    # They intentionally have independent evidence windows: a short isolated
+    # media churn diagnostic and the legacy 30-minute monolithic soak.
+    run_gate "perf media churn" env \
+      RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}" \
+      cargo test -p rvoip-sip --release --features "$all_features" --test perf_media_churn perf_media_churn -- --exact --ignored --nocapture
+    run_gate "perf monolithic soak" env \
+      RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}" \
+      cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_30min perf_soak_30min -- --exact --ignored --nocapture
+  fi
   run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features "$features" --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
+  local burst_smoke_covered_by_matrix=0
+  if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ] &&
+     [ "${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" = "carrier-smoke" ]; then
+    local burst_matrix_selection
+    local burst_scenario
+    burst_matrix_selection="${BETA_BURST_MATRIX:-all}"
+    burst_matrix_selection="${burst_matrix_selection//,/ }"
+    for burst_scenario in $burst_matrix_selection; do
+      if [ "$burst_scenario" = "all" ] || [ "$burst_scenario" = "carrier-smoke" ]; then
+        burst_smoke_covered_by_matrix=1
+        break
+      fi
+    done
+  fi
   if [ "${BETA_RUN_BURST_SMOKE:-1}" = "1" ]; then
-    run_gate "perf media burst smoke" env \
-      RVOIP_PERF_FEATURES="$features" \
-      RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
-      RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" \
-      RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
-      RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
-      RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
-      RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
-      "$SCRIPT_DIR/perf_burst_matrix.sh"
+    if [ "$burst_smoke_covered_by_matrix" = "1" ]; then
+      local burst_smoke_log="$ARTIFACT_DIR/perf-media-burst-smoke.log"
+      {
+        echo "COVERED: perf media burst smoke"
+        echo "The selected full burst matrix includes carrier-smoke; the standalone invocation is coalesced into that gate."
+      } > "$burst_smoke_log"
+      record "COVERED" "perf media burst smoke" "$burst_smoke_log" "-"
+      echo "COVERED: perf media burst smoke - coalesced into perf media burst matrix"
+    else
+      run_gate "perf media burst smoke" env \
+        RVOIP_PERF_FEATURES="$features" \
+        RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
+        RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" \
+        RVOIP_PERF_MEMORY_DIAGNOSTICS="${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}" \
+        RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
+        RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
+        RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+        "$SCRIPT_DIR/perf_burst_matrix.sh"
+    fi
   else
     skip_gate "perf media burst smoke" "BETA_RUN_BURST_SMOKE=0 disables required media burst smoke evidence."
   fi
@@ -1191,6 +1389,10 @@ run_perf_gates() {
 write_environment_report
 write_summary_gate_table_header
 
+if canonical_2k_evidence_requested; then
+  run_canonical_2k_evidence_gate
+fi
+
 case "$MODE" in
   local)
     run_local_gates
@@ -1215,6 +1417,13 @@ case "$MODE" in
     exit 2
     ;;
 esac
+
+if canonical_2k_evidence_requested; then
+  run_gate "canonical 2k beta source unchanged" \
+    python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
+      --workspace-root "$WORKSPACE_ROOT" \
+      --beta-start "$BETA_SOURCE_AT_START"
+fi
 
 if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
   cat >> "$SUMMARY" <<'EOF'

@@ -37,7 +37,19 @@ STEADY_SECS="${RVOIP_PERF_STEADY_SECS:-15}"
 # CPS levels: doc says 30/100/300; can be overridden for quick smoke.
 CPS_LEVELS="${RVOIP_PERF_CPS:-30 100 300}"
 MIN_SUCCESS_PCT="${RVOIP_PERF_MIN_SUCCESS_PCT:-99.9}"
+SIPP_SHARD_CPS="${RVOIP_PERF_SIPP_SHARD_CPS:-0}"
+SIPP_EXTRA_ARGS="${RVOIP_PERF_SIPP_EXTRA_ARGS:--timer_resol 1 -max_recv_loops 10000 -max_sched_loops 10000}"
+INTER_RUN_PAUSE_SECS="${RVOIP_PERF_INTER_RUN_PAUSE_SECS:-2}"
 RUN_FAILURES=0
+
+if ! [[ "$STEADY_SECS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "RVOIP_PERF_STEADY_SECS must be a positive integer (got '$STEADY_SECS')" >&2
+  exit 1
+fi
+if ! [[ "$SIPP_SHARD_CPS" =~ ^[0-9]+$ ]]; then
+  echo "RVOIP_PERF_SIPP_SHARD_CPS must be a non-negative integer (got '$SIPP_SHARD_CPS')" >&2
+  exit 1
+fi
 
 redacted_env() {
   env | LC_ALL=C sort | awk -F= '
@@ -78,6 +90,8 @@ write_environment_report() {
     echo "- steady_secs: $STEADY_SECS"
     echo "- cps_levels: $CPS_LEVELS"
     echo "- min_success_pct: $MIN_SUCCESS_PCT"
+    echo "- sipp_shard_cps: $SIPP_SHARD_CPS (0 preserves the historical single-runner topology)"
+    echo "- sipp_extra_args: $SIPP_EXTRA_ARGS"
     echo "- scenario: $SCENARIO"
     echo "- workspace: $WORKSPACE_ROOT"
     echo "- workspace_git: $(git -C "$WORKSPACE_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
@@ -171,114 +185,239 @@ fi
 init_report
 echo "[run_comparison] target=$TARGET_HOST:$TARGET_PORT tag=$TAG steady=${STEADY_SECS}s cps=$CPS_LEVELS"
 
-evaluate_stat_csv() {
-  local stat_file="$1"
-  local expected_calls="$2"
-  local min_success_pct="$3"
-  python3 - "$stat_file" "$expected_calls" "$min_success_pct" <<'PY'
+evaluate_stat_csvs() {
+  local expected_calls="$1"
+  local min_success_pct="$2"
+  shift 2
+  python3 - "$expected_calls" "$min_success_pct" "$@" <<'PY'
 import csv
 import sys
 
-path, expected_raw, threshold_raw = sys.argv[1:4]
+expected_raw, threshold_raw, *paths = sys.argv[1:]
 expected = int(expected_raw)
 threshold = float(threshold_raw)
-with open(path, newline="") as f:
-    rows = list(csv.reader(f, delimiter=";"))
-if len(rows) < 2:
-    print("FAIL empty_or_missing_data")
+totals = {"total": 0, "success": 0, "failed": 0, "current": 0}
+
+try:
+    for path in paths:
+        with open(path, newline="") as f:
+            rows = list(csv.reader(f, delimiter=";"))
+        if len(rows) < 2:
+            print(f"FAIL empty_or_missing_data path={path}")
+            raise SystemExit(0)
+        values = dict(zip(rows[0], rows[-1]))
+
+        def as_int(name: str) -> int:
+            raw = values.get(name, "")
+            return int(raw) if raw else 0
+
+        totals["total"] += as_int("TotalCallCreated")
+        totals["success"] += as_int("SuccessfulCall(C)")
+        totals["failed"] += as_int("FailedCall(C)")
+        totals["current"] += as_int("CurrentCall")
+except (OSError, ValueError) as error:
+    print(f"FAIL unreadable_stat error={error}")
     raise SystemExit(0)
-header = rows[0]
-last = rows[-1]
-values = dict(zip(header, last))
 
-def as_int(name: str) -> int:
-    raw = values.get(name, "")
-    return int(raw) if raw else 0
-
-total = as_int("TotalCallCreated")
-success = as_int("SuccessfulCall(C)")
-failed = as_int("FailedCall(C)")
-current = as_int("CurrentCall")
+total = totals["total"]
+success = totals["success"]
+failed = totals["failed"]
+current = totals["current"]
 basis = max(expected, total, 1)
 success_pct = success / basis * 100.0
-if success_pct + 1e-9 < threshold or failed != 0 or current != 0:
+if total != expected or success_pct + 1e-9 < threshold or failed != 0 or current != 0:
     print(
         "FAIL "
         f"success={success} total={total} expected={expected} "
         f"failed={failed} current={current} success_pct={success_pct:.3f} "
-        f"threshold={threshold}"
+        f"threshold={threshold} shards={len(paths)}"
     )
 else:
     print(
         "PASS "
         f"success={success} total={total} expected={expected} "
         f"failed={failed} current={current} success_pct={success_pct:.3f} "
-        f"threshold={threshold}"
+        f"threshold={threshold} shards={len(paths)}"
     )
 PY
 }
 
+ceil_div() {
+  local numerator="$1"
+  local denominator="$2"
+  echo $(( (numerator + denominator - 1) / denominator ))
+}
+
+runner_count_for_cps() {
+  local cps="$1"
+  if [[ "$SIPP_SHARD_CPS" -eq 0 ]]; then
+    echo 1
+  else
+    ceil_div "$cps" "$SIPP_SHARD_CPS"
+  fi
+}
+
+resolve_stat_file() {
+  local prefix="$1"
+  local candidate
+  if [[ -f "$prefix" ]]; then
+    printf '%s' "$prefix"
+    return
+  fi
+  for candidate in "${prefix}"_*.csv "${prefix}".csv; do
+    if [[ -f "$candidate" ]]; then
+      printf '%s' "$candidate"
+      return
+    fi
+  done
+}
+
+join_by_comma() {
+  local IFS=,
+  echo "$*"
+}
+
+run_sipp_shard() {
+  local stat_prefix="$1"
+  local shard_cps="$2"
+  local shard_calls="$3"
+  local call_limit="$4"
+  local local_port="$5"
+  local run_timeout="$6"
+  local screen="$7"
+  local errlog="$8"
+  local -a cmd extra_args
+
+  cmd=(
+    "$SIPP_BIN"
+    -sf "$SCENARIO"
+    -r "$shard_cps"
+    -m "$shard_calls"
+    -l "$call_limit"
+    -p "$local_port"
+    -nostdin
+  )
+  if [[ -n "$SIPP_EXTRA_ARGS" ]]; then
+    read -r -a extra_args <<< "$SIPP_EXTRA_ARGS"
+    cmd+=("${extra_args[@]}")
+  fi
+  cmd+=(
+    -trace_stat
+    -stf "$stat_prefix"
+    -trace_screen
+    -screen_file "$screen"
+    -trace_err
+    -error_file "$errlog"
+    -timeout "${run_timeout}s"
+    -timeout_error
+    "${TARGET_HOST}:${TARGET_PORT}"
+  )
+  "${cmd[@]}" >/dev/null 2>&1
+}
+
 for CPS in $CPS_LEVELS; do
+  if ! [[ "$CPS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "RVOIP_PERF_CPS values must be positive integers (got '$CPS')" >&2
+    exit 1
+  fi
   CALLS=$(( CPS * STEADY_SECS ))
   if [[ "$CALLS" -lt 10 ]]; then CALLS=10; fi
   START_EPOCH="$(date +%s)"
+  RUNNERS="$(runner_count_for_cps "$CPS")"
+  BASE_PORT=$(( 35000 + RANDOM % 1000 ))
+  REMAINING_CPS="$CPS"
+  REMAINING_CALLS="$CALLS"
+  PIDS=()
+  STAT_PREFIXES=()
+  SCREENS=()
+  ERRLOGS=()
 
-  # Pick a per-run local sipp port to avoid contention across re-runs.
-  SIPP_LOCAL_PORT=$(( 35000 + RANDOM % 1000 ))
-  STAT_PREFIX="$RESULTS_DIR/${TAG}_${CPS}cps"
-  SCREEN="$RESULTS_DIR/${TAG}_${CPS}cps_screen.log"
-  ERRLOG="$RESULTS_DIR/${TAG}_${CPS}cps_errors.log"
-
-  echo "[run_comparison] === ${TAG} @ ${CPS} CPS (${CALLS} calls, sipp:${SIPP_LOCAL_PORT}) ==="
+  echo "[run_comparison] === ${TAG} @ ${CPS} CPS (${CALLS} calls, ${RUNNERS} runner(s), sipp:${BASE_PORT}+) ==="
 
   # Drive the run. Timeout = STEADY_SECS + 30 s buffer so we don't get
   # stuck if the SUT silently drops calls (sipp would otherwise retry
   # forever).
   RUN_TIMEOUT=$(( STEADY_SECS + 30 ))
-  set +e
-  "$SIPP_BIN" \
-    -sf "$SCENARIO" \
-    -r "$CPS" \
-    -m "$CALLS" \
-    -p "$SIPP_LOCAL_PORT" \
-    -nostdin \
-    -trace_stat \
-    -stf "$STAT_PREFIX" \
-    -trace_screen \
-    -screen_file "$SCREEN" \
-    -trace_err \
-    -error_file "$ERRLOG" \
-    -timeout "${RUN_TIMEOUT}s" \
-    -timeout_error \
-    "${TARGET_HOST}:${TARGET_PORT}" >/dev/null 2>&1
-  RC=$?
-  set -e
-
-  if [[ -f "$STAT_PREFIX" ]]; then
-    STAT_FILE="$STAT_PREFIX"
-  else
-    STAT_FILE="$(ls -1 "${STAT_PREFIX}"_*.csv "${STAT_PREFIX}".csv 2>/dev/null | head -1 || true)"
-  fi
-  if [[ -z "$STAT_FILE" ]]; then
-    echo "[run_comparison] FAIL: no stat CSV produced for ${TAG}@${CPS}cps (rc=$RC)" >&2
-    RUN_STATUS=FAIL
-    RUN_FAILURES=$((RUN_FAILURES + 1))
-  else
-    EVAL_RESULT="$(evaluate_stat_csv "$STAT_FILE" "$CALLS" "$MIN_SUCCESS_PCT")"
-    echo "[run_comparison] -> $STAT_FILE (rc=$RC; $EVAL_RESULT)"
-    RUN_STATUS="${EVAL_RESULT%% *}"
-    if [[ "$RUN_STATUS" != "PASS" ]]; then
-      RUN_FAILURES=$((RUN_FAILURES + 1))
+  for (( SHARD=0; SHARD<RUNNERS; SHARD++ )); do
+    REMAINING_SHARDS=$(( RUNNERS - SHARD ))
+    SHARD_CPS=$(( (REMAINING_CPS + REMAINING_SHARDS - 1) / REMAINING_SHARDS ))
+    REMAINING_CPS=$(( REMAINING_CPS - SHARD_CPS ))
+    if [[ "$RUNNERS" -eq 1 ]]; then
+      SHARD_CALLS="$CALLS"
+      STAT_PREFIX="$RESULTS_DIR/${TAG}_${CPS}cps"
+    else
+      SHARD_CALLS=$(( SHARD_CPS * STEADY_SECS ))
+      STAT_PREFIX="$RESULTS_DIR/${TAG}_${CPS}cps_s${SHARD}"
     fi
+    REMAINING_CALLS=$(( REMAINING_CALLS - SHARD_CALLS ))
+    if [[ "$SHARD" -eq $(( RUNNERS - 1 )) && "$REMAINING_CALLS" -ne 0 ]]; then
+      # This only matters for the minimum-ten-calls smoke case; normal shards
+      # are an exact rate * duration partition.
+      SHARD_CALLS=$(( SHARD_CALLS + REMAINING_CALLS ))
+      REMAINING_CALLS=0
+    fi
+    CALL_LIMIT_HEADROOM="$SHARD_CPS"
+    if [[ "$CALL_LIMIT_HEADROOM" -lt 10 ]]; then CALL_LIMIT_HEADROOM=10; fi
+    CALL_LIMIT=$(( SHARD_CALLS + CALL_LIMIT_HEADROOM ))
+    SIPP_LOCAL_PORT=$(( BASE_PORT + SHARD ))
+    SCREEN="${STAT_PREFIX}_screen.log"
+    ERRLOG="${STAT_PREFIX}_errors.log"
+    echo "[run_comparison] shard=${SHARD} rate=${SHARD_CPS} calls=${SHARD_CALLS} call_limit=${CALL_LIMIT} sipp:${SIPP_LOCAL_PORT}"
+    run_sipp_shard "$STAT_PREFIX" "$SHARD_CPS" "$SHARD_CALLS" "$CALL_LIMIT" \
+      "$SIPP_LOCAL_PORT" "$RUN_TIMEOUT" "$SCREEN" "$ERRLOG" &
+    PIDS+=("$!")
+    STAT_PREFIXES+=("$STAT_PREFIX")
+    SCREENS+=("$SCREEN")
+    ERRLOGS+=("$ERRLOG")
+  done
+
+  RC=0
+  MISSING_STATS=0
+  STAT_FILES=()
+  for (( SHARD=0; SHARD<RUNNERS; SHARD++ )); do
+    SHARD_RC=0
+    if wait "${PIDS[$SHARD]}"; then
+      SHARD_RC=0
+    else
+      SHARD_RC=$?
+    fi
+    if [[ "$SHARD_RC" -ne 0 && "$RC" -eq 0 ]]; then RC="$SHARD_RC"; fi
+    STAT_FILE="$(resolve_stat_file "${STAT_PREFIXES[$SHARD]}")"
+    if [[ -z "$STAT_FILE" ]]; then
+      MISSING_STATS=$((MISSING_STATS + 1))
+      echo "[run_comparison] shard=${SHARD} rc=${SHARD_RC} missing_stat=${STAT_PREFIXES[$SHARD]}" >&2
+    else
+      STAT_FILES+=("$STAT_FILE")
+      echo "[run_comparison] shard=${SHARD} rc=${SHARD_RC} stat=${STAT_FILE}"
+    fi
+  done
+
+  if [[ "$MISSING_STATS" -ne 0 ]]; then
+    EVAL_RESULT="FAIL missing_stat_files=${MISSING_STATS}/${RUNNERS}"
+  else
+    EVAL_RESULT="$(evaluate_stat_csvs "$CALLS" "$MIN_SUCCESS_PCT" "${STAT_FILES[@]}")"
+  fi
+  RUN_STATUS="${EVAL_RESULT%% *}"
+  if [[ "$RC" -ne 0 ]]; then
+    RUN_STATUS=FAIL
+    EVAL_RESULT="$EVAL_RESULT nonzero_sipp_rc=$RC"
+  fi
+
+  STAT_FILE="$(join_by_comma "${STAT_FILES[@]}")"
+  SCREEN="$(join_by_comma "${SCREENS[@]}")"
+  ERRLOG="$(join_by_comma "${ERRLOGS[@]}")"
+  echo "[run_comparison] -> ${STAT_FILE:-no-stat-file} (rc=$RC; $EVAL_RESULT)"
+  if [[ "$RUN_STATUS" != "PASS" ]]; then
+    RUN_FAILURES=$((RUN_FAILURES + 1))
   fi
   DURATION="$(( $(date +%s) - START_EPOCH ))"
   record_run "$RUN_STATUS" "$CPS" "$CALLS" "$DURATION" "$RC" "$STAT_FILE" "$SCREEN" "$ERRLOG"
 
   # Small inter-run pause so the SUT settles between CPS bands.
-  sleep 2
+  sleep "$INTER_RUN_PAUSE_SECS"
 done
 
-if compgen -G "$RESULTS_DIR/${TAG}_*cps*.csv" >/dev/null || compgen -G "$RESULTS_DIR/${TAG}_*cps" >/dev/null; then
+if compgen -G "$RESULTS_DIR/${TAG}_*cps*.csv" >/dev/null || compgen -G "$RESULTS_DIR/${TAG}_*cps*" >/dev/null; then
   "$SCRIPT_DIR/analyze.py" "$RESULTS_DIR" "$ANALYSIS_MD" >/dev/null 2>&1 || true
 else
   {

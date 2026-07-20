@@ -72,6 +72,17 @@ use rvoip_sip_transport::UdpParseDispatch;
 const HIGH_CPS_CAPACITY: usize = 20_000;
 const HIGH_CPS_RTP_PORT_START: u16 = 16_384;
 const HIGH_CPS_RTP_PORT_CAPACITY: usize = 49_152;
+const QUALIFIED_CALLS_PER_SECOND: usize = 2_000;
+const LIFECYCLE_ANTI_REUSE_HORIZON_SECONDS: usize = 64;
+const RETAINED_ACTIVE_CAPACITY_TURNOVERS: usize = 8;
+
+fn qualified_retained_lifecycle_capacity(active_capacity: usize) -> usize {
+    active_capacity
+        .saturating_mul(RETAINED_ACTIVE_CAPACITY_TURNOVERS)
+        .max(active_capacity.saturating_add(
+            QUALIFIED_CALLS_PER_SECOND.saturating_mul(LIFECYCLE_ANTI_REUSE_HORIZON_SECONDS),
+        ))
+}
 
 #[derive(Clone, Copy, Default)]
 struct PerfDiagnostics {
@@ -126,14 +137,11 @@ fn sip_uri_host(ip: IpAddr) -> String {
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
     let mut args = std::env::args().skip(1).peekable();
-    let port: u16 = args
-        .peek()
-        .and_then(|s| s.parse().ok())
-        .map(|port| {
-            args.next();
-            port
-        })
-        .unwrap_or(5060);
+    let port = args.peek().and_then(|s| s.parse::<u16>().ok());
+    if port.is_some() {
+        args.next();
+    }
+    let port = port.unwrap_or(5060);
     let mut advertised_arg = None;
     let mut diagnostics = PerfDiagnostics::default();
     let mut fast_auto_accept = false;
@@ -489,6 +497,9 @@ fn print_sip_udp_diagnostics() {
     }
 }
 
+// This example mirrors individual CLI switches into the runtime config. Keep
+// the flat signature so each switch remains visible at its call site.
+#[allow(clippy::too_many_arguments)]
 fn apply_perf_config(
     config: Config,
     diagnostics: PerfDiagnostics,
@@ -543,6 +554,17 @@ fn apply_perf_config(
     .with_srtp_diagnostics(diagnostics.wire)
     .with_rtp_diagnostics(diagnostics.wire)
     .with_media_sdp_diagnostics(diagnostics.wire);
+
+    // Performance server recipes explicitly size active lifecycle slots. Size
+    // their retained anti-reuse fence independently so the qualified 2,000-CPS
+    // workload can turn over calls for the full 64-second horizon. Keep this
+    // workload policy in the benchmark executable rather than inflating the
+    // general-purpose library default.
+    if let Some(active_capacity) = config.server_call_capacity {
+        config = config.with_server_retained_lifecycle_capacity(
+            qualified_retained_lifecycle_capacity(active_capacity),
+        );
+    }
 
     if let Some(workers) = udp_parse_workers {
         config = config.with_sip_udp_parse_workers(workers);
@@ -659,7 +681,7 @@ fn print_effective_config(
     );
     println!(
         "rvoip-sip perf_listener: media range {}-{} requested_capacity={:?} \
-         media_session_capacity={:?} server_capacity={:?} \
+         media_session_capacity={:?} server_capacity={:?} retained_lifecycle_capacity={:?} \
          server_admission_limit={:?} server_admission_soft_limit={:?} \
          server_admission_pacing_delay_ms={:?} server_overload_retry_after_secs={:?} mode={:?}",
         config.media_port_start,
@@ -667,6 +689,7 @@ fn print_effective_config(
         config.media_port_capacity,
         config.media_session_capacity,
         config.server_call_capacity,
+        config.server_retained_lifecycle_capacity,
         config.server_call_admission_limit,
         config.server_call_admission_soft_limit,
         config.server_call_admission_pacing_delay_ms,
@@ -703,4 +726,21 @@ fn next_usize_arg(
     value
         .parse::<usize>()
         .unwrap_or_else(|e| panic!("invalid {flag} '{value}': {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_retained_capacity_covers_2k_cps_horizon() {
+        let retained = qualified_retained_lifecycle_capacity(HIGH_CPS_CAPACITY);
+
+        assert_eq!(retained, 160_000);
+        assert!(
+            retained
+                >= HIGH_CPS_CAPACITY
+                    + QUALIFIED_CALLS_PER_SECOND * LIFECYCLE_ANTI_REUSE_HORIZON_SECONDS
+        );
+    }
 }

@@ -142,10 +142,11 @@ pub use adapter::{
     ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
     InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
     OriginateRequest, OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders,
-    TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
-    MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
+    TransferAttemptId, TransferStatus, TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
+    MAX_INBOUND_ROUTING_HINT_BYTES,
 };
-pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
+pub use bridge::{BridgeError, BridgeHandle, BridgeManager, DirectionalMediaBridgePlan};
 pub use broadcast::{
     BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
     BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
@@ -175,7 +176,11 @@ pub use ids::{
     ListenerId, MediaRouteId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId,
     StreamId, TenantId, TranscriptionId,
 };
-pub use inbound_admission::InboundAdmission;
+pub use inbound_admission::{
+    InboundAdmission, ProvisionalMediaRoute, StagedInboundDataChannel, StagedInboundDataPolicy,
+    StagedInboundDataReceiver, StagedInboundDataSender, MAX_STAGED_INBOUND_DATA_CAPACITY,
+    MAX_STAGED_INBOUND_DATA_LABELS,
+};
 pub use media_graph::{
     start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,
     DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
@@ -197,7 +202,10 @@ pub use store::{
     ConversationFilter, ConversationStore, MemoryConversationStore, MemoryMessageStore,
     MemoryVconStore, MessageFilter, MessagePage, MessageStore, PageCursor, VconStore,
 };
-pub use stream::{MediaFrame, MediaStream, MediaStreamHandle, QualitySnapshot, StreamKind};
+pub use stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, MediaStreamHandle, QualitySnapshot,
+    StreamKind,
+};
 pub use vcon::{
     DefaultVconBuilder, VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle,
     VconDialog, VconDialogKind, VconParty, VconRef, VconSnapshot,

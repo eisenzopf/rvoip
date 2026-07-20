@@ -4,7 +4,7 @@
 //! It serves as the central coordinator for SIP dialog management.
 
 use dashmap::DashMap;
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::{hash_map::DefaultHasher, BTreeMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
@@ -25,6 +25,7 @@ use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
 use crate::manager::outbound_flow::OutboundFlow;
+use crate::manager::session_coordination::SessionCoordinator;
 use crate::manager::utils::DialogUtils;
 use crate::subscription::SubscriptionManager;
 
@@ -52,9 +53,11 @@ pub enum IdentityVerificationDecision {
 }
 
 const TERMINATED_BYE_TOMBSTONE_TTL: Duration = Duration::from_secs(32);
-const MIN_TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 65_536;
-const TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER: usize = 16;
-const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
+// The terminated-BYE table now stores one canonical dialog key rather than
+// two directional strings. These bounds preserve the historical number of
+// protected dialogs while halving both entries and repeated key storage.
+const MIN_TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 32_768;
+const TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER: usize = 8;
 const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
 const DEFAULT_DIALOG_EVENT_DISPATCH_WORKERS: usize = 1;
 const INVITE_FAILOVER_RETAINED_PLAN_CAPACITY_MULTIPLIER: usize = 4;
@@ -62,6 +65,8 @@ const QUALIFIED_INVITE_SETUP_RATE_PER_SECOND: usize = 10;
 const QUALIFIED_INVITE_RETAINED_GENERATIONS_PER_SETUP: usize = 4;
 const MIN_INVITE_FAILOVER_ATTEMPT_CAPACITY: usize = 65_536;
 const INVITE_FAILOVER_ATTEMPT_CAPACITY_MULTIPLIER: usize = 16;
+const INITIAL_RETAINED_PLAN_INDEX_CAPACITY: usize = 4_096;
+const INITIAL_RETAINED_ATTEMPT_INDEX_CAPACITY: usize = 8_192;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -121,11 +126,30 @@ impl InviteFailoverOperationTracker {
     async fn wait_idle(&self) {
         loop {
             let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.active.load(Ordering::Acquire) == 0 {
                 return;
             }
             notified.await;
         }
+    }
+
+    #[cfg(test)]
+    async fn wait_idle_paused_after_load(
+        &self,
+        ready: tokio::sync::oneshot::Sender<()>,
+        resume: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let notified = self.idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.active.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let _ = ready.send(());
+        let _ = resume.await;
+        notified.await;
     }
 }
 
@@ -136,6 +160,52 @@ pub(crate) struct InviteFailoverOperationGuard {
 impl Drop for InviteFailoverOperationGuard {
     fn drop(&mut self) {
         self.tracker.finish_one();
+    }
+}
+
+#[cfg(test)]
+mod operation_tracker_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn enabled_idle_waiter_observes_zero_transition_after_active_load() {
+        let tracker = InviteFailoverOperationTracker::new();
+        let lifecycle = AtomicU8::new(DialogManagerLifecycle::Running as u8);
+        let guard = tracker.enter(&lifecycle).expect("operation admitted");
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let wait_tracker = Arc::clone(&tracker);
+        let waiter = tokio::spawn(async move {
+            wait_tracker
+                .wait_idle_paused_after_load(ready_tx, resume_rx)
+                .await;
+        });
+        ready_rx.await.expect("waiter loaded active state");
+        drop(guard);
+        let _ = resume_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("zero transition was retained")
+            .expect("waiter joined");
+    }
+
+    #[tokio::test]
+    async fn draining_rejects_new_operations_and_existing_operation_joins() {
+        let tracker = InviteFailoverOperationTracker::new();
+        let lifecycle = AtomicU8::new(DialogManagerLifecycle::Running as u8);
+        let guard = tracker.enter(&lifecycle).expect("operation admitted");
+        lifecycle.store(DialogManagerLifecycle::Draining as u8, Ordering::Release);
+        assert!(tracker.enter(&lifecycle).is_none());
+
+        let wait_tracker = Arc::clone(&tracker);
+        let waiter = tokio::spawn(async move { wait_tracker.wait_idle().await });
+        tokio::task::yield_now().await;
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("existing operation drained")
+            .expect("waiter joined");
+        assert_eq!(tracker.active.load(Ordering::Acquire), 0);
     }
 }
 
@@ -160,12 +230,18 @@ pub struct DialogManagerRetentionCounts {
     pub dialog_lookup: usize,
     pub early_dialog_lookup: usize,
     pub terminated_bye_lookup: usize,
+    pub terminated_bye_deadlines: usize,
     pub transaction_to_dialog: usize,
     pub transaction_dialog_route_hash: usize,
     pub dialog_invite_transactions: usize,
     pub invite_failover_plans: usize,
     pub active_invite_failover_by_dialog: usize,
+    pub invite_failover_plans_by_dialog: usize,
     pub invite_failover_attempts: usize,
+    pub invite_failover_attempts_by_dialog: usize,
+    pub invite_failover_expiry_deadlines: usize,
+    pub invite_failover_overflow_deadlines: usize,
+    pub invite_failover_dialog_cleanup_retries: usize,
     pub invite_failover_plan_reservations: usize,
     pub invite_failover_attempt_reservations: usize,
     pub dialog_server_transactions: usize,
@@ -174,6 +250,7 @@ pub struct DialogManagerRetentionCounts {
     pub dialog_to_session: usize,
     pub reliable_provisional_tasks: usize,
     pub session_refresh_tasks: usize,
+    pub bye_cleanup_tasks: usize,
     pub outbound_flows: usize,
     pub outbound_flow_tasks: usize,
     pub flow_by_destination: usize,
@@ -263,9 +340,37 @@ impl DialogRouteSource {
 }
 
 struct QueuedDialogTransactionEvent {
-    event: TransactionEvent,
+    event: Arc<TransactionEvent>,
     kind: Option<DialogTransactionEventKind>,
     queued_at: Option<Instant>,
+}
+
+enum DialogTransactionEventReceiver {
+    Owned(mpsc::Receiver<TransactionEvent>),
+    Shared(mpsc::Receiver<Arc<TransactionEvent>>),
+}
+
+impl DialogTransactionEventReceiver {
+    fn is_empty(&self) -> bool {
+        match self {
+            Self::Owned(receiver) => receiver.is_empty(),
+            Self::Shared(receiver) => receiver.is_empty(),
+        }
+    }
+
+    async fn recv(&mut self) -> Option<Arc<TransactionEvent>> {
+        match self {
+            Self::Owned(receiver) => receiver.recv().await.map(Arc::new),
+            Self::Shared(receiver) => receiver.recv().await,
+        }
+    }
+
+    fn try_recv(&mut self) -> Result<Arc<TransactionEvent>, mpsc::error::TryRecvError> {
+        match self {
+            Self::Owned(receiver) => receiver.try_recv().map(Arc::new),
+            Self::Shared(receiver) => receiver.try_recv(),
+        }
+    }
 }
 
 fn request_dialog_route_hash(request: &Request) -> Option<u64> {
@@ -418,7 +523,104 @@ mod verification_diagnostic_tests {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TerminatedByeTombstone {
     pub(crate) cseq: u32,
-    created_at: Instant,
+    expires_at: Instant,
+    deadline_generation: u64,
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+pub(crate) struct TerminatedByeDialogKey(Arc<str>);
+
+impl TerminatedByeDialogKey {
+    pub(crate) fn canonical(call_id: &str, first_tag: &str, second_tag: &str) -> Self {
+        let (first_tag, second_tag) = if first_tag <= second_tag {
+            (first_tag, second_tag)
+        } else {
+            (second_tag, first_tag)
+        };
+        // Length prefixes keep the representation collision-free even when a
+        // legal identifier contains a delimiter. Arc keeps the lookup map and
+        // both deadline indexes on one backing allocation instead of cloning
+        // this retained identifier three times.
+        Self(
+            format!(
+                "{}:{}{}:{}{}:{}",
+                call_id.len(),
+                call_id,
+                first_tag.len(),
+                first_tag,
+                second_tag.len(),
+                second_tag
+            )
+            .into(),
+        )
+    }
+
+    fn allocation_identity(&self) -> usize {
+        self.0.as_ptr() as usize
+    }
+
+    fn payload_bytes(&self) -> usize {
+        self.0.len()
+    }
+}
+
+#[derive(Default, Debug)]
+struct TerminatedByeDeadlineQueue {
+    by_deadline: BTreeMap<(Instant, u64), TerminatedByeDialogKey>,
+    next_sequence: u64,
+}
+
+impl TerminatedByeDeadlineQueue {
+    fn schedule(
+        &mut self,
+        key: &TerminatedByeDialogKey,
+        created_at: Instant,
+        previous: Option<TerminatedByeTombstone>,
+    ) -> (Instant, u64) {
+        if let Some(previous) = previous {
+            self.by_deadline
+                .remove(&(previous.expires_at, previous.deadline_generation));
+        }
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.wrapping_add(1);
+        let expires_at = created_at + TERMINATED_BYE_TOMBSTONE_TTL;
+        let deadline = (expires_at, sequence);
+        self.by_deadline.insert(deadline, key.clone());
+        (expires_at, sequence)
+    }
+
+    fn take_due(&mut self, now: Instant) -> Vec<(TerminatedByeDialogKey, u64)> {
+        let mut due = Vec::new();
+        while self
+            .by_deadline
+            .first_key_value()
+            .is_some_and(|((deadline, _), _)| *deadline <= now)
+        {
+            if let Some((deadline, key)) = self.by_deadline.pop_first() {
+                due.push((key, deadline.1));
+            }
+        }
+        due
+    }
+
+    fn take_oldest(&mut self, count: usize) -> Vec<(TerminatedByeDialogKey, u64)> {
+        let mut oldest = Vec::with_capacity(count);
+        while oldest.len() < count {
+            let Some((deadline, key)) = self.by_deadline.pop_first() else {
+                break;
+            };
+            oldest.push((key, deadline.1));
+        }
+        oldest
+    }
+
+    fn clear(&mut self) {
+        self.by_deadline.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.by_deadline.len()
+    }
 }
 
 #[derive(Clone)]
@@ -453,11 +655,10 @@ pub struct DialogManager {
     /// Recently terminated BYE lookup by call-id + tags. This preserves
     /// idempotent 200 OK handling for late BYE retransmits after the full
     /// dialog record has been removed from the hot lookup maps.
-    pub(crate) terminated_bye_lookup: Arc<DashMap<String, TerminatedByeTombstone>>,
+    pub(crate) terminated_bye_lookup: Arc<DashMap<TerminatedByeDialogKey, TerminatedByeTombstone>>,
 
-    /// Approximate insert counter used to prune terminated BYE tombstones
-    /// without scanning the full map on every call.
-    terminated_bye_insert_count: Arc<AtomicUsize>,
+    /// Exact, due-driven expiry for compact terminated-BYE records.
+    terminated_bye_deadlines: Arc<std::sync::Mutex<TerminatedByeDeadlineQueue>>,
 
     /// Capacity-derived safety cap for the terminated BYE tombstone index.
     /// Server/high-CPS deployments increase this with their dialog index
@@ -495,8 +696,22 @@ pub struct DialogManager {
         DashMap<u64, Arc<tokio::sync::Mutex<super::transaction_integration::InviteFailoverPlan>>>,
     >,
     pub(crate) active_invite_failover_by_dialog: Arc<DashMap<DialogId, u64>>,
-    pub(crate) invite_failover_attempts:
-        Arc<DashMap<TransactionKey, super::transaction_integration::InviteFailoverAttemptIndex>>,
+    /// Exact reverse index for active and retained logical INVITE plans.
+    /// Unlike `active_invite_failover_by_dialog`, entries remain until the
+    /// corresponding late-response tombstones are removed.
+    pub(crate) invite_failover_plans_by_dialog: Arc<DashMap<DialogId, Vec<u64>>>,
+    pub(crate) invite_failover_attempts: Arc<
+        DashMap<Arc<TransactionKey>, super::transaction_integration::InviteFailoverAttemptIndex>,
+    >,
+    /// Exact reverse index for active and retained INVITE attempts. This is
+    /// independent of `dialog_invite_transactions`, whose hot transaction
+    /// routes are intentionally removed before the late-response tombstone.
+    pub(crate) invite_failover_attempts_by_dialog: Arc<DashMap<DialogId, Vec<Arc<TransactionKey>>>>,
+    /// Exact ordered expiry index for active and retained INVITE plans. It is
+    /// bounded to one current entry per retained plan and excludes the
+    /// deliberately non-expiring wire-unknown phase.
+    pub(crate) invite_failover_expiry_scheduler:
+        Arc<std::sync::Mutex<super::transaction_integration::InviteFailoverExpiryScheduler>>,
     pub(crate) invite_failover_plan_reservations: Arc<AtomicUsize>,
     pub(crate) invite_failover_attempt_reservations: Arc<AtomicUsize>,
     pub(crate) next_invite_failover_plan_id: Arc<AtomicU64>,
@@ -508,10 +723,12 @@ pub struct DialogManager {
     /// starve otherwise healthy calls during the 90-second retention window.
     pub(crate) invite_failover_plan_capacity: usize,
     pub(crate) invite_failover_attempt_capacity: usize,
-    /// Linearizes structural changes across the plan, active-owner and attempt
-    /// indexes. It is never held across an async suspension point.
+    /// Linearizes structural changes across the plan, active-owner, attempt,
+    /// and exact reverse indexes. It is never held across an async suspension
+    /// point.
     pub(crate) invite_failover_registry_lock: Arc<std::sync::Mutex<()>>,
     invite_failover_operations: Arc<InviteFailoverOperationTracker>,
+    bye_cleanup_operations: Arc<InviteFailoverOperationTracker>,
 
     /// One-way manager lifecycle used as the admission boundary for all new
     /// dialog-layer sends and retained-plan work.
@@ -558,16 +775,17 @@ pub struct DialogManager {
     /// Subscription manager for handling SUBSCRIBE/NOTIFY
     pub(crate) subscription_manager: Option<Arc<SubscriptionManager>>,
 
-    /// Abort handles for in-flight UAS reliable-provisional retransmit tasks
-    /// (RFC 3262 §3). Keyed by `(dialog_id, rseq)`. On PRACK arrival the
-    /// matching entry is removed and aborted so the 18x stops retransmitting;
-    /// on dialog termination every entry for that dialog is aborted.
-    pub(crate) reliable_provisional_tasks: Arc<DashMap<(DialogId, u32), tokio::task::AbortHandle>>,
+    /// Exact pre-wire reservations and active UAS reliable-provisional
+    /// retransmit tasks (RFC 3262 §3).
+    pub(crate) reliable_provisional_tasks:
+        Arc<crate::transaction::server::reliable_invite::ReliableProvisionalRegistry>,
 
-    /// Abort handles for per-dialog RFC 4028 session-timer refresh tasks.
-    /// Populated when the UAC or UAS is designated refresher; one entry per
-    /// dialog. Aborted on dialog termination.
-    pub(crate) session_refresh_tasks: Arc<DashMap<DialogId, tokio::task::AbortHandle>>,
+    /// Tokenized, completion-tracked per-dialog RFC 4028 refresh tasks.
+    pub(crate) session_refresh_tasks:
+        Arc<crate::manager::session_timer::SessionRefreshTaskRegistry>,
+
+    /// Bounded manager-owned post-wire BYE cleanup queue and worker.
+    pub(crate) bye_cleanup_tasks: Arc<crate::protocol::bye_handler::ByeCleanupTaskRegistry>,
 
     /// Discovered public address from RFC 3581 `received=` / `rport=`
     /// echoed back on responses.
@@ -787,7 +1005,7 @@ fn start_dialog_event_dispatch_workers(
 
 async fn dispatch_dialog_transaction_event(
     manager: &DialogManager,
-    event: TransactionEvent,
+    event: Arc<TransactionEvent>,
     dispatch_senders: &Arc<Vec<mpsc::Sender<QueuedDialogTransactionEvent>>>,
     fallback_worker: &AtomicUsize,
 ) {
@@ -840,6 +1058,10 @@ impl DialogManager {
 
     pub(crate) fn enter_invite_failover_operation(&self) -> Option<InviteFailoverOperationGuard> {
         self.invite_failover_operations.enter(&self.lifecycle)
+    }
+
+    pub(crate) fn enter_bye_cleanup_operation(&self) -> Option<InviteFailoverOperationGuard> {
+        self.bye_cleanup_operations.enter(&self.lifecycle)
     }
 
     /// Create a new dialog manager
@@ -897,17 +1119,30 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
-            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
-            terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
+            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity.min(4_096))),
+            terminated_bye_deadlines: Arc::new(std::sync::Mutex::new(
+                TerminatedByeDeadlineQueue::default(),
+            )),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_transaction: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_plans: Arc::new(DashMap::with_capacity(retained_plan_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(
+                retained_plan_capacity.min(INITIAL_RETAINED_PLAN_INDEX_CAPACITY),
+            )),
             active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_attempts: Arc::new(DashMap::with_capacity(retained_attempt_capacity)),
+            invite_failover_plans_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(
+                retained_attempt_capacity.min(INITIAL_RETAINED_ATTEMPT_INDEX_CAPACITY),
+            )),
+            invite_failover_attempts_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_expiry_scheduler: Arc::new(std::sync::Mutex::new(
+                super::transaction_integration::InviteFailoverExpiryScheduler::new(
+                    retained_plan_capacity,
+                ),
+            )),
             invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
             invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
             next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
@@ -917,6 +1152,7 @@ impl DialogManager {
             invite_failover_attempt_capacity: retained_attempt_capacity,
             invite_failover_registry_lock: Arc::new(std::sync::Mutex::new(())),
             invite_failover_operations: InviteFailoverOperationTracker::new(),
+            bye_cleanup_operations: InviteFailoverOperationTracker::new(),
             lifecycle: Arc::new(AtomicU8::new(DialogManagerLifecycle::Running as u8)),
             stop_gate: Arc::new(tokio::sync::Mutex::new(())),
             background_tasks: Arc::new(std::sync::Mutex::new(DialogManagerBackgroundTasks::new())),
@@ -932,8 +1168,16 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
-            reliable_provisional_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
-            session_refresh_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            reliable_provisional_tasks:
+                crate::transaction::server::reliable_invite::ReliableProvisionalRegistry::with_capacity(
+                    index_capacity,
+                ),
+            session_refresh_tasks:
+                crate::manager::session_timer::SessionRefreshTaskRegistry::with_capacity(
+                    index_capacity,
+                ),
+            bye_cleanup_tasks:
+                crate::protocol::bye_handler::ByeCleanupTaskRegistry::with_capacity(index_capacity),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
@@ -1478,6 +1722,20 @@ impl DialogManager {
         .await
     }
 
+    pub async fn with_shared_global_events(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        local_address: SocketAddr,
+    ) -> DialogResult<Self> {
+        Self::with_shared_global_events_and_index_capacity(
+            transaction_manager,
+            transaction_events,
+            local_address,
+            dialog_index_capacity(None),
+        )
+        .await
+    }
+
     pub async fn with_global_events_and_index_capacity(
         transaction_manager: Arc<TransactionManager>,
         transaction_events: mpsc::Receiver<TransactionEvent>,
@@ -1494,9 +1752,59 @@ impl DialogManager {
         .await
     }
 
+    pub async fn with_shared_global_events_and_index_capacity(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        local_address: SocketAddr,
+        index_capacity: usize,
+    ) -> DialogResult<Self> {
+        Self::with_shared_global_events_and_index_capacity_and_config(
+            transaction_manager,
+            transaction_events,
+            local_address,
+            index_capacity,
+            None,
+        )
+        .await
+    }
+
     pub async fn with_global_events_and_index_capacity_and_config(
         transaction_manager: Arc<TransactionManager>,
         transaction_events: mpsc::Receiver<TransactionEvent>,
+        local_address: SocketAddr,
+        index_capacity: usize,
+        initial_config: Option<DialogManagerConfig>,
+    ) -> DialogResult<Self> {
+        Self::with_transaction_event_receiver_and_index_capacity_and_config(
+            transaction_manager,
+            DialogTransactionEventReceiver::Owned(transaction_events),
+            local_address,
+            index_capacity,
+            initial_config,
+        )
+        .await
+    }
+
+    pub async fn with_shared_global_events_and_index_capacity_and_config(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<Arc<TransactionEvent>>,
+        local_address: SocketAddr,
+        index_capacity: usize,
+        initial_config: Option<DialogManagerConfig>,
+    ) -> DialogResult<Self> {
+        Self::with_transaction_event_receiver_and_index_capacity_and_config(
+            transaction_manager,
+            DialogTransactionEventReceiver::Shared(transaction_events),
+            local_address,
+            index_capacity,
+            initial_config,
+        )
+        .await
+    }
+
+    async fn with_transaction_event_receiver_and_index_capacity_and_config(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: DialogTransactionEventReceiver,
         local_address: SocketAddr,
         index_capacity: usize,
         initial_config: Option<DialogManagerConfig>,
@@ -1505,6 +1813,20 @@ impl DialogManager {
             "Creating new DialogManager with global transaction events and local address {}",
             local_address
         );
+
+        // Enable exact terminal fences before inspecting the receiver. Every
+        // event queued after this point is correlated; an already-queued event
+        // or existing transaction/retention record proves late attachment and
+        // is rejected rather than risking an indistinguishable Owned event.
+        transaction_manager.require_compact_dialog_terminal_ack();
+        if !transaction_events.is_empty()
+            || !transaction_manager.dialog_terminal_consumer_attach_state_is_clean()
+        {
+            return Err(DialogError::InvalidState {
+                expected: "an empty transaction event queue and a transaction manager with no existing lifecycle state".into(),
+                actual: "dialog terminal consumer was attached after transaction activity began".into(),
+            });
+        }
 
         // Create shared stores
         let active_plan_capacity = index_capacity.max(1);
@@ -1528,17 +1850,30 @@ impl DialogManager {
             dialogs,
             dialog_lookup,
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
-            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
-            terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
+            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity.min(4_096))),
+            terminated_bye_deadlines: Arc::new(std::sync::Mutex::new(
+                TerminatedByeDeadlineQueue::default(),
+            )),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_transaction: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
             transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_plans: Arc::new(DashMap::with_capacity(retained_plan_capacity)),
+            invite_failover_plans: Arc::new(DashMap::with_capacity(
+                retained_plan_capacity.min(INITIAL_RETAINED_PLAN_INDEX_CAPACITY),
+            )),
             active_invite_failover_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
-            invite_failover_attempts: Arc::new(DashMap::with_capacity(retained_attempt_capacity)),
+            invite_failover_plans_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_attempts: Arc::new(DashMap::with_capacity(
+                retained_attempt_capacity.min(INITIAL_RETAINED_ATTEMPT_INDEX_CAPACITY),
+            )),
+            invite_failover_attempts_by_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            invite_failover_expiry_scheduler: Arc::new(std::sync::Mutex::new(
+                super::transaction_integration::InviteFailoverExpiryScheduler::new(
+                    retained_plan_capacity,
+                ),
+            )),
             invite_failover_plan_reservations: Arc::new(AtomicUsize::new(0)),
             invite_failover_attempt_reservations: Arc::new(AtomicUsize::new(0)),
             next_invite_failover_plan_id: Arc::new(AtomicU64::new(1)),
@@ -1548,6 +1883,7 @@ impl DialogManager {
             invite_failover_attempt_capacity: retained_attempt_capacity,
             invite_failover_registry_lock: Arc::new(std::sync::Mutex::new(())),
             invite_failover_operations: InviteFailoverOperationTracker::new(),
+            bye_cleanup_operations: InviteFailoverOperationTracker::new(),
             lifecycle: Arc::new(AtomicU8::new(DialogManagerLifecycle::Running as u8)),
             stop_gate: Arc::new(tokio::sync::Mutex::new(())),
             background_tasks: Arc::new(std::sync::Mutex::new(DialogManagerBackgroundTasks::new())),
@@ -1563,8 +1899,16 @@ impl DialogManager {
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
-            reliable_provisional_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
-            session_refresh_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            reliable_provisional_tasks:
+                crate::transaction::server::reliable_invite::ReliableProvisionalRegistry::with_capacity(
+                    index_capacity,
+                ),
+            session_refresh_tasks:
+                crate::manager::session_timer::SessionRefreshTaskRegistry::with_capacity(
+                    index_capacity,
+                ),
+            bye_cleanup_tasks:
+                crate::protocol::bye_handler::ByeCleanupTaskRegistry::with_capacity(index_capacity),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
@@ -1583,6 +1927,10 @@ impl DialogManager {
             resolver: Arc::new(std::sync::RwLock::new(None)),
         };
 
+        // Transaction primary delivery is followed by this manager's own
+        // (optionally sharded) queue. Tell compact Timer J/K cleanup to retain
+        // its exact key fence until the final event has actually crossed that
+        // second queue and finished processing.
         // Spawn global transaction event processor
         let event_processor = manager.clone();
         let event_processor_task = tokio::spawn(async move {
@@ -1645,10 +1993,7 @@ impl DialogManager {
     ///
     /// This follows the exact pattern from working examples that use global event consumption
     /// instead of individual transaction subscriptions.
-    async fn process_global_transaction_events(
-        &self,
-        mut events: mpsc::Receiver<TransactionEvent>,
-    ) {
+    async fn process_global_transaction_events(&self, mut events: DialogTransactionEventReceiver) {
         info!("🔄 Starting global transaction event processor for dialog-core");
 
         let dispatch_workers = self.dialog_event_dispatch_worker_count();
@@ -1703,7 +2048,7 @@ impl DialogManager {
 
     async fn process_global_transaction_events_sharded(
         &self,
-        mut events: mpsc::Receiver<TransactionEvent>,
+        mut events: DialogTransactionEventReceiver,
         worker_count: usize,
         queue_capacity: usize,
     ) {
@@ -1845,11 +2190,57 @@ impl DialogManager {
         fallback_worker.fetch_add(1, Ordering::Relaxed) % worker_count
     }
 
-    async fn process_timed_global_transaction_event(&self, event: TransactionEvent) {
+    async fn process_timed_global_transaction_event(&self, event: Arc<TransactionEvent>) {
+        let Some(_transaction_operation) = self.transaction_manager.try_enter_existing_operation()
+        else {
+            return;
+        };
         let timing_enabled = crate::diagnostics::dialog_timing_enabled();
         let kind = timing_enabled.then(|| dialog_event_kind(&event));
         let started = timing_enabled.then(Instant::now);
+        let terminal_fence = matches!(
+            event.as_ref(),
+            TransactionEvent::TransactionTerminated { .. }
+        )
+        .then(|| self.transaction_manager.take_terminal_event_fence(&event))
+        .flatten();
+        let compact_terminal = match (event.as_ref(), terminal_fence.as_ref()) {
+            (TransactionEvent::TransactionTerminated { transaction_id }, Some(fence)) => fence
+                .compact_generation()
+                .map(|generation| (transaction_id.clone(), generation)),
+            _ => None,
+        };
+        let route_cleanup_transaction = match event.as_ref() {
+            TransactionEvent::TransactionTerminated { transaction_id } => {
+                Some(transaction_id.clone())
+            }
+            // Stateless ACK transactions do not emit a later terminal event.
+            // ACK observations keyed to an INVITE must retain that INVITE's
+            // route for its following lifecycle sequence.
+            TransactionEvent::AckReceived { transaction_id, .. }
+            | TransactionEvent::AckRequest { transaction_id, .. }
+                if transaction_id.method() == &Method::Ack =>
+            {
+                Some(transaction_id.clone())
+            }
+            _ => None,
+        };
+        let event = Arc::try_unwrap(event).unwrap_or_else(|event| (*event).clone());
         self.process_global_transaction_event(event).await;
+        if let Some((transaction_id, generation)) = compact_terminal.as_ref() {
+            self.transaction_manager
+                .acknowledge_compact_dialog_terminal(transaction_id, *generation);
+        }
+        // Route lifetime is part of the sharded ordering fence. Clear only
+        // after the terminal handler and exact compact-generation ACK have
+        // completed, never at StateChanged(Terminated).
+        if let Some(transaction_id) = route_cleanup_transaction.as_ref() {
+            self.transaction_dialog_route_hash.remove(transaction_id);
+        }
+        // `terminal_fence` intentionally remains live through the handler,
+        // compact acknowledgement, and route cleanup above. Its final owner
+        // release is the same-key admission boundary.
+        drop(terminal_fence);
         if let Some(started) = started {
             crate::diagnostics::record_dialog_event_handler(
                 kind.expect("timed dialog transaction event kind").as_str(),
@@ -1886,17 +2277,6 @@ impl DialogManager {
         ) {
             return;
         }
-
-        let clear_route_after_processing = matches!(
-            &event,
-            TransactionEvent::TransactionTerminated { .. }
-                | TransactionEvent::StateChanged {
-                    new_state: TransactionState::Terminated,
-                    ..
-                }
-                | TransactionEvent::AckReceived { .. }
-                | TransactionEvent::AckRequest { .. }
-        );
 
         // Extract transaction ID from the event
         let transaction_id = self.extract_transaction_id(&event);
@@ -1958,10 +2338,6 @@ impl DialogManager {
                     error!("Failed to handle unassociated transaction event");
                 }
             }
-        }
-
-        if clear_route_after_processing {
-            self.transaction_dialog_route_hash.remove(&transaction_id);
         }
     }
 
@@ -2136,7 +2512,27 @@ impl DialogManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<DialogId> {
-        self.transaction_dialog_route_hash.remove(transaction_id);
+        self.unlink_transaction_from_dialog_indexed_inner(transaction_id, true)
+    }
+
+    /// Remove dialog ownership at terminal handling while retaining the
+    /// sharded dispatch route until `process_timed_global_transaction_event`
+    /// finishes the exact compact-generation ACK.
+    pub(crate) fn unlink_transaction_from_dialog_indexed_preserving_route(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<DialogId> {
+        self.unlink_transaction_from_dialog_indexed_inner(transaction_id, false)
+    }
+
+    fn unlink_transaction_from_dialog_indexed_inner(
+        &self,
+        transaction_id: &TransactionKey,
+        clear_route: bool,
+    ) -> Option<DialogId> {
+        if clear_route {
+            self.transaction_dialog_route_hash.remove(transaction_id);
+        }
         self.outbound_transport_by_transaction
             .remove(transaction_id);
         let removed_dialog_id = self
@@ -2538,6 +2934,55 @@ impl DialogManager {
         }
     }
 
+    /// Deliver the internal BYE cleanup command through an acknowledged
+    /// dialog-to-session route. Public event subscribers are observational;
+    /// only the direct cross-crate handler or legacy session queue can satisfy
+    /// this protocol boundary. A dialog without a session mapping has no
+    /// session owner to notify and is therefore already complete.
+    pub(crate) async fn deliver_bye_received_authoritative(
+        &self,
+        dialog_id: &DialogId,
+    ) -> DialogResult<()> {
+        if self.get_session_id(dialog_id).is_none() {
+            return Ok(());
+        }
+
+        let hub = self.event_hub.read().await.clone();
+        if let Some(hub) = hub {
+            return match hub
+                .publish_bye_received_authoritative(dialog_id.clone())
+                .await
+            {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(DialogError::InternalError {
+                    message: "No authoritative session handler accepted ByeReceived".into(),
+                    context: None,
+                }),
+                Err(error) => Err(DialogError::InternalError {
+                    message: format!("Authoritative ByeReceived delivery failed: {error}"),
+                    context: None,
+                }),
+            };
+        }
+
+        let sender = self.session_coordinator.read().await.clone();
+        let Some(sender) = sender else {
+            return Err(DialogError::InternalError {
+                message: "No authoritative session route for ByeReceived".into(),
+                context: None,
+            });
+        };
+        sender
+            .send(SessionCoordinationEvent::ByeReceived {
+                dialog_id: dialog_id.clone(),
+            })
+            .await
+            .map_err(|_| DialogError::InternalError {
+                message: "Authoritative ByeReceived session route closed".into(),
+                context: None,
+            })
+    }
+
     /// Try to emit a session coordination event and report whether any session
     /// consumer path accepted it. This is intentionally narrower than
     /// `emit_session_coordination_event`: protocol handlers that need a
@@ -2647,12 +3092,11 @@ impl DialogManager {
             Method::Notify => self.handle_notify(request, source).await,
             Method::Prack => self.handle_prack(request).await,
             Method::Message => {
-                // RFC 3428 — MESSAGE is a fire-and-forget transport that
-                // dialog-core does not parse for application semantics.
-                // Reply with a basic 200 OK so the transaction settles
-                // and the application can observe the wire bytes via
-                // the SIP trace channel. Out-of-dialog MESSAGE creates
-                // no dialog state per RFC 3428 §4.
+                // RFC 3428 — MESSAGE is a fire-and-forget transport.  The
+                // transaction layer owns the immediate response, while an
+                // in-dialog request must also reach session-core so adapters
+                // can surface its byte-exact body as a DataMessage.  An
+                // out-of-dialog MESSAGE still creates no dialog state.
                 debug!("Replying 200 OK to inbound MESSAGE from {}", source);
                 let server_transaction = self
                     .transaction_manager
@@ -2672,6 +3116,15 @@ impl DialogManager {
                     .await
                 {
                     debug!("Failed to send 200 OK for MESSAGE");
+                }
+
+                if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+                    self.notify_session_layer(crate::events::SessionCoordinationEvent::ReInvite {
+                        dialog_id,
+                        transaction_id,
+                        request,
+                    })
+                    .await?;
                 }
                 Ok(())
             }
@@ -2744,6 +3197,47 @@ impl DialogManager {
             self.stop_outbound_ping(&key);
         }
 
+        // Candidate work can publish transaction attempts and retain exact
+        // admission owners. Drain it before stopping the transaction manager;
+        // compensation after TransactionManager::Stopped cannot be safe.
+        self.invite_failover_operations.wait_idle().await;
+        // Wake BYE handlers still waiting for bounded cleanup capacity before
+        // waiting for their operation guards. Capacity is reserved before any
+        // dialog mutation, so rejected waiters leave the dialog untouched.
+        self.bye_cleanup_tasks.begin_close();
+        // A handler that already owns capacity may be suspended in the final
+        // response transport write. Cancel transaction-layer operations while
+        // fail-closed cleanup is still admissible, then wait for the dialog
+        // operation fence. `TransactionManager::shutdown` completes below.
+        self.transaction_manager.begin_shutdown_drain();
+        self.bye_cleanup_operations.wait_idle().await;
+        self.bye_cleanup_tasks
+            .close_all()
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "BYE cleanup tasks did not drain during shutdown".to_string(),
+                context: None,
+            })?;
+
+        // Reliable provisional tasks may still call TransactionManager for a
+        // retransmit. Close admission and observe every pending/active task's
+        // completion before the transaction layer is stopped. A timeout keeps
+        // the exact records registered and prevents a false ShutdownComplete.
+        self.reliable_provisional_tasks
+            .close_all()
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "reliable provisional tasks did not drain during shutdown".to_string(),
+                context: None,
+            })?;
+        self.session_refresh_tasks
+            .close_all()
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "session refresh tasks did not drain during shutdown".to_string(),
+                context: None,
+            })?;
+
         // Step 1: Shutdown the transaction manager
         // Note: Transport should already be stopped by now via events
         info!("Shutting down transaction manager...");
@@ -2777,11 +3271,6 @@ impl DialogManager {
             }
         }
 
-        // Candidate work is caller-owned rather than spawned. The lifecycle
-        // latch rejects new entries, while each admitted operation is bounded
-        // by its logical setup deadline and drops this count on cancellation.
-        self.invite_failover_operations.wait_idle().await;
-
         // Step 3: Now terminate any remaining dialogs
         let dialog_ids: Vec<DialogId> = self
             .dialogs
@@ -2803,7 +3292,10 @@ impl DialogManager {
         self.dialog_lookup.clear();
         self.early_dialog_lookup.clear();
         self.terminated_bye_lookup.clear();
-        self.terminated_bye_insert_count.store(0, Ordering::Relaxed);
+        self.terminated_bye_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         self.transaction_to_dialog.clear();
         self.outbound_transport_by_transaction.clear();
         self.outbound_transport_by_request_key.clear();
@@ -2821,16 +3313,27 @@ impl DialogManager {
                 if let Ok(mut plan) = entry.value().try_lock() {
                     if plan.phase == super::transaction_integration::InviteFailoverPlanPhase::Active
                     {
-                        plan.phase =
-                            super::transaction_integration::InviteFailoverPlanPhase::Closed;
+                        plan.transition_to_terminal(
+                            super::transaction_integration::InviteFailoverPlanPhase::Closed,
+                        );
+                    } else {
+                        // Captured terminal Arcs may predate compaction (for
+                        // example restored/test-injected state). Drain still
+                        // guarantees that active-only payload is released.
+                        let phase = plan.phase;
+                        plan.transition_to_terminal(phase);
                     }
-                    plan.pending_candidate = None;
-                    plan.current_send_generation = None;
                 }
             }
             self.active_invite_failover_by_dialog.clear();
+            self.invite_failover_plans_by_dialog.clear();
             self.invite_failover_attempts.clear();
+            self.invite_failover_attempts_by_dialog.clear();
             self.invite_failover_plans.clear();
+            self.invite_failover_expiry_scheduler
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clear();
             self.invite_failover_plan_reservations
                 .store(0, Ordering::Release);
             self.invite_failover_attempt_reservations
@@ -2842,14 +3345,6 @@ impl DialogManager {
         self.pending_response_transaction_by_dialog.clear();
         self.session_to_dialog.clear();
         self.dialog_to_session.clear();
-        for entry in self.reliable_provisional_tasks.iter() {
-            entry.value().abort();
-        }
-        self.reliable_provisional_tasks.clear();
-        for entry in self.session_refresh_tasks.iter() {
-            entry.value().abort();
-        }
-        self.session_refresh_tasks.clear();
         self.outbound_flows.clear();
         self.outbound_flow_tasks.clear();
         self.flow_by_destination.clear();
@@ -2894,18 +3389,38 @@ impl DialogManager {
     /// reflect live retransmission protection, not expired cache residue.
     pub fn retention_counts(&self) -> DialogManagerRetentionCounts {
         self.prune_terminated_bye_lookup();
+        let terminated_bye_deadlines = self
+            .terminated_bye_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        let (
+            invite_failover_expiry_deadlines,
+            invite_failover_overflow_deadlines,
+            invite_failover_dialog_cleanup_retries,
+        ) = self
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .counts();
 
         DialogManagerRetentionCounts {
             dialogs: self.dialogs.len(),
             dialog_lookup: self.dialog_lookup.len(),
             early_dialog_lookup: self.early_dialog_lookup.len(),
             terminated_bye_lookup: self.terminated_bye_lookup.len(),
+            terminated_bye_deadlines,
             transaction_to_dialog: self.transaction_to_dialog.len(),
             transaction_dialog_route_hash: self.transaction_dialog_route_hash.len(),
             dialog_invite_transactions: self.dialog_invite_transactions.len(),
             invite_failover_plans: self.invite_failover_plans.len(),
             active_invite_failover_by_dialog: self.active_invite_failover_by_dialog.len(),
+            invite_failover_plans_by_dialog: self.invite_failover_plans_by_dialog.len(),
             invite_failover_attempts: self.invite_failover_attempts.len(),
+            invite_failover_attempts_by_dialog: self.invite_failover_attempts_by_dialog.len(),
+            invite_failover_expiry_deadlines,
+            invite_failover_overflow_deadlines,
+            invite_failover_dialog_cleanup_retries,
             invite_failover_plan_reservations: self
                 .invite_failover_plan_reservations
                 .load(Ordering::Acquire),
@@ -2920,11 +3435,177 @@ impl DialogManager {
             dialog_to_session: self.dialog_to_session.len(),
             reliable_provisional_tasks: self.reliable_provisional_tasks.len(),
             session_refresh_tasks: self.session_refresh_tasks.len(),
+            bye_cleanup_tasks: self.bye_cleanup_tasks.len(),
             outbound_flows: self.outbound_flows.len(),
             outbound_flow_tasks: self.outbound_flow_tasks.len(),
             flow_by_destination: self.flow_by_destination.len(),
             flow_by_aor: self.flow_by_aor.len(),
         }
+    }
+
+    /// Return diagnostic-only retained storage attribution.
+    ///
+    /// Payload bytes, inline record sizes, and table capacities are reported
+    /// separately because none is an allocator-accurate heap total on its
+    /// own. The combination is sufficient to identify which protocol index
+    /// scales with completed calls before running an intrusive allocation
+    /// profiler.
+    pub fn retention_breakdown(&self) -> serde_json::Value {
+        self.prune_terminated_bye_lookup();
+
+        let transaction_key_payload_bytes = |key: &TransactionKey| key.branch.capacity();
+
+        let mut terminated_bye_unique_allocations = HashSet::new();
+        let mut terminated_bye_unique_payload_bytes = 0_usize;
+        for entry in self.terminated_bye_lookup.iter() {
+            if terminated_bye_unique_allocations.insert(entry.key().allocation_identity()) {
+                terminated_bye_unique_payload_bytes += entry.key().payload_bytes();
+            }
+        }
+        let (terminated_bye_deadline_records, terminated_bye_deadline_unique_payload_bytes) = {
+            let deadlines = self
+                .terminated_bye_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut bytes = 0_usize;
+            for key in deadlines.by_deadline.values() {
+                if terminated_bye_unique_allocations.insert(key.allocation_identity()) {
+                    bytes += key.payload_bytes();
+                }
+            }
+            (deadlines.by_deadline.len(), bytes)
+        };
+
+        let mut failover_active_plans = 0_usize;
+        let mut failover_terminal_plans = 0_usize;
+        let mut failover_busy_plans = 0_usize;
+        let mut failover_active_payloads = 0_usize;
+        let mut failover_retained_attempt_references = 0_usize;
+        let mut failover_accepted_tag_bytes = 0_usize;
+        let mut failover_unique_transaction_allocations = HashSet::new();
+        let mut failover_unique_transaction_key_bytes = 0_usize;
+        for entry in self.invite_failover_plans.iter() {
+            let Ok(plan) = entry.value().try_lock() else {
+                failover_busy_plans += 1;
+                continue;
+            };
+            if plan.active_payload.is_some() {
+                failover_active_plans += 1;
+                failover_active_payloads += 1;
+            } else {
+                failover_terminal_plans += 1;
+            }
+            failover_retained_attempt_references += plan.retained_attempts.len();
+            failover_accepted_tag_bytes +=
+                plan.accepted_to_tag.as_ref().map_or(0, String::capacity);
+            for transaction_id in plan
+                .retained_attempts
+                .iter()
+                .chain(plan.current_transaction.iter())
+            {
+                let identity = Arc::as_ptr(transaction_id) as usize;
+                if failover_unique_transaction_allocations.insert(identity) {
+                    failover_unique_transaction_key_bytes +=
+                        transaction_key_payload_bytes(transaction_id.as_ref());
+                }
+            }
+        }
+        for entry in self.invite_failover_attempts.iter() {
+            let identity = Arc::as_ptr(entry.key()) as usize;
+            if failover_unique_transaction_allocations.insert(identity) {
+                failover_unique_transaction_key_bytes +=
+                    transaction_key_payload_bytes(entry.key().as_ref());
+            }
+        }
+        for entry in self.invite_failover_attempts_by_dialog.iter() {
+            for transaction_id in entry.value().iter() {
+                let identity = Arc::as_ptr(transaction_id) as usize;
+                if failover_unique_transaction_allocations.insert(identity) {
+                    failover_unique_transaction_key_bytes +=
+                        transaction_key_payload_bytes(transaction_id.as_ref());
+                }
+            }
+        }
+
+        let mut transaction_index_key_payload_bytes = 0_usize;
+        for entry in self.transaction_to_dialog.iter() {
+            transaction_index_key_payload_bytes += transaction_key_payload_bytes(entry.key());
+        }
+        for entry in self.transaction_dialog_route_hash.iter() {
+            transaction_index_key_payload_bytes += transaction_key_payload_bytes(entry.key());
+        }
+        for entry in self.dialog_invite_transactions.iter() {
+            transaction_index_key_payload_bytes += entry
+                .value()
+                .iter()
+                .map(transaction_key_payload_bytes)
+                .sum::<usize>();
+        }
+        for entry in self.dialog_server_transactions.iter() {
+            transaction_index_key_payload_bytes += entry
+                .value()
+                .iter()
+                .map(transaction_key_payload_bytes)
+                .sum::<usize>();
+        }
+        for entry in self.pending_response_transaction_by_dialog.iter() {
+            transaction_index_key_payload_bytes += transaction_key_payload_bytes(entry.value());
+        }
+
+        let failover_expiry = self
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .storage_breakdown();
+
+        serde_json::json!({
+            "record_inline_bytes": {
+                "transaction_key": std::mem::size_of::<TransactionKey>(),
+                "terminated_bye_dialog_key": std::mem::size_of::<TerminatedByeDialogKey>(),
+                "terminated_bye_tombstone": std::mem::size_of::<TerminatedByeTombstone>(),
+                "invite_failover_plan": std::mem::size_of::<super::transaction_integration::InviteFailoverPlan>(),
+                "invite_failover_attempt_index": std::mem::size_of::<super::transaction_integration::InviteFailoverAttemptIndex>(),
+            },
+            "table_capacity": {
+                "dialogs": self.dialogs.capacity(),
+                "dialog_lookup": self.dialog_lookup.capacity(),
+                "early_dialog_lookup": self.early_dialog_lookup.capacity(),
+                "terminated_bye_lookup": self.terminated_bye_lookup.capacity(),
+                "transaction_to_dialog": self.transaction_to_dialog.capacity(),
+                "transaction_dialog_route_hash": self.transaction_dialog_route_hash.capacity(),
+                "dialog_invite_transactions": self.dialog_invite_transactions.capacity(),
+                "invite_failover_plans": self.invite_failover_plans.capacity(),
+                "active_invite_failover_by_dialog": self.active_invite_failover_by_dialog.capacity(),
+                "invite_failover_plans_by_dialog": self.invite_failover_plans_by_dialog.capacity(),
+                "invite_failover_attempts": self.invite_failover_attempts.capacity(),
+                "invite_failover_attempts_by_dialog": self.invite_failover_attempts_by_dialog.capacity(),
+                "dialog_server_transactions": self.dialog_server_transactions.capacity(),
+                "pending_response_transaction_by_dialog": self.pending_response_transaction_by_dialog.capacity(),
+            },
+            "terminated_bye": {
+                "lookup_records": self.terminated_bye_lookup.len(),
+                "deadline_records": terminated_bye_deadline_records,
+                "unique_identifier_allocations": terminated_bye_unique_allocations.len(),
+                "lookup_unique_identifier_payload_bytes": terminated_bye_unique_payload_bytes,
+                "deadline_additional_unique_identifier_payload_bytes": terminated_bye_deadline_unique_payload_bytes,
+            },
+            "invite_failover": {
+                "plans": self.invite_failover_plans.len(),
+                "active_plans": failover_active_plans,
+                "terminal_plans": failover_terminal_plans,
+                "busy_plans": failover_busy_plans,
+                "active_payloads": failover_active_payloads,
+                "retained_attempt_references": failover_retained_attempt_references,
+                "accepted_tag_payload_bytes": failover_accepted_tag_bytes,
+                "unique_transaction_allocations": failover_unique_transaction_allocations.len(),
+                "unique_transaction_key_payload_bytes": failover_unique_transaction_key_bytes,
+                "expiry_scheduler": failover_expiry,
+            },
+            "transaction_indexes": {
+                "transaction_key_payload_bytes": transaction_index_key_payload_bytes,
+            },
+            "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+        })
     }
 
     /// Check if a dialog exists
@@ -2956,6 +3637,19 @@ impl DialogManager {
     /// can be woken and removed instead of becoming unowned transaction-runner
     /// tasks.
     pub async fn cleanup_dialog_storage_and_transactions(&self, dialog_id: &DialogId) -> bool {
+        if let Err(_error) = self.session_refresh_tasks.cancel_dialog(dialog_id).await {
+            warn!(dialog=%dialog_id, "Session refresh task did not drain before dialog cleanup");
+            return false;
+        }
+        if let Err(_error) = self
+            .reliable_provisional_tasks
+            .close_dialog(dialog_id)
+            .await
+        {
+            warn!(dialog=%dialog_id, "Reliable provisional task did not drain before dialog cleanup");
+            return false;
+        }
+
         let mut transaction_ids = Vec::new();
 
         if let Some(transaction_id) = self.pending_response_transaction_for_dialog(dialog_id) {
@@ -3037,14 +3731,43 @@ impl DialogManager {
         }
     }
 
+    /// Release dialog-layer correlation for a request that received a final
+    /// stack-authored response because no session owner accepted it.
+    ///
+    /// The transaction manager retains the completed server transaction for
+    /// its RFC retransmission timer; only the dialog pending slot, dispatch
+    /// route, and ownership indexes are retired here.
+    pub(crate) fn retire_unowned_response_indexes(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+    ) {
+        self.clear_pending_response_transaction(dialog_id, transaction_id);
+        self.cleanup_transaction_receiver(transaction_id);
+    }
+
     pub(crate) fn remove_dialog_storage(&self, dialog_id: &DialogId) -> Option<Dialog> {
+        self.session_refresh_tasks.fence_dialog(dialog_id);
+        self.reliable_provisional_tasks.fence_dialog(dialog_id);
+        if self.session_refresh_tasks.has_task(dialog_id)
+            || self
+                .reliable_provisional_tasks
+                .has_tasks_for_dialog(dialog_id)
+        {
+            warn!(dialog=%dialog_id, "Refusing to remove dialog storage while a protocol producer is active");
+            return None;
+        }
         {
             if let Some(dialog) = self.dialogs.get(dialog_id) {
                 self.insert_terminated_bye_tombstone(dialog.value());
             }
         }
 
-        let (_, dialog) = self.dialogs.remove(dialog_id)?;
+        let Some((_, dialog)) = self.dialogs.remove(dialog_id) else {
+            self.reliable_provisional_tasks.release_dialog(dialog_id);
+            self.session_refresh_tasks.release_dialog(dialog_id);
+            return None;
+        };
 
         if let Some(remote_tag) = dialog.remote_tag.as_ref() {
             let key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
@@ -3059,7 +3782,10 @@ impl DialogManager {
         }
 
         if let Some((_, session_id)) = self.dialog_to_session.remove(dialog_id) {
-            self.session_to_dialog.remove(&session_id);
+            // A late cleanup for an older dialog must not erase a session
+            // mapping that has already been reassigned to a replacement.
+            self.session_to_dialog
+                .remove_if(&session_id, |_, mapped| mapped == dialog_id);
         }
         self.pending_response_transaction_by_dialog
             .remove(dialog_id);
@@ -3071,6 +3797,8 @@ impl DialogManager {
             }
         }
         self.dialog_server_transactions.remove(dialog_id);
+        self.reliable_provisional_tasks.release_dialog(dialog_id);
+        self.session_refresh_tasks.release_dialog(dialog_id);
 
         Some(dialog)
     }
@@ -3081,25 +3809,33 @@ impl DialogManager {
         }
 
         if let Some((call_id, local_tag, remote_tag)) = dialog.dialog_id_tuple() {
-            let tombstone = TerminatedByeTombstone {
-                cseq: dialog.remote_cseq,
-                created_at: Instant::now(),
-            };
-            let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
-            self.terminated_bye_lookup.insert(key, tombstone);
-            let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
-            self.terminated_bye_lookup.insert(reverse_key, tombstone);
+            let key = TerminatedByeDialogKey::canonical(&call_id, &local_tag, &remote_tag);
+            let created_at = Instant::now();
+            let mut deadlines = self
+                .terminated_bye_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let previous = self
+                .terminated_bye_lookup
+                .get(&key)
+                .map(|entry| *entry.value());
+            let (expires_at, deadline_generation) = deadlines.schedule(&key, created_at, previous);
+            self.terminated_bye_lookup.insert(
+                key.clone(),
+                TerminatedByeTombstone {
+                    cseq: dialog.remote_cseq,
+                    expires_at,
+                    deadline_generation,
+                },
+            );
+            drop(deadlines);
             if crate::diagnostics::dialog_timing_enabled() {
                 crate::diagnostics::record_bye_tombstone_observed_size(
                     self.terminated_bye_lookup.len(),
                 );
             }
 
-            let insert_count = self
-                .terminated_bye_insert_count
-                .fetch_add(2, Ordering::Relaxed)
-                + 2;
-            if insert_count % TERMINATED_BYE_PRUNE_INTERVAL == 0 {
+            if self.terminated_bye_lookup.len() > self.terminated_bye_lookup_hard_max {
                 self.prune_terminated_bye_lookup();
             }
         }
@@ -3108,17 +3844,16 @@ impl DialogManager {
     fn prune_terminated_bye_lookup(&self) {
         let prune_started = crate::diagnostics::dialog_timing_enabled().then(Instant::now);
         let now = Instant::now();
-        let expired_keys: Vec<_> = self
-            .terminated_bye_lookup
-            .iter()
-            .filter(|entry| {
-                now.duration_since(entry.value().created_at) >= TERMINATED_BYE_TOMBSTONE_TTL
-            })
-            .map(|entry| entry.key().clone())
-            .collect();
+        let expired_keys = self
+            .terminated_bye_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take_due(now);
 
-        for key in expired_keys {
-            self.terminated_bye_lookup.remove(&key);
+        for (key, generation) in expired_keys {
+            self.terminated_bye_lookup.remove_if(&key, |_, tombstone| {
+                tombstone.deadline_generation == generation
+            });
         }
 
         let len = self.terminated_bye_lookup.len();
@@ -3126,15 +3861,16 @@ impl DialogManager {
 
         if len > self.terminated_bye_lookup_hard_max {
             let overage = len - self.terminated_bye_lookup_hard_max;
-            let overflow_keys: Vec<_> = self
-                .terminated_bye_lookup
-                .iter()
-                .take(overage)
-                .map(|entry| entry.key().clone())
-                .collect();
+            let overflow_keys = self
+                .terminated_bye_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take_oldest(overage);
 
-            for key in overflow_keys {
-                self.terminated_bye_lookup.remove(&key);
+            for (key, generation) in overflow_keys {
+                self.terminated_bye_lookup.remove_if(&key, |_, tombstone| {
+                    tombstone.deadline_generation == generation
+                });
             }
         }
 
@@ -3909,6 +4645,7 @@ mod outbound_flow_handler_tests {
     struct BlockingSendTransport {
         addr: SocketAddr,
         entered: Arc<tokio::sync::Notify>,
+        block_next_send: AtomicBool,
         closed: AtomicBool,
     }
 
@@ -3917,6 +4654,7 @@ mod outbound_flow_handler_tests {
             Arc::new(Self {
                 addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
                 entered,
+                block_next_send: AtomicBool::new(true),
                 closed: AtomicBool::new(false),
             })
         }
@@ -3933,8 +4671,12 @@ mod outbound_flow_handler_tests {
             _message: rvoip_sip_core::Message,
             _destination: SocketAddr,
         ) -> TransportResult<()> {
-            self.entered.notify_one();
-            std::future::pending().await
+            if self.block_next_send.swap(false, Ordering::AcqRel) {
+                self.entered.notify_one();
+                std::future::pending().await
+            } else {
+                Ok(())
+            }
         }
 
         async fn close(&self) -> TransportResult<()> {
@@ -3982,9 +4724,15 @@ mod outbound_flow_handler_tests {
     async fn make_manager() -> (DialogManager, mpsc::Receiver<SessionCoordinationEvent>) {
         let transport = NoopTransport::new();
         let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
-        let (tm, _events_rx) = TransactionManager::new(transport, transport_rx, Some(16))
+        let (tm, mut events_rx) = TransactionManager::new(transport, transport_rx, Some(16))
             .await
             .expect("build TransactionManager");
+        // These focused manager tests inject transaction events directly.
+        // Keep the authoritative primary transaction-event path open and
+        // drained: closing it is now a deliberate fail-closed signal that
+        // moves TransactionManager into Draining and rejects new failover,
+        // CANCEL, and cleanup transactions.
+        tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
         let local = SocketAddr::from_str("127.0.0.1:5060").unwrap();
         let manager = DialogManager::new(Arc::new(tm), local)
             .await
@@ -3998,6 +4746,21 @@ mod outbound_flow_handler_tests {
         (manager, sc_rx)
     }
 
+    async fn make_manager_with_global_processor() -> DialogManager {
+        let transport = NoopTransport::new();
+        let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (tm, events_rx) = TransactionManager::new(transport, transport_rx, Some(16))
+            .await
+            .expect("build TransactionManager");
+        DialogManager::with_global_events(
+            Arc::new(tm),
+            events_rx,
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+        )
+        .await
+        .expect("build DialogManager with global processor")
+    }
+
     async fn make_manager_with_setup_timeout(
         setup_timeout: Duration,
         index_capacity: usize,
@@ -4006,7 +4769,7 @@ mod outbound_flow_handler_tests {
         let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
         let mut timer_settings = crate::transaction::timer::TimerSettings::default();
         timer_settings.transaction_timeout = setup_timeout;
-        let (tm, _events_rx) = TransactionManager::new_with_config(
+        let (tm, mut events_rx) = TransactionManager::new_with_config(
             transport,
             transport_rx,
             Some(16),
@@ -4014,6 +4777,7 @@ mod outbound_flow_handler_tests {
         )
         .await
         .expect("build TransactionManager with setup timeout");
+        tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
         DialogManager::new_with_index_capacity(
             Arc::new(tm),
             SocketAddr::from_str("127.0.0.1:5060").unwrap(),
@@ -4030,7 +4794,7 @@ mod outbound_flow_handler_tests {
         let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
         let mut timer_settings = crate::transaction::timer::TimerSettings::default();
         timer_settings.transaction_timeout = setup_timeout;
-        let (tm, _events_rx) = TransactionManager::new_with_config(
+        let (tm, mut events_rx) = TransactionManager::new_with_config(
             transport,
             transport_rx,
             Some(16),
@@ -4038,6 +4802,7 @@ mod outbound_flow_handler_tests {
         )
         .await
         .expect("build TransactionManager with custom transport");
+        tokio::spawn(async move { while events_rx.recv().await.is_some() {} });
         DialogManager::new_with_index_capacity(
             Arc::new(tm),
             SocketAddr::from_str("127.0.0.1:5060").unwrap(),
@@ -4186,7 +4951,7 @@ mod outbound_flow_handler_tests {
     }
 
     #[tokio::test]
-    async fn setup_deadline_compensates_a_blocked_transaction_send() {
+    async fn setup_deadline_retains_wire_unknown_until_cancel_and_terminal_release() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
         let send_entered = Arc::new(tokio::sync::Notify::new());
@@ -4195,7 +4960,17 @@ mod outbound_flow_handler_tests {
             Duration::from_millis(100),
         )
         .await;
-        let dialog_id = DialogId::new();
+        let mut dialog = Dialog::new(
+            "invite-send-deadline".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-send-deadline".to_string()),
+            None,
+            true,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
             .from(
@@ -4249,23 +5024,99 @@ mod outbound_flow_handler_tests {
             .expect("bounded tombstone retained")
             .value()
             .clone();
-        let plan = plan.lock().await;
-        assert_eq!(plan.phase, InviteFailoverPlanPhase::Exhausted);
-        assert!(plan.pending_candidate.is_none());
-        assert!(plan.current_transaction.is_none());
-        drop(plan);
-        assert!(manager.invite_failover_attempts.is_empty());
+        let invite_transaction = {
+            let plan = plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            assert!(plan.active_payload.is_none());
+            plan.current_transaction
+                .clone()
+                .expect("wire-unknown INVITE transaction retained for CANCEL")
+        };
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&invite_transaction));
+        assert!(manager
+            .transaction_to_dialog
+            .contains_key(&invite_transaction));
         assert_eq!(
             manager
                 .transaction_manager
                 .retention_counts()
                 .active_transactions_total,
+            1
+        );
+
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&invite_transaction)
+            .await
+            .expect("INVITE request lookup")
+            .expect("wire-unknown INVITE retained");
+        let terminal = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::RequestTerminated,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-send-deadline"))
+        .build();
+
+        let cancel_transaction = manager
+            .cancel_invite_transaction_with_dialog(&invite_transaction)
+            .await
+            .expect("send one legal CANCEL for the exact uncertain INVITE");
+        let cancel = manager
+            .transaction_manager
+            .original_request(&cancel_transaction)
+            .await
+            .expect("CANCEL lookup")
+            .expect("CANCEL retained");
+        assert_eq!(cancel.method(), Method::Cancel);
+        assert_eq!(
+            cancel.call_id().map(|value| value.as_str()),
+            sent_request.call_id().map(|value| value.as_str())
+        );
+        assert_eq!(
+            cancel.cseq().map(|value| value.seq),
+            sent_request.cseq().map(|value| value.seq)
+        );
+
+        manager
+            .process_global_transaction_event(TransactionEvent::FailureResponse {
+                transaction_id: invite_transaction.as_ref().clone(),
+                response: terminal,
+            })
+            .await;
+        manager
+            .complete_wire_unknown_invite_for_dialog(&dialog_id)
+            .await;
+        assert!(!manager.invite_failover_plans.iter().any(|entry| {
+            entry
+                .value()
+                .try_lock()
+                .is_ok_and(|plan| plan.dialog_id == dialog_id)
+        }));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&invite_transaction));
+        assert!(!manager
+            .transaction_to_dialog
+            .contains_key(&invite_transaction));
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
             0
         );
     }
 
     #[tokio::test]
-    async fn setup_deadline_compensates_a_blocked_post_send_hook() {
+    async fn setup_deadline_retains_wire_unknown_until_late_success_ack_bye_release() {
         use crate::manager::request_lifecycle::test_hooks::{
             install_post_send_gate, remove_post_send_gate,
         };
@@ -4274,7 +5125,17 @@ mod outbound_flow_handler_tests {
         const CALL_ID: &str = "invite-post-send-deadline";
         let manager = make_manager_with_setup_timeout(Duration::from_millis(100), 100).await;
         let gate = install_post_send_gate(CALL_ID);
-        let dialog_id = DialogId::new();
+        let mut dialog = Dialog::new(
+            CALL_ID.to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-post-deadline".to_string()),
+            None,
+            true,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
             .from(
@@ -4329,23 +5190,109 @@ mod outbound_flow_handler_tests {
             .expect("bounded tombstone retained")
             .value()
             .clone();
-        let plan = plan.lock().await;
-        assert_eq!(plan.phase, InviteFailoverPlanPhase::Exhausted);
-        assert!(plan.pending_candidate.is_none());
-        assert!(plan.current_transaction.is_none());
-        drop(plan);
-        assert!(manager.invite_failover_attempts.is_empty());
+        let invite_transaction = {
+            let plan = plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            assert!(plan.active_payload.is_none());
+            plan.current_transaction
+                .clone()
+                .expect("wire-unknown INVITE retained for a late response")
+        };
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&invite_transaction));
+        assert!(manager
+            .transaction_to_dialog
+            .contains_key(&invite_transaction));
         assert_eq!(
             manager
                 .transaction_manager
                 .retention_counts()
                 .active_transactions_total,
+            1
+        );
+
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&invite_transaction)
+            .await
+            .expect("INVITE request lookup")
+            .expect("wire-unknown INVITE retained");
+        let accepted = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::Ok,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-post-deadline"))
+        .contact("sip:bob@127.0.0.1:5113", None)
+        .body(bytes::Bytes::from_static(b"v=0\r\n"))
+        .build();
+        let transactions_before = manager.transaction_manager.active_transactions().await.0;
+
+        manager
+            .process_global_transaction_event(TransactionEvent::SuccessResponse {
+                transaction_id: invite_transaction.as_ref().clone(),
+                response: accepted,
+                need_ack: true,
+                source: dest_addr(5113),
+            })
+            .await;
+
+        let transactions_after = manager.transaction_manager.active_transactions().await.0;
+        let mut bye_transactions = Vec::new();
+        for transaction in transactions_after {
+            if transactions_before.contains(&transaction) {
+                continue;
+            }
+            if manager
+                .transaction_manager
+                .original_request(&transaction)
+                .await
+                .expect("late cleanup transaction lookup")
+                .is_some_and(|request| request.method == Method::Bye)
+            {
+                bye_transactions.push(transaction);
+            }
+        }
+        assert_eq!(
+            bye_transactions.len(),
+            1,
+            "one legal BYE must compensate the late accepted INVITE"
+        );
+
+        manager
+            .complete_wire_unknown_invite_for_dialog(&dialog_id)
+            .await;
+        assert!(!manager.invite_failover_plans.iter().any(|entry| {
+            entry
+                .value()
+                .try_lock()
+                .is_ok_and(|plan| plan.dialog_id == dialog_id)
+        }));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&invite_transaction));
+        assert!(!manager
+            .transaction_to_dialog
+            .contains_key(&invite_transaction));
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
             0
         );
     }
 
     #[tokio::test]
     async fn sharded_event_workers_and_flow_consumer_join_on_idempotent_stop() {
+        use crate::manager::transaction_integration::InviteFailoverPlan;
+
         let transport = NoopTransport::new();
         let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
         let (tm, event_rx) = TransactionManager::new(transport, transport_rx, Some(16))
@@ -4366,6 +5313,22 @@ mod outbound_flow_handler_tests {
         )
         .await
         .expect("build sharded DialogManager");
+        assert!(manager
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .schedule_dialog_cleanup(
+                999,
+                &DialogId::new(),
+                std::sync::Weak::<tokio::sync::Mutex<InviteFailoverPlan>>::new(),
+                Instant::now() + Duration::from_secs(3_600),
+            ));
+        assert_eq!(
+            manager
+                .retention_counts()
+                .invite_failover_dialog_cleanup_retries,
+            1
+        );
 
         tokio::time::timeout(Duration::from_secs(1), manager.stop())
             .await
@@ -4380,6 +5343,13 @@ mod outbound_flow_handler_tests {
             assert!(tasks.event_processor.is_none());
             assert!(tasks.flow_consumer.is_none());
         }
+        assert_eq!(
+            manager
+                .retention_counts()
+                .invite_failover_dialog_cleanup_retries,
+            0,
+            "drain clears pending manager-owned cleanup retries"
+        );
         tokio::time::timeout(Duration::from_millis(20), manager.stop())
             .await
             .expect("second stop is immediate")
@@ -4442,7 +5412,7 @@ mod outbound_flow_handler_tests {
             .clone();
         let pre_plan = pre_plan.lock().await;
         assert_eq!(pre_plan.phase, InviteFailoverPlanPhase::Closed);
-        assert!(pre_plan.pending_candidate.is_none());
+        assert!(pre_plan.active_payload.is_none());
         drop(pre_plan);
 
         let send_entered = Arc::new(tokio::sync::Notify::new());
@@ -4516,6 +5486,7 @@ mod outbound_flow_handler_tests {
         let send_plan = send_plan.lock().await;
         assert_eq!(send_plan.phase, InviteFailoverPlanPhase::Closed);
         assert!(send_plan.current_transaction.is_none());
+        assert!(send_plan.active_payload.is_none());
     }
 
     fn test_key(n: u8) -> (String, u32, String) {
@@ -4620,7 +5591,7 @@ mod outbound_flow_handler_tests {
     }
 
     #[tokio::test]
-    async fn state_changed_terminated_clears_stored_dialog_route_hash() {
+    async fn state_changed_retains_route_until_authoritative_terminal_event() {
         let (manager, _rx) = make_manager().await;
         let fallback = AtomicUsize::new(0);
         let source = dest_addr(5070);
@@ -4638,11 +5609,23 @@ mod outbound_flow_handler_tests {
             .contains_key(&invite_tx));
 
         manager
-            .process_global_transaction_event(TransactionEvent::StateChanged {
+            .process_timed_global_transaction_event(Arc::new(TransactionEvent::StateChanged {
                 transaction_id: invite_tx.clone(),
                 previous_state: TransactionState::Proceeding,
                 new_state: TransactionState::Terminated,
-            })
+            }))
+            .await;
+
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
+
+        manager
+            .process_timed_global_transaction_event(Arc::new(
+                TransactionEvent::TransactionTerminated {
+                    transaction_id: invite_tx.clone(),
+                },
+            ))
             .await;
 
         assert!(!manager
@@ -4653,8 +5636,9 @@ mod outbound_flow_handler_tests {
     #[tokio::test]
     async fn retained_invite_attempts_share_route_hash_and_prune_all_indexes() {
         use crate::manager::transaction_integration::{
-            CandidateWirePlan, InviteFailoverAttempt, InviteFailoverAttemptIndex,
-            InviteFailoverAttemptOutcome, InviteFailoverPlan, InviteFailoverPlanPhase,
+            CandidateWirePlan, InviteFailoverActivePayload, InviteFailoverAttempt,
+            InviteFailoverAttemptIndex, InviteFailoverAttemptOutcome, InviteFailoverPlan,
+            InviteFailoverPlanPhase,
         };
 
         let (manager, _rx) = make_manager().await;
@@ -4697,55 +5681,107 @@ mod outbound_flow_handler_tests {
         );
 
         let plan_id = 77;
-        let captured_plan = Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
-            id: plan_id,
-            dialog_id: dialog_id.clone(),
+        let first_retained = Arc::new(first_transaction.clone());
+        let setup_deadline = Instant::now() + Duration::from_secs(32);
+        let mut active_payload = InviteFailoverActivePayload::new(
             request,
-            candidates: vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+            vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
                 dest_addr(5090),
                 rvoip_sip_transport::transport::TransportType::Udp,
             )],
-            wire_plan: CandidateWirePlan::default(),
-            next_candidate_index: 1,
-            next_send_generation: 1,
-            pending_candidate: None,
-            current_transaction: Some(first_transaction.clone()),
-            current_candidate_index: Some(0),
-            current_send_generation: Some(1),
-            provisional_seen: false,
+            CandidateWirePlan::default(),
+            setup_deadline,
+        );
+        active_payload.next_candidate_index = 1;
+        active_payload.next_send_generation = 1;
+        active_payload.current_candidate_index = Some(0);
+        active_payload.current_send_generation = Some(1);
+        active_payload.attempts.push(InviteFailoverAttempt {
+            transaction_id: first_retained.clone(),
+            outcome: InviteFailoverAttemptOutcome::FinalResponse,
+        });
+        let captured_plan = Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
+            id: plan_id,
+            dialog_id: dialog_id.clone(),
+            active_payload: Some(Box::new(active_payload)),
+            reserved_attempt_slots: 1,
+            current_transaction: Some(first_retained.clone()),
+            wire_attempted: true,
             phase: InviteFailoverPlanPhase::Closed,
-            attempts: vec![InviteFailoverAttempt {
-                transaction_id: first_transaction.clone(),
-                candidate_index: 0,
-                outcome: InviteFailoverAttemptOutcome::FinalResponse,
-            }],
-            accepted_transaction: None,
+            retained_attempts: Box::new([]),
+            accepted_candidate_index: None,
             accepted_to_tag: None,
-            cleaned_fork_tags: std::collections::HashSet::new(),
-            setup_deadline: Instant::now() + Duration::from_secs(32),
+            fork_cleanup: None,
             expires_at: Instant::now() - Duration::from_millis(1),
+            expiry_generation: 0,
         }));
         manager
             .invite_failover_plans
             .insert(plan_id, captured_plan.clone());
         manager
             .invite_failover_plan_reservations
-            .store(1, Ordering::Release);
+            .store(2, Ordering::Release);
         manager
             .invite_failover_attempt_reservations
-            .store(1, Ordering::Release);
+            .store(4, Ordering::Release);
         manager
             .active_invite_failover_by_dialog
             .insert(dialog_id.clone(), plan_id);
         manager.invite_failover_attempts.insert(
-            first_transaction.clone(),
+            first_retained,
             InviteFailoverAttemptIndex {
                 plan_id,
                 dialog_id: dialog_id.clone(),
                 candidate_index: 0,
+                _admission_owner: None,
             },
         );
 
+        {
+            let mut plan = captured_plan.lock().await;
+            plan.transition_to_terminal(InviteFailoverPlanPhase::WireUnknown);
+            manager.schedule_invite_failover_plan_expiry(
+                &mut plan,
+                Instant::now() - Duration::from_millis(1),
+            );
+        }
+        manager.prune_invite_failover_state().await;
+        assert!(manager.invite_failover_plans.contains_key(&plan_id));
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(manager
+            .transaction_to_dialog
+            .contains_key(&first_transaction));
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            2,
+            "wire-unknown plans stay capacity-charged past normal TTL"
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
+            4,
+            "wire-unknown plans retain the complete immutable attempt charge"
+        );
+        let retention = manager.retention_counts();
+        assert_eq!(retention.invite_failover_expiry_deadlines, 0);
+        assert_eq!(retention.invite_failover_overflow_deadlines, 0);
+        {
+            let mut plan = captured_plan.lock().await;
+            plan.transition_to_terminal(InviteFailoverPlanPhase::Closed);
+            manager.schedule_invite_failover_plan_expiry(
+                &mut plan,
+                Instant::now() - Duration::from_millis(1),
+            );
+        }
+
+        manager.prune_invite_failover_state().await;
+        // Reaping is idempotent: a stale scheduler wake-up or duplicate
+        // maintenance pass must not release immutable reservations twice.
         manager.prune_invite_failover_state().await;
 
         assert!(!manager.invite_failover_plans.contains_key(&plan_id));
@@ -4761,25 +5797,349 @@ mod outbound_flow_handler_tests {
         assert!(!manager
             .transaction_dialog_route_hash
             .contains_key(&first_transaction));
-        assert_eq!(
-            captured_plan.lock().await.phase,
-            InviteFailoverPlanPhase::Closed,
-            "an event that captured the Arc before prune must observe a non-active tombstone"
-        );
+        {
+            let captured_plan = captured_plan.lock().await;
+            assert_eq!(
+                captured_plan.phase,
+                InviteFailoverPlanPhase::Closed,
+                "an event that captured the Arc before prune must observe a non-active tombstone"
+            );
+            assert!(captured_plan.active_payload.is_none());
+        }
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
                 .load(Ordering::Acquire),
-            0
+            1,
+            "exactly one plan slot is released without touching unrelated reservations"
         );
         assert_eq!(
             manager
                 .invite_failover_attempt_reservations
                 .load(Ordering::Acquire),
-            0
+            3,
+            "the immutable one-attempt charge is released exactly once after payload compaction"
         );
+        manager
+            .invite_failover_plan_reservations
+            .store(0, Ordering::Release);
+        manager
+            .invite_failover_attempt_reservations
+            .store(0, Ordering::Release);
 
         manager.unlink_transaction_from_dialog_indexed(&second_transaction);
+    }
+
+    #[tokio::test]
+    async fn retained_invite_reverse_indexes_cleanup_only_the_exact_dialog() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let manager = make_manager_with_global_processor().await;
+        let first_dialog = DialogId::new();
+        let second_dialog = DialogId::new();
+        let request = |call_id: &str, branch: &str| {
+            SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+                .unwrap()
+                .from(
+                    "Alice",
+                    "sip:alice@example.com",
+                    Some("alice-exact-cleanup"),
+                )
+                .to("Bob", "sip:bob@example.com", None)
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id(call_id)
+                .cseq(1)
+                .via("127.0.0.1:5060", "UDP", Some(branch))
+                .max_forwards(70)
+                .build()
+        };
+
+        let (first_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request("reverse-index-first", "z9hG4bK-reverse-index-first"),
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5090),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&first_dialog),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("first retained INVITE");
+        let (second_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request("reverse-index-second", "z9hG4bK-reverse-index-second"),
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5091),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&second_dialog),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("second retained INVITE");
+
+        let first_plan_id = manager
+            .invite_failover_attempts
+            .get(&first_transaction)
+            .expect("first attempt index")
+            .plan_id;
+        let second_plan_id = manager
+            .invite_failover_attempts
+            .get(&second_transaction)
+            .expect("second attempt index")
+            .plan_id;
+        assert_eq!(
+            manager
+                .invite_failover_plans_by_dialog
+                .get(&first_dialog)
+                .map(|entry| entry.value().clone()),
+            Some(vec![first_plan_id])
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempts_by_dialog
+                .get(&first_dialog)
+                .map(|entry| {
+                    entry
+                        .value()
+                        .iter()
+                        .map(|transaction_id| transaction_id.as_ref().clone())
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec![first_transaction.clone()])
+        );
+
+        // A plan worker may temporarily own the plan mutex while synchronous
+        // dialog cleanup runs. The exact attempt reverse index must still
+        // detach the hot transaction route immediately without scanning or
+        // touching another dialog.
+        let first_plan = manager
+            .invite_failover_plans
+            .get(&first_plan_id)
+            .expect("first retained plan")
+            .value()
+            .clone();
+        let busy_plan = first_plan.lock().await;
+        manager.remove_invite_failover_state_for_dialog(&first_dialog);
+        assert!(!manager
+            .transaction_to_dialog
+            .contains_key(&first_transaction));
+        assert_eq!(
+            manager
+                .transaction_to_dialog
+                .get(&second_transaction)
+                .map(|entry| entry.value().clone()),
+            Some(second_dialog.clone())
+        );
+        let second_plan = manager
+            .invite_failover_plans
+            .get(&second_plan_id)
+            .expect("second retained plan")
+            .value()
+            .clone();
+        assert_eq!(
+            second_plan.lock().await.phase,
+            InviteFailoverPlanPhase::Active
+        );
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert_eq!(
+            manager
+                .retention_counts()
+                .invite_failover_dialog_cleanup_retries,
+            1,
+            "one exact retry is queued while the plan mutex is busy"
+        );
+        drop(busy_plan);
+
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let compacted = first_plan.try_lock().is_ok_and(|plan| {
+                    plan.phase == InviteFailoverPlanPhase::Cancelled
+                        && plan.active_payload.is_none()
+                });
+                if compacted
+                    && !manager
+                        .invite_failover_plans_by_dialog
+                        .contains_key(&first_dialog)
+                    && !manager
+                        .invite_failover_attempts_by_dialog
+                        .contains_key(&first_dialog)
+                    && manager
+                        .retention_counts()
+                        .invite_failover_dialog_cleanup_retries
+                        == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("one cleanup call converges through manager-owned maintenance");
+
+        assert!(manager.invite_failover_plans.contains_key(&first_plan_id));
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(!manager
+            .invite_failover_plans_by_dialog
+            .contains_key(&first_dialog));
+        assert!(!manager
+            .invite_failover_attempts_by_dialog
+            .contains_key(&first_dialog));
+        {
+            let mut plan = first_plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
+            assert!(plan.active_payload.is_none());
+            plan.transition_to_terminal(InviteFailoverPlanPhase::Closed);
+            manager.schedule_invite_failover_plan_expiry(
+                &mut plan,
+                Instant::now() - Duration::from_millis(1),
+            );
+        }
+        manager.prune_invite_failover_state().await;
+
+        assert!(!manager.invite_failover_plans.contains_key(&first_plan_id));
+        assert!(!manager
+            .invite_failover_attempts
+            .contains_key(&first_transaction));
+        assert!(!manager
+            .invite_failover_plans_by_dialog
+            .contains_key(&first_dialog));
+        assert!(!manager
+            .invite_failover_attempts_by_dialog
+            .contains_key(&first_dialog));
+        assert!(manager.invite_failover_plans.contains_key(&second_plan_id));
+        assert!(manager
+            .invite_failover_attempts
+            .contains_key(&second_transaction));
+        assert_eq!(
+            manager
+                .invite_failover_plans_by_dialog
+                .get(&second_dialog)
+                .map(|entry| entry.value().clone()),
+            Some(vec![second_plan_id])
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempts_by_dialog
+                .get(&second_dialog)
+                .map(|entry| {
+                    entry
+                        .value()
+                        .iter()
+                        .map(|transaction_id| transaction_id.as_ref().clone())
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec![second_transaction])
+        );
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            1
+        );
+        assert_eq!(
+            manager
+                .invite_failover_attempt_reservations
+                .load(Ordering::Acquire),
+            1
+        );
+        manager.stop().await.expect("stop exact-cleanup manager");
+    }
+
+    #[tokio::test]
+    async fn busy_dialog_cleanup_preserves_wire_unknown_recovery_indexes() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-wire-cleanup"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("busy-wire-unknown-cleanup")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-busy-wire-unknown-cleanup"),
+            )
+            .max_forwards(70)
+            .build();
+        let (transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5092),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("wire-unknown retained INVITE");
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction)
+            .expect("wire-unknown attempt index")
+            .plan_id;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("wire-unknown plan")
+            .value()
+            .clone();
+        {
+            let mut plan = plan.lock().await;
+            plan.transition_to_terminal(InviteFailoverPlanPhase::WireUnknown);
+            manager.schedule_invite_failover_plan_expiry(
+                &mut plan,
+                Instant::now() + Duration::from_secs(90),
+            );
+        }
+
+        let busy_plan = plan.lock().await;
+        manager.remove_invite_failover_state_for_dialog(&dialog_id);
+        assert_eq!(
+            manager
+                .retention_counts()
+                .invite_failover_dialog_cleanup_retries,
+            1
+        );
+        drop(busy_plan);
+        manager.prune_invite_failover_state().await;
+
+        {
+            let plan = plan.lock().await;
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            assert!(plan.active_payload.is_none());
+            assert!(plan.current_transaction.is_some());
+        }
+        assert!(manager
+            .invite_failover_plans_by_dialog
+            .get(&dialog_id)
+            .is_some_and(|plans| plans.contains(&plan_id)));
+        assert!(manager
+            .invite_failover_attempts_by_dialog
+            .get(&dialog_id)
+            .is_some_and(|attempts| attempts
+                .iter()
+                .any(|attempt| attempt.as_ref() == &transaction)));
+        let retention = manager.retention_counts();
+        assert_eq!(retention.invite_failover_dialog_cleanup_retries, 0);
+        assert_eq!(retention.invite_failover_expiry_deadlines, 0);
+
+        manager
+            .complete_wire_unknown_invite_for_dialog(&dialog_id)
+            .await;
+        assert!(!manager.invite_failover_plans.contains_key(&plan_id));
+        assert!(!manager.invite_failover_attempts.contains_key(&transaction));
+        manager.stop().await.expect("stop wire-unknown manager");
     }
 
     #[tokio::test]
@@ -4834,7 +6194,13 @@ mod outbound_flow_handler_tests {
                 .expect("retained plan")
                 .value()
                 .clone();
-            let setup_deadline = plan.lock().await.setup_deadline;
+            let setup_deadline = plan
+                .lock()
+                .await
+                .active_payload
+                .as_ref()
+                .expect("active payload")
+                .setup_deadline;
             setup_deadline
         };
 
@@ -4865,16 +6231,17 @@ mod outbound_flow_handler_tests {
             .current_transaction
             .clone()
             .expect("second attempt is current");
-        assert_ne!(first_transaction, second_transaction);
-        assert_eq!(plan.attempts.len(), 2);
-        assert_eq!(plan.next_candidate_index, 2);
-        assert_eq!(plan.setup_deadline, original_setup_deadline);
+        assert_ne!(&first_transaction, second_transaction.as_ref());
+        let active = plan.active_payload.as_ref().expect("active failover state");
+        assert_eq!(active.attempts.len(), 2);
+        assert_eq!(active.next_candidate_index, 2);
+        assert_eq!(active.setup_deadline, original_setup_deadline);
         assert_eq!(
-            plan.attempts[0].outcome,
+            active.attempts[0].outcome,
             InviteFailoverAttemptOutcome::TransactionTimeout
         );
         assert_eq!(
-            plan.attempts[1].outcome,
+            active.attempts[1].outcome,
             InviteFailoverAttemptOutcome::Active
         );
         drop(plan);
@@ -4936,14 +6303,25 @@ mod outbound_flow_handler_tests {
             .value()
             .clone();
         let mut retained_plan_guard = retained_plan.lock().await;
-        retained_plan_guard.phase = InviteFailoverPlanPhase::Closed;
-        retained_plan_guard.expires_at = Instant::now() - Duration::from_millis(1);
+        retained_plan_guard.transition_to_terminal(InviteFailoverPlanPhase::Closed);
+        manager.schedule_invite_failover_plan_expiry(
+            &mut retained_plan_guard,
+            Instant::now() - Duration::from_millis(1),
+        );
         manager.prune_invite_failover_state().await;
         assert!(
             manager.invite_failover_plans.contains_key(&plan_id),
             "maintenance must skip a busy plan instead of blocking its event shard"
         );
         drop(retained_plan_guard);
+        // A busy expiry is deliberately requeued with a short backoff.  The
+        // second maintenance pass must run after that deadline rather than
+        // spin immediately on the same contended plan.
+        tokio::time::sleep(
+            crate::manager::transaction_integration::INVITE_FAILOVER_EXPIRY_BUSY_RETRY
+                + Duration::from_millis(20),
+        )
+        .await;
         manager.prune_invite_failover_state().await;
 
         assert!(!manager.invite_failover_plans.contains_key(&plan_id));
@@ -4965,6 +6343,210 @@ mod outbound_flow_handler_tests {
                 .load(Ordering::Acquire),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn scoped_internal_error_advances_retained_invite_and_old_terminal_is_consumed() {
+        use crate::manager::transaction_integration::{
+            CandidateWirePlan, InviteFailoverAttemptOutcome, InviteFailoverPlanPhase,
+        };
+
+        let (manager, mut session_events) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-internal-next"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-internal-next")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-internal-next-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let (first_transaction, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5110),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                    rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5111),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    ),
+                ],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("initial retained INVITE");
+
+        manager
+            .process_global_transaction_event(TransactionEvent::Error {
+                transaction_id: Some(first_transaction.clone()),
+                error: "redacted injected runner failure".to_string(),
+            })
+            .await;
+
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&first_transaction)
+            .expect("first attempt remains indexed")
+            .plan_id;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("retained plan")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Active);
+        let second_transaction = plan
+            .current_transaction
+            .clone()
+            .expect("replacement attempt is current");
+        assert_ne!(first_transaction, *second_transaction);
+        let active = plan.active_payload.as_ref().expect("active failover state");
+        assert_eq!(active.attempts.len(), 2);
+        assert_eq!(
+            active.attempts[0].outcome,
+            InviteFailoverAttemptOutcome::InternalError
+        );
+        assert_eq!(
+            active.attempts[1].outcome,
+            InviteFailoverAttemptOutcome::Active
+        );
+        drop(plan);
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTerminated {
+                transaction_id: first_transaction,
+            })
+            .await;
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("plan remains active")
+            .value()
+            .clone();
+        assert_eq!(
+            plan.lock().await.current_transaction.as_deref(),
+            Some(second_transaction.as_ref())
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), session_events.recv())
+                .await
+                .is_err(),
+            "the superseded attempt must not emit a call failure"
+        );
+
+        manager.stop().await.expect("stop internal-next manager");
+    }
+
+    #[tokio::test]
+    async fn scoped_internal_error_exhausts_plan_and_emits_one_failure() {
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
+
+        let (manager, mut session_events) = make_manager().await;
+        let dialog_id = DialogId::new();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-internal-final"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-plan-internal-final")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-internal-final-template"),
+            )
+            .max_forwards(70)
+            .build();
+        let (transaction_id, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5112),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("single-candidate retained INVITE");
+        let plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction_id)
+            .expect("attempt indexed")
+            .plan_id;
+
+        manager
+            .process_global_transaction_event(TransactionEvent::Error {
+                transaction_id: Some(transaction_id.clone()),
+                error: "redacted injected runner failure".to_string(),
+            })
+            .await;
+
+        let failure = tokio::time::timeout(Duration::from_millis(200), session_events.recv())
+            .await
+            .expect("terminal failure must arrive")
+            .expect("session channel open");
+        assert!(matches!(
+            failure,
+            SessionCoordinationEvent::RequestFailed {
+                dialog_id: Some(failed_dialog),
+                transaction_id: failed_transaction,
+                status_code: 500,
+                ref reason_phrase,
+                ref method,
+            } if failed_dialog == dialog_id
+                && failed_transaction == transaction_id
+                && reason_phrase == "Local transaction processing failed"
+                && method == "INVITE"
+        ));
+
+        let plan = manager
+            .invite_failover_plans
+            .get(&plan_id)
+            .expect("terminal plan retained")
+            .value()
+            .clone();
+        let plan = plan.lock().await;
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::Exhausted);
+        assert!(plan.active_payload.is_none());
+        assert!(plan.current_transaction.is_none());
+        drop(plan);
+        assert!(!manager
+            .active_invite_failover_by_dialog
+            .contains_key(&dialog_id));
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTerminated {
+                transaction_id,
+            })
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), session_events.recv())
+                .await
+                .is_err(),
+            "TransactionTerminated must not emit a duplicate failure"
+        );
+
+        manager.stop().await.expect("stop internal-final manager");
     }
 
     #[tokio::test]
@@ -5075,6 +6657,7 @@ mod outbound_flow_handler_tests {
         let plan = plan.lock().await;
         assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
         assert!(plan.current_transaction.is_none());
+        assert!(plan.active_payload.is_none());
         drop(plan);
 
         manager
@@ -5093,9 +6676,7 @@ mod outbound_flow_handler_tests {
 
     #[tokio::test]
     async fn cancel_and_timer_b_serialize_on_one_exact_current_attempt() {
-        use crate::manager::transaction_integration::{
-            CandidateWirePlan, InviteFailoverAttemptOutcome, InviteFailoverPlanPhase,
-        };
+        use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
         let (manager, _rx) = make_manager().await;
         let manager = Arc::new(manager);
@@ -5166,25 +6747,16 @@ mod outbound_flow_handler_tests {
             .clone();
         let plan = plan.lock().await;
         assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
-        assert!((1..=2).contains(&plan.attempts.len()));
+        assert!(plan.active_payload.is_none());
+        assert!((1..=2).contains(&plan.retained_attempts.len()));
         let current_transaction = plan
             .current_transaction
             .as_ref()
             .expect("cancelled current transaction");
-        assert_eq!(
-            plan.attempts
-                .iter()
-                .find(|attempt| &attempt.transaction_id == current_transaction)
-                .expect("current attempt")
-                .outcome,
-            InviteFailoverAttemptOutcome::Cancelled
-        );
-        if plan.attempts.len() == 2 {
-            assert_eq!(
-                plan.attempts[0].outcome,
-                InviteFailoverAttemptOutcome::TransactionTimeout
-            );
-        }
+        assert!(plan
+            .retained_attempts
+            .iter()
+            .any(|attempt| attempt.as_ref() == current_transaction.as_ref()));
         drop(plan);
         assert!(!manager
             .active_invite_failover_by_dialog
@@ -5247,18 +6819,16 @@ mod outbound_flow_handler_tests {
             .clone();
         let cancel_first_plan = cancel_first_plan.lock().await;
         assert_eq!(cancel_first_plan.phase, InviteFailoverPlanPhase::Cancelled);
-        assert_eq!(cancel_first_plan.attempts.len(), 1);
-        assert_eq!(
-            cancel_first_plan.attempts[0].outcome,
-            InviteFailoverAttemptOutcome::Cancelled
-        );
+        assert!(cancel_first_plan.active_payload.is_none());
+        assert_eq!(cancel_first_plan.retained_attempts.len(), 1);
     }
 
     #[tokio::test]
     async fn retained_invite_plan_hard_cap_rejects_admission_and_stop_drains_all_state() {
         use crate::manager::transaction_integration::{
-            CandidateWirePlan, InviteFailoverAttempt, InviteFailoverAttemptIndex,
-            InviteFailoverAttemptOutcome, InviteFailoverPlan, InviteFailoverPlanPhase,
+            CandidateWirePlan, InviteFailoverActivePayload, InviteFailoverAttempt,
+            InviteFailoverAttemptIndex, InviteFailoverAttemptOutcome, InviteFailoverPlan,
+            InviteFailoverPlanPhase,
         };
 
         let (manager, _rx) = make_manager().await;
@@ -5274,6 +6844,7 @@ mod outbound_flow_handler_tests {
             .build();
         let retained_transaction =
             TransactionKey::new("z9hG4bK-cap-retained".into(), Method::Invite, false);
+        let retained_transaction_key = Arc::new(retained_transaction.clone());
         let retained_dialog = DialogId::new();
         let now = Instant::now();
 
@@ -5284,37 +6855,36 @@ mod outbound_flow_handler_tests {
             } else {
                 DialogId::new()
             };
-            let attempts = if offset == 0 {
-                vec![InviteFailoverAttempt {
-                    transaction_id: retained_transaction.clone(),
-                    candidate_index: 0,
+            let mut active_payload = InviteFailoverActivePayload::new(
+                request.clone(),
+                Vec::new(),
+                CandidateWirePlan::default(),
+                now + Duration::from_secs(32),
+            );
+            if offset == 0 {
+                active_payload.current_candidate_index = Some(0);
+                active_payload.current_send_generation = Some(1);
+                active_payload.attempts.push(InviteFailoverAttempt {
+                    transaction_id: retained_transaction_key.clone(),
                     outcome: InviteFailoverAttemptOutcome::Active,
-                }]
-            } else {
-                Vec::new()
-            };
+                });
+            }
             manager.invite_failover_plans.insert(
                 plan_id,
                 Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
                     id: plan_id,
                     dialog_id,
-                    request: request.clone(),
-                    candidates: Vec::new(),
-                    wire_plan: CandidateWirePlan::default(),
-                    next_candidate_index: 0,
-                    next_send_generation: 0,
-                    pending_candidate: None,
-                    current_transaction: (offset == 0).then(|| retained_transaction.clone()),
-                    current_candidate_index: (offset == 0).then_some(0),
-                    current_send_generation: (offset == 0).then_some(1),
-                    provisional_seen: false,
+                    active_payload: Some(Box::new(active_payload)),
+                    reserved_attempt_slots: 0,
+                    current_transaction: (offset == 0).then(|| retained_transaction_key.clone()),
+                    wire_attempted: offset == 0,
                     phase: InviteFailoverPlanPhase::Active,
-                    attempts,
-                    accepted_transaction: None,
+                    retained_attempts: Box::new([]),
+                    accepted_candidate_index: None,
                     accepted_to_tag: None,
-                    cleaned_fork_tags: std::collections::HashSet::new(),
-                    setup_deadline: now + Duration::from_secs(32),
+                    fork_cleanup: None,
                     expires_at: now + Duration::from_secs(90),
+                    expiry_generation: 0,
                 })),
             );
         }
@@ -5322,11 +6892,12 @@ mod outbound_flow_handler_tests {
             .active_invite_failover_by_dialog
             .insert(retained_dialog.clone(), 1);
         manager.invite_failover_attempts.insert(
-            retained_transaction.clone(),
+            retained_transaction_key,
             InviteFailoverAttemptIndex {
                 plan_id: 1,
                 dialog_id: retained_dialog.clone(),
                 candidate_index: 0,
+                _admission_owner: None,
             },
         );
         manager.link_outbound_transaction_to_dialog_indexed(
@@ -5373,7 +6944,9 @@ mod outbound_flow_handler_tests {
         manager.stop().await.expect("manager stop");
         assert!(manager.invite_failover_plans.is_empty());
         assert!(manager.active_invite_failover_by_dialog.is_empty());
+        assert!(manager.invite_failover_plans_by_dialog.is_empty());
         assert!(manager.invite_failover_attempts.is_empty());
+        assert!(manager.invite_failover_attempts_by_dialog.is_empty());
         assert_eq!(
             manager
                 .invite_failover_plan_reservations
@@ -5391,7 +6964,11 @@ mod outbound_flow_handler_tests {
         let retention = manager.retention_counts();
         assert_eq!(retention.invite_failover_plans, 0);
         assert_eq!(retention.active_invite_failover_by_dialog, 0);
+        assert_eq!(retention.invite_failover_plans_by_dialog, 0);
         assert_eq!(retention.invite_failover_attempts, 0);
+        assert_eq!(retention.invite_failover_attempts_by_dialog, 0);
+        assert_eq!(retention.invite_failover_expiry_deadlines, 0);
+        assert_eq!(retention.invite_failover_overflow_deadlines, 0);
         assert_eq!(retention.invite_failover_plan_reservations, 0);
         assert_eq!(retention.invite_failover_attempt_reservations, 0);
     }
@@ -5457,6 +7034,26 @@ mod outbound_flow_handler_tests {
         };
 
         manager.process_global_transaction_event(event).await;
+        let accepted_plan_id = manager
+            .invite_failover_attempts
+            .get(&transaction_id)
+            .expect("accepted attempt remains retained")
+            .plan_id;
+        let accepted_plan = manager
+            .invite_failover_plans
+            .get(&accepted_plan_id)
+            .expect("accepted plan remains retained")
+            .value()
+            .clone();
+        {
+            let accepted_plan = accepted_plan.lock().await;
+            assert_eq!(
+                accepted_plan.phase,
+                crate::manager::transaction_integration::InviteFailoverPlanPhase::Accepted
+            );
+            assert!(accepted_plan.active_payload.is_none());
+            assert_eq!(accepted_plan.accepted_candidate_index, Some(0));
+        }
         manager
             .process_global_transaction_event(TransactionEvent::SuccessResponse {
                 transaction_id,
@@ -5480,7 +7077,7 @@ mod outbound_flow_handler_tests {
     }
 
     #[tokio::test]
-    async fn ack_received_clears_stored_dialog_route_hash_after_processing() {
+    async fn invite_keyed_ack_retains_route_until_invite_terminal_event() {
         let (manager, _rx) = make_manager().await;
         let fallback = AtomicUsize::new(0);
         let invite_tx =
@@ -5495,7 +7092,21 @@ mod outbound_flow_handler_tests {
             .transaction_dialog_route_hash
             .contains_key(&invite_tx));
 
-        manager.process_global_transaction_event(ack).await;
+        manager
+            .process_timed_global_transaction_event(Arc::new(ack))
+            .await;
+
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&invite_tx));
+
+        manager
+            .process_timed_global_transaction_event(Arc::new(
+                TransactionEvent::TransactionTerminated {
+                    transaction_id: invite_tx.clone(),
+                },
+            ))
+            .await;
 
         assert!(!manager
             .transaction_dialog_route_hash
@@ -5532,7 +7143,45 @@ mod outbound_flow_handler_tests {
             terminated_bye_lookup_hard_max(MIN_DIALOG_INDEX_CAPACITY),
             MIN_TERMINATED_BYE_LOOKUP_HARD_MAX
         );
-        assert_eq!(terminated_bye_lookup_hard_max(100_000), 1_600_000);
+        assert_eq!(terminated_bye_lookup_hard_max(100_000), 800_000);
+    }
+
+    #[test]
+    fn terminated_bye_key_is_canonical_across_dialog_direction() {
+        let forward = TerminatedByeDialogKey::canonical("call", "alice", "bob");
+        let reverse = TerminatedByeDialogKey::canonical("call", "bob", "alice");
+        assert_eq!(forward, reverse);
+        assert_ne!(
+            TerminatedByeDialogKey::canonical("call:alice", "bob", "carol"),
+            TerminatedByeDialogKey::canonical("call", "alice:bob", "carol"),
+            "length-prefixed canonical keys must not alias on delimiters"
+        );
+    }
+
+    #[test]
+    fn terminated_bye_deadlines_are_due_driven_and_replace_stale_schedule() {
+        let now = Instant::now();
+        let key = TerminatedByeDialogKey::canonical("call", "alice", "bob");
+        let mut deadlines = TerminatedByeDeadlineQueue::default();
+        let (first_expires_at, first_generation) = deadlines.schedule(
+            &key,
+            now - TERMINATED_BYE_TOMBSTONE_TTL - Duration::from_secs(1),
+            None,
+        );
+        let previous = TerminatedByeTombstone {
+            cseq: 1,
+            expires_at: first_expires_at,
+            deadline_generation: first_generation,
+        };
+        deadlines.schedule(&key, now, Some(previous));
+
+        assert!(deadlines.take_due(now).is_empty());
+        assert_eq!(deadlines.len(), 1);
+        assert_eq!(
+            deadlines.take_due(now + TERMINATED_BYE_TOMBSTONE_TTL + Duration::from_millis(1)),
+            vec![(key, 1)]
+        );
+        assert!(deadlines.by_deadline.is_empty());
     }
 
     #[tokio::test]
@@ -5556,25 +7205,17 @@ mod outbound_flow_handler_tests {
             .expect("dialog removed");
         let (call_id, local_tag, remote_tag) =
             removed.dialog_id_tuple().expect("full dialog tuple");
-        let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
-        let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
+        let key = TerminatedByeDialogKey::canonical(&call_id, &local_tag, &remote_tag);
 
         assert_eq!(
             manager
                 .terminated_bye_lookup
                 .get(&key)
-                .expect("forward tombstone")
+                .expect("canonical tombstone")
                 .cseq,
             42
         );
-        assert_eq!(
-            manager
-                .terminated_bye_lookup
-                .get(&reverse_key)
-                .expect("reverse tombstone")
-                .cseq,
-            42
-        );
+        assert_eq!(manager.terminated_bye_lookup.len(), 1);
         assert!(!manager.dialogs.contains_key(&dialog_id));
     }
 
@@ -5728,6 +7369,19 @@ mod outbound_flow_handler_tests {
         manager.link_transaction_to_dialog_indexed(&server_bye, &dialog_id);
         manager.link_transaction_to_dialog_indexed(&client_invite, &dialog_id);
 
+        assert_eq!(
+            manager
+                .find_dialog_for_transaction(&server_invite)
+                .expect("server INVITE transaction lookup"),
+            dialog_id
+        );
+        assert_eq!(
+            manager
+                .find_dialog_for_transaction(&server_bye)
+                .expect("server BYE transaction lookup"),
+            dialog_id
+        );
+
         let server_transactions = manager.server_transactions_for_dialog(&dialog_id);
         assert!(server_transactions.contains(&server_invite));
         assert!(server_transactions.contains(&server_bye));
@@ -5738,6 +7392,7 @@ mod outbound_flow_handler_tests {
         );
 
         manager.unlink_transaction_from_dialog_indexed(&server_invite);
+        assert!(manager.find_dialog_for_transaction(&server_invite).is_err());
         let server_transactions = manager.server_transactions_for_dialog(&dialog_id);
         assert!(!server_transactions.contains(&server_invite));
         assert!(server_transactions.contains(&server_bye));
@@ -5746,7 +7401,23 @@ mod outbound_flow_handler_tests {
             Some(client_invite.clone())
         );
 
-        manager.unlink_transaction_from_dialog_indexed(&server_bye);
+        manager
+            .pending_response_transaction_by_dialog
+            .insert(dialog_id.clone(), server_bye.clone());
+        manager
+            .transaction_dialog_route_hash
+            .insert(server_bye.clone(), 0xB1E);
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&server_bye));
+        manager.retire_unowned_response_indexes(&dialog_id, &server_bye);
+        assert!(manager
+            .pending_response_transaction_for_dialog(&dialog_id)
+            .is_none());
+        assert!(!manager
+            .transaction_dialog_route_hash
+            .contains_key(&server_bye));
+        assert!(manager.find_dialog_for_transaction(&server_bye).is_err());
         assert!(manager
             .server_transactions_for_dialog(&dialog_id)
             .is_empty());

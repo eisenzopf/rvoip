@@ -210,6 +210,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::SessionRefreshed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::SessionRefreshFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::AuthRequired { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::OutboundRequestCompleted { session_id, .. } => {
+                    Some(session_id)
+                }
                 DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::SessionIntervalTooSmall { session_id, .. } => {
@@ -914,6 +917,17 @@ pub enum IdentityVerificationStatus {
 }
 
 /// Events sent from dialog-core to session-core
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OutboundRequestOutcome {
+    /// The peer returned a final SIP response for the exact request attempt.
+    FinalResponse { status_code: u16 },
+    /// The client transaction response timer expired without a final response.
+    Timeout,
+    /// The selected transport failed before a final response was received.
+    TransportFailure,
+}
+
+/// Events sent from dialog-core to session-core
 #[derive(Clone, Serialize, Deserialize)]
 pub enum DialogToSessionEvent {
     /// Incoming call notification
@@ -1035,6 +1049,15 @@ pub enum DialogToSessionEvent {
     /// `CallFailed` / `RegistrationFailed` at the app level.
     AuthRequired {
         session_id: String,
+        /// Exact client transaction that received the challenge. This is an
+        /// internal correlation token; consumers must not log its value.
+        #[serde(default)]
+        transaction_id: String,
+        /// Exact Request-URI from the challenged outbound request. Digest
+        /// authentication signs this URI, so it must never be reconstructed
+        /// from session or dialog metadata.
+        #[serde(default)]
+        request_uri: String,
         /// 401 or 407.
         status_code: u16,
         /// Raw challenge header value (e.g. `Digest realm="...", nonce="..."`).
@@ -1060,6 +1083,22 @@ pub enum DialogToSessionEvent {
         outbound_transport: Option<SipTransportContext>,
     },
 
+    /// Exact terminal result for an outbound non-INVITE request attempt.
+    ///
+    /// Authentication challenges with a usable challenge are represented by
+    /// [`Self::AuthRequired`] instead, so the retained request snapshot can be
+    /// reused by the authenticated retry. Every other final response, timeout,
+    /// or transport failure reaches this event.
+    OutboundRequestCompleted {
+        session_id: String,
+        /// Exact client transaction correlation token. Its value is private
+        /// signaling metadata and is redacted by the custom `Debug` impl.
+        transaction_id: String,
+        /// SIP method for the completed request attempt.
+        method: String,
+        outcome: OutboundRequestOutcome,
+    },
+
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC
     /// SHOULD retry the INVITE against the first URI in `targets`. `q_values`
     /// carries the relative priority from Contact headers (RFC 3261 §20.10);
@@ -1071,10 +1110,13 @@ pub enum DialogToSessionEvent {
         q_values: Vec<f32>,
     },
 
-    /// 491 Request Pending for a mid-dialog request (RFC 3261 §14.1). The
-    /// UAC SHOULD wait a random interval and retry. Emitted only for
-    /// re-INVITEs (and UPDATEs) — call-setup INVITEs fall through the
-    /// generic CallFailed path.
+    /// 491 Request Pending for an outbound re-INVITE (RFC 3261 §14.1). The
+    /// UAC SHOULD wait a random interval and retry the re-INVITE.
+    ///
+    /// An outbound UPDATE that receives 491 does **not** emit this event. It
+    /// emits [`Self::OutboundRequestCompleted`] for the exact UPDATE client
+    /// transaction so UPDATE-owned retained state is released without
+    /// entering the re-INVITE retry state machine.
     ReinviteGlare { session_id: String },
 
     /// RFC 4028 §6 — 422 Session Interval Too Small on INVITE. The UAS
@@ -1211,6 +1253,11 @@ pub enum DialogToSessionEvent {
     /// signalling through a typed `IncomingRequest`.
     InfoReceived {
         session_id: String,
+        /// Exact inbound server transaction. Older serialized events omit
+        /// this field and remain observable, but cannot author an exact
+        /// response.
+        #[serde(default)]
+        transaction_id: String,
         /// Raw inbound INFO bytes; subscribers reconstruct an
         /// `Arc<Request>` via `parse_message`.
         #[serde(skip)]
@@ -1419,6 +1466,8 @@ impl fmt::Debug for DialogToSessionEvent {
             }
             Self::AuthRequired {
                 session_id: _,
+                transaction_id,
+                request_uri,
                 status_code,
                 challenge,
                 realm,
@@ -1438,7 +1487,23 @@ impl fmt::Debug for DialogToSessionEvent {
                     &realm.as_ref().map_or(0, |value| value.len()),
                 )
                 .field("method", &safe_auth_method_debug_label(method))
+                .field("transaction_id_present", &!transaction_id.is_empty())
+                .field("transaction_id_bytes", &transaction_id.len())
+                .field("request_uri_present", &!request_uri.is_empty())
+                .field("request_uri_bytes", &request_uri.len())
                 .field("outbound_transport_present", &outbound_transport.is_some())
+                .finish(),
+            Self::OutboundRequestCompleted {
+                session_id: _,
+                transaction_id,
+                method,
+                outcome,
+            } => f
+                .debug_struct("OutboundRequestCompleted")
+                .field("transaction_id_present", &!transaction_id.is_empty())
+                .field("transaction_id_bytes", &transaction_id.len())
+                .field("method", &safe_auth_method_debug_label(method))
+                .field("outcome", outcome)
                 .finish(),
             Self::CallRedirected {
                 session_id,
@@ -1550,9 +1615,17 @@ impl fmt::Debug for DialogToSessionEvent {
             ),
             Self::InfoReceived {
                 session_id,
+                transaction_id,
                 raw_request,
                 transport,
-            } => debug_dialog_variant!(f, "InfoReceived", session_id, raw_request, transport,),
+            } => debug_dialog_variant!(
+                f,
+                "InfoReceived",
+                session_id,
+                transaction_id,
+                raw_request,
+                transport,
+            ),
             Self::MessageReceived {
                 session_id,
                 raw_request,
@@ -2931,9 +3004,13 @@ mod tests {
         const CHALLENGE_SECRET: &str = "debug-challenge-secret-canary";
         const REALM_SECRET: &str = "debug-realm-secret-canary";
         const METHOD_SECRET: &str = "X-DEBUG-METHOD-SECRET-CANARY";
+        const TRANSACTION_SECRET: &str = "z9hG4bK-debug-transaction-secret-canary";
+        const URI_SECRET: &str = "sip:debug-uri-secret-canary@example.invalid";
         let challenge = format!("Digest realm=\"{REALM_SECRET}\", nonce=\"{CHALLENGE_SECRET}\"");
         let event = DialogToSessionEvent::AuthRequired {
             session_id: "session-1".to_string(),
+            transaction_id: TRANSACTION_SECRET.to_string(),
+            request_uri: URI_SECRET.to_string(),
             status_code: 401,
             challenge: challenge.clone(),
             realm: Some(REALM_SECRET.to_string()),
@@ -2949,7 +3026,13 @@ mod tests {
             assert!(rendered.contains(&format!("challenge_bytes: {}", challenge.len())));
             assert!(rendered.contains(&format!("realm_bytes: {}", REALM_SECRET.len())));
             assert!(rendered.contains("method: \"extension\""));
-            for secret in [CHALLENGE_SECRET, REALM_SECRET, METHOD_SECRET] {
+            for secret in [
+                CHALLENGE_SECRET,
+                REALM_SECRET,
+                METHOD_SECRET,
+                TRANSACTION_SECRET,
+                URI_SECRET,
+            ] {
                 assert!(
                     !rendered.contains(secret),
                     "debug leaked {secret}: {rendered}"
@@ -2961,6 +3044,26 @@ mod tests {
         assert!(wire.contains(CHALLENGE_SECRET));
         assert!(wire.contains(REALM_SECRET));
         assert!(wire.contains(METHOD_SECRET));
+        assert!(wire.contains(TRANSACTION_SECRET));
+        assert!(wire.contains(URI_SECRET));
+    }
+
+    #[test]
+    fn outbound_request_completed_debug_redacts_transaction_identity() {
+        const TRANSACTION_SECRET: &str = "z9hG4bK-terminal-secret-canary";
+        const METHOD_SECRET: &str = "X-TERMINAL-METHOD-SECRET-CANARY";
+        let event = DialogToSessionEvent::OutboundRequestCompleted {
+            session_id: "session-1".to_string(),
+            transaction_id: TRANSACTION_SECRET.to_string(),
+            method: METHOD_SECRET.to_string(),
+            outcome: OutboundRequestOutcome::FinalResponse { status_code: 486 },
+        };
+
+        let rendered = format!("{event:?}");
+        assert!(rendered.contains("OutboundRequestCompleted"));
+        assert!(rendered.contains("FinalResponse"));
+        assert!(!rendered.contains(TRANSACTION_SECRET));
+        assert!(!rendered.contains(METHOD_SECRET));
     }
 
     #[test]

@@ -6,6 +6,7 @@
 use rvoip_core::capability::{
     negotiate_streams, CapabilityDescriptor, Codec, CodecInfo, NegotiationOutcome, StreamOffer,
 };
+use rvoip_uctp::state::default_v0_descriptor;
 
 fn descriptor_with(audio: &[&str]) -> CapabilityDescriptor {
     CapabilityDescriptor {
@@ -19,6 +20,26 @@ fn descriptor_with(audio: &[&str]) -> CapabilityDescriptor {
             })
             .collect(),
         ..Default::default()
+    }
+}
+
+#[test]
+fn default_v0_descriptor_negotiates_pcma_without_codec_fallback() {
+    let answerer = default_v0_descriptor();
+    let prefs = ["g.711-a".to_string()];
+    let offer = StreamOffer {
+        id: "pcma-audio",
+        kind: "audio",
+        direction: "sendrecv",
+        codec_preferences: &prefs,
+    };
+
+    match negotiate_streams(std::iter::once(offer), &answerer) {
+        NegotiationOutcome::Ok(streams) => {
+            assert_eq!(streams.len(), 1);
+            assert_eq!(streams[0].chosen_codec.as_deref(), Some("g.711-a"));
+        }
+        NegotiationOutcome::NotAcceptable488 => panic!("default UCTP descriptor rejected PCMA"),
     }
 }
 

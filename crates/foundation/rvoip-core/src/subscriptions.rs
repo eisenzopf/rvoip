@@ -14,6 +14,7 @@
 //! lets cleanup paths (connection.end, session.end) be eager without
 //! needing precise ordering.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -123,18 +124,77 @@ impl SessionSubscriptions {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// Drop one exact publisher Stream row and every subscriber it names.
+    pub fn drop_publisher_stream(&self, publisher: &ConnectionId, stream: &StreamId) {
+        self.inner.remove(&(publisher.clone(), stream.clone()));
+    }
 }
 
 /// Workspace-level subscription registry — one [`SessionSubscriptions`]
 /// per active `SessionId`. Lives on the [`crate::Orchestrator`].
-#[derive(Default)]
 pub struct SubscriptionRegistry {
     sessions: DashMap<SessionId, Arc<SessionSubscriptions>>,
+    max_direct_subscribers: usize,
+    direct: Mutex<DirectSubscriptionState>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct DirectSubscriptionRoute {
+    sid: SessionId,
+    publisher: ConnectionId,
+    stream: StreamId,
+}
+
+#[derive(Default)]
+struct DirectSubscriptionState {
+    /// One row per physical direct subscriber Connection. Multiple stream
+    /// routes on that Connection consume exactly one worker permit.
+    listeners: HashMap<ConnectionId, HashSet<DirectSubscriptionRoute>>,
+}
+
+/// Atomic direct-listener admission failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectSubscriptionAdmissionError {
+    /// Direct subscriptions were disabled by setting the worker limit to zero.
+    Disabled,
+    /// Admitting a new distinct subscriber would exceed the worker limit.
+    CapacityExhausted,
+}
+
+impl fmt::Display for DirectSubscriptionAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Disabled => "direct subscriptions are disabled",
+            Self::CapacityExhausted => "direct subscriber capacity is exhausted",
+        })
+    }
+}
+
+impl std::error::Error for DirectSubscriptionAdmissionError {}
+
+impl Default for SubscriptionRegistry {
+    fn default() -> Self {
+        Self::with_direct_listener_limit(1_000)
+    }
 }
 
 impl SubscriptionRegistry {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_direct_listener_limit(max_direct_subscribers: usize) -> Self {
+        Self {
+            sessions: DashMap::new(),
+            max_direct_subscribers,
+            direct: Mutex::new(DirectSubscriptionState::default()),
+        }
+    }
+
+    /// Configured process-wide ceiling for direct fanout listeners.
+    pub fn direct_listener_limit(&self) -> usize {
+        self.max_direct_subscribers
     }
 
     /// Get the per-Session table, creating it lazily on first use.
@@ -145,14 +205,131 @@ impl SubscriptionRegistry {
             .clone()
     }
 
+    /// Atomically admit every validated route in one subscribe request.
+    ///
+    /// Capacity is process-wide for this registry, not handler-local, so raw
+    /// QUIC, WebTransport, and any other UCTP ingress sharing an Orchestrator
+    /// cannot each admit up to the configured maximum. No route is installed
+    /// when admission fails.
+    pub fn try_add_direct(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        routes: &[(ConnectionId, StreamId)],
+    ) -> Result<(), DirectSubscriptionAdmissionError> {
+        if routes.is_empty() {
+            return Ok(());
+        }
+        if self.max_direct_subscribers == 0 {
+            return Err(DirectSubscriptionAdmissionError::Disabled);
+        }
+        let mut direct = self
+            .direct
+            .lock()
+            .expect("direct subscription lock poisoned");
+        if !direct.listeners.contains_key(subscriber)
+            && direct.listeners.len() >= self.max_direct_subscribers
+        {
+            return Err(DirectSubscriptionAdmissionError::CapacityExhausted);
+        }
+
+        let table = self.for_session(sid);
+        let subscriber_routes = direct.listeners.entry(subscriber.clone()).or_default();
+        for (publisher, stream) in routes {
+            table.add(publisher.clone(), stream.clone(), subscriber.clone());
+            subscriber_routes.insert(DirectSubscriptionRoute {
+                sid: sid.clone(),
+                publisher: publisher.clone(),
+                stream: stream.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove one direct route and release the worker permit only when this
+    /// was the subscriber's final route.
+    pub fn remove_direct(
+        &self,
+        sid: &SessionId,
+        subscriber: &ConnectionId,
+        publisher: &ConnectionId,
+        stream: &StreamId,
+    ) -> bool {
+        let mut direct = self
+            .direct
+            .lock()
+            .expect("direct subscription lock poisoned");
+        let removed = self.for_session(sid).remove(publisher, stream, subscriber);
+        if let Some(routes) = direct.listeners.get_mut(subscriber) {
+            routes.remove(&DirectSubscriptionRoute {
+                sid: sid.clone(),
+                publisher: publisher.clone(),
+                stream: stream.clone(),
+            });
+            if routes.is_empty() {
+                direct.listeners.remove(subscriber);
+            }
+        }
+        removed
+    }
+
+    pub fn active_direct_listener_count(&self) -> usize {
+        self.direct
+            .lock()
+            .expect("direct subscription lock poisoned")
+            .listeners
+            .len()
+    }
+
+    /// Remove one exact publisher Stream and release each listener whose final
+    /// direct route disappeared with it.
+    pub fn drop_publisher_stream(
+        &self,
+        sid: &SessionId,
+        publisher: &ConnectionId,
+        stream: &StreamId,
+    ) {
+        let mut direct = self
+            .direct
+            .lock()
+            .expect("direct subscription lock poisoned");
+        direct.listeners.retain(|_, routes| {
+            routes.remove(&DirectSubscriptionRoute {
+                sid: sid.clone(),
+                publisher: publisher.clone(),
+                stream: stream.clone(),
+            });
+            !routes.is_empty()
+        });
+        self.for_session(sid)
+            .drop_publisher_stream(publisher, stream);
+    }
+
     /// Remove the entire table for a Session. Called on session.ended.
     pub fn drop_session(&self, sid: &SessionId) {
+        let mut direct = self
+            .direct
+            .lock()
+            .expect("direct subscription lock poisoned");
+        direct.listeners.retain(|_, routes| {
+            routes.retain(|route| &route.sid != sid);
+            !routes.is_empty()
+        });
         self.sessions.remove(sid);
     }
 
     /// Drop every reference to `connid` across every Session's table.
     /// Called by `crate::Orchestrator::forget_connection`.
     pub fn drop_connection(&self, connid: &ConnectionId) {
+        let mut direct = self
+            .direct
+            .lock()
+            .expect("direct subscription lock poisoned");
+        direct.listeners.remove(connid);
+        direct.listeners.retain(|_, routes| {
+            routes.retain(|route| &route.publisher != connid);
+            !routes.is_empty()
+        });
         // Snapshot session ids so we don't hold the outer DashMap lock
         // while mutating individual SessionSubscriptions.
         let sids: Vec<SessionId> = self.sessions.iter().map(|e| e.key().clone()).collect();
@@ -410,6 +587,33 @@ impl PublisherRegistry {
             .get(&(sid.clone(), participant.to_string()))
             .map(|e| e.value().clone())
             .unwrap_or_default()
+    }
+
+    /// Execute one admission operation only while every resolved
+    /// `(publisher, stream)` pair is still current.
+    ///
+    /// Publisher removal uses this same mutation lock. Keeping it through the
+    /// synchronous subscription-registry operation establishes one ordering:
+    /// either admission wins and teardown subsequently removes its routes, or
+    /// teardown wins and admission observes a stale publisher without
+    /// mutating. Callers must not re-enter this PublisherRegistry from
+    /// `operation`.
+    pub fn with_current_routes<R>(
+        &self,
+        sid: &SessionId,
+        routes: &[(ConnectionId, StreamId)],
+        operation: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let all_current = routes.iter().all(|(publisher, stream)| {
+            self.inner
+                .get(&(sid.clone(), stream.as_str().to_string()))
+                .is_some_and(|record| &record.entry.connection == publisher)
+        });
+        all_current.then(operation)
     }
 
     /// Remove exactly one published stream and its participant-index row.

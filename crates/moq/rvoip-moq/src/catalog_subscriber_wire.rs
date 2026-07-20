@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_transport::coding::{Location, TrackName, TrackNamespace};
+use moq_transport::coding::{Location, TrackName, TrackNamespace, Value};
 use moq_transport::data::ObjectStatus;
 use moq_transport::serve::{SubgroupsReader, Track, TrackReader, TrackReaderMode};
 use moq_transport::session::{
@@ -15,6 +15,7 @@ use moq_transport::session::{
 use rvoip_core_traits::broadcast::BroadcastSubstrate;
 use tokio::task::JoinHandle;
 
+use crate::audio_subscription::{AudioSubscriberStatus, ManagedLocAudioObject};
 use crate::wire::{
     admit_relay_peer, canonical_session_target, map_peer_identity, native_substrate_policy,
     WireRelayClient,
@@ -22,10 +23,12 @@ use crate::wire::{
 use crate::{
     MoqCatalogDeliveryMode, MoqCatalogSubscriberConfig, MoqCatalogValidationError,
     MoqEndOfGroupEvidence, MoqError, MoqRelayPeerIdentity, MoqRelaySubstratePolicy,
-    MoqSubscriberCredential, CATALOG_TRACK, MOQT_NEGOTIATED_PROTOCOL,
+    MoqSubscriberCredential, AUDIO_TRACK, CATALOG_TRACK, LOC_TIMESCALE_PROPERTY,
+    LOC_TIMESTAMP_PROPERTY, MOQT_NEGOTIATED_PROTOCOL,
 };
 
 const SESSION_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+const AUDIO_END_CATALOG_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct WireCatalogSubscriberClient {
@@ -142,6 +145,8 @@ impl WireCatalogSubscriberClient {
             fetch_drained: fetch.is_none(),
             fetch,
             subscribe: Some(subscribe),
+            audio_subscribe: None,
+            audio_task: None,
             raw_session: Some(raw_session),
             session_task: Some(session_task),
             runtime,
@@ -162,12 +167,60 @@ pub(crate) struct WireCatalogSubscription {
     fetch_drained: bool,
     fetch: Option<Fetch>,
     subscribe: Option<Subscribe>,
+    audio_subscribe: Option<Subscribe>,
+    audio_task: Option<JoinHandle<()>>,
     raw_session: Option<web_transport::Session>,
     session_task: Option<JoinHandle<Result<(), SessionError>>>,
     runtime: tokio::runtime::Handle,
 }
 
 impl WireCatalogSubscription {
+    pub(crate) async fn start_audio(
+        &mut self,
+        max_audio_object_bytes: usize,
+        status: std::sync::Arc<AudioSubscriberStatus>,
+    ) -> Result<(), WireCatalogFailure> {
+        if self.audio_subscribe.is_some() || self.audio_task.is_some() {
+            return Ok(());
+        }
+        let namespace = TrackNamespace::from_utf8_path(status.snapshot().namespace.as_str());
+        let setup = async {
+            let (track_writer, track_reader) =
+                Track::new(namespace, TrackName::from(AUDIO_TRACK)).produce();
+            let subscribe = self
+                .subscriber
+                .subscribe_open(track_writer)
+                .await
+                .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
+            subscribe
+                .ok()
+                .await
+                .map_err(|_| WireCatalogFailure::SubscribeFailed)?;
+            Ok::<_, WireCatalogFailure>((subscribe, track_reader))
+        };
+        tokio::pin!(setup);
+        let (subscribe, track_reader) = tokio::select! {
+            result = &mut setup => result?,
+            result = session_task(self.session_task.as_mut()) => {
+                self.session_task.take();
+                return Err(map_session_result(result));
+            }
+        };
+        let raw_session = self
+            .raw_session
+            .as_ref()
+            .expect("catalog raw session missing while starting audio")
+            .clone();
+        self.audio_subscribe = Some(subscribe);
+        self.audio_task = Some(tokio::spawn(run_audio_track(
+            track_reader,
+            max_audio_object_bytes,
+            status,
+            raw_session,
+        )));
+        Ok(())
+    }
+
     pub(crate) async fn next_object(
         &mut self,
         max_catalog_bytes: usize,
@@ -314,6 +367,8 @@ impl WireCatalogSubscription {
     pub(crate) async fn close(mut self, reason: &'static str) {
         self.fetch.take();
         self.subscribe.take();
+        self.audio_subscribe.take();
+        finish_auxiliary_task(&mut self.audio_task).await;
         if let Some(raw_session) = self.raw_session.take() {
             raw_session.close(0, reason);
         }
@@ -325,6 +380,13 @@ impl Drop for WireCatalogSubscription {
     fn drop(&mut self) {
         self.fetch.take();
         self.subscribe.take();
+        self.audio_subscribe.take();
+        if let Some(task) = self.audio_task.take() {
+            task.abort();
+            let _cleanup = self.runtime.spawn(async move {
+                let _ = task.await;
+            });
+        }
         if let Some(raw_session) = self.raw_session.take() {
             raw_session.close(0, "rvoip catalog subscriber dropped");
         }
@@ -481,4 +543,142 @@ async fn finish_session_task(task: &mut Option<JoinHandle<Result<(), SessionErro
         task.abort();
         let _ = task.await;
     }
+}
+
+async fn finish_auxiliary_task(task: &mut Option<JoinHandle<()>>) {
+    let Some(mut task) = task.take() else {
+        return;
+    };
+    task.abort();
+    if tokio::time::timeout(SESSION_CLOSE_TIMEOUT, &mut task)
+        .await
+        .is_err()
+    {
+        task.abort();
+        let _ = task.await;
+    }
+}
+
+async fn run_audio_track(
+    track_reader: TrackReader,
+    max_audio_object_bytes: usize,
+    status: std::sync::Arc<AudioSubscriberStatus>,
+    raw_session: web_transport::Session,
+) {
+    let result = read_audio_track(track_reader, max_audio_object_bytes, &status).await;
+    if let Err(error) = result {
+        if matches!(error, WireAudioFailure::StreamEnded) {
+            tracing::debug!("managed MOQT audio track ended; awaiting terminal catalog");
+            // A conforming publisher ends audio before sending the terminal
+            // catalog. Keep the shared session alive briefly so the catalog
+            // supervisor can observe that authoritative completion instead of
+            // turning a clean end into a reconnect.
+            status.draining();
+            tokio::time::sleep(AUDIO_END_CATALOG_GRACE).await;
+            if status.snapshot().lifecycle.is_terminal() {
+                return;
+            }
+            raw_session.close(0, "rvoip audio track ended without terminal catalog");
+            return;
+        }
+        tracing::warn!(%error, "managed MOQT audio track failed validation or delivery");
+        if matches!(
+            error,
+            WireAudioFailure::InvalidTrack
+                | WireAudioFailure::InvalidObject
+                | WireAudioFailure::PayloadTooLarge
+        ) && !status.fatal_invalid_object()
+        {
+            status.invalid_object();
+        }
+        raw_session.close(0, "rvoip audio track failed");
+    }
+}
+
+async fn read_audio_track(
+    track_reader: TrackReader,
+    max_audio_object_bytes: usize,
+    status: &AudioSubscriberStatus,
+) -> Result<(), WireAudioFailure> {
+    let mut groups = match track_reader
+        .mode()
+        .await
+        .map_err(|_| WireAudioFailure::InvalidTrack)?
+    {
+        TrackReaderMode::Subgroups(groups) => groups,
+        _ => return Err(WireAudioFailure::InvalidTrack),
+    };
+    while let Some(mut subgroup) = groups
+        .next()
+        .await
+        .map_err(|_| WireAudioFailure::StreamEnded)?
+    {
+        let Some(mut object) = subgroup
+            .next()
+            .await
+            .map_err(|_| WireAudioFailure::StreamEnded)?
+        else {
+            return Err(WireAudioFailure::InvalidObject);
+        };
+        if object.status != ObjectStatus::NormalObject {
+            return Err(WireAudioFailure::InvalidObject);
+        }
+        if object.size > max_audio_object_bytes {
+            return Err(WireAudioFailure::PayloadTooLarge);
+        }
+        let extension_header_count = object.extension_headers.0.len();
+        let timestamp = extension_integer(&object.extension_headers, LOC_TIMESTAMP_PROPERTY);
+        let timescale = extension_integer(&object.extension_headers, LOC_TIMESCALE_PROPERTY);
+        let object_id = object.object_id;
+        let declared_payload_len = u64::try_from(object.size).unwrap_or(u64::MAX);
+        let payload = object
+            .read_all()
+            .await
+            .map_err(|_| WireAudioFailure::StreamEnded)?;
+        if subgroup
+            .next()
+            .await
+            .map_err(|_| WireAudioFailure::StreamEnded)?
+            .is_some()
+        {
+            return Err(WireAudioFailure::InvalidObject);
+        }
+        status
+            .accept(ManagedLocAudioObject {
+                namespace: status.snapshot().namespace.to_string(),
+                track: AUDIO_TRACK.to_owned(),
+                group_id: subgroup.group_id,
+                subgroup_id: subgroup.subgroup_id,
+                object_id,
+                first_object: subgroup.first_object,
+                end_of_group: subgroup.end_of_group,
+                extension_header_count,
+                timestamp,
+                timescale,
+                declared_payload_len,
+                payload,
+                received_at: chrono::Utc::now(),
+            })
+            .map_err(|_| WireAudioFailure::InvalidObject)?;
+    }
+    Err(WireAudioFailure::StreamEnded)
+}
+
+fn extension_integer(headers: &moq_transport::data::ExtensionHeaders, key: u64) -> Option<u64> {
+    match headers.get(key).map(|entry| &entry.value) {
+        Some(Value::IntValue(value)) => Some(*value),
+        Some(Value::BytesValue(_)) | None => None,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum WireAudioFailure {
+    #[error("audio subscription delivered an incompatible track mode")]
+    InvalidTrack,
+    #[error("audio subscription delivered a noncanonical LOC object")]
+    InvalidObject,
+    #[error("audio subscription object exceeded its configured size")]
+    PayloadTooLarge,
+    #[error("audio subscription stream ended unexpectedly")]
+    StreamEnded,
 }

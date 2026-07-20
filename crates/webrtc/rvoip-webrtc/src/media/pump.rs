@@ -1,6 +1,6 @@
 //! RTP frame pumps between webrtc-rs tracks and rvoip-core channels.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,18 +10,20 @@ use bytes::BytesMut;
 use chrono::Utc;
 use parking_lot::Mutex;
 use rtc::rtp;
-use rtc::shared::marshal::{Marshal, MarshalSize, Unmarshal};
+#[cfg(test)]
+use rtc::shared::marshal::Unmarshal;
+use rtc::shared::marshal::{Marshal, MarshalSize};
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 use tracing::warn;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
-use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, QualitySnapshot};
 
-use crate::media::dtmf::{DecodedDtmfEvent, DtmfDecoder, TELEPHONE_EVENT_PAYLOAD_TYPE};
+use crate::media::dtmf::{DecodedDtmfEvent, DtmfDecoder, TelephoneEventCodec};
+use crate::media::outbound::OutboundAudioRtpWriter;
 
 pub const FRAME_CHANNEL_CAP: usize = 64;
 
@@ -32,10 +34,35 @@ pub const DEFAULT_INBOUND_SEND_DEADLINE_MS: u64 = 200;
 /// Default Opus payload type registered in the media engine.
 pub const OPUS_PT_DEFAULT: u8 = 111;
 
+pub(crate) struct MediaTaskGuard(Option<Arc<AtomicUsize>>);
+
+impl MediaTaskGuard {
+    pub(crate) fn new(counter: Option<Arc<AtomicUsize>>) -> Self {
+        if let Some(counter) = &counter {
+            counter.fetch_add(1, Ordering::AcqRel);
+        }
+        Self(counter)
+    }
+}
+
+impl Drop for MediaTaskGuard {
+    fn drop(&mut self) {
+        if let Some(counter) = &self.0 {
+            let previous = counter.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "WebRTC media task counter underflow");
+        }
+    }
+}
+
 /// Inbound RTP statistics for [`QualitySnapshot`].
 #[derive(Default)]
 pub struct InboundStats {
     packets: AtomicU64,
+    /// Last non-DTMF wire RTP payload type plus one (`0` means unseen).
+    /// Keeping this separate from the negotiated descriptor lets
+    /// qualification and diagnostics prove what the remote sender actually
+    /// placed on the wire.
+    last_media_payload_type_plus_one: AtomicU64,
     /// Frames dropped because the downstream consumer was too slow.
     pub frames_dropped: AtomicU64,
     jitter_ms: Mutex<f32>,
@@ -128,6 +155,18 @@ impl InboundStats {
         *last = Some(now);
     }
 
+    fn record_media_payload_type(&self, payload_type: u8) {
+        self.last_media_payload_type_plus_one
+            .store(u64::from(payload_type) + 1, Ordering::Release);
+    }
+
+    pub fn last_media_payload_type(&self) -> Option<u8> {
+        self.last_media_payload_type_plus_one
+            .load(Ordering::Acquire)
+            .checked_sub(1)
+            .and_then(|value| u8::try_from(value).ok())
+    }
+
     /// Merge inbound / outbound / candidate-pair data from a webrtc-rs stats
     /// report. G4: also harvests `outbound-rtp` and the nominated
     /// `candidate-pair` so the snapshot includes the sender side and the
@@ -193,11 +232,18 @@ impl InboundStats {
             use rtc::statistics::report::RTCStatsReportEntry;
             match entry {
                 RTCStatsReportEntry::LocalCandidate(c) => {
-                    local_types.insert(c.stats.id.clone(), candidate_type_label(&c.candidate_type));
+                    let candidate_type = candidate_type_label(&c.candidate_type);
+                    local_types.insert(c.stats.id.clone(), candidate_type.clone());
+                    if let Some(candidate_id) = c.stats.id.strip_prefix("RTCLocalIceCandidate_") {
+                        local_types.insert(candidate_id.to_owned(), candidate_type);
+                    }
                 }
                 RTCStatsReportEntry::RemoteCandidate(c) => {
-                    remote_types
-                        .insert(c.stats.id.clone(), candidate_type_label(&c.candidate_type));
+                    let candidate_type = candidate_type_label(&c.candidate_type);
+                    remote_types.insert(c.stats.id.clone(), candidate_type.clone());
+                    if let Some(candidate_id) = c.stats.id.strip_prefix("RTCRemoteIceCandidate_") {
+                        remote_types.insert(candidate_id.to_owned(), candidate_type);
+                    }
                 }
                 _ => {}
             }
@@ -332,9 +378,36 @@ pub fn spawn_inbound_pump(
     cancel: Option<Arc<Notify>>,
     dtmf_tx: Option<mpsc::Sender<DecodedDtmfEvent>>,
 ) -> JoinHandle<()> {
+    spawn_inbound_pump_tracked(
+        track,
+        stream_id,
+        frames_in_tx,
+        stats,
+        send_deadline_ms,
+        cancel,
+        dtmf_tx,
+        vec![TelephoneEventCodec::default()],
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn spawn_inbound_pump_tracked(
+    track: Arc<dyn TrackRemote>,
+    stream_id: StreamId,
+    frames_in_tx: mpsc::Sender<MediaFrame>,
+    stats: Arc<InboundStats>,
+    send_deadline_ms: u64,
+    cancel: Option<Arc<Notify>>,
+    dtmf_tx: Option<mpsc::Sender<DecodedDtmfEvent>>,
+    dtmf_codecs: Vec<TelephoneEventCodec>,
+    task_counter: Option<Arc<AtomicUsize>>,
+) -> JoinHandle<()> {
+    let task_guard = MediaTaskGuard::new(task_counter);
     tokio::spawn(async move {
+        let _task_guard = task_guard;
         let deadline = Duration::from_millis(send_deadline_ms);
-        let mut dtmf_decoder = DtmfDecoder::default();
+        let mut dtmf_decoder = DtmfDecoder::new(dtmf_codecs);
         loop {
             // Honor cancellation as well as the per-poll timeout.
             let poll = tokio::time::timeout(Duration::from_millis(100), track.poll());
@@ -349,18 +422,28 @@ pub fn spawn_inbound_pump(
             match event {
                 TrackRemoteEvent::OnRtpPacket(pkt) => {
                     stats.record_packet();
-                    if pkt.header.payload_type == TELEPHONE_EVENT_PAYLOAD_TYPE {
+                    if dtmf_decoder.accepts_payload_type(pkt.header.payload_type) {
+                        tracing::trace!(
+                            payload_type = pkt.header.payload_type,
+                            timestamp = pkt.header.timestamp,
+                            "received negotiated WebRTC telephone-event RTP"
+                        );
                         if let Some(event) = dtmf_decoder.decode_packet(
                             pkt.header.timestamp,
                             pkt.header.payload_type,
                             &pkt.payload,
                         ) {
+                            tracing::debug!(
+                                duration_ms = event.duration_ms,
+                                "decoded completed WebRTC telephone-event"
+                            );
                             if let Some(tx) = &dtmf_tx {
                                 let _ = tx.send(event).await;
                             }
                         }
                         continue;
                     }
+                    stats.record_media_payload_type(pkt.header.payload_type);
                     // D4 follow-up — emit codec payload bytes only (no RTP
                     // header). The orchestrator's `Transcoder` consumes
                     // codec bytes; the local outbound pump re-wraps with
@@ -408,66 +491,58 @@ pub fn spawn_inbound_pump(
 /// bytes** (no RTP header). The pump wraps each frame in a fresh RTP
 /// packet using the supplied `ssrc` and `payload_type` and an internal
 /// sequence counter. `MediaFrame.timestamp_rtp` is honored when non-zero;
-/// otherwise the pump derives a monotonically-increasing timestamp from
-/// the codec's expected frame duration.
+/// otherwise the compatibility entry point derives 20 ms timestamps using
+/// WebRTC's 48 kHz Opus clock. Use [`spawn_outbound_pump_with_clock_rate`]
+/// for another negotiated clock.
 ///
-/// Legacy callers that put full RTP wire bytes in `MediaFrame.payload`
-/// (pre-D4) are still tolerated — if the payload parses as a valid RTP
-/// packet, we forward it verbatim (the test fixtures
-/// `silent_rtp_payload_for_ssrc` use this path).
 pub fn spawn_outbound_pump(
     track: Arc<TrackLocalStaticRTP>,
-    mut frames_out_rx: mpsc::Receiver<MediaFrame>,
+    frames_out_rx: mpsc::Receiver<MediaFrame>,
     ssrc: u32,
     payload_type: u8,
 ) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut seq: u16 = 1;
-        let mut next_timestamp: u32 = 0;
-        while let Some(frame) = frames_out_rx.recv().await {
-            // Try the legacy "full RTP wire image" path first — preserves
-            // the long-standing semantics of `silent_rtp_payload_for_ssrc`
-            // and the `loopback_rtp_inbound_round_trip` test gate.
-            let pkt = if let Ok(mut legacy) = bytes_to_rtp_packet(&frame.payload) {
-                if legacy.header.timestamp == 0 {
-                    legacy.header.timestamp = frame.timestamp_rtp;
-                }
-                legacy
-            } else {
-                // New contract — codec bytes only, wrap in a fresh RTP header.
-                let ts = if frame.timestamp_rtp != 0 {
-                    frame.timestamp_rtp
-                } else {
-                    let t = next_timestamp;
-                    next_timestamp = next_timestamp.wrapping_add(960); // 20 ms @ 48 kHz default
-                    t
-                };
-                let pkt = rtp::Packet {
-                    header: rtp::Header {
-                        version: 2,
-                        padding: false,
-                        extension: false,
-                        marker: false,
-                        payload_type,
-                        sequence_number: seq,
-                        timestamp: ts,
-                        ssrc,
-                        ..Default::default()
-                    },
-                    payload: frame.payload,
-                };
-                seq = seq.wrapping_add(1);
-                pkt
-            };
+    spawn_outbound_pump_with_clock_rate(track, frames_out_rx, ssrc, payload_type, 48_000)
+}
 
-            loop {
-                match track.write_rtp(pkt.clone()).await {
-                    Ok(()) => break,
-                    Err(e) if e.to_string().contains("not binding") => {
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                    Err(_) => return,
-                }
+/// Spawn an outbound RTP pump using the exact negotiated RTP clock.
+///
+/// Writers for the same exact local track and SSRC share sequence/timestamp
+/// ownership, including with peer-level RFC 4733 sends.
+pub fn spawn_outbound_pump_with_clock_rate(
+    track: Arc<TrackLocalStaticRTP>,
+    frames_out_rx: mpsc::Receiver<MediaFrame>,
+    ssrc: u32,
+    payload_type: u8,
+    clock_rate_hz: u32,
+) -> JoinHandle<()> {
+    spawn_outbound_pump_with_writer_tracked(
+        OutboundAudioRtpWriter::new(track, ssrc, clock_rate_hz),
+        frames_out_rx,
+        payload_type,
+        None,
+    )
+}
+
+pub(crate) fn spawn_outbound_pump_with_writer_tracked(
+    writer: Arc<OutboundAudioRtpWriter>,
+    mut frames_out_rx: mpsc::Receiver<MediaFrame>,
+    payload_type: u8,
+    task_counter: Option<Arc<AtomicUsize>>,
+) -> JoinHandle<()> {
+    let task_guard = MediaTaskGuard::new(task_counter);
+    tokio::spawn(async move {
+        let _task_guard = task_guard;
+        while let Some(frame) = frames_out_rx.recv().await {
+            // MediaFrame payload is always codec payload. RTP wire images are
+            // created only at this transport boundary. The route-owned writer
+            // serializes this packet with same-SSRC telephone events so their
+            // sequence and timestamp timelines cannot race or reorder.
+            if writer
+                .write_audio(payload_type, frame.timestamp_rtp, frame.payload)
+                .await
+                .is_err()
+            {
+                return;
             }
         }
     })
@@ -484,19 +559,6 @@ fn rtp_packet_to_bytes(pkt: &rtp::Packet) -> bytes::Bytes {
     }
 }
 
-fn bytes_to_rtp_packet(data: &bytes::Bytes) -> Result<rtp::Packet, rtc::shared::error::Error> {
-    let mut buf = data.clone();
-    // Pre-D4 this function discarded the unmarshal result and always
-    // returned `Packet::default()` (PT=0, SSRC=0, empty payload), which
-    // meant the legacy outbound-pump path silently wrote zero-byte
-    // PCMU packets instead of the caller's RTP bytes. Tests only ever
-    // asserted `!payload.is_empty()` after a remote round-trip, so the
-    // regression hid in plain sight. Fixed here as part of the D4
-    // contract reconciliation.
-    let pkt = rtp::Packet::unmarshal(&mut buf)?;
-    Ok(pkt)
-}
-
 /// Build a minimal silent Opus RTP packet for loopback tests.
 pub fn silent_rtp_payload(seq: u16, timestamp: u32) -> bytes::Bytes {
     rtp_packet_to_bytes(&silent_rtp_packet(seq, timestamp))
@@ -505,6 +567,12 @@ pub fn silent_rtp_payload(seq: u16, timestamp: u32) -> bytes::Bytes {
 /// Marshalled silent Opus RTP with an explicit SSRC.
 pub fn silent_rtp_payload_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> bytes::Bytes {
     rtp_packet_to_bytes(&silent_rtp_packet_for_ssrc(ssrc, seq, timestamp))
+}
+
+/// Canonical codec-payload-only Opus silence used by `MediaFrame` fixtures.
+/// RTP headers are added by the WebRTC outbound pump.
+pub fn silent_opus_payload() -> bytes::Bytes {
+    bytes::Bytes::from_static(&[0xF8, 0xFF, 0xFE])
 }
 
 /// Parsed silent Opus RTP packet for direct `TrackLocal::write_rtp`.
@@ -582,29 +650,29 @@ pub fn silent_vp8_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rt
 mod tests {
     use super::*;
 
-    /// D4 follow-up — the legacy-compat path on the outbound pump must
-    /// detect a full RTP wire image in `MediaFrame.payload` and forward it
-    /// verbatim, so the long-standing `silent_rtp_payload_for_ssrc` fixture
-    /// (used by `loopback_rtp_inbound_round_trip` and the QUIC bridge
-    /// test) keeps working.
+    /// This adversarial codec payload happens to parse as RTP. It remains
+    /// codec payload because the outbound pump never attempts that parse.
     #[test]
-    fn legacy_rtp_payload_round_trips_through_bytes_to_rtp_packet() {
-        let bytes = silent_rtp_payload_for_ssrc(0xCAFEBABE, 42, 9600);
-        let pkt = bytes_to_rtp_packet(&bytes).expect("legacy RTP must parse");
-        assert_eq!(pkt.header.payload_type, OPUS_PT_DEFAULT);
-        assert_eq!(pkt.header.ssrc, 0xCAFEBABE);
-    }
-
-    /// D4 follow-up — codec payload bytes must NOT happen to parse as a
-    /// valid RTP packet (otherwise the legacy-compat path would
-    /// mis-trigger). The 3-byte silent Opus payload (`F8 FF FE`) has
-    /// version bits `11` (≠ 2), so it's reliably rejected.
-    #[test]
-    fn opus_silence_codec_bytes_do_not_parse_as_rtp() {
-        let raw_opus = bytes::Bytes::from_static(&[0xF8, 0xFF, 0xFE]);
-        assert!(
-            bytes_to_rtp_packet(&raw_opus).is_err(),
-            "Opus codec bytes must be rejected as RTP — otherwise the outbound pump's legacy path mis-fires"
-        );
+    fn rtp_looking_codec_payload_stays_opaque() {
+        let raw_codec = bytes::Bytes::from_static(&[
+            0x80,
+            OPUS_PT_DEFAULT,
+            0,
+            1,
+            0,
+            0,
+            3,
+            0,
+            1,
+            2,
+            3,
+            4,
+            0xF8,
+            0xFF,
+            0xFE,
+        ]);
+        let mut wire_like = raw_codec.clone();
+        assert!(rtp::Packet::unmarshal(&mut wire_like).is_ok());
+        assert_eq!(&raw_codec[12..], &[0xF8, 0xFF, 0xFE]);
     }
 }

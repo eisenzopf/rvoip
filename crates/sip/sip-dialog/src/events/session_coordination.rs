@@ -7,10 +7,25 @@
 use std::{fmt, net::SocketAddr};
 
 use crate::transaction::TransactionKey;
+use rvoip_infra_common::events::cross_crate::OutboundRequestOutcome;
 use rvoip_sip_core::types::refer_to::ReferTo;
 use rvoip_sip_core::{Method, Request, Response, Uri};
 
 use crate::dialog::DialogId;
+
+/// Methods whose builder-option snapshot lifecycle is completed by the
+/// generic exact outbound-request event.
+///
+/// BYE/CANCEL and out-of-dialog MESSAGE/OPTIONS/SUBSCRIBE retain their
+/// existing method-specific completion paths. Emitting the generic event for
+/// those methods would add protocol work to the call teardown hot path and
+/// could clear state owned by a different lifecycle.
+pub(crate) fn tracks_generic_outbound_request_completion(method: &Method) -> bool {
+    matches!(
+        method,
+        Method::Info | Method::Refer | Method::Notify | Method::Update
+    )
+}
 
 /// Events sent from dialog-core to session-core for coordination
 #[derive(Clone)]
@@ -101,6 +116,21 @@ pub enum SessionCoordinationEvent {
 
         /// Transaction ID that received the response
         transaction_id: TransactionKey,
+
+        /// Exact Request-URI from the original outbound request when it is
+        /// required for authentication. This is captured from transaction
+        /// state, never reconstructed from dialog/session metadata.
+        request_uri: Option<Uri>,
+    },
+
+    /// Exact terminal outcome for an outbound non-INVITE request that did not
+    /// carry a response through [`Self::ResponseReceived`] (for example a
+    /// timeout or transport failure).
+    OutboundRequestCompleted {
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+        method: Method,
+        outcome: OutboundRequestOutcome,
     },
 
     /// Registration request received
@@ -376,6 +406,7 @@ impl fmt::Debug for SessionCoordinationEvent {
                 dialog_id,
                 response,
                 transaction_id,
+                request_uri,
             } => formatter
                 .debug_struct("ResponseReceived")
                 .field("dialog_id", dialog_id)
@@ -383,6 +414,19 @@ impl fmt::Debug for SessionCoordinationEvent {
                 .field("response_header_count", &response.headers.len())
                 .field("response_body_len", &response.body.len())
                 .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
+                .field("request_uri_present", &request_uri.is_some())
+                .finish(),
+            Self::OutboundRequestCompleted {
+                dialog_id,
+                transaction_id,
+                method,
+                outcome,
+            } => formatter
+                .debug_struct("OutboundRequestCompleted")
+                .field("dialog_id", dialog_id)
+                .field("transaction_id", &SafeTransactionKeyDebug(transaction_id))
+                .field("method", &safe_method_label(method))
+                .field("outcome", outcome)
                 .finish(),
             Self::RegistrationRequest {
                 transaction_id,
@@ -614,6 +658,7 @@ mod tests {
                         .with_reason(REASON_SECRET)
                         .with_body(BODY_SECRET),
                     transaction_id: transaction_key(Method::Invite),
+                    request_uri: Some(format!("sip:bob@{URI_SECRET}").parse().unwrap()),
                 }
             ),
             format!(

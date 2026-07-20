@@ -1083,6 +1083,7 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_manager/dialog_lookup",
         "/dialog_manager/early_dialog_lookup",
         "/dialog_manager/terminated_bye_lookup",
+        "/dialog_manager/terminated_bye_deadlines",
         "/dialog_manager/transaction_to_dialog",
         "/dialog_manager/transaction_dialog_route_hash",
         "/dialog_manager/dialog_invite_transactions",

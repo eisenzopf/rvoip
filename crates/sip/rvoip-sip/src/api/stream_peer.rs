@@ -76,6 +76,10 @@ pub use crate::api::unified::Config as PeerConfig;
 /// [`GlobalEventCoordinator`]: rvoip_infra_common::events::coordinator::GlobalEventCoordinator
 pub struct EventReceiver {
     rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+    control_rx: Option<mpsc::Receiver<Event>>,
+    control_coordinator: Option<Arc<UnifiedCoordinator>>,
+    owns_control: bool,
+    observations_open: bool,
     filter: Option<CallId>,
     /// Events synthesized at receiver-construction time to compensate for the
     /// subscribe-after-event race: the session-to-app channel is broadcast,
@@ -92,6 +96,10 @@ impl EventReceiver {
     ) -> Self {
         Self {
             rx,
+            control_rx: None,
+            control_coordinator: None,
+            owns_control: false,
+            observations_open: true,
             filter: None,
             primed: std::collections::VecDeque::new(),
         }
@@ -104,7 +112,27 @@ impl EventReceiver {
     ) -> Self {
         Self {
             rx,
+            control_rx: None,
+            control_coordinator: None,
+            owns_control: false,
+            observations_open: true,
             filter: Some(call_id),
+            primed: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn with_control(
+        rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+        control_rx: mpsc::Receiver<Event>,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) -> Self {
+        Self {
+            rx,
+            control_rx: Some(control_rx),
+            control_coordinator: Some(coordinator),
+            owns_control: true,
+            observations_open: true,
+            filter: None,
             primed: std::collections::VecDeque::new(),
         }
     }
@@ -138,10 +166,49 @@ impl EventReceiver {
             return Some(event);
         }
         loop {
-            let raw = self.rx.recv().await?;
-            // Downcast from Arc<dyn CrossCrateEvent> to our concrete wrapper
-            let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
-            let event = session_event.event.clone();
+            enum Input {
+                Control(Option<Event>),
+                Observation(
+                    Option<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+                ),
+            }
+            let input = match (self.control_rx.as_mut(), self.observations_open) {
+                (Some(control_rx), true) => tokio::select! {
+                    event = control_rx.recv() => Input::Control(event),
+                    raw = self.rx.recv() => Input::Observation(raw),
+                },
+                (Some(control_rx), false) => Input::Control(control_rx.recv().await),
+                (None, true) => Input::Observation(self.rx.recv().await),
+                (None, false) => return None,
+            };
+            let mut event = match input {
+                Input::Control(Some(event)) => event,
+                Input::Control(None) => {
+                    self.control_rx = None;
+                    continue;
+                }
+                Input::Observation(Some(raw)) => {
+                    let Some(session_event) =
+                        raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()
+                    else {
+                        continue;
+                    };
+                    let event = session_event.event.clone();
+                    if self.owns_control && matches!(&event, Event::InfoReceived { .. }) {
+                        continue;
+                    }
+                    event
+                }
+                Input::Observation(None) => {
+                    self.observations_open = false;
+                    continue;
+                }
+            };
+            if let (Some(coordinator), Event::InfoReceived { request, .. }) =
+                (&self.control_coordinator, &mut event)
+            {
+                request.set_coordinator(Arc::clone(coordinator));
+            }
             // Apply per-session filter if set
             if let Some(ref filter) = self.filter {
                 if event.call_id() != Some(filter) {
@@ -168,9 +235,45 @@ impl EventReceiver {
             return Some(event);
         }
         loop {
-            let raw = self.rx.try_recv().ok()?;
+            if let Some(control_rx) = self.control_rx.as_mut() {
+                match control_rx.try_recv() {
+                    Ok(mut event) => {
+                        if let (Some(coordinator), Event::InfoReceived { request, .. }) =
+                            (&self.control_coordinator, &mut event)
+                        {
+                            request.set_coordinator(Arc::clone(coordinator));
+                        }
+                        if self
+                            .filter
+                            .as_ref()
+                            .is_none_or(|filter| event.call_id() == Some(filter))
+                        {
+                            return Some(event);
+                        }
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.control_rx = None;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if !self.observations_open {
+                return None;
+            }
+            let raw = match self.rx.try_recv() {
+                Ok(raw) => raw,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.observations_open = false;
+                    return None;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return None,
+            };
             let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
             let event = session_event.event.clone();
+            if self.owns_control && matches!(&event, Event::InfoReceived { .. }) {
+                continue;
+            }
             if let Some(ref filter) = self.filter {
                 if event.call_id() != Some(filter) {
                     continue;
@@ -715,12 +818,13 @@ impl StreamPeer {
         let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
         let event_rx = coordinator.subscribe_events().await?;
+        let control_rx = coordinator.claim_session_control_events().await?;
         Ok(Self {
             control: PeerControl {
-                coordinator,
+                coordinator: Arc::clone(&coordinator),
                 local_uri,
             },
-            events: EventReceiver::new(event_rx),
+            events: EventReceiver::with_control(event_rx, control_rx, coordinator),
         })
     }
 
@@ -836,11 +940,9 @@ impl StreamPeer {
                     // inbound INVITE; falls back to the legacy empty
                     // headers shape when synthesized in tests.
                     let coord = self.control.coordinator.clone();
-                    let parsed = coord.session_registry.peek_pending_incoming_request().await;
-                    let transport = coord
-                        .session_registry
-                        .peek_pending_incoming_transport()
-                        .await;
+                    let pending = coord.pending_incoming_bundle_exact(&call_id);
+                    let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+                    let transport = pending.and_then(|bundle| bundle.transport);
                     let incoming = match parsed {
                         Some(req) => IncomingCall::with_request(call_id, from, to, sdp, coord, req),
                         None => IncomingCall::new(call_id, from, to, sdp, coord),
@@ -915,10 +1017,10 @@ impl StreamPeer {
     {
         loop {
             match self.events.next().await {
-                Some(event @ Event::CallProgress { .. }) => {
-                    if event.call_id() == Some(call_id) && predicate(&event) {
-                        return Ok(event);
-                    }
+                Some(event @ Event::CallProgress { .. })
+                    if event.call_id() == Some(call_id) && predicate(&event) =>
+                {
+                    return Ok(event);
                 }
                 Some(Event::CallAnswered {
                     call_id: answered_id,
@@ -1589,10 +1691,12 @@ mod tests {
             recv_buffer_size: 2048,
             rtcp_recv_buffer_size: 1024,
         };
-        let mut media_config = MediaSessionControllerConfig::default();
-        media_config.rtp_buffer_size = 960;
-        media_config.rtp_buffer_initial_count = 3;
-        media_config.rtp_buffer_max_count = 9;
+        let media_config = MediaSessionControllerConfig {
+            rtp_buffer_size: 960,
+            rtp_buffer_initial_count: 3,
+            rtp_buffer_max_count: 9,
+            ..Default::default()
+        };
 
         let builder = StreamPeerBuilder::new()
             .media_session_controller_config(media_config)

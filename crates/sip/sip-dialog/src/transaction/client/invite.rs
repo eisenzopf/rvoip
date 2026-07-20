@@ -67,7 +67,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -79,6 +78,7 @@ use crate::transaction::client::{
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
 use crate::transaction::runner::run_transaction_loop;
+use crate::transaction::timer::manager::ManagedTimerHandle;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::utils;
 use crate::transaction::{
@@ -115,23 +115,23 @@ pub struct ClientInviteTransaction {
     logic: Arc<ClientInviteLogic>,
 }
 
-/// Holds JoinHandles and dynamic state for timers specific to Client INVITE transactions.
+/// Holds cancellation handles and dynamic state for Client INVITE timers.
 ///
 /// Used by the transaction runner to manage the various timers required by the
 /// INVITE client transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ClientInviteTimerHandles {
     /// Handle for Timer A, which controls INVITE retransmissions
-    timer_a: Option<JoinHandle<()>>,
+    timer_a: Option<ManagedTimerHandle>,
 
     /// Current interval for Timer A, which doubles after each firing
     current_timer_a_interval: Option<Duration>, // For backoff
 
     /// Handle for Timer B, which controls transaction timeout
-    timer_b: Option<JoinHandle<()>>,
+    timer_b: Option<ManagedTimerHandle>,
 
     /// Handle for Timer D, which controls how long to wait in Completed state
-    timer_d: Option<JoinHandle<()>>,
+    timer_d: Option<ManagedTimerHandle>,
 }
 
 /// Implements the TransactionLogic for Client INVITE transactions.
@@ -163,7 +163,7 @@ impl ClientInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "A",
@@ -198,7 +198,7 @@ impl ClientInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "B",
@@ -233,7 +233,7 @@ impl ClientInviteLogic {
 
         // Use timer_utils to start the timer with transition
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_timer_with_transition(
+        match timer_utils::start_timer_with_transition_managed(
             &timer_manager,
             tx_id,
             "D",
@@ -275,6 +275,8 @@ impl ClientInviteLogic {
         {
             data.complete_initial_send(false);
             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Calling state");
+            data.completion
+                .record_failure(crate::transaction::ClientTransactionFailure::Transport);
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
             let _ = command_tx
@@ -322,6 +324,8 @@ impl ClientInviteLogic {
                     .await
                 {
                     error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit request");
+                    data.completion
+                        .record_failure(crate::transaction::ClientTransactionFailure::Transport);
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Ok(Some(TransactionState::Terminated));
                 }
@@ -363,6 +367,8 @@ impl ClientInviteLogic {
                 warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer B (Timeout) fired in state {:?}", current_state);
 
                 // Notify TU about timeout using common logic
+                data.completion
+                    .record_failure(crate::transaction::ClientTransactionFailure::Timeout);
                 common_logic::send_transaction_timeout_event(tx_id, &data.events_tx).await;
 
                 // Return state transition
@@ -422,6 +428,8 @@ impl ClientInviteLogic {
                 // Send the ACK request
                 if let Err(e) = data.send_on_request_route(Message::Request(ack)).await {
                     error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send ACK");
+                    data.completion
+                        .record_failure(crate::transaction::ClientTransactionFailure::Transport);
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Err(Error::transport_error(e, "Failed to send ACK"));
                 }
@@ -685,10 +693,7 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
         match validators::extract_response(&message, tx_id) {
             Ok(response) => {
                 // Store the response
-                {
-                    let mut last_response = data.last_response.lock().await;
-                    *last_response = Some(response.clone());
-                }
+                data.record_response(response.clone()).await;
 
                 // Use the command_tx from data for timer operations
                 let self_command_tx = data.cmd_tx.clone();
@@ -777,9 +782,33 @@ impl ClientInviteTransaction {
         request: Request,
         request_route: TransportRoute,
         transport: Arc<dyn Transport>,
-        events_tx: mpsc::Sender<TransactionEvent>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
+    ) -> Result<Self> {
+        let timer_manager = Arc::new(TimerManager::new(timer_config_override.clone()));
+        Self::new_with_route_command_capacity_and_timer_manager(
+            id,
+            request,
+            request_route,
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+            timer_manager,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_route_command_capacity_and_timer_manager(
+        id: TransactionKey,
+        request: Request,
+        request_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+        timer_manager: Arc<TimerManager>,
     ) -> Result<Self> {
         tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&id), "Creating new ClientInviteTransaction");
 
@@ -799,12 +828,24 @@ impl ClientInviteTransaction {
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
+            response_notify: Arc::new(tokio::sync::Notify::new()),
+            completion: Arc::new(
+                crate::transaction::completion::ClientTransactionCompletion::new(
+                    TransactionState::Initial,
+                ),
+            ),
             remote_addr,
             request_route: Arc::new(Mutex::new(request_route)),
             transport,
-            events_tx,
+            events_tx: events_tx.into(),
             cmd_tx: cmd_tx.clone(),
             event_loop_handle: Arc::new(Mutex::new(None)),
+            termination_cleanup_tx: std::sync::OnceLock::new(),
+            lifecycle_scheduler: std::sync::OnceLock::new(),
+            compact_retention_reservation: std::sync::OnceLock::new(),
+            transaction_admission_owner: std::sync::OnceLock::new(),
+            terminal_event_publication:
+                crate::transaction::event_sender::TerminalEventPublication::new(),
             timer_config: timer_config.clone(),
             initial_send_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             initial_send_notify: Arc::new(tokio::sync::Notify::new()),
@@ -812,7 +853,7 @@ impl ClientInviteTransaction {
 
         let logic = Arc::new(ClientInviteLogic {
             _data_marker: std::marker::PhantomData,
-            timer_factory: TimerFactory::new(Some(timer_config), Arc::new(TimerManager::new(None))),
+            timer_factory: TimerFactory::new(Some(timer_config), timer_manager),
         });
 
         let data_for_runner = data.clone();

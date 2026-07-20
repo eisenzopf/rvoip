@@ -35,7 +35,14 @@ use tokio::sync::mpsc;
 use crate::transaction::error::Result;
 use crate::transaction::timer::TimerSettings;
 use crate::transaction::{InternalTransactionCommand, TransactionKind, TransactionState};
-use rvoip_sip_core::Message;
+use rvoip_sip_core::{Message, Response};
+
+/// Runner-local work produced by a supervised server response write.
+#[doc(hidden)]
+pub struct ServerResponseDisposition {
+    pub next_state: Option<TransactionState>,
+    pub cancel_timer_100: bool,
+}
 
 /// Core trait defining the state machine logic for a SIP transaction type.
 ///
@@ -127,6 +134,21 @@ where
         current_state: TransactionState,
         timer_handles: &mut TH,
     ) -> Result<Option<TransactionState>>;
+
+    /// Write a server response from the transaction runner. Client logic uses
+    /// the default unsupported implementation. Server implementations must
+    /// return the next state instead of self-enqueuing it.
+    async fn send_server_response(
+        &self,
+        _data: &Arc<D>,
+        _response: Response,
+        _current_state: TransactionState,
+        _timer_handles: &mut TH,
+    ) -> Result<ServerResponseDisposition> {
+        Err(crate::transaction::error::Error::Other(
+            "server responses are unsupported for this transaction".to_string(),
+        ))
+    }
 
     /// Handles a timer expiration event based on the transaction's current state.
     ///

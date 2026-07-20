@@ -18,6 +18,7 @@ use rvoip_core::identity::{
 };
 use rvoip_core::ids::{ParticipantId, SessionId};
 use rvoip_core::orchestrator::Orchestrator;
+use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 #[cfg(feature = "signaling-ws")]
 use rvoip_webrtc::signaling::auth::WsAuthHook;
 use rvoip_webrtc::signaling::auth::{AuthContext, AuthRejection, WhipAuthHook};
@@ -105,6 +106,20 @@ async fn offer() -> (Arc<WebRtcAdapter>, String) {
     (publisher, sdp)
 }
 
+async fn whep_offer() -> String {
+    let player = RvoipPeerConnection::new(&WebRtcConfig::loopback(), PeerRole::Offerer)
+        .await
+        .expect("WHEP player");
+    player
+        .prepare_receive_only_offer()
+        .await
+        .expect("receive-only WHEP media");
+    player
+        .create_offer_and_gather()
+        .await
+        .expect("WHEP player offer")
+}
+
 fn http() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -116,6 +131,13 @@ fn whip_url(server: &WebRtcServer, tag: &str) -> String {
     format!(
         "http://{}/whip/{tag}",
         server.whip_addr().expect("WHIP address")
+    )
+}
+
+fn whep_url(server: &WebRtcServer, tag: &str) -> String {
+    format!(
+        "http://{}/whep/{tag}",
+        server.whip_addr().expect("WHEP address")
     )
 }
 
@@ -193,6 +215,7 @@ async fn websocket_does_not_send_answer_before_core_accepts() {
                 sdp: offer,
                 connection_id: String::new(),
                 candidate: String::new(),
+                request_id: String::new(),
             })
             .expect("offer JSON")
             .into(),
@@ -367,20 +390,147 @@ async fn accept_terminal_race_never_leaves_a_successful_orphan() {
 }
 
 #[tokio::test]
-async fn secure_mode_does_not_gate_outbound_whep() {
-    let server = secure_server(Duration::from_millis(100), 1).await;
-    let started = Instant::now();
-    let response = http()
-        .post(format!(
-            "http://{}/whep/subscriber",
-            server.whip_addr().expect("WHIP address")
-        ))
-        .header("authorization", "Bearer ignored-by-test-hook")
-        .send()
+async fn canonical_whep_waits_for_principal_bound_core_admission() {
+    let server = secure_server(Duration::from_secs(2), 1).await;
+    let adapter = server.adapter();
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .expect("install WHEP admission gate");
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register adapter");
+    let request = tokio::spawn(
+        http()
+            .post(format!(
+                "http://{}/whep/attachment-proof",
+                server.whip_addr().expect("WHIP address")
+            ))
+            .header("authorization", "Bearer ignored-by-test-hook")
+            .header("content-type", "application/sdp")
+            .body(whep_offer().await)
+            .send(),
+    );
+    let mut admission = admissions.recv().await.expect("WHEP admission");
+    let principal = admission
+        .authenticated_principal()
+        .expect("principal is retained before admission");
+    assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
+    let context = admission
+        .take_inbound_context()
+        .expect("take attachment context")
+        .expect("WHEP attachment context");
+    assert_eq!(
+        context
+            .routing_hint()
+            .expect("attachment token")
+            .expose_secret(),
+        "attachment-proof"
+    );
+    assert!(admission
+        .take_inbound_context()
+        .expect("second context read")
+        .is_none());
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    assert!(!request.is_finished(), "WHEP 201 escaped before admission");
+
+    admission.accept().await.expect("accept WHEP admission");
+    let response = request
         .await
+        .expect("WHEP request task")
         .expect("WHEP POST");
     assert_eq!(response.status(), reqwest::StatusCode::CREATED);
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(response
+        .text()
+        .await
+        .expect("WHEP answer")
+        .contains("a=sendonly"));
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_replay_is_exposed_as_two_exact_admissions_for_atomic_policy() {
+    let server = secure_server(Duration::from_secs(2), 2).await;
+    let adapter = server.adapter();
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(2, Duration::from_secs(2))
+        .expect("install WHEP admission gate");
+    orchestrator
+        .register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .expect("register adapter");
+    let offer = whep_offer().await;
+    let post = |offer: String| {
+        http()
+            .post(whep_url(&server, "single-use-token"))
+            .header("authorization", "Bearer ignored-by-test-hook")
+            .header("content-type", "application/sdp")
+            .body(offer)
+            .send()
+    };
+    let first_request = tokio::spawn(post(offer.clone()));
+    let second_request = tokio::spawn(post(offer));
+    let mut first = admissions.recv().await.expect("first WHEP admission");
+    let mut second = admissions.recv().await.expect("second WHEP admission");
+    assert_ne!(first.connection_id(), second.connection_id());
+    for admission in [&mut first, &mut second] {
+        assert_eq!(
+            admission
+                .authenticated_principal()
+                .expect("retained principal")
+                .tenant
+                .as_deref(),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            admission
+                .take_inbound_context()
+                .expect("take replay context")
+                .expect("replay context")
+                .routing_hint()
+                .expect("replayed attachment token")
+                .expose_secret(),
+            "single-use-token"
+        );
+    }
+    let accepted_id = first.connection_id().clone();
+    first.accept().await.expect("atomic first-use acceptance");
+    second
+        .reject(RejectReason::Forbidden)
+        .await
+        .expect("atomic replay rejection");
+
+    let first_response = first_request
+        .await
+        .expect("first request task")
+        .expect("first response");
+    let second_response = second_request
+        .await
+        .expect("second request task")
+        .expect("second response");
+    let statuses = [first_response.status(), second_response.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::FORBIDDEN)
+            .count(),
+        1
+    );
+    assert_eq!(adapter.metrics().active_sessions, 1);
+    assert_eq!(adapter.metrics().active_http_resources, 1);
+    adapter
+        .end(accepted_id, EndReason::Cancelled)
+        .await
+        .expect("end accepted route");
+    assert_eq!(adapter.metrics().active_sessions, 0);
+    assert_eq!(adapter.metrics().active_http_resources, 0);
     server.shutdown().await;
 }
 

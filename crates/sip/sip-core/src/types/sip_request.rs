@@ -579,6 +579,30 @@ impl Request {
         buffer
     }
 
+    /// Serialize the complete request to its SIP wire representation.
+    ///
+    /// Unlike [`fmt::Display`], this method preserves arbitrary binary body
+    /// bytes. It also serializes directly from the borrowed request so callers
+    /// do not need to clone the parsed header tree merely to construct a
+    /// temporary [`Message`](crate::Message).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let estimated = 64 + self.headers.len() * 64 + self.body.len();
+        let mut bytes = Vec::with_capacity(estimated);
+        let _ = write!(
+            &mut bytes,
+            "{} {} {}\r\n",
+            self.method, self.uri, self.version
+        );
+        for header in &self.headers {
+            let _ = write!(&mut bytes, "{}\r\n", header);
+        }
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(&self.body);
+        bytes
+    }
+
     // Note: The parse method is intentionally omitted here.
     // Parsing should be handled by the parser module.
     // pub fn parse(data: &[u8]) -> Result<Self> { ... }
@@ -1155,6 +1179,22 @@ mod tests {
         assert!(content.contains("INVITE sip:bob@example.com SIP/2.0"));
         assert!(content.contains("Call-ID: test-id"));
         assert!(!content.contains("test body"));
+    }
+
+    #[test]
+    fn test_to_bytes_preserves_binary_body_and_matches_message_serializer() {
+        let body = Bytes::from_static(&[0x00, 0x80, 0xff, b'\r', b'\n']);
+        let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+            .with_header(TypedHeader::CallId(types::CallId::new("binary-wire")))
+            .with_body(body.clone());
+
+        let wire = request.to_bytes();
+        assert_eq!(wire, crate::Message::Request(request.clone()).to_bytes());
+        let crate::Message::Request(parsed) = crate::parse_message(&wire).expect("parse wire")
+        else {
+            panic!("request wire parsed as a response");
+        };
+        assert_eq!(parsed.body(), body.as_ref());
     }
 
     #[test]

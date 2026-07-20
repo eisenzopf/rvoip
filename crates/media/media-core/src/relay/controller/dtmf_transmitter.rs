@@ -56,6 +56,60 @@ const END_OF_EVENT_RETRANSMITS: usize = 3;
 /// 6-bit field's max).
 const DEFAULT_VOLUME: u8 = 10;
 
+/// Smallest accepted telephone-event duration. Durations shorter than two
+/// 20-ms RTP ticks are not interoperable with common gateways.
+pub const MIN_DTMF_DURATION_MS: u32 = 40;
+/// Largest accepted duration for one telephone event.
+pub const MAX_DTMF_DURATION_MS: u32 = 6_000;
+/// Maximum digits accepted by one atomic sequence request.
+pub const MAX_DTMF_SEQUENCE_DIGITS: usize = 32;
+/// Bound the complete sequence so an API request cannot monopolize its
+/// connection control lane indefinitely.
+pub const MAX_DTMF_SEQUENCE_MS: u64 = 30_000;
+/// Default quiet interval between the final packet of one event and the first
+/// packet of the next event.
+pub const DEFAULT_DTMF_INTER_DIGIT_MS: u32 = 70;
+
+/// Validate a complete RFC 4733 sequence before any packet is scheduled.
+///
+/// Returning the parsed digits lets upper layers preserve all-or-nothing
+/// validation: an invalid suffix can never follow an already-scheduled prefix.
+pub fn validate_dtmf_sequence(
+    digits: &str,
+    duration_ms: u32,
+    inter_digit_ms: u32,
+) -> Result<Vec<char>> {
+    let digits: Vec<char> = digits.chars().collect();
+    if digits.is_empty() {
+        return Err(Error::config(
+            "DTMF sequence must contain at least one digit",
+        ));
+    }
+    if digits.len() > MAX_DTMF_SEQUENCE_DIGITS {
+        return Err(Error::config("DTMF sequence exceeds the digit limit"));
+    }
+    if !(MIN_DTMF_DURATION_MS..=MAX_DTMF_DURATION_MS).contains(&duration_ms) {
+        return Err(Error::config(
+            "DTMF duration is outside the supported range",
+        ));
+    }
+    if digits
+        .iter()
+        .any(|digit| DtmfEvent::from_digit(*digit).is_none())
+    {
+        return Err(Error::config("DTMF sequence contains an unsupported digit"));
+    }
+
+    let digit_count = u64::try_from(digits.len()).unwrap_or(u64::MAX);
+    let total_ms = u64::from(duration_ms)
+        .saturating_mul(digit_count)
+        .saturating_add(u64::from(inter_digit_ms).saturating_mul(digit_count.saturating_sub(1)));
+    if total_ms > MAX_DTMF_SEQUENCE_MS {
+        return Err(Error::config("DTMF sequence exceeds the schedule limit"));
+    }
+    Ok(digits)
+}
+
 /// Multi-packet RFC 4733 DTMF sender. Owns no per-call state — each
 /// `send_digit` spawns an independent task. Construct one per RTP
 /// session.
@@ -76,6 +130,31 @@ impl DtmfTransmitter {
         let rtp_session = self.rtp_session.clone();
         tokio::spawn(async move { run_schedule(rtp_session, digit, duration_ms).await })
     }
+
+    /// Send a prevalidated sequence without overlapping telephone events.
+    ///
+    /// The complete sequence is validated before the first task is spawned.
+    /// Each tone drains before the fixed quiet interval begins, so successive
+    /// events never share wall-clock time even though the legacy single-digit
+    /// API remains fire-and-forget.
+    pub async fn send_sequence(
+        &self,
+        digits: &str,
+        duration_ms: u32,
+        inter_digit_ms: u32,
+    ) -> Result<()> {
+        let digits = validate_dtmf_sequence(digits, duration_ms, inter_digit_ms)?;
+        let last = digits.len().saturating_sub(1);
+        for (index, digit) in digits.into_iter().enumerate() {
+            self.send_digit(digit, duration_ms)
+                .await
+                .map_err(|_| Error::config("DTMF transmitter task did not complete"))??;
+            if index != last {
+                tokio::time::sleep(Duration::from_millis(u64::from(inter_digit_ms))).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn run_schedule(
@@ -83,7 +162,14 @@ async fn run_schedule(
     digit: char,
     duration_ms: u32,
 ) -> Result<()> {
-    let event_code = DtmfEvent::from_digit(digit).map(|d| d.0).unwrap_or(0);
+    let event_code = DtmfEvent::from_digit(digit)
+        .ok_or_else(|| Error::config("unsupported RFC 4733 DTMF digit"))?
+        .0;
+    if !(MIN_DTMF_DURATION_MS..=MAX_DTMF_DURATION_MS).contains(&duration_ms) {
+        return Err(Error::config(
+            "DTMF duration is outside the supported range",
+        ));
+    }
 
     // Anchor the tone on the audio stream's current cursor (RFC 4733 §2.1).
     let start_timestamp = {
@@ -91,10 +177,12 @@ async fn run_schedule(
         session.current_timestamp()
     };
 
-    // Total audio ticks to span. A short digit (e.g. 100 ms) becomes
-    // 5 ticks: one start + 3 continuations + the final tick covered
-    // by the E=1 retransmits.
-    let total_ticks = (duration_ms / 20).max(1);
+    // Total packet intervals to span. Round up so a non-20-ms requested
+    // duration is never truncated; the final interval below may be shorter
+    // than one full tick and carries the exact requested sample duration.
+    let total_ticks = duration_ms.div_ceil(20).max(1);
+    let final_duration_samples = u16::try_from(duration_ms.saturating_mul(8))
+        .map_err(|_| Error::config("DTMF duration exceeds the telephone-event clock range"))?;
 
     // Start packet: E=0, marker=1, duration = one tick.
     let mut duration_samples: u16 = SAMPLES_PER_TICK;
@@ -128,9 +216,13 @@ async fn run_schedule(
         .await?;
     }
 
-    // Final tick → switch to E=1 and emit RFC 4733 §2.5.1.3 retransmits.
-    tokio::time::sleep(TICK).await;
-    duration_samples = duration_samples.saturating_add(SAMPLES_PER_TICK);
+    // Final (possibly partial) tick → switch to E=1 and emit RFC 4733
+    // §2.5.1.3 retransmits. The duration field is exact even when the caller's
+    // requested duration is not divisible by the 20-ms packet cadence.
+    let represented_ms = (continuation_count + 1).saturating_mul(20);
+    let final_interval_ms = duration_ms.saturating_sub(represented_ms).max(1);
+    tokio::time::sleep(Duration::from_millis(u64::from(final_interval_ms))).await;
+    duration_samples = final_duration_samples;
     for _ in 0..END_OF_EVENT_RETRANSMITS {
         send_packet(
             &rtp_session,
@@ -355,5 +447,102 @@ mod tests {
         if let Some(RtpEvent::DtmfEvent { event, .. }) = end_events.first() {
             assert_eq!(*event, 11, "digit '#' encodes as event 11");
         }
+    }
+
+    #[tokio::test]
+    async fn invalid_suffix_rejects_the_complete_sequence_before_first_packet() {
+        let (session, mut rx) = pair().await;
+        let tx = DtmfTransmitter::new(session);
+
+        tx.send_sequence("1X", 100, DEFAULT_DTMF_INTER_DIGIT_MS)
+            .await
+            .expect_err("invalid suffix must reject the complete sequence");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv())
+                .await
+                .is_err(),
+            "all-or-nothing validation must schedule no prefix packet"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequence_uses_requested_duration_and_inter_digit_quiet_interval() {
+        let (session, mut rx) = pair().await;
+        let tx = DtmfTransmitter::new(session);
+        let receive = tokio::spawn(async move {
+            let mut first_final_at = None;
+            let mut second_start_at = None;
+            let mut first_final_duration = None;
+            while second_start_at.is_none() {
+                let event = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("sequence receive deadline")
+                    .expect("sequence receiver open");
+                if let RtpEvent::DtmfEvent {
+                    event,
+                    end_of_event,
+                    duration,
+                    ..
+                } = event
+                {
+                    if event == 1 && end_of_event {
+                        first_final_at = Some(tokio::time::Instant::now());
+                        first_final_duration = Some(duration);
+                    } else if event == 2 && !end_of_event {
+                        second_start_at = Some(tokio::time::Instant::now());
+                    }
+                }
+            }
+            (
+                first_final_at.expect("first final event"),
+                second_start_at.expect("second start event"),
+                first_final_duration.expect("first final duration"),
+            )
+        });
+
+        tx.send_sequence("12", 100, DEFAULT_DTMF_INTER_DIGIT_MS)
+            .await
+            .expect("valid sequence");
+        let (first_final_at, second_start_at, first_final_duration) =
+            receive.await.expect("receiver task");
+        assert_eq!(first_final_duration, 800, "100 ms at an 8 kHz event clock");
+        assert!(
+            second_start_at.duration_since(first_final_at)
+                >= Duration::from_millis(u64::from(DEFAULT_DTMF_INTER_DIGIT_MS)),
+            "the next event must start only after the configured quiet interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_tick_duration_is_not_truncated() {
+        let (session, mut rx) = pair().await;
+        let tx = DtmfTransmitter::new(session);
+        tx.send_digit('3', 95)
+            .await
+            .expect("DTMF task")
+            .expect("valid DTMF schedule");
+
+        let events = drain_dtmf(&mut rx, Duration::from_millis(150)).await;
+        let final_duration = events.into_iter().find_map(|event| match event {
+            RtpEvent::DtmfEvent {
+                end_of_event: true,
+                duration,
+                ..
+            } => Some(duration),
+            _ => None,
+        });
+        assert_eq!(final_duration, Some(760), "95 ms at an 8 kHz event clock");
+    }
+
+    #[test]
+    fn sequence_validation_bounds_duration_count_and_total_schedule() {
+        assert!(validate_dtmf_sequence("12#ABcd", 100, 70).is_ok());
+        assert!(validate_dtmf_sequence("", 100, 70).is_err());
+        assert!(validate_dtmf_sequence("1", MIN_DTMF_DURATION_MS - 1, 70).is_err());
+        assert!(validate_dtmf_sequence("1", MAX_DTMF_DURATION_MS + 1, 70).is_err());
+        assert!(
+            validate_dtmf_sequence(&"1".repeat(MAX_DTMF_SEQUENCE_DIGITS + 1), 100, 70).is_err()
+        );
+        assert!(validate_dtmf_sequence(&"1".repeat(MAX_DTMF_SEQUENCE_DIGITS), 1_000, 70).is_err());
     }
 }

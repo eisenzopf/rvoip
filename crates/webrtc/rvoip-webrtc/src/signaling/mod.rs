@@ -10,5 +10,5 @@ pub mod websocket;
 #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
 pub use auth::{
     extract_bearer, AnonymousAuth, AuthContext, AuthRejection, BearerStaticTokenAuth, WhipAuthHook,
-    WsAuthHook,
+    WsAuthHook, WsBearerSessionBinding,
 };

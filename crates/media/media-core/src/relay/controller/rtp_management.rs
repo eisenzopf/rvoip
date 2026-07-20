@@ -252,16 +252,19 @@ impl MediaSessionController {
     /// softphone UX where a key-down handler should not block on the
     /// full tone duration.
     ///
-    /// Unknown digits fall back to event code 0 (DTMF '0' interpretation
-    /// is implementation-defined for non-DTMF events; receivers MAY
-    /// ignore).
+    /// Invalid digits and out-of-range durations are rejected before the RTP
+    /// session is resolved or a transmitter task is spawned.
     pub async fn send_dtmf_packet(
         &self,
         dialog_id: &DialogId,
         digit: char,
         duration_ms: u32,
     ) -> Result<()> {
-        use super::dtmf_transmitter::DtmfTransmitter;
+        use super::dtmf_transmitter::{validate_dtmf_sequence, DtmfTransmitter};
+
+        let mut encoded = [0u8; 4];
+        let encoded_digit = digit.encode_utf8(&mut encoded);
+        validate_dtmf_sequence(encoded_digit, duration_ms, 0)?;
 
         let rtp_session = self
             .get_rtp_session(dialog_id)
@@ -278,6 +281,31 @@ impl MediaSessionController {
             digit, duration_ms, dialog_id
         );
         Ok(())
+    }
+
+    /// Send a bounded RFC 4733 sequence with non-overlapping tones.
+    ///
+    /// Validation covers the complete sequence before the RTP session is
+    /// resolved or any transmitter task is started. The returned future
+    /// completes only after every tone and inter-digit quiet interval has
+    /// drained, giving call-control code an exact success/failure boundary.
+    pub async fn send_dtmf_sequence_packets(
+        &self,
+        dialog_id: &DialogId,
+        digits: &str,
+        duration_ms: u32,
+        inter_digit_ms: u32,
+    ) -> Result<()> {
+        use super::dtmf_transmitter::{validate_dtmf_sequence, DtmfTransmitter};
+
+        validate_dtmf_sequence(digits, duration_ms, inter_digit_ms)?;
+        let rtp_session = self
+            .get_rtp_session(dialog_id)
+            .await
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        DtmfTransmitter::new(rtp_session)
+            .send_sequence(digits, duration_ms, inter_digit_ms)
+            .await
     }
 
     /// Update remote address for RTP session

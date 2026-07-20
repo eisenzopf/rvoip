@@ -471,6 +471,10 @@ async fn spawn_peer_session(
     );
     let auth_guard =
         rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
+    let resource_guard = rvoip_uctp::state::spawn_resource_authorization_guard(
+        Arc::clone(&resource_bindings),
+        Duration::from_millis(250),
+    );
 
     let in_tx_for_pump = in_tx.clone();
     let inbound_pump = tokio::spawn(async move {
@@ -579,7 +583,7 @@ async fn spawn_peer_session(
                             detail: "bearer".into(),
                         })
                     }
-                    UctpSessionEvent::InboundInvite { sid, from, .. } => {
+                    UctpSessionEvent::InboundInvite { cid, sid, from, .. } => {
                         let Some(principal) = coord_for_translator.authenticated_principal() else {
                             warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
                             continue;
@@ -608,6 +612,7 @@ async fn spawn_peer_session(
                         routes.insert(
                             id.clone(),
                             Route {
+                                cid,
                                 sid: sid.to_string(),
                                 core_session_id,
                                 core_connection_id: id.clone(),
@@ -1012,6 +1017,7 @@ async fn spawn_peer_session(
             outbound_pump,
             event_pump,
             auth_guard,
+            resource_guard,
             media_guard,
         ],
         drain_grace,

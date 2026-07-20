@@ -1719,6 +1719,16 @@ where
     }
 }
 
+fn normalize_uri_for_match(uri: &str) -> String {
+    uri.trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .split(';')
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1862,14 +1872,4 @@ mod tests {
             }
         ));
     }
-}
-
-fn normalize_uri_for_match(uri: &str) -> String {
-    uri.trim()
-        .trim_matches('<')
-        .trim_matches('>')
-        .split(';')
-        .next()
-        .unwrap_or(uri)
-        .to_ascii_lowercase()
 }

@@ -257,6 +257,7 @@ fn signaling_messages_and_auth_rejections_are_metadata_only() {
         sdp: CANARY.into(),
         candidate: CANARY.into(),
         connection_id: CANARY.into(),
+        request_id: CANARY.into(),
     };
     let rejection = AuthRejection::Unauthorized {
         www_authenticate: CANARY.into(),

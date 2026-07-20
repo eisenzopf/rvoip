@@ -67,7 +67,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -79,6 +78,7 @@ use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
 use crate::transaction::runner::run_transaction_loop;
+use crate::transaction::timer::manager::ManagedTimerHandle;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::timer_utils;
 use crate::transaction::validators;
@@ -113,23 +113,23 @@ pub struct ClientNonInviteTransaction {
     logic: Arc<ClientNonInviteLogic>,
 }
 
-/// Holds JoinHandles and dynamic state for timers specific to Client Non-INVITE transactions.
+/// Holds cancellation handles and dynamic state for Client Non-INVITE timers.
 ///
 /// Used by the transaction runner to manage the various timers required by the
 /// non-INVITE client transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ClientNonInviteTimerHandles {
     /// Handle for Timer E, which controls request retransmissions
-    timer_e: Option<JoinHandle<()>>,
+    timer_e: Option<ManagedTimerHandle>,
 
     /// Current interval for Timer E, which doubles after each firing (up to T2)
     current_timer_e_interval: Option<Duration>, // For backoff
 
     /// Handle for Timer F, which controls transaction timeout
-    timer_f: Option<JoinHandle<()>>,
+    timer_f: Option<ManagedTimerHandle>,
 
     /// Handle for Timer K, which controls how long to wait in Completed state
-    timer_k: Option<JoinHandle<()>>,
+    timer_k: Option<ManagedTimerHandle>,
 }
 
 /// Implements the TransactionLogic for Client Non-INVITE transactions.
@@ -163,7 +163,7 @@ impl ClientNonInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "E",
@@ -202,7 +202,7 @@ impl ClientNonInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "F",
@@ -218,46 +218,6 @@ impl ClientNonInviteLogic {
             }
             Err(e) => {
                 error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer F");
-            }
-        }
-    }
-
-    /// Start Timer K (wait for response retransmissions) using timer utils
-    ///
-    /// This method starts Timer K, which controls how long to wait in the Completed
-    /// state for retransmissions of the final response. When Timer K fires, the
-    /// transaction transitions to the Terminated state.
-    async fn start_timer_k(
-        &self,
-        data: &Arc<ClientTransactionData>,
-        timer_handles: &mut ClientNonInviteTimerHandles,
-        command_tx: mpsc::Sender<InternalTransactionCommand>,
-    ) {
-        let tx_id = &data.id;
-        let timer_config = &data.timer_config;
-
-        // Start Timer K that automatically transitions to Terminated state when it fires
-        let interval_k = timer_config.wait_time_k;
-
-        // Use timer_utils to start the timer with transition
-        let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_timer_with_transition(
-            &timer_manager,
-            tx_id,
-            "K",
-            TimerType::K,
-            interval_k,
-            command_tx,
-            TransactionState::Terminated,
-        )
-        .await
-        {
-            Ok(handle) => {
-                timer_handles.timer_k = Some(handle);
-                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_k, "Started Timer K for Completed state");
-            }
-            Err(e) => {
-                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to start Timer K");
             }
         }
     }
@@ -283,6 +243,8 @@ impl ClientNonInviteLogic {
         {
             data.complete_initial_send(false);
             error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Trying state");
+            data.completion
+                .record_failure(crate::transaction::ClientTransactionFailure::Transport);
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
             // If send fails, command a transition to Terminated
             let _ = command_tx
@@ -329,6 +291,8 @@ impl ClientNonInviteLogic {
                     .await
                 {
                     error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to retransmit request");
+                    data.completion
+                        .record_failure(crate::transaction::ClientTransactionFailure::Transport);
                     common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                     return Ok(Some(TransactionState::Terminated));
                 }
@@ -343,7 +307,7 @@ impl ClientNonInviteLogic {
 
                 // Start new Timer E with the increased interval
                 let timer_manager = self.timer_factory.timer_manager();
-                match timer_utils::start_transaction_timer(
+                match timer_utils::start_transaction_timer_managed(
                     &timer_manager,
                     tx_id,
                     "E",
@@ -388,6 +352,8 @@ impl ClientNonInviteLogic {
                 warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer F (Timeout) fired in state {:?}", current_state);
 
                 // Notify TU about timeout using common logic
+                data.completion
+                    .record_failure(crate::transaction::ClientTransactionFailure::Timeout);
                 common_logic::send_transaction_timeout_event(tx_id, &data.events_tx).await;
 
                 // Return state transition
@@ -563,8 +529,28 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                 // Timer F continues. No new timers are started specifically for entering Proceeding.
             }
             TransactionState::Completed => {
-                // Start Timer K (wait for response retransmissions)
-                self.start_timer_k(data, timer_handles, command_tx).await;
+                // RFC 3261 section 17.1.2.2: Timer K is T4 for an
+                // unreliable transport and zero for a reliable transport.
+                // Avoid a timer task entirely for TCP/TLS/WS/WSS.
+                let unreliable = {
+                    let route = data.request_route.lock().await;
+                    timer_utils::uses_unreliable_transport(
+                        &route,
+                        data.transport.default_transport_type(),
+                    )
+                };
+                if unreliable {
+                    if !data
+                        .clone()
+                        .schedule_compact_timer_k(data.timer_config.wait_time_k)
+                        .await
+                        && !data.clone().schedule_termination().await
+                    {
+                        data.state.set(TransactionState::Terminated);
+                    }
+                } else if !data.clone().schedule_termination().await {
+                    data.state.set(TransactionState::Terminated);
+                }
             }
             TransactionState::Terminated => {
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Terminated state. Specific timers should have been cancelled by runner.");
@@ -639,10 +625,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), status=%response.status(), "🔍 DEBUG: Extracted response, storing and processing");
 
                 // Store the response
-                {
-                    let mut last_response = data.last_response.lock().await;
-                    *last_response = Some(response.clone());
-                }
+                data.record_response(response.clone()).await;
 
                 // Use our helper for response processing with real timer handles
                 let result = self
@@ -731,9 +714,33 @@ impl ClientNonInviteTransaction {
         request: Request,
         request_route: TransportRoute,
         transport: Arc<dyn Transport>,
-        events_tx: mpsc::Sender<TransactionEvent>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
+    ) -> Result<Self> {
+        let timer_manager = Arc::new(TimerManager::new(timer_config_override.clone()));
+        Self::new_with_route_command_capacity_and_timer_manager(
+            id,
+            request,
+            request_route,
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+            timer_manager,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_route_command_capacity_and_timer_manager(
+        id: TransactionKey,
+        request: Request,
+        request_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+        timer_manager: Arc<TimerManager>,
     ) -> Result<Self> {
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
@@ -745,13 +752,25 @@ impl ClientNonInviteTransaction {
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
+            response_notify: Arc::new(tokio::sync::Notify::new()),
+            completion: Arc::new(
+                crate::transaction::completion::ClientTransactionCompletion::new(
+                    TransactionState::Initial,
+                ),
+            ),
             remote_addr,
             request_route: Arc::new(Mutex::new(request_route)),
             transport,
-            events_tx,
+            events_tx: events_tx.into(),
             cmd_tx: cmd_tx.clone(), // For the transaction itself to send commands to its loop
             // cmd_rx is no longer stored here; it's passed directly to the spawned loop
             event_loop_handle: Arc::new(Mutex::new(None)),
+            termination_cleanup_tx: std::sync::OnceLock::new(),
+            lifecycle_scheduler: std::sync::OnceLock::new(),
+            compact_retention_reservation: std::sync::OnceLock::new(),
+            transaction_admission_owner: std::sync::OnceLock::new(),
+            terminal_event_publication:
+                crate::transaction::event_sender::TerminalEventPublication::new(),
             timer_config: timer_config.clone(),
             initial_send_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             initial_send_notify: Arc::new(tokio::sync::Notify::new()),
@@ -759,7 +778,7 @@ impl ClientNonInviteTransaction {
 
         let logic = Arc::new(ClientNonInviteLogic {
             _data_marker: std::marker::PhantomData,
-            timer_factory: TimerFactory::new(Some(timer_config), Arc::new(TimerManager::new(None))),
+            timer_factory: TimerFactory::new(Some(timer_config), timer_manager),
         });
 
         let data_for_runner = data.clone();
@@ -1105,6 +1124,14 @@ mod tests {
         request_method: Method,
         target_uri_str: &str, // Changed to target_uri_str
     ) -> TestSetup {
+        setup_test_environment_with_transport(request_method, target_uri_str, None).await
+    }
+
+    async fn setup_test_environment_with_transport(
+        request_method: Method,
+        target_uri_str: &str,
+        transport_type: Option<rvoip_sip_transport::transport::TransportType>,
+    ) -> TestSetup {
         let local_addr = "127.0.0.1:5090";
         let mock_transport = Arc::new(UnitTestMockTransport::new(local_addr));
         let (tu_events_tx, tu_events_rx) = mpsc::channel(100);
@@ -1134,19 +1161,37 @@ mod tests {
         let settings = TimerSettings {
             t1: Duration::from_millis(50),
             transaction_timeout: Duration::from_millis(200),
-            wait_time_k: Duration::from_millis(100),
+            wait_time_k: if transport_type.is_some() {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(100)
+            },
             ..Default::default()
         };
 
-        let transaction = ClientNonInviteTransaction::new(
-            tx_key,
-            request,
-            remote_addr,
-            mock_transport.clone() as Arc<dyn Transport>,
-            tu_events_tx,
-            Some(settings),
-        )
-        .unwrap();
+        let transaction = match transport_type {
+            Some(transport_type) => {
+                ClientNonInviteTransaction::new_with_route_and_command_channel_capacity(
+                    tx_key,
+                    request,
+                    TransportRoute::new(remote_addr).with_transport_type(transport_type),
+                    mock_transport.clone() as Arc<dyn Transport>,
+                    tu_events_tx,
+                    Some(settings),
+                    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+                )
+                .unwrap()
+            }
+            None => ClientNonInviteTransaction::new(
+                tx_key,
+                request,
+                remote_addr,
+                mock_transport.clone() as Arc<dyn Transport>,
+                tu_events_tx,
+                Some(settings),
+            )
+            .unwrap(),
+        };
 
         TestSetup {
             transaction,
@@ -1436,6 +1481,38 @@ mod tests {
             TransactionState::Terminated,
             "State should be Terminated after Timer K"
         );
+    }
+
+    #[tokio::test]
+    async fn reliable_transport_uses_zero_timer_k() {
+        let setup = setup_test_environment_with_transport(
+            Method::Options,
+            "sip:bob@target.com",
+            Some(rvoip_sip_transport::transport::TransportType::Tcp),
+        )
+        .await;
+        setup.transaction.initiate().await.expect("initiate failed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .unwrap();
+
+        let response =
+            build_simple_response(StatusCode::Ok, setup.transaction.data.request.as_ref());
+        setup
+            .transaction
+            .process_response(response)
+            .await
+            .expect("process_response failed");
+
+        TokioTimeout(Duration::from_millis(500), async {
+            while setup.transaction.state() != TransactionState::Terminated {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reliable client transaction should not wait for Timer K");
     }
 
     #[tokio::test]

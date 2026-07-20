@@ -176,6 +176,7 @@ use crate::transaction::TransactionKind;
 /// 2. The `AtomicTransactionState` struct for thread-safe state management
 /// 3. Functions to validate state transitions according to RFC 3261 rules
 use std::sync::atomic::{AtomicU8, Ordering};
+use tokio::sync::watch;
 
 /// Represents the state of a SIP transaction, aligned with the state machines
 /// defined in RFC 3261 (Section 17).
@@ -409,13 +410,16 @@ impl From<u8> for StateValue {
 #[derive(Debug)]
 pub struct AtomicTransactionState {
     value: AtomicU8,
+    changes: watch::Sender<TransactionState>,
 }
 
 impl AtomicTransactionState {
     /// Creates a new `AtomicTransactionState` initialized to the given `state`.
     pub fn new(state: TransactionState) -> Self {
+        let (changes, _receiver) = watch::channel(state);
         Self {
             value: AtomicU8::new(StateValue::from(state) as u8),
+            changes,
         }
     }
 
@@ -435,7 +439,18 @@ impl AtomicTransactionState {
         let prev_value = self
             .value
             .swap(StateValue::from(new_state) as u8, Ordering::AcqRel);
-        TransactionState::from(StateValue::from(prev_value))
+        let previous = TransactionState::from(StateValue::from(prev_value));
+        if previous != new_state {
+            self.changes.send_replace(new_state);
+        }
+        previous
+    }
+
+    /// Subscribe to exact state changes without using the public transaction
+    /// event bus. The latest state is retained, so registering after a
+    /// transition cannot miss it.
+    pub fn subscribe(&self) -> watch::Receiver<TransactionState> {
+        self.changes.subscribe()
     }
 
     /// Atomically transitions the state from `current_state` to `new_state` if the
@@ -480,7 +495,10 @@ impl AtomicTransactionState {
             Ordering::AcqRel,  // Strongest ordering for CAS success.
             Ordering::Acquire, // Weaker ordering for CAS failure is fine, only reading.
         ) {
-            Ok(_) => true, // Successfully transitioned from current_value to new_value.
+            Ok(_) => {
+                self.changes.send_replace(new_state);
+                true
+            }
             Err(actual_loaded_value) => {
                 // CAS failed. Check why.
                 if actual_loaded_value == new_value {
@@ -490,6 +508,7 @@ impl AtomicTransactionState {
                     // If the target is Terminated, force it.
                     // This ensures transactions can always be moved to Terminated.
                     self.value.store(new_value, Ordering::Release);
+                    self.changes.send_replace(new_state);
                     true
                 } else {
                     // The current state was not as expected, and we are not forcing termination,

@@ -12,7 +12,6 @@
 //! channel ends, which keeps it `Send + Sync` for tokio.
 
 use std::thread;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;

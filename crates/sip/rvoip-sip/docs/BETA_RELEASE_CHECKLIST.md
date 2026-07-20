@@ -83,6 +83,11 @@ Current reference report:
 - [x] Any result above 2,000 CPS is labeled as tuned or experimental.
 - [x] 24-hour release-candidate soak is explicitly waived for beta; the
   1-hour split soak is accepted as the beta release bar.
+- [ ] Three consecutive `perf_call_setup_2k_profile.sh clean` manifests pass
+  the current absolute acceptance and relative-audit gates from one source
+  fingerprint.
+- [ ] The final beta report imports those exact three run directories under
+  `canonical-2k/` and its end-of-gate source fence remains unchanged.
 
 ## Commands
 
@@ -101,13 +106,38 @@ crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 Final external release-gate command:
 
 ```sh
+# First run this three times without changing the source tree. Record each
+# printed target/perf-results/profiles/<run> artifact directory.
+crates/sip/rvoip-sip/scripts/perf_call_setup_2k_profile.sh clean
+
 RVOIP_STRICT_UA_HOST_IP=<local-host-ip> \
 BETA_REPORT_PACKAGE=1 \
+BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1 \
+BETA_CANONICAL_2K_RUN_DIRS="<oldest-run>:<middle-run>:<newest-run>" \
 BETA_RUN_LOCAL_PBX=1 \
 BETA_PBX_PROVIDER=both \
 BETA_PBX_API=all \
 BETA_PBX_SCENARIO=all \
 BETA_PBX_G729_PROFILES="g729a g729ab" \
+crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
+```
+
+For a literal-all performance qualification rather than the standard beta
+performance subset, add the following switches. This runs every registered
+performance/resiliency target, all configured burst scenarios, and both the
+split and monolithic long soaks. The isolated media-churn diagnostic defaults
+to 120 seconds, the legacy monolithic soak to 1800 seconds, and the split soak
+to `RVOIP_PERF_SOAK_DURATION_SECS` (3600 seconds in the beta gate). Their
+duration controls are deliberately independent:
+
+```sh
+BETA_RUN_PERF_ALL=1 \
+BETA_RUN_BURST_MATRIX=1 \
+BETA_BURST_MATRIX=all \
+BETA_RUN_LONG_SOAK=1 \
+BETA_PERF_MEDIA_CHURN_DURATION_SECS=120 \
+BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS=1800 \
+RVOIP_PERF_SOAK_DURATION_SECS=3600 \
 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
 
@@ -122,6 +152,7 @@ crates/sip/rvoip-sip/scripts/beta_gate.sh --interop
 Required release evidence from each interop/perf/security run:
 
 - `summary.md` at the beta-gate artifact root.
+- `canonical-2k/index.json` and its three read-only `run-N/` copies.
 - `environment/environment.md` and Docker snapshots under
   `environment/docker-<phase>/`.
 - `pbx/summary.md` and `pbx/matrix.tsv` for PBX runs.

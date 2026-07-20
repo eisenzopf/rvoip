@@ -318,12 +318,16 @@ impl DialogManager {
             if let Some(secs) = dlg.session_expires_secs {
                 let is_refresher = dlg.is_session_refresher;
                 drop(dlg);
-                crate::manager::session_timer::spawn_refresh_task(
+                if let Err(_error) = crate::manager::session_timer::spawn_refresh_task(
                     self.clone(),
                     dialog_id.clone(),
                     secs,
                     is_refresher,
-                );
+                )
+                .await
+                {
+                    warn!(dialog=%dialog_id, "Session refresh task was not started");
+                }
             }
         }
 

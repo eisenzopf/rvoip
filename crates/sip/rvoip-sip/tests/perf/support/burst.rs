@@ -250,22 +250,13 @@ impl HoldBucket {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnswerDelay {
     #[serde(default)]
     pub min_millis: u64,
     #[serde(default)]
     pub max_millis: u64,
-}
-
-impl Default for AnswerDelay {
-    fn default() -> Self {
-        Self {
-            min_millis: 0,
-            max_millis: 0,
-        }
-    }
 }
 
 impl AnswerDelay {

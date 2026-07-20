@@ -326,7 +326,7 @@ pub use crate::types::CallState;
 pub use unified::{
     Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
     RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SipContactMode,
-    SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
+    SipNatConfig, SipTlsMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
 };
 
 // Re-export event types
@@ -381,8 +381,9 @@ pub use send::{
 // Response builders (SIP_API_DESIGN_2 Phase D)
 pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 pub use respond::{
-    AcceptBuilder, AuthChallengeBuilder, AuthScheme, GenericResponseBuilder, ProvisionalBuilder,
-    RedirectBuilder, RegisterResponseBuilder, RejectBuilder,
+    AcceptBuilder, AuthChallengeBuilder, AuthScheme, GenericResponseBuilder,
+    InDialogResponseBuilder, ProvisionalBuilder, RedirectBuilder, RegisterResponseBuilder,
+    RejectBuilder,
 };
 
 // StreamPeer

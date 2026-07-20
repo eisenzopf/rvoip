@@ -88,6 +88,7 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
         Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
     );
     assert_eq!(Config::default().server_call_capacity, None);
+    assert_eq!(Config::default().server_retained_lifecycle_capacity, None);
     assert_eq!(Config::default().server_call_admission_limit, None);
     assert_eq!(Config::default().server_call_admission_soft_limit, None);
     assert_eq!(
@@ -222,6 +223,7 @@ fn server_capacity_sets_hot_index_capacity_only() {
     let config = Config::local("capacity-test", 5060).with_server_capacity(2048);
 
     assert_eq!(config.server_call_capacity, Some(2048));
+    assert_eq!(config.server_retained_lifecycle_capacity, None);
     assert_eq!(config.incoming_call_channel_capacity, 1000);
     assert_eq!(config.state_event_channel_capacity, 1000);
     assert_eq!(config.sip_transport_channel_capacity, 10_000);
@@ -234,6 +236,17 @@ fn server_capacity_sets_hot_index_capacity_only() {
         config.session_event_dispatcher_channel_capacity,
         Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
     );
+}
+
+#[test]
+fn retained_lifecycle_capacity_is_explicit_and_independent_from_active_capacity() {
+    let config = Config::local("capacity-test", 5060)
+        .with_server_capacity(20_000)
+        .with_server_retained_lifecycle_capacity(160_000);
+
+    assert_eq!(config.server_call_capacity, Some(20_000));
+    assert_eq!(config.server_retained_lifecycle_capacity, Some(160_000));
+    config.validate().expect("explicit lifecycle capacities");
 }
 
 #[test]
@@ -645,6 +658,51 @@ fn zero_server_call_capacity_is_rejected_when_set() {
 }
 
 #[test]
+fn zero_server_retained_lifecycle_capacity_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060).with_server_capacity(1);
+    config.server_retained_lifecycle_capacity = Some(0);
+
+    let err = config.validate().expect_err("zero capacity must fail");
+    assert!(
+        config_error_detail(&err)
+            .contains("server_retained_lifecycle_capacity must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn retained_lifecycle_capacity_requires_active_capacity() {
+    let config =
+        Config::local("capacity-test", 5060).with_server_retained_lifecycle_capacity(160_000);
+
+    let err = config
+        .validate()
+        .expect_err("retained capacity without active capacity must fail");
+    assert!(
+        config_error_detail(&err)
+            .contains("server_retained_lifecycle_capacity requires server_call_capacity"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn retained_lifecycle_capacity_must_cover_active_capacity() {
+    let config = Config::local("capacity-test", 5060)
+        .with_server_capacity(20_000)
+        .with_server_retained_lifecycle_capacity(19_999);
+
+    let err = config
+        .validate()
+        .expect_err("retained capacity below active capacity must fail");
+    assert!(
+        config_error_detail(&err).contains(
+            "server_retained_lifecycle_capacity (19999) must be >= server_call_capacity (20000)"
+        ),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
 fn zero_server_call_admission_limit_is_rejected_when_set() {
     let mut config = Config::local("capacity-test", 5060);
     config.server_call_admission_limit = Some(0);
@@ -701,13 +759,13 @@ fn zero_server_call_admission_pacing_delay_is_rejected_when_set() {
 #[test]
 fn unsupported_beta_media_codec_advertisement_is_rejected() {
     let mut config = Config::local("codec-test", 5060);
-    config.offered_codecs = vec![0, 8, 111, 101];
+    config.offered_codecs = vec![0, 8, 112, 101];
 
     let err = config
         .validate()
-        .expect_err("unsupported Opus advertisement must fail beta validation");
+        .expect_err("unsupported payload advertisement must fail beta validation");
     assert!(
-        config_error_detail(&err).contains("payload type 111 is not beta-supported for full media"),
+        config_error_detail(&err).contains("payload type 112 is not beta-supported for full media"),
         "unexpected validation error: {err}"
     );
 }

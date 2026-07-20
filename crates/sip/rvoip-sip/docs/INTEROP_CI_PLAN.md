@@ -65,7 +65,7 @@ The beta gate writes audit evidence under `BETA_GATE_ARTIFACT_DIR` or
 | REGISTER and unregister | Successful lifecycle and expiry handling. |
 | OPTIONS | Correct capability response. |
 | re-INVITE hold/resume | Correct SDP direction and dialog state. |
-| UPDATE | Correct in-dialog handling and glare behavior. |
+| UPDATE | Correct in-dialog handling; outbound 491 completes the exact UPDATE attempt without entering re-INVITE glare retry. |
 | PRACK | Reliable provisional positive and negative behavior. |
 | REFER/NOTIFY | Transfer progress and terminal NOTIFY. |
 | INFO DTMF | Correct mid-dialog request behavior. |

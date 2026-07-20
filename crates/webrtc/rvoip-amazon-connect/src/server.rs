@@ -17,9 +17,10 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -33,11 +34,13 @@ use rvoip_sip::{
     UnifiedCoordinator,
 };
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderName, TypedHeader};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, watch, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::adapter::{
-    AmazonConnectAdapter, ContactSetupObserver, ContactSetupStage, ContactTarget,
+    AmazonConnectAdapter, AmazonConnectDrainReport, ContactSetupObserver, ContactSetupStage,
+    ContactTarget,
 };
 use crate::bridge::{bridge_streams, StreamBridge};
 use crate::config::ConnectConfig;
@@ -503,6 +506,34 @@ impl<T> ContactRegistry<T> {
         }
     }
 
+    fn live_sessions(&self) -> (Vec<SipSessionId>, usize, usize) {
+        let _routing = self.routing_lock.lock();
+        let setup_sessions = self
+            .setups
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        let active_sessions = self
+            .active
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>();
+        let setup_count = setup_sessions.len();
+        let active_count = active_sessions.len();
+        let mut sessions = setup_sessions;
+        for session in active_sessions {
+            if !sessions.contains(&session) {
+                sessions.push(session);
+            }
+        }
+        (sessions, setup_count, active_count)
+    }
+
+    fn live_counts(&self) -> (usize, usize, usize) {
+        let _routing = self.routing_lock.lock();
+        (self.setups.len(), self.active.len(), self.by_connect.len())
+    }
+
     #[cfg(test)]
     fn live_is_empty(&self) -> bool {
         self.setups.is_empty()
@@ -657,6 +688,187 @@ pub struct RouteMetrics {
     pub active_sessions: u64,
 }
 
+const MAX_SCREEN_POP_SETUPS: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreenPopAdmissionError {
+    Draining,
+    Capacity,
+}
+
+/// Linearizable setup admission. The closure runs while the drain boundary is
+/// held, so an admitted task is inserted into the owned task set before drain
+/// can snapshot it.
+struct ScreenPopAdmission {
+    draining: SyncMutex<bool>,
+    setup_slots: Arc<Semaphore>,
+}
+
+impl ScreenPopAdmission {
+    fn new(capacity: usize) -> Self {
+        Self {
+            draining: SyncMutex::new(false),
+            setup_slots: Arc::new(Semaphore::new(capacity)),
+        }
+    }
+
+    fn admit_and<T, R>(
+        &self,
+        input: T,
+        admitted: impl FnOnce(T, OwnedSemaphorePermit) -> R,
+    ) -> std::result::Result<R, (ScreenPopAdmissionError, T)> {
+        let draining = self.draining.lock();
+        if *draining {
+            return Err((ScreenPopAdmissionError::Draining, input));
+        }
+        let permit = match Arc::clone(&self.setup_slots).try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => return Err((ScreenPopAdmissionError::Capacity, input)),
+        };
+        Ok(admitted(input, permit))
+    }
+
+    fn begin_drain(&self) -> bool {
+        let mut draining = self.draining.lock();
+        if *draining {
+            return false;
+        }
+        *draining = true;
+        self.setup_slots.close();
+        true
+    }
+
+    fn is_draining(&self) -> bool {
+        *self.draining.lock()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerTaskKind {
+    SipWatcher,
+    ConnectWatcher,
+    CallSetup,
+    DrainCleanup,
+}
+
+impl ServerTaskKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::SipWatcher => "sip-watcher",
+            Self::ConnectWatcher => "connect-watcher",
+            Self::CallSetup => "call-setup",
+            Self::DrainCleanup => "drain-cleanup",
+        }
+    }
+}
+
+struct TrackedServerTask {
+    kind: ServerTaskKind,
+    handle: JoinHandle<()>,
+}
+
+#[derive(Default)]
+struct TrackedServerTasks {
+    tasks: SyncMutex<Vec<TrackedServerTask>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ServerTaskDrainReport {
+    attempted_tasks: usize,
+    joined_tasks: usize,
+    failed_tasks: usize,
+    detached_tasks: usize,
+}
+
+impl TrackedServerTasks {
+    fn spawn(&self, kind: ServerTaskKind, future: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self.tasks.lock();
+        // Finished handles retain no runtime ownership. Reap them at every
+        // admission so the vector is bounded by live setup plus two watchers.
+        tasks.retain(|task| !task.handle.is_finished());
+        tasks.push(TrackedServerTask {
+            kind,
+            handle: tokio::spawn(future),
+        });
+    }
+
+    async fn drain_until(&self, deadline: Instant) -> ServerTaskDrainReport {
+        let tasks = std::mem::take(&mut *self.tasks.lock());
+        let mut report = ServerTaskDrainReport {
+            attempted_tasks: tasks.len(),
+            ..Default::default()
+        };
+        for mut task in tasks {
+            if task.handle.is_finished() {
+                match task.handle.await {
+                    Ok(()) => report.joined_tasks += 1,
+                    Err(_) => {
+                        report.failed_tasks += 1;
+                        warn!(task = task.kind.as_str(), "owned screen-pop task failed");
+                    }
+                }
+                continue;
+            }
+            match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                &mut task.handle,
+            )
+            .await
+            {
+                Ok(Ok(())) => report.joined_tasks += 1,
+                Ok(Err(_)) => {
+                    report.failed_tasks += 1;
+                    warn!(task = task.kind.as_str(), "owned screen-pop task failed");
+                }
+                Err(_) => {
+                    // Dropping a JoinHandle detaches rather than aborts. This
+                    // is required for setup that may be past StartContact but
+                    // has not yet returned its exact StopContact authority.
+                    report.detached_tasks += 1;
+                    drop(task.handle);
+                }
+            }
+        }
+        report
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.tasks.lock().len()
+    }
+}
+
+/// Result of draining the batteries-included SIP-to-Connect server to one
+/// absolute deadline.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ConnectScreenPopServerDrainReport {
+    pub setup_cancellations: usize,
+    pub active_cancellations: usize,
+    pub attempted_tasks: usize,
+    pub joined_tasks: usize,
+    pub failed_tasks: usize,
+    pub detached_tasks: usize,
+    pub remaining_setups: usize,
+    pub remaining_active: usize,
+    pub remaining_connect_routes: usize,
+    pub serve_stopped: bool,
+    pub coordinator_stopped: bool,
+    pub adapter: AmazonConnectDrainReport,
+}
+
+impl ConnectScreenPopServerDrainReport {
+    pub fn is_complete(&self) -> bool {
+        self.failed_tasks == 0
+            && self.detached_tasks == 0
+            && self.remaining_setups == 0
+            && self.remaining_active == 0
+            && self.remaining_connect_routes == 0
+            && self.serve_stopped
+            && self.coordinator_stopped
+            && self.adapter.is_complete()
+    }
+}
+
 /// The running server.
 pub struct ConnectScreenPopServer {
     coordinator: Arc<UnifiedCoordinator>,
@@ -671,6 +883,26 @@ pub struct ConnectScreenPopServer {
     registry: Arc<ContactRegistry<ActiveContact>>,
     lifecycle_tx: broadcast::Sender<ScreenPopLifecycleEvent>,
     cleanup: Arc<dyn ScreenPopCleanupActions>,
+    admission: ScreenPopAdmission,
+    tasks: TrackedServerTasks,
+    shutdown_tx: watch::Sender<bool>,
+    serve_started: AtomicBool,
+    serve_running: AtomicBool,
+    serve_idle: Notify,
+}
+
+struct ServeRunGuard {
+    server: Weak<ConnectScreenPopServer>,
+}
+
+impl Drop for ServeRunGuard {
+    fn drop(&mut self) {
+        if let Some(server) = self.server.upgrade() {
+            server.begin_drain();
+            server.serve_running.store(false, Ordering::Release);
+            server.serve_idle.notify_waiters();
+        }
+    }
 }
 
 impl ConnectScreenPopServer {
@@ -710,6 +942,7 @@ impl ConnectScreenPopServer {
             adapter: Arc::clone(&adapter),
         });
         let (lifecycle_tx, _) = broadcast::channel(256);
+        let (shutdown_tx, _) = watch::channel(false);
 
         Ok(Arc::new(Self {
             coordinator,
@@ -720,6 +953,12 @@ impl ConnectScreenPopServer {
             registry: Arc::new(ContactRegistry::default()),
             lifecycle_tx,
             cleanup,
+            admission: ScreenPopAdmission::new(MAX_SCREEN_POP_SETUPS),
+            tasks: TrackedServerTasks::default(),
+            shutdown_tx,
+            serve_started: AtomicBool::new(false),
+            serve_running: AtomicBool::new(false),
+            serve_idle: Notify::new(),
         }))
     }
 
@@ -801,10 +1040,67 @@ impl ConnectScreenPopServer {
             .clone()
     }
 
+    /// Establish the one-way admission boundary for shutdown. Calls admitted
+    /// before this method are already present in the owned task set; calls
+    /// observed afterwards are rejected before setup or Connect control I/O.
+    pub fn begin_drain(&self) -> bool {
+        let began = self.admission.begin_drain();
+        self.adapter.begin_drain();
+        if began {
+            self.shutdown_tx.send_replace(true);
+        }
+        began
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.admission.is_draining()
+    }
+
+    fn spawn_call_or_reject(self: &Arc<Self>, call: IncomingCall) {
+        let result = self.admission.admit_and(call, |call, permit| {
+            let server = Arc::clone(self);
+            self.tasks.spawn(ServerTaskKind::CallSetup, async move {
+                let _permit = permit;
+                if let Err(error) = server.handle_call(call).await {
+                    warn!(error = %error, "failed to bridge inbound call to Amazon Connect");
+                }
+            });
+        });
+        if let Err((reason, call)) = result {
+            match reason {
+                ScreenPopAdmissionError::Draining => {
+                    call.reject(503, "Service Unavailable");
+                }
+                ScreenPopAdmissionError::Capacity => {
+                    call.reject(503, "Server Busy");
+                }
+            }
+        }
+    }
+
     /// Run the accept loop forever: each inbound INVITE is translated, the
     /// Connect contact is placed, and the two legs are bridged. Per-call
     /// failures are logged and skipped; the loop continues.
     pub async fn serve(self: Arc<Self>) -> Result<()> {
+        if self.is_draining() {
+            return Err(ConnectError::Signaling(
+                "screen-pop server is draining".into(),
+            ));
+        }
+        if self
+            .serve_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(ConnectError::Signaling(
+                "screen-pop server was already started".into(),
+            ));
+        }
+        self.serve_running.store(true, Ordering::Release);
+        let _serve_guard = ServeRunGuard {
+            server: Arc::downgrade(&self),
+        };
+
         // Bidirectional teardown:
         //  • SIP leg ends  → LEAVE the Chime meeting (spawn_teardown_watcher).
         //  • Connect leg ends (agent hangup) → BYE the SIP carrier
@@ -817,10 +1113,15 @@ impl ConnectScreenPopServer {
             .events()
             .await
             .map_err(|e| ConnectError::Signaling(format!("SIP events: {e}")))?;
+        let mut shutdown = self.shutdown_tx.subscribe();
         info!("ConnectScreenPopServer listening for inbound SIP calls");
 
         loop {
-            let incoming = match self.coordinator.next_incoming_call(&mut events).await {
+            let incoming = match tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
+                incoming = self.coordinator.next_incoming_call(&mut events) => incoming,
+            } {
                 Ok(Some(call)) => call,
                 Ok(None) => {
                     info!("SIP event stream ended; stopping server");
@@ -831,15 +1132,7 @@ impl ConnectScreenPopServer {
                     continue;
                 }
             };
-
-            let me = Arc::clone(&self);
-            // Handle each call on its own task so a slow Connect handshake
-            // doesn't block the next inbound INVITE.
-            tokio::spawn(async move {
-                if let Err(e) = me.handle_call(incoming).await {
-                    warn!(error = %e, "failed to bridge inbound call to Amazon Connect");
-                }
-            });
+            self.spawn_call_or_reject(incoming);
         }
     }
 
@@ -847,12 +1140,30 @@ impl ConnectScreenPopServer {
     /// configured router can divert the call to a per-tenant Connect target
     /// or reject it outright (e.g. `404` for an unknown tenant).
     async fn handle_call(self: &Arc<Self>, call: IncomingCall) -> Result<()> {
+        if self.is_draining() {
+            call.reject(503, "Service Unavailable");
+            return Ok(());
+        }
         let session_id = call.call_id.clone();
         let correlation_id = correlation_id_from_headers(&extract_headers(&call));
         let Some(setup) = self.registry.register(session_id.clone(), correlation_id) else {
             call.reject(482, "Call Already Exists");
             return Ok(());
         };
+        // An admission that linearized immediately before begin_drain may not
+        // execute until afterwards. Register it so the exact SIP identity is
+        // owned, then reject and clean it without entering setup I/O.
+        if self.is_draining() {
+            call.reject(503, "Service Unavailable");
+            if let ContactClaim::Setup {
+                attempt,
+                connect_conn,
+            } = self.registry.claim_sip(&session_id)
+            {
+                self.cleanup_setup(attempt, connect_conn, false).await;
+            }
+            return Ok(());
+        }
         self.emit_lifecycle(&setup, ScreenPopLifecycleStage::SipInviteReceived);
 
         // 0. Per-call routing decision (multi-tenant hook).
@@ -1075,8 +1386,17 @@ impl ConnectScreenPopServer {
             .await
             .map_err(|e| ConnectError::Signaling(format!("SIP teardown events: {e}")))?;
         let me = Arc::clone(self);
-        tokio::spawn(async move {
-            while let Some(event) = events.next().await {
+        let mut shutdown = self.shutdown_tx.subscribe();
+        self.tasks.spawn(ServerTaskKind::SipWatcher, async move {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = shutdown.wait_for(|stopping| *stopping) => break,
+                    event = events.next() => event,
+                };
+                let Some(event) = event else {
+                    break;
+                };
                 let (call_id, failed) = match event {
                     SipEvent::CallEnded { call_id, .. } | SipEvent::CallCancelled { call_id } => {
                         (call_id, false)
@@ -1095,16 +1415,26 @@ impl ConnectScreenPopServer {
     fn spawn_connect_end_watcher(self: &Arc<Self>) {
         let mut events = self.adapter.subscribe_events();
         let me = Arc::clone(self);
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                let (connect_conn, failed) = match event {
-                    AdapterEvent::Ended { connection_id, .. } => (connection_id, false),
-                    AdapterEvent::Failed { connection_id, .. } => (connection_id, true),
-                    _ => continue,
-                };
-                me.on_connect_ended(&connect_conn, failed).await;
-            }
-        });
+        let mut shutdown = self.shutdown_tx.subscribe();
+        self.tasks
+            .spawn(ServerTaskKind::ConnectWatcher, async move {
+                loop {
+                    let event = tokio::select! {
+                        biased;
+                        _ = shutdown.wait_for(|stopping| *stopping) => break,
+                        event = events.recv() => event,
+                    };
+                    let Some(event) = event else {
+                        break;
+                    };
+                    let (connect_conn, failed) = match event {
+                        AdapterEvent::Ended { connection_id, .. } => (connection_id, false),
+                        AdapterEvent::Failed { connection_id, .. } => (connection_id, true),
+                        _ => continue,
+                    };
+                    me.on_connect_ended(&connect_conn, failed).await;
+                }
+            });
     }
 
     /// SIP leg ended → LEAVE the Chime meeting. Claims teardown by removing the
@@ -1201,6 +1531,79 @@ impl ConnectScreenPopServer {
         // Dropping active stops both graph directions.
     }
 
+    fn enqueue_registry_drain(self: &Arc<Self>) -> (usize, usize) {
+        let (sessions, setup_count, active_count) = self.registry.live_sessions();
+        for session in sessions {
+            let server = Arc::clone(self);
+            self.tasks.spawn(ServerTaskKind::DrainCleanup, async move {
+                server.on_sip_ended(&session).await;
+            });
+        }
+        (setup_count, active_count)
+    }
+
+    async fn wait_for_serve_stop(&self, deadline: Instant) -> bool {
+        loop {
+            let stopped = self.serve_idle.notified();
+            if !self.serve_running.load(Ordering::Acquire) {
+                return true;
+            }
+            if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), stopped)
+                .await
+                .is_err()
+            {
+                return false;
+            }
+        }
+    }
+
+    async fn shutdown_coordinator_until(&self, deadline: Instant) -> bool {
+        let shutdown = self.coordinator.shutdown_gracefully(Some(Duration::ZERO));
+        match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), shutdown).await {
+            Ok(Ok(())) => true,
+            Ok(Err(_)) | Err(_) => {
+                self.coordinator.shutdown();
+                false
+            }
+        }
+    }
+
+    /// Stop admission, cancel every exact setup/active registry owner, join
+    /// server tasks, delegate route cleanup to the adapter, and stop the SIP
+    /// coordinator using one caller-supplied absolute deadline.
+    ///
+    /// Tasks that cross the deadline are detached, never aborted. In
+    /// particular, setup that may have crossed StartWebRTCContact retains its
+    /// route/guard authority until it can reconcile and Stop the contact.
+    pub async fn drain_until(
+        self: &Arc<Self>,
+        deadline: Instant,
+    ) -> ConnectScreenPopServerDrainReport {
+        self.begin_drain();
+        let (setup_cancellations, active_cancellations) = self.enqueue_registry_drain();
+        let serve_stopped = self.wait_for_serve_stop(deadline).await;
+        let task_report = self.tasks.drain_until(deadline).await;
+        let adapter = self.adapter.drain_until(deadline).await;
+        let coordinator_stopped = self.shutdown_coordinator_until(deadline).await;
+        let (remaining_setups, remaining_active, remaining_connect_routes) =
+            self.registry.live_counts();
+
+        ConnectScreenPopServerDrainReport {
+            setup_cancellations,
+            active_cancellations,
+            attempted_tasks: task_report.attempted_tasks,
+            joined_tasks: task_report.joined_tasks,
+            failed_tasks: task_report.failed_tasks,
+            detached_tasks: task_report.detached_tasks,
+            remaining_setups,
+            remaining_active,
+            remaining_connect_routes,
+            serve_stopped,
+            coordinator_stopped,
+            adapter,
+        }
+    }
+
     /// Tear down a bridged contact by SIP session (public manual teardown).
     pub async fn end(&self, sip_session: &SipSessionId) {
         self.on_sip_ended(sip_session).await;
@@ -1280,6 +1683,205 @@ pub fn uri_user_part(uri: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use tokio::sync::Barrier;
+
+    struct NoopStarter;
+
+    #[async_trait]
+    impl ConnectContactStarter for NoopStarter {
+        async fn start_webrtc_contact(
+            &self,
+            _request: crate::control::StartContactRequest,
+        ) -> Result<crate::control::ConnectionData> {
+            Err(ConnectError::Control("unused test starter".into()))
+        }
+
+        async fn stop_contact(&self, _request: crate::control::StopContactRequest) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn setup_admission_is_bounded_and_closes_permanently_at_drain() {
+        let admission = ScreenPopAdmission::new(1);
+        let first = admission
+            .admit_and((), |(), permit| permit)
+            .expect("first setup is admitted");
+        assert!(matches!(
+            admission.admit_and((), |(), permit| permit),
+            Err((ScreenPopAdmissionError::Capacity, ()))
+        ));
+        assert!(admission.begin_drain());
+        assert!(!admission.begin_drain());
+        drop(first);
+        assert!(matches!(
+            admission.admit_and((), |(), permit| permit),
+            Err((ScreenPopAdmissionError::Draining, ()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_joins_owned_watcher_and_call_tasks() {
+        let tasks = TrackedServerTasks::default();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        tasks.spawn(ServerTaskKind::SipWatcher, async move {
+            let _ = shutdown_rx.wait_for(|stopping| *stopping).await;
+        });
+        tasks.spawn(ServerTaskKind::CallSetup, async {});
+        assert_eq!(tasks.len(), 2);
+        shutdown_tx.send_replace(true);
+
+        let report = tasks
+            .drain_until(Instant::now() + Duration::from_secs(1))
+            .await;
+        assert_eq!(report.attempted_tasks, 2);
+        assert_eq!(report.joined_tasks, 2);
+        assert_eq!(report.failed_tasks, 0);
+        assert_eq!(report.detached_tasks, 0);
+        assert_eq!(tasks.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn task_deadline_detaches_without_aborting_ambiguous_work() {
+        let tasks = TrackedServerTasks::default();
+        let entered = Arc::new(Barrier::new(2));
+        let release = Arc::new(Notify::new());
+        let completed = Arc::new(AtomicBool::new(false));
+        tasks.spawn(ServerTaskKind::CallSetup, {
+            let entered = Arc::clone(&entered);
+            let release = Arc::clone(&release);
+            let completed = Arc::clone(&completed);
+            async move {
+                entered.wait().await;
+                release.notified().await;
+                completed.store(true, Ordering::Release);
+            }
+        });
+        entered.wait().await;
+
+        let report = tasks
+            .drain_until(Instant::now() + Duration::from_millis(10))
+            .await;
+        assert_eq!(report.detached_tasks, 1);
+        assert!(!completed.load(Ordering::Acquire));
+
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !completed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached ambiguous work retained ownership and completed");
+    }
+
+    #[tokio::test]
+    async fn registry_drain_claims_and_cleans_exact_setup_and_active_owners() {
+        struct TestActive {
+            attempt: Arc<SetupAttempt>,
+            connection: ConnectionId,
+        }
+
+        let registry = ContactRegistry::<TestActive>::default();
+        let setup_session = SipSessionId::from_string("drain-setup");
+        let setup_attempt = registry
+            .register(setup_session.clone(), Some("setup-correlation".into()))
+            .expect("register setup");
+        let setup_connection = ConnectionId::new();
+        assert!(registry.bind_connect(&setup_attempt, setup_connection.clone()));
+
+        let active_session = SipSessionId::from_string("drain-active");
+        let active_attempt = registry
+            .register(active_session.clone(), Some("active-correlation".into()))
+            .expect("register active setup");
+        let active_connection = ConnectionId::new();
+        assert!(registry.bind_connect(&active_attempt, active_connection.clone()));
+        assert!(registry
+            .promote(
+                &active_attempt,
+                TestActive {
+                    attempt: Arc::clone(&active_attempt),
+                    connection: active_connection.clone(),
+                },
+            )
+            .is_ok());
+
+        let (sessions, setups, active) = registry.live_sessions();
+        assert_eq!(setups, 1);
+        assert_eq!(active, 1);
+        assert_eq!(sessions.len(), 2);
+        let cleanup = MockCleanupActions::default();
+
+        for session in sessions {
+            match registry.claim_sip(&session) {
+                ContactClaim::Setup {
+                    attempt,
+                    connect_conn,
+                } => {
+                    release_resources(&cleanup, &attempt.session_id, connect_conn.as_ref())
+                        .await
+                        .expect("setup resources released");
+                    registry.finish(&attempt, connect_conn.as_ref());
+                }
+                ContactClaim::Active(active) => {
+                    release_resources(
+                        &cleanup,
+                        &active.attempt.session_id,
+                        Some(&active.connection),
+                    )
+                    .await
+                    .expect("active resources released");
+                    registry.finish(&active.attempt, Some(&active.connection));
+                }
+                _ => panic!("drain must claim an exact live owner"),
+            }
+        }
+
+        let mut cleaned_sip = cleanup.sip.lock().clone();
+        cleaned_sip.sort_by_key(ToString::to_string);
+        let mut expected_sip = vec![setup_session, active_session];
+        expected_sip.sort_by_key(ToString::to_string);
+        assert_eq!(cleaned_sip, expected_sip);
+        assert_eq!(cleanup.connect.lock().len(), 2);
+        assert_eq!(registry.live_counts(), (0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn server_drain_closes_admission_and_delegates_to_adapter() {
+        let config = ScreenPopServerConfig::new(
+            SipConfig::local("server-drain", 0),
+            ConnectConfig::new("test-instance", "test-flow"),
+            Arc::new(NoopStarter),
+        );
+        let server = ConnectScreenPopServer::build(config)
+            .await
+            .expect("build test server");
+        let serve_task = tokio::spawn(Arc::clone(&server).serve());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !server.serve_running.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("serve loop entered");
+        let report = server
+            .drain_until(Instant::now() + Duration::from_secs(1))
+            .await;
+        tokio::time::timeout(Duration::from_secs(1), serve_task)
+            .await
+            .expect("serve task joined")
+            .expect("serve task did not panic")
+            .expect("serve exited cleanly");
+
+        assert!(server.is_draining());
+        assert!(server.adapter().is_draining());
+        assert_eq!(report.setup_cancellations, 0);
+        assert_eq!(report.active_cancellations, 0);
+        assert!(report.attempted_tasks >= 2);
+        assert_eq!(report.remaining_setups, 0);
+        assert_eq!(report.remaining_active, 0);
+        assert!(report.adapter.is_complete());
+        assert!(report.is_complete(), "unexpected report: {report:?}");
+    }
 
     #[test]
     fn parses_plain_and_bracketed_uris() {

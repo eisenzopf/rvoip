@@ -7,7 +7,11 @@ pub use capability::{
     offer_codec_preferences, pick_codec,
 };
 pub use inspect::{
-    redact_for_log, sdp_advertises_telephone_event, sdp_has_inline_ice_candidates,
-    sdp_has_media_line, sdp_indicates_simulcast,
+    negotiated_telephone_event_codec, preferred_telephone_event_codec_in_sdp, redact_for_log,
+    sdp_advertises_telephone_event, sdp_has_inline_ice_candidates, sdp_has_media_line,
+    sdp_indicates_simulcast, telephone_event_codecs_in_sdp,
 };
-pub use session::{audio_codecs_in_sdp, parse_sdp, sdp_to_string};
+pub use session::{
+    audio_codecs_in_sdp, negotiated_single_audio_payload, parse_sdp, sdp_to_string,
+    NegotiatedAudioPayload,
+};

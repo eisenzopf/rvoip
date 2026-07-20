@@ -17,10 +17,12 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::audio_subscription::AudioSubscriberStatus;
 use crate::catalog_subscriber_wire::{
     WireCatalogFailure, WireCatalogObject, WireCatalogSubscriberClient, WireCatalogSubscription,
 };
 use crate::{
+    MoqAudioObjectReceiver, MoqAudioSubscriberConfig, MoqAudioSubscriptionSnapshot,
     MoqCatalogApplyOutcome, MoqCatalogDeliveryMode, MoqCatalogObject, MoqCatalogStateMachine,
     MoqCatalogSubscriberConfig, MoqCatalogSubscriberFailure, MoqCatalogSubscriberLifecycle,
     MoqCatalogSubscriptionSnapshot, MoqEndOfGroupEvidence, MoqError, MoqProtocolVersion,
@@ -68,6 +70,14 @@ trait CatalogConnection: Send {
         max_catalog_bytes: usize,
     ) -> Result<Option<ManagedCatalogObject>, WireCatalogFailure>;
 
+    async fn start_audio(
+        &mut self,
+        _max_audio_object_bytes: usize,
+        _status: Arc<AudioSubscriberStatus>,
+    ) -> Result<(), WireCatalogFailure> {
+        Ok(())
+    }
+
     async fn close(self: Box<Self>, reason: &'static str);
 }
 
@@ -103,6 +113,14 @@ impl CatalogConnection for WireCatalogSubscription {
                 .await?
                 .map(ManagedCatalogObject::from),
         )
+    }
+
+    async fn start_audio(
+        &mut self,
+        max_audio_object_bytes: usize,
+        status: Arc<AudioSubscriberStatus>,
+    ) -> Result<(), WireCatalogFailure> {
+        WireCatalogSubscription::start_audio(self, max_audio_object_bytes, status).await
     }
 
     async fn close(self: Box<Self>, reason: &'static str) {
@@ -154,6 +172,90 @@ pub struct MoqCatalogSubscriber {
     control: Arc<CatalogSubscriberControl>,
 }
 
+/// Managed canonical `audio/main` subscriber.
+///
+/// The audio track is opened only after the same authenticated session has
+/// delivered a compatible MSF-01 catalog. Reconnect, authorization, protocol
+/// negotiation, and drain are owned by the underlying catalog supervisor.
+#[must_use = "retain the subscriber or close it to observe cleanup"]
+pub struct MoqAudioSubscriber {
+    catalog: Arc<MoqCatalogSubscriber>,
+    audio: Arc<AudioSubscriberStatus>,
+}
+
+impl MoqAudioSubscriber {
+    pub fn bind(
+        bind: SocketAddr,
+        config: MoqAudioSubscriberConfig,
+        tls: MoqCatalogSubscriberTlsConfig,
+        credentials: Arc<dyn MoqSubscriberCredentialProvider>,
+    ) -> Result<Arc<Self>, MoqError> {
+        config.validate()?;
+        let wire = WireCatalogSubscriberClient::bind(bind, tls.root_certificates)?;
+        let audio = AudioSubscriberStatus::new(&config);
+        let catalog = MoqCatalogSubscriber::start_with_connector_and_audio(
+            config.catalog.clone(),
+            credentials,
+            Arc::new(wire),
+            Some(ManagedAudioSubscription {
+                max_audio_object_bytes: config.max_audio_object_bytes,
+                status: Arc::clone(&audio),
+            }),
+        )?;
+        Ok(Arc::new(Self { catalog, audio }))
+    }
+
+    pub fn snapshot(&self) -> MoqCatalogSubscriptionSnapshot {
+        self.catalog.snapshot()
+    }
+
+    pub fn updates(&self) -> watch::Receiver<MoqCatalogSubscriptionSnapshot> {
+        self.catalog.updates()
+    }
+
+    pub fn audio_snapshot(&self) -> MoqAudioSubscriptionSnapshot {
+        self.audio.snapshot()
+    }
+
+    pub fn audio_updates(&self) -> watch::Receiver<MoqAudioSubscriptionSnapshot> {
+        self.audio.updates()
+    }
+
+    /// Receive validated objects through an independent bounded live-edge queue.
+    pub fn audio_objects(&self) -> MoqAudioObjectReceiver {
+        self.audio.objects()
+    }
+
+    pub async fn wait(&self) -> Result<(), MoqError> {
+        self.catalog.wait().await?;
+        audio_terminal_result(&self.audio.wait_terminal().await)
+    }
+
+    pub async fn close(&self) -> Result<(), MoqError> {
+        self.catalog.close().await?;
+        audio_terminal_result(&self.audio.snapshot())
+    }
+
+    pub async fn drain(&self, deadline: DateTime<Utc>) -> bool {
+        self.catalog.drain(deadline).await && self.audio.snapshot().failure.is_none()
+    }
+}
+
+fn audio_terminal_result(snapshot: &MoqAudioSubscriptionSnapshot) -> Result<(), MoqError> {
+    if snapshot.failure.is_some() {
+        return Err(MoqError::CatalogSubscriber(
+            MoqCatalogSubscriberFailure::InvalidAudio,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct ManagedAudioSubscription {
+    max_audio_object_bytes: usize,
+    status: Arc<AudioSubscriberStatus>,
+}
+
 impl MoqCatalogSubscriber {
     pub fn bind(
         bind: SocketAddr,
@@ -171,6 +273,15 @@ impl MoqCatalogSubscriber {
         credentials: Arc<dyn MoqSubscriberCredentialProvider>,
         connector: Arc<dyn CatalogConnector>,
     ) -> Result<Arc<Self>, MoqError> {
+        Self::start_with_connector_and_audio(config, credentials, connector, None)
+    }
+
+    fn start_with_connector_and_audio(
+        config: MoqCatalogSubscriberConfig,
+        credentials: Arc<dyn MoqSubscriberCredentialProvider>,
+        connector: Arc<dyn CatalogConnector>,
+        audio: Option<ManagedAudioSubscription>,
+    ) -> Result<Arc<Self>, MoqError> {
         config.validate()?;
         let state = MoqCatalogStateMachine::new(&config)?;
         let runtime =
@@ -186,12 +297,16 @@ impl MoqCatalogSubscriber {
                 credentials,
                 state,
                 Arc::clone(&task_status),
+                audio.clone(),
                 task_cancel,
             ))
             .catch_unwind()
             .await;
             if result.is_err() {
                 task_status.failed(MoqCatalogSubscriberFailure::TaskFailed);
+                if let Some(audio) = audio {
+                    audio.status.transport_ended();
+                }
             }
         });
         Ok(Arc::new(Self {
@@ -449,6 +564,7 @@ async fn run_subscriber(
     credentials: Arc<dyn MoqSubscriberCredentialProvider>,
     mut catalog: MoqCatalogStateMachine,
     status: Arc<CatalogSubscriberStatus>,
+    audio: Option<ManagedAudioSubscription>,
     cancel: CancellationToken,
 ) {
     let mut used_credentials = HashSet::new();
@@ -458,6 +574,10 @@ async fn run_subscriber(
     loop {
         if cancel.is_cancelled() {
             status.draining();
+            if let Some(audio) = &audio {
+                audio.status.draining();
+                audio.status.closed();
+            }
             status.closed();
             return;
         }
@@ -466,6 +586,9 @@ async fn run_subscriber(
             Ok(request) => request,
             Err(_) => {
                 status.failed(MoqCatalogSubscriberFailure::ReconnectExhausted);
+                if let Some(audio) = &audio {
+                    audio.status.transport_ended();
+                }
                 return;
             }
         };
@@ -485,6 +608,10 @@ async fn run_subscriber(
         let connected = tokio::select! {
             () = cancel.cancelled() => {
                 status.draining();
+                if let Some(audio) = &audio {
+                    audio.status.draining();
+                    audio.status.closed();
+                }
                 status.closed();
                 return;
             }
@@ -510,6 +637,7 @@ async fn run_subscriber(
                     &mut attempt,
                     &mut reconnect_deadline,
                     failure,
+                    audio.as_ref(),
                 )
                 .await
                 {
@@ -518,12 +646,19 @@ async fn run_subscriber(
                 continue;
             }
         };
+        let mut audio_started = false;
 
-        let failure = loop {
+        let mut failure = loop {
             let next = tokio::select! {
                 () = cancel.cancelled() => {
                     status.draining();
+                    if let Some(audio) = &audio {
+                        audio.status.draining();
+                    }
                     subscription.close("rvoip catalog subscriber closed").await;
+                    if let Some(audio) = &audio {
+                        audio.status.closed();
+                    }
                     status.closed();
                     return;
                 }
@@ -547,8 +682,10 @@ async fn run_subscriber(
                 payload: &object.payload,
                 received_at: Utc::now(),
             });
-            match applied {
-                Ok(MoqCatalogApplyOutcome::Duplicate) => {}
+            let live_catalog = match applied {
+                Ok(MoqCatalogApplyOutcome::Duplicate) => catalog
+                    .latest()
+                    .is_some_and(|latest| latest.catalog.state() == MsfCatalogState::Live),
                 Ok(MoqCatalogApplyOutcome::Update(update)) => {
                     let completed = update.catalog.state() == MsfCatalogState::PermanentlyCompleted;
                     status.update(update);
@@ -556,12 +693,37 @@ async fn run_subscriber(
                         subscription
                             .close("rvoip catalog publication completed")
                             .await;
+                        if let Some(audio) = &audio {
+                            audio.status.closed();
+                        }
                         return;
                     }
+                    true
                 }
                 Err(error) => break map_validation_failure(&error),
+            };
+            if live_catalog && !audio_started {
+                if let Some(audio) = &audio {
+                    audio.status.subscribing();
+                    match subscription
+                        .start_audio(audio.max_audio_object_bytes, Arc::clone(&audio.status))
+                        .await
+                    {
+                        Ok(()) => {
+                            audio.status.live();
+                            audio_started = true;
+                        }
+                        Err(error) => break map_wire_failure(error),
+                    }
+                }
             }
         };
+        if audio
+            .as_ref()
+            .is_some_and(|audio| audio.status.fatal_invalid_object())
+        {
+            failure = MoqCatalogSubscriberFailure::InvalidAudio;
+        }
         subscription
             .close("rvoip catalog subscriber reconnecting")
             .await;
@@ -572,6 +734,7 @@ async fn run_subscriber(
             &mut attempt,
             &mut reconnect_deadline,
             failure,
+            audio.as_ref(),
         )
         .await
         {
@@ -587,6 +750,7 @@ async fn retry_or_wait(
     attempt: &mut u32,
     reconnect_deadline: &mut Option<Instant>,
     failure: MoqCatalogSubscriberFailure,
+    audio: Option<&ManagedAudioSubscription>,
 ) -> bool {
     if !retryable(failure) || *attempt >= config.max_reconnect_attempts {
         status.failed(if retryable(failure) {
@@ -594,6 +758,13 @@ async fn retry_or_wait(
         } else {
             failure
         });
+        if let Some(audio) = audio {
+            if failure == MoqCatalogSubscriberFailure::SubscribeFailed {
+                audio.status.subscribe_failed();
+            } else {
+                audio.status.transport_ended();
+            }
+        }
         return false;
     }
     let deadline =
@@ -601,17 +772,30 @@ async fn retry_or_wait(
     let backoff = reconnect_backoff(config, *attempt);
     let Some(wakeup) = Instant::now().checked_add(backoff) else {
         status.failed(MoqCatalogSubscriberFailure::ReconnectExhausted);
+        if let Some(audio) = audio {
+            audio.status.transport_ended();
+        }
         return false;
     };
     if wakeup > deadline {
         status.failed(MoqCatalogSubscriberFailure::ReconnectExhausted);
+        if let Some(audio) = audio {
+            audio.status.transport_ended();
+        }
         return false;
     }
     *attempt = attempt.saturating_add(1);
     status.reconnecting(*attempt, failure);
+    if let Some(audio) = audio {
+        audio.status.reconnecting(*attempt);
+    }
     tokio::select! {
         () = cancel.cancelled() => {
             status.draining();
+            if let Some(audio) = audio {
+                audio.status.draining();
+                audio.status.closed();
+            }
             status.closed();
             false
         }
@@ -813,6 +997,7 @@ mod tests {
         calls: AtomicUsize,
         fingerprints: Mutex<Vec<[u8; 32]>>,
         closes: Arc<AtomicUsize>,
+        audio_starts: Arc<AtomicUsize>,
         close_notify: Arc<Notify>,
     }
 
@@ -823,6 +1008,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 fingerprints: Mutex::new(Vec::new()),
                 closes: Arc::new(AtomicUsize::new(0)),
+                audio_starts: Arc::new(AtomicUsize::new(0)),
                 close_notify: Arc::new(Notify::new()),
             }
         }
@@ -864,6 +1050,7 @@ mod tests {
                 MockAttempt::Connected(stream) => Ok(Box::new(MockConnection {
                     stream,
                     closes: Arc::clone(&self.closes),
+                    audio_starts: Arc::clone(&self.audio_starts),
                     close_notify: Arc::clone(&self.close_notify),
                 })),
             }
@@ -873,6 +1060,7 @@ mod tests {
     struct MockConnection {
         stream: MockStream,
         closes: Arc<AtomicUsize>,
+        audio_starts: Arc<AtomicUsize>,
         close_notify: Arc<Notify>,
     }
 
@@ -905,6 +1093,15 @@ mod tests {
                     .pop_front()
                     .unwrap_or(Err(WireCatalogFailure::StreamEnded)),
             }
+        }
+
+        async fn start_audio(
+            &mut self,
+            _max_audio_object_bytes: usize,
+            _status: Arc<AudioSubscriberStatus>,
+        ) -> Result<(), WireCatalogFailure> {
+            self.audio_starts.fetch_add(1, Ordering::AcqRel);
+            Ok(())
         }
 
         async fn close(self: Box<Self>, _reason: &'static str) {
@@ -942,6 +1139,24 @@ mod tests {
         }
     }
 
+    fn live_object(group_id: u64) -> ManagedCatalogObject {
+        let namespace = crate::MoqNamespace::new("tenant", "broadcast").unwrap();
+        let payload = crate::MsfCatalog::opus_audio(&namespace, 24_000, None, 1)
+            .unwrap()
+            .to_json_bytes()
+            .unwrap();
+        ManagedCatalogObject {
+            group_id,
+            subgroup_id: 0,
+            object_id: 0,
+            first_object: true,
+            end_of_group: MoqEndOfGroupEvidence::Signaled,
+            extension_header_count: 0,
+            declared_payload_len: payload.len() as u64,
+            payload: payload.into(),
+        }
+    }
+
     fn start_mock(
         config: MoqCatalogSubscriberConfig,
         credentials: Arc<SequenceCredentials>,
@@ -950,6 +1165,32 @@ mod tests {
         let credentials: Arc<dyn MoqSubscriberCredentialProvider> = credentials;
         let connector: Arc<dyn CatalogConnector> = connector;
         MoqCatalogSubscriber::start_with_connector(config, credentials, connector).unwrap()
+    }
+
+    fn start_mock_audio(
+        catalog_config: MoqCatalogSubscriberConfig,
+        credentials: Arc<SequenceCredentials>,
+        connector: Arc<MockConnector>,
+    ) -> (Arc<MoqCatalogSubscriber>, Arc<AudioSubscriberStatus>) {
+        let mut audio_config = MoqAudioSubscriberConfig::new(
+            catalog_config.endpoint.clone(),
+            catalog_config.namespace.clone(),
+        );
+        audio_config.catalog = catalog_config.clone();
+        let audio = AudioSubscriberStatus::new(&audio_config);
+        let credentials: Arc<dyn MoqSubscriberCredentialProvider> = credentials;
+        let connector: Arc<dyn CatalogConnector> = connector;
+        let subscriber = MoqCatalogSubscriber::start_with_connector_and_audio(
+            catalog_config,
+            credentials,
+            connector,
+            Some(ManagedAudioSubscription {
+                max_audio_object_bytes: audio_config.max_audio_object_bytes,
+                status: Arc::clone(&audio),
+            }),
+        )
+        .unwrap();
+        (subscriber, audio)
     }
 
     #[test]
@@ -1015,6 +1256,42 @@ mod tests {
             .expect("fingerprints poisoned");
         assert_eq!(fingerprints.len(), 2);
         assert_ne!(fingerprints[0], fingerprints[1]);
+    }
+
+    #[tokio::test]
+    async fn audio_track_reuses_catalog_auth_reconnect_and_terminal_lifecycle() {
+        let credentials = Arc::new(SequenceCredentials::new([
+            Ok(b"audio-attempt-one".to_vec()),
+            Ok(b"audio-attempt-two".to_vec()),
+        ]));
+        let connector = Arc::new(MockConnector::new([
+            MockAttempt::Connected(MockStream::Events(VecDeque::from([
+                Ok(Some(live_object(3))),
+                Err(WireCatalogFailure::StreamEnded),
+            ]))),
+            MockAttempt::Connected(MockStream::Events(VecDeque::from([
+                Ok(Some(live_object(3))),
+                Err(WireCatalogFailure::StreamEnded),
+            ]))),
+        ]));
+        let (subscriber, audio) =
+            start_mock_audio(config(1), Arc::clone(&credentials), Arc::clone(&connector));
+        let result = tokio::time::timeout(Duration::from_secs(1), subscriber.wait())
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            Err(MoqError::CatalogSubscriber(
+                MoqCatalogSubscriberFailure::ReconnectExhausted
+            ))
+        ));
+        assert_eq!(credentials.calls.load(Ordering::Acquire), 2);
+        assert_eq!(connector.audio_starts.load(Ordering::Acquire), 2);
+        assert_eq!(audio.snapshot().reconnects, 1);
+        assert_eq!(
+            audio.snapshot().lifecycle,
+            crate::MoqAudioSubscriberLifecycle::Failed
+        );
     }
 
     #[tokio::test]

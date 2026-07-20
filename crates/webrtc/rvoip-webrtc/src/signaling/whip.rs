@@ -20,8 +20,8 @@
 //! | `PATCH`  | `/whip/{id}`   | `application/trickle-ice-sdpfrag`     | 204 |
 //! | `DELETE` | `/whip/{id}`   | -                                     | 200 |
 //! | `OPTIONS`| any            | -                                     | 204 + CORS preflight headers |
-//! | `POST`   | `/whep/{tag}`  | -                                     | 201 offer (subscriber answers via PATCH) |
-//! | `PATCH`  | `/whep/{id}`   | `application/sdp` answer              | 204 |
+//! | `POST`   | `/whep/{tag}`  | `application/sdp` player offer        | 201 + server answer, or typed 406 counter-offer when configured |
+//! | `PATCH`  | `/whep/{id}`   | counter-offer answer or trickle ICE   | 204 |
 //! | `DELETE` | `/whep/{id}`   | -                                     | 200 |
 //! | `GET`    | `/healthz`     | -                                     | 200 plain text |
 //! | `GET`    | `/readyz`      | -                                     | 200 plain text + active session count |
@@ -41,11 +41,15 @@ use dashmap::DashMap;
 use rvoip_core::adapter::{ConnectionAdapter, InboundRoutingHint};
 use rvoip_core::ids::ConnectionId;
 use rvoip_sip_core::sdp::parser::parse_attribute;
+use rvoip_sip_core::types::sdp::SdpSession;
+use rvoip_sip_core::MediaDirection;
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
 use webrtc::peer_connection::RTCIceCandidateInit;
 
-use crate::adapter::{RouteAuthorization, WebRtcAdapter};
+use crate::adapter::{
+    HttpSignalingResource, HttpSignalingResourcePhase, RouteAuthorization, WebRtcAdapter,
+};
 use crate::errors::{Result, WebRtcError};
 use crate::signaling::auth::{
     extract_bearer, AnonymousAuth, AuthContext, AuthRejection, WhipAuthHook,
@@ -53,6 +57,23 @@ use crate::signaling::auth::{
 
 const CT_TRICKLE: &str = "application/trickle-ice-sdpfrag";
 const CT_SDP: &str = "application/sdp";
+const MAX_SDPFRAG_BYTES: usize = 64 * 1024;
+const MAX_SDPFRAG_MUTATIONS: usize = 256;
+const WHEP_COUNTER_OFFER_LIFETIME: Duration = Duration::from_secs(30);
+
+/// WHEP listener behavior.
+///
+/// Draft-04 client-offer handling is the default. The counter-offer variant
+/// is an explicit endpoint policy used when the origin needs to replace the
+/// player's offer. The historical empty-POST/server-offer exchange is kept
+/// only as an opt-in compatibility mode and is observable through metrics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WhepServerMode {
+    #[default]
+    Draft04,
+    Draft04CounterOffer,
+    LegacyServerOffer,
+}
 
 #[derive(Clone)]
 pub struct WhipState {
@@ -63,6 +84,7 @@ pub struct WhipState {
     /// Pluggable Bearer-token enforcement (RFC 9725 §4.1). Default
     /// [`AnonymousAuth`] accepts everything — back-compat with pre-G2.
     auth: Arc<dyn WhipAuthHook>,
+    whep_mode: WhepServerMode,
 }
 
 impl WhipState {
@@ -71,6 +93,7 @@ impl WhipState {
             adapter,
             rate: Arc::new(DashMap::new()),
             auth: Arc::new(AnonymousAuth),
+            whep_mode: WhepServerMode::Draft04,
         }
     }
 
@@ -78,6 +101,11 @@ impl WhipState {
     /// hook accepts every request — backward compatible with pre-G2.
     pub fn with_auth(mut self, auth: Arc<dyn WhipAuthHook>) -> Self {
         self.auth = auth;
+        self
+    }
+
+    pub fn with_whep_mode(mut self, mode: WhepServerMode) -> Self {
+        self.whep_mode = mode;
         self
     }
 
@@ -103,6 +131,22 @@ impl WhipState {
         }
         *entry = (new_tokens - 1, now);
         true
+    }
+
+    fn register_resource(
+        &self,
+        connection_id: &ConnectionId,
+        phase: HttpSignalingResourcePhase,
+    ) -> Option<(String, Arc<HttpSignalingResource>)> {
+        self.adapter.register_http_resource(connection_id, phase)
+    }
+
+    fn resource_version(&self, connection_id: &ConnectionId) -> Option<Arc<HttpSignalingResource>> {
+        self.adapter.http_resource(connection_id)
+    }
+
+    fn remove_resource(&self, connection_id: &ConnectionId, version: &Arc<HttpSignalingResource>) {
+        self.adapter.remove_http_resource_if(connection_id, version);
     }
 }
 
@@ -131,7 +175,19 @@ pub async fn serve_listener_with_auth(
     adapter: Arc<WebRtcAdapter>,
     auth: Arc<dyn WhipAuthHook>,
 ) -> Result<()> {
-    let state = WhipState::new(Arc::clone(&adapter)).with_auth(auth);
+    serve_listener_with_auth_and_mode(listener, adapter, auth, WhepServerMode::Draft04).await
+}
+
+/// Serve WHIP plus an explicitly selected WHEP protocol mode.
+pub async fn serve_listener_with_auth_and_mode(
+    listener: TcpListener,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WhipAuthHook>,
+    whep_mode: WhepServerMode,
+) -> Result<()> {
+    let state = WhipState::new(Arc::clone(&adapter))
+        .with_auth(auth)
+        .with_whep_mode(whep_mode);
     let app = build_router(state, &adapter);
 
     axum::serve(
@@ -160,7 +216,26 @@ pub async fn serve_listener_with_auth_and_shutdown(
     auth: Arc<dyn WhipAuthHook>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let state = WhipState::new(Arc::clone(&adapter)).with_auth(auth);
+    serve_listener_with_auth_mode_and_shutdown(
+        listener,
+        adapter,
+        auth,
+        WhepServerMode::Draft04,
+        shutdown,
+    )
+    .await
+}
+
+pub async fn serve_listener_with_auth_mode_and_shutdown(
+    listener: TcpListener,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WhipAuthHook>,
+    whep_mode: WhepServerMode,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let state = WhipState::new(Arc::clone(&adapter))
+        .with_auth(auth)
+        .with_whep_mode(whep_mode);
     let app = build_router(state, &adapter);
 
     axum::serve(
@@ -195,7 +270,29 @@ pub async fn serve_tls_with_auth_and_shutdown(
     auth: Arc<dyn WhipAuthHook>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let state = WhipState::new(Arc::clone(&adapter)).with_auth(auth);
+    serve_tls_with_auth_mode_and_shutdown(
+        listener,
+        tls,
+        adapter,
+        auth,
+        WhepServerMode::Draft04,
+        shutdown,
+    )
+    .await
+}
+
+#[cfg(feature = "tls-rustls")]
+pub async fn serve_tls_with_auth_mode_and_shutdown(
+    listener: std::net::TcpListener,
+    tls: crate::tls::TlsConfig,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WhipAuthHook>,
+    whep_mode: WhepServerMode,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    let state = WhipState::new(Arc::clone(&adapter))
+        .with_auth(auth)
+        .with_whep_mode(whep_mode);
     let app = build_router(state, &adapter);
     let handle = axum_server::Handle::new();
     let handle_for_shutdown = handle.clone();
@@ -223,6 +320,7 @@ fn build_router(state: WhipState, adapter: &Arc<WebRtcAdapter>) -> Router {
         .route(
             "/whep/:id",
             post(whep_post)
+                .get(whep_get)
                 .patch(whep_patch)
                 .delete(whep_delete)
                 .options(whip_options),
@@ -296,6 +394,18 @@ async fn healthz() -> Response {
     (StatusCode::OK, "ok").into_response()
 }
 
+/// Draft-04 endpoint/session discovery. WHEP resources have no HTTP
+/// representation, so GET and Axum's corresponding HEAD handling return a
+/// successful empty response while retaining the SDP content type.
+async fn whep_get() -> Response {
+    (
+        StatusCode::OK,
+        [("content-type", CT_SDP)],
+        axum::body::Body::empty(),
+    )
+        .into_response()
+}
+
 async fn readyz(State(state): State<WhipState>) -> Response {
     let m = state.adapter.metrics();
     (
@@ -338,12 +448,17 @@ fn content_type_of(headers: &HeaderMap) -> String {
 /// Includes `Location`, `ETag`, `Accept-Patch`, `Content-Type` (the SDP body
 /// type), and one `Link: <…>; rel="ice-server"` per configured ICE server
 /// (RFC 9725 §4.6, auto-populated in G2).
-fn build_session_headers(adapter: &Arc<WebRtcAdapter>, conn_id: &ConnectionId) -> HeaderMap {
+fn build_session_headers(
+    adapter: &Arc<WebRtcAdapter>,
+    conn_id: &ConnectionId,
+    resource_kind: &str,
+    etag: &str,
+) -> HeaderMap {
     let mut headers = HeaderMap::new();
-    if let Ok(v) = HeaderValue::from_str(&format!("/whip/{conn_id}")) {
+    if let Ok(v) = HeaderValue::from_str(&format!("/{resource_kind}/{conn_id}")) {
         headers.insert("location", v);
     }
-    if let Ok(v) = HeaderValue::from_str(&format!("\"{conn_id}\"")) {
+    if let Ok(v) = HeaderValue::from_str(etag) {
         headers.insert("etag", v);
     }
     if let Ok(v) = HeaderValue::from_str(&format!("{CT_SDP}, {CT_TRICKLE}")) {
@@ -424,10 +539,38 @@ fn route_error_response(state: &WhipState, error: WebRtcError) -> Response {
     }
 }
 
-/// Stable ETag derivation from a connection id. Stays in sync with
-/// [`build_session_headers`]; both must produce the same value.
-fn etag_for(conn_id: &ConnectionId) -> String {
-    format!("\"{conn_id}\"")
+fn new_strong_etag() -> String {
+    // A fresh opaque UUID on every successful mutation prevents ABA across
+    // ICE restarts and across server/resource recreation.
+    format!("\"{}\"", ConnectionId::new())
+}
+
+fn require_exact_if_match(
+    headers: &HeaderMap,
+    expected: &str,
+) -> std::result::Result<(), Response> {
+    let mut supplied = headers.get_all("if-match").iter();
+    let Some(first) = supplied.next() else {
+        return Err((StatusCode::PRECONDITION_REQUIRED, "If-Match required").into_response());
+    };
+    if supplied.next().is_some() {
+        return Err((StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response());
+    }
+    let Ok(first) = first.to_str() else {
+        return Err((StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response());
+    };
+    if first != expected {
+        return Err((StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response());
+    }
+    Ok(())
+}
+
+fn etag_response(status: StatusCode, etag: &str) -> Response {
+    let mut headers = HeaderMap::new();
+    if let Ok(etag) = HeaderValue::from_str(etag) {
+        headers.insert("etag", etag);
+    }
+    (status, headers).into_response()
 }
 
 /// OPTIONS handler — RFC 9725 §4.6 / browser-side feature detection.
@@ -490,10 +633,11 @@ async fn whip_post(
 
     let conn_id = match state
         .adapter
-        .apply_remote_offer_authorized_with_hint(
+        .apply_remote_offer_authorized_with_hint_and_ice_policy(
             &body,
             auth.route_authorization(),
             Some(routing_hint),
+            crate::WebRtcIceExchangePolicy::FullGather,
         )
         .await
     {
@@ -521,16 +665,20 @@ async fn whip_post(
         }
     };
 
-    let headers = build_session_headers(&state.adapter, &conn_id);
+    let Some((etag, _)) = state.register_resource(&conn_id, HttpSignalingResourcePhase::Whip)
+    else {
+        return (StatusCode::CONFLICT, "WHIP route ended during creation").into_response();
+    };
+    let headers = build_session_headers(&state.adapter, &conn_id, "whip", &etag);
     (StatusCode::CREATED, headers, answer).into_response()
 }
 
 /// WHIP PATCH: dispatch by `Content-Type` between ICE restart (full SDP) and
 /// trickle ICE candidate update (RFC 8840 sdpfrag).
 ///
-/// For ICE restart (`application/sdp`), enforces `If-Match: "<etag>"` per
-/// RFC 9725 §4.4.1 — 428 when missing, 412 on mismatch. Trickle updates
-/// do not require If-Match (per the spec).
+/// Every resource mutation is serialized behind its current strong ETag.
+/// Missing preconditions return 428 and stale, weak, wildcard, duplicated, or
+/// otherwise inexact validators return 412.
 async fn whip_patch(
     State(state): State<WhipState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -550,6 +698,20 @@ async fn whip_patch(
     let id = ConnectionId::from_string(conn_id);
     let authorization = auth.route_authorization();
 
+    if let Err(error) = state.adapter.authorize_network_route(&id, &authorization) {
+        return route_error_response(&state, error);
+    }
+    let Some(resource) = state.resource_version(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut version = resource.version.lock().await;
+    if version.phase != HttpSignalingResourcePhase::Whip {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(response) = require_exact_if_match(&headers, &version.etag) {
+        return response;
+    }
+
     if content_type == CT_TRICKLE {
         if body.trim().is_empty() {
             return (StatusCode::BAD_REQUEST, "empty WHIP trickle body").into_response();
@@ -559,7 +721,8 @@ async fn whip_patch(
                 if count == 0 {
                     (StatusCode::BAD_REQUEST, "no candidates in sdpfrag").into_response()
                 } else {
-                    StatusCode::NO_CONTENT.into_response()
+                    version.etag = new_strong_etag();
+                    etag_response(StatusCode::NO_CONTENT, &version.etag)
                 }
             }
             Err(e) => route_error_response(&state, e),
@@ -574,22 +737,6 @@ async fn whip_patch(
             .into_response();
     }
 
-    // ICE restart path: require If-Match per RFC 9725 §4.4.1.
-    let expected_etag = etag_for(&id);
-    match headers.get("if-match").and_then(|v| v.to_str().ok()) {
-        None => {
-            return (
-                StatusCode::PRECONDITION_REQUIRED,
-                "If-Match required for ICE restart (RFC 9725 §4.4.1)",
-            )
-                .into_response();
-        }
-        Some(supplied) if supplied != expected_etag && supplied != "*" => {
-            return (StatusCode::PRECONDITION_FAILED, "ETag mismatch").into_response();
-        }
-        Some(_) => {}
-    }
-
     if body.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "empty WHIP ICE restart offer body").into_response();
     }
@@ -598,7 +745,15 @@ async fn whip_patch(
         .apply_ice_restart_offer_authorized(id, &body, &authorization)
         .await
     {
-        Ok(sdp) => (StatusCode::OK, [("content-type", CT_SDP)], sdp).into_response(),
+        Ok(sdp) => {
+            version.etag = new_strong_etag();
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert("content-type", HeaderValue::from_static(CT_SDP));
+            if let Ok(etag) = HeaderValue::from_str(&version.etag) {
+                response_headers.insert("etag", etag);
+            }
+            (StatusCode::OK, response_headers, sdp).into_response()
+        }
         Err(e) => route_error_response(&state, e),
     }
 }
@@ -615,6 +770,11 @@ async fn apply_sdpfrag(
     // Authorize even a syntactically empty fragment so callers cannot use
     // PATCH response differences to probe another principal's route.
     adapter.authorize_network_route(conn_id, authorization)?;
+    if body.len() > MAX_SDPFRAG_BYTES {
+        return Err(WebRtcError::Signaling(
+            "trickle ICE fragment exceeds its bound".into(),
+        ));
+    }
     let mut current_mid: Option<String> = None;
     let mut mline_index: u16 = 0;
     let mut applied = 0usize;
@@ -630,6 +790,11 @@ async fn apply_sdpfrag(
             }
             current_mid = None;
         } else if let Some(cand) = line.strip_prefix("a=candidate:") {
+            if applied >= MAX_SDPFRAG_MUTATIONS {
+                return Err(WebRtcError::Signaling(
+                    "trickle ICE fragment exceeds its mutation bound".into(),
+                ));
+            }
             parse_attribute(&format!("candidate:{cand}"))
                 .map_err(|err| WebRtcError::Sdp(format!("invalid sdpfrag candidate: {err}")))?;
             let init = RTCIceCandidateInit {
@@ -643,6 +808,26 @@ async fn apply_sdpfrag(
                 .apply_trickle_candidate_authorized(conn_id, init, authorization)
                 .await?;
             applied += 1;
+        } else if line == "a=end-of-candidates" {
+            if applied >= MAX_SDPFRAG_MUTATIONS {
+                return Err(WebRtcError::Signaling(
+                    "trickle ICE fragment exceeds its mutation bound".into(),
+                ));
+            }
+            adapter
+                .apply_trickle_candidate_authorized(
+                    conn_id,
+                    RTCIceCandidateInit {
+                        candidate: String::new(),
+                        sdp_mid: current_mid.clone(),
+                        sdp_mline_index: Some(mline_index),
+                        username_fragment: None,
+                        url: None,
+                    },
+                    authorization,
+                )
+                .await?;
+            applied += 1;
         }
     }
     Ok(applied)
@@ -653,7 +838,7 @@ async fn whep_post(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Path(tag): Path<String>,
     headers: HeaderMap,
-    _body: String,
+    body: String,
 ) -> Response {
     let auth = match check_auth(&state, "POST", &format!("/whep/{tag}"), &headers, addr).await {
         Ok(auth) => auth,
@@ -662,6 +847,142 @@ async fn whep_post(
     if !state.allow_request(addr.ip()) {
         return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
     }
+    if state.whep_mode == WhepServerMode::LegacyServerOffer {
+        return whep_legacy_post(&state, auth, &body).await;
+    }
+
+    let content_type = content_type_of(&headers);
+    if content_type != CT_SDP {
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert("accept-post", HeaderValue::from_static(CT_SDP));
+        return (
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            response_headers,
+            "WHEP draft-04 requires Content-Type: application/sdp",
+        )
+            .into_response();
+    }
+    if let Err(response) = validate_whep_player_offer(&body) {
+        return response;
+    }
+    let routing_hint = match InboundRoutingHint::new(tag) {
+        Ok(routing_hint) => routing_hint,
+        Err(_) => {
+            state.adapter.note_signaling_error();
+            return (StatusCode::BAD_REQUEST, "invalid WHEP resource tag").into_response();
+        }
+    };
+    let authorization = auth.route_authorization();
+
+    match state.whep_mode {
+        WhepServerMode::Draft04 => {
+            let conn_id = match state
+                .adapter
+                .apply_remote_offer_authorized_with_hint_and_ice_policy(
+                    &body,
+                    authorization,
+                    Some(routing_hint),
+                    crate::WebRtcIceExchangePolicy::FullGather,
+                )
+                .await
+            {
+                Ok(connection_id) => connection_id,
+                Err(error) => return whep_creation_error_response(&state, error),
+            };
+            let answer = match state.adapter.local_sdp(&conn_id) {
+                Ok(answer) if whep_answer_is_send_only(&answer) => answer,
+                Ok(_) | Err(_) => {
+                    let _ = state
+                        .adapter
+                        .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                        .await;
+                    return (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "WHEP answer did not satisfy playback direction",
+                    )
+                        .into_response();
+                }
+            };
+            let Some((etag, _)) =
+                state.register_resource(&conn_id, HttpSignalingResourcePhase::WhepEstablished)
+            else {
+                return (StatusCode::CONFLICT, "WHEP route ended during creation").into_response();
+            };
+            let response_headers = build_session_headers(&state.adapter, &conn_id, "whep", &etag);
+            (StatusCode::CREATED, response_headers, answer).into_response()
+        }
+        WhepServerMode::Draft04CounterOffer => {
+            let (conn_id, offer) = match state
+                .adapter
+                .create_whep_counter_offer_authorized_with_hint(authorization, routing_hint)
+                .await
+            {
+                Ok(created) => created,
+                Err(error) => return whep_creation_error_response(&state, error),
+            };
+            if !whep_counter_offer_is_send_only(&offer) {
+                let _ = state
+                    .adapter
+                    .end(conn_id, rvoip_core::adapter::EndReason::Normal)
+                    .await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "WHEP counter-offer direction is invalid",
+                )
+                    .into_response();
+            }
+            let expires_at = tokio::time::Instant::now() + WHEP_COUNTER_OFFER_LIFETIME;
+            let Some((etag, resource)) = state.register_resource(
+                &conn_id,
+                HttpSignalingResourcePhase::WhepAwaitingCounterOfferAnswer { expires_at },
+            ) else {
+                return (StatusCode::CONFLICT, "WHEP route ended during creation").into_response();
+            };
+            spawn_whep_counter_offer_expiry(
+                Arc::clone(&state.adapter),
+                conn_id.clone(),
+                Arc::clone(&resource),
+                expires_at,
+            );
+            let mut response_headers =
+                build_session_headers(&state.adapter, &conn_id, "whep", &etag);
+            let valid_until = chrono::Utc::now()
+                + chrono::Duration::from_std(WHEP_COUNTER_OFFER_LIFETIME)
+                    .unwrap_or_else(|_| chrono::Duration::seconds(30));
+            let content_type = format!(
+                "{CT_SDP}; valid-until=\"{}\"",
+                valid_until.format("%a, %d %b %Y %H:%M:%S GMT")
+            );
+            if let Ok(value) = HeaderValue::from_str(&content_type) {
+                response_headers.insert("content-type", value);
+            }
+            (StatusCode::NOT_ACCEPTABLE, response_headers, offer).into_response()
+        }
+        // The early return above owns this compatibility path. Keeping this
+        // arm non-panicking protects library callers if mode dispatch is
+        // refactored later.
+        WhepServerMode::LegacyServerOffer => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "legacy WHEP mode dispatch failed",
+        )
+            .into_response(),
+    }
+}
+
+async fn whep_legacy_post(state: &WhipState, auth: AuthContext, body: &str) -> Response {
+    if !body.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "legacy WHEP server-offer mode requires an empty POST body",
+        )
+            .into_response();
+    }
+    state.adapter.note_legacy_whep_session();
+    tracing::warn!(
+        protocol = "whep",
+        mode = "legacy-server-offer",
+        "serving explicitly enabled legacy WHEP exchange"
+    );
     match state
         .adapter
         .originate(rvoip_core::adapter::OriginateRequest {
@@ -711,10 +1032,21 @@ async fn whep_post(
             }
             match state.adapter.local_sdp(&conn_id) {
                 Ok(sdp) => {
-                    let mut headers = build_session_headers(&state.adapter, &conn_id);
-                    if let Ok(v) = HeaderValue::from_str(&format!("/whep/{conn_id}")) {
-                        headers.insert("location", v);
-                    }
+                    let expires_at = tokio::time::Instant::now() + WHEP_COUNTER_OFFER_LIFETIME;
+                    let Some((etag, resource)) = state.register_resource(
+                        &conn_id,
+                        HttpSignalingResourcePhase::WhepAwaitingCounterOfferAnswer { expires_at },
+                    ) else {
+                        return (StatusCode::CONFLICT, "WHEP route ended during creation")
+                            .into_response();
+                    };
+                    spawn_whep_counter_offer_expiry(
+                        Arc::clone(&state.adapter),
+                        conn_id.clone(),
+                        resource,
+                        expires_at,
+                    );
+                    let headers = build_session_headers(&state.adapter, &conn_id, "whep", &etag);
                     (StatusCode::CREATED, headers, sdp).into_response()
                 }
                 Err(_) => {
@@ -733,7 +1065,152 @@ async fn whep_post(
     }
 }
 
-/// WHEP subscriber answer: PATCH SDP answer onto the offerer connection.
+fn validate_whep_player_offer(body: &str) -> std::result::Result<(), Response> {
+    if body.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "empty WHEP offer body").into_response());
+    }
+    let session = body
+        .parse::<SdpSession>()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid WHEP SDP offer").into_response())?;
+    let mut active_media = 0usize;
+    for media in &session.media_descriptions {
+        if media.port == 0
+            || !(media.media.eq_ignore_ascii_case("audio")
+                || media.media.eq_ignore_ascii_case("video"))
+        {
+            continue;
+        }
+        active_media += 1;
+        let direction = media
+            .direction
+            .or(session.direction)
+            .unwrap_or(MediaDirection::SendRecv);
+        if matches!(
+            direction,
+            MediaDirection::SendOnly | MediaDirection::Inactive
+        ) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "WHEP player offer has a forbidden media direction",
+            )
+                .into_response());
+        }
+    }
+    if active_media == 0 {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "WHEP offer contains no active audio or video media",
+        )
+            .into_response());
+    }
+    Ok(())
+}
+
+fn whep_answer_is_send_only(sdp: &str) -> bool {
+    whep_sdp_has_direction(sdp, MediaDirection::SendOnly)
+}
+
+fn whep_counter_offer_is_send_only(sdp: &str) -> bool {
+    whep_sdp_has_direction(sdp, MediaDirection::SendOnly)
+}
+
+fn whep_sdp_has_direction(sdp: &str, required: MediaDirection) -> bool {
+    let Ok(session) = sdp.parse::<SdpSession>() else {
+        return false;
+    };
+    let mut active_media = 0usize;
+    for media in &session.media_descriptions {
+        if media.port == 0
+            || !(media.media.eq_ignore_ascii_case("audio")
+                || media.media.eq_ignore_ascii_case("video"))
+        {
+            continue;
+        }
+        active_media += 1;
+        if media
+            .direction
+            .or(session.direction)
+            .unwrap_or(MediaDirection::SendRecv)
+            != required
+        {
+            return false;
+        }
+    }
+    active_media > 0
+}
+
+fn whep_creation_error_response(state: &WhipState, error: WebRtcError) -> Response {
+    state.adapter.note_signaling_error();
+    match error {
+        WebRtcError::InboundAdmissionRejected => {
+            (StatusCode::FORBIDDEN, "WHEP attachment was not admitted").into_response()
+        }
+        WebRtcError::Unauthorized(_) => (StatusCode::UNAUTHORIZED, "unauthorized").into_response(),
+        WebRtcError::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden").into_response(),
+        WebRtcError::Adapter(ref detail) if detail.contains("cap reached") => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "WebRTC capacity unavailable",
+        )
+            .into_response(),
+        WebRtcError::Sdp(_) | WebRtcError::Webrtc(_) | WebRtcError::IncompatibleCapabilities => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "WHEP offer could not be negotiated",
+        )
+            .into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "WebRTC signaling failed").into_response(),
+    }
+}
+
+fn spawn_whep_counter_offer_expiry(
+    adapter: Arc<WebRtcAdapter>,
+    connection_id: ConnectionId,
+    resource: Arc<HttpSignalingResource>,
+    expires_at: tokio::time::Instant,
+) {
+    let mut cancelled = resource.expiry_cancelled();
+    let task_guard = adapter.start_http_resource_task();
+    tokio::spawn(async move {
+        let _task_guard = task_guard;
+        if *cancelled.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = tokio::time::sleep_until(expires_at) => {}
+            changed = cancelled.changed() => {
+                let _ = changed;
+                return;
+            }
+        }
+        let current = adapter.http_resource(&connection_id);
+        if current
+            .as_ref()
+            .is_none_or(|candidate| !Arc::ptr_eq(candidate, &resource))
+        {
+            return;
+        }
+        let expired = {
+            let version = resource.version.lock().await;
+            matches!(
+                version.phase,
+                HttpSignalingResourcePhase::WhepAwaitingCounterOfferAnswer { expires_at: deadline }
+                    if tokio::time::Instant::now() >= deadline
+            )
+        };
+        if expired {
+            let _ = adapter
+                .end(
+                    connection_id,
+                    rvoip_core::adapter::EndReason::Failed {
+                        detail: "WHEP counter-offer expired".into(),
+                    },
+                )
+                .await;
+        }
+    });
+}
+
+/// WHEP subscriber answer or trickle update. Both paths require and rotate
+/// the exact current strong ETag under one per-resource mutation lock.
 async fn whep_patch(
     State(state): State<WhipState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -746,25 +1223,93 @@ async fn whep_patch(
         Ok(auth) => auth,
         Err(resp) => return resp,
     };
-    let ct = content_type_of(&headers);
-    if !ct.is_empty() && ct != CT_SDP {
+    if !state.allow_request(addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+    }
+    let content_type = content_type_of(&headers);
+    if content_type != CT_SDP && content_type != CT_TRICKLE {
         return (
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            format!("expected {CT_SDP}, got '{ct}'"),
+            format!("expected {CT_SDP} or {CT_TRICKLE}, got '{content_type}'"),
         )
             .into_response();
     }
     if body.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, "empty WHEP answer body").into_response();
+        return (StatusCode::BAD_REQUEST, "empty WHEP PATCH body").into_response();
     }
     let id = ConnectionId::from_string(conn_id);
-    match state
-        .adapter
-        .accept_remote_answer_authorized(id, &body, &auth.route_authorization())
-        .await
+    let authorization = auth.route_authorization();
+    if let Err(error) = state.adapter.authorize_network_route(&id, &authorization) {
+        return route_error_response(&state, error);
+    }
+    let Some(resource) = state.resource_version(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut version = resource.version.lock().await;
+    if version.phase == HttpSignalingResourcePhase::Whip {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(response) = require_exact_if_match(&headers, &version.etag) {
+        return response;
+    }
+    if let HttpSignalingResourcePhase::WhepAwaitingCounterOfferAnswer { expires_at } = version.phase
     {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(e) => route_error_response(&state, e),
+        if tokio::time::Instant::now() >= expires_at {
+            drop(version);
+            let _ = state
+                .adapter
+                .end(
+                    id.clone(),
+                    rvoip_core::adapter::EndReason::Failed {
+                        detail: "WHEP counter-offer expired".into(),
+                    },
+                )
+                .await;
+            state.remove_resource(&id, &resource);
+            return StatusCode::GONE.into_response();
+        }
+    }
+    let result = if content_type == CT_TRICKLE {
+        if version.phase != HttpSignalingResourcePhase::WhepEstablished {
+            return (
+                StatusCode::CONFLICT,
+                "WHEP counter-offer answer is still pending",
+            )
+                .into_response();
+        }
+        apply_sdpfrag(&state.adapter, &id, &body, &authorization)
+            .await
+            .and_then(|count| {
+                (count > 0).then_some(()).ok_or_else(|| {
+                    WebRtcError::Signaling("WHEP trickle fragment had no mutations".into())
+                })
+            })
+    } else {
+        if !matches!(
+            version.phase,
+            HttpSignalingResourcePhase::WhepAwaitingCounterOfferAnswer { .. }
+        ) {
+            return (
+                StatusCode::CONFLICT,
+                "WHEP does not permit SDP renegotiation",
+            )
+                .into_response();
+        }
+        state
+            .adapter
+            .accept_remote_answer_authorized(id, &body, &authorization)
+            .await
+    };
+    match result {
+        Ok(()) => {
+            if content_type == CT_SDP {
+                version.phase = HttpSignalingResourcePhase::WhepEstablished;
+                resource.cancel_expiry_task();
+            }
+            version.etag = new_strong_etag();
+            etag_response(StatusCode::NO_CONTENT, &version.etag)
+        }
+        Err(error) => route_error_response(&state, error),
     }
 }
 
@@ -787,16 +1332,34 @@ async fn whip_delete(
         Err(resp) => return resp,
     };
     let id = ConnectionId::from_string(conn_id);
+    let authorization = auth.route_authorization();
+    if let Err(error) = state.adapter.authorize_network_route(&id, &authorization) {
+        return route_error_response(&state, error);
+    }
+    let Some(resource) = state.resource_version(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let version = resource.version.lock().await;
+    if version.phase != HttpSignalingResourcePhase::Whip {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(response) = require_exact_if_match(&headers, &version.etag) {
+        return response;
+    }
     match state
         .adapter
         .end_authorized(
-            id,
+            id.clone(),
             rvoip_core::adapter::EndReason::Normal,
-            &auth.route_authorization(),
+            &authorization,
         )
         .await
     {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            drop(version);
+            state.remove_resource(&id, &resource);
+            StatusCode::OK.into_response()
+        }
         Err(error) => route_error_response(&state, error),
     }
 }
@@ -820,16 +1383,34 @@ async fn whep_delete(
         Err(resp) => return resp,
     };
     let id = ConnectionId::from_string(conn_id);
+    let authorization = auth.route_authorization();
+    if let Err(error) = state.adapter.authorize_network_route(&id, &authorization) {
+        return route_error_response(&state, error);
+    }
+    let Some(resource) = state.resource_version(&id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let version = resource.version.lock().await;
+    if version.phase == HttpSignalingResourcePhase::Whip {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    if let Err(response) = require_exact_if_match(&headers, &version.etag) {
+        return response;
+    }
     match state
         .adapter
         .end_authorized(
-            id,
+            id.clone(),
             rvoip_core::adapter::EndReason::Normal,
-            &auth.route_authorization(),
+            &authorization,
         )
         .await
     {
-        Ok(()) => StatusCode::OK.into_response(),
+        Ok(()) => {
+            drop(version);
+            state.remove_resource(&id, &resource);
+            StatusCode::OK.into_response()
+        }
         Err(error) => route_error_response(&state, error),
     }
 }

@@ -17,6 +17,13 @@ pub mod errors;
 pub mod identity;
 pub mod media;
 pub mod observability;
+pub mod originate;
+#[cfg(feature = "signaling-whip")]
+mod outbound_whep;
+#[cfg(feature = "signaling-whip")]
+mod outbound_whip;
+#[cfg(feature = "signaling-ws")]
+mod outbound_ws;
 pub mod peer;
 pub mod sdp;
 #[cfg(feature = "tls-rustls")]
@@ -36,18 +43,28 @@ pub use adapter::{
     WebRtcAdapter, WebRtcMetrics, WebRtcTransportHandle, ADAPTER_EVENT_CAP,
     MAX_INBOUND_ADMISSION_CONFIRMATION_TIMEOUT,
 };
-pub use config::{IceServerConfig, OpusSettings, WebRtcConfig};
+pub use config::{IceServerConfig, Nat1To1CandidateType, OpusSettings, WebRtcConfig};
 pub use errors::{Result, WebRtcError};
 pub use media::WebRtcStatsSnapshot;
+#[cfg(feature = "tls-rustls")]
+pub use originate::WebRtcTlsClientTrust;
+pub use originate::{
+    StaticWebRtcBearerCredentialProvider, WebRtcAudioCodec, WebRtcBearerCredential,
+    WebRtcBearerCredentialProvider, WebRtcIceExchangePolicy, WebRtcOriginateContext,
+    WebRtcOriginateContextError, WebRtcSignalingMode, WebRtcTargetPolicy,
+    MAX_WEBRTC_ORIGINATE_PREOPENED_DATA_CHANNELS,
+};
 pub use peer::{
-    connect_loopback, DataChannelOptions, IceCandidateLog, PeerRole, RvoipDataChannel,
-    RvoipPeerConnection, WebRtcFeatureSupport,
+    connect_loopback, DataChannelOptions, IceCandidateLog, LocalIceEvent, PeerRole,
+    RvoipDataChannel, RvoipPeerConnection, WebRtcFeatureSupport,
 };
 pub use sdp::{sdp_has_inline_ice_candidates, sdp_has_media_line, sdp_indicates_simulcast};
 pub use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit};
 
 #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
 pub use server::{WebRtcServer, WebRtcServerBuilder};
+#[cfg(feature = "signaling-whip")]
+pub use signaling::whip::WhepServerMode;
 
 #[cfg(feature = "client")]
 pub use client::{

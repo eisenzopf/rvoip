@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
 PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
+CARGO_ARTIFACT_HELPER="${SCRIPT_DIR}/perf_cargo_artifact.py"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 
@@ -65,38 +66,60 @@ elif [[ "${RVOIP_PERF_SYSTEM_ALLOCATOR}" == "1" ]]; then
   append_perf_feature "perf-system-allocator"
 fi
 
-echo "Building split soak test binaries (features: ${PERF_FEATURES})..."
-cargo test \
-  -p rvoip-sip \
-  --release \
-  --features "${PERF_FEATURES}" \
-  --test perf_soak_receiver \
-  --no-run
-cargo test \
-  -p rvoip-sip \
-  --release \
-  --features "${PERF_FEATURES}" \
-  --test perf_soak_caller \
-  --no-run
+RUN_DIR="${PERF_DIR}/perf_soak_split_$(date +%Y%m%d_%H%M%S)_$$"
+BUILD_DIR="${RUN_DIR}/build"
+SOURCE_AT_BUILD="${BUILD_DIR}/source-at-build.json"
+SOURCE_AFTER_BUILD="${BUILD_DIR}/source-after-build.json"
+SOURCE_AT_FINALIZE="${BUILD_DIR}/source-at-finalize.json"
+mkdir -p "${BUILD_DIR}"
 
-find_test_bin() {
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AT_BUILD}" >/dev/null
+
+build_exact_test_bin() {
   local name="$1"
-  local bins=()
-  shopt -s nullglob
-  for candidate in "${WORKSPACE_ROOT}"/target/release/deps/"${name}"-*; do
-    if [[ -f "${candidate}" && -x "${candidate}" ]]; then
-      bins+=("${candidate}")
-    fi
-  done
-  shopt -u nullglob
+  local messages="${BUILD_DIR}/${name}-cargo-messages.jsonl"
+  local manifest="${BUILD_DIR}/${name}-artifact.json"
+  local target_source="${CRATE_DIR}/tests/perf/${name}.rs"
 
-  if (( ${#bins[@]} == 0 )); then
-    echo "Could not locate compiled ${name} test binary" >&2
+  echo "Building exact ${name} artifact (features: ${PERF_FEATURES})..." >&2
+  if ! cargo test \
+      -p rvoip-sip \
+      --release \
+      --features "${PERF_FEATURES}" \
+      --test "${name}" \
+      --no-run \
+      --message-format=json-render-diagnostics \
+      >"${messages}"; then
+    echo "Cargo failed while building ${name}; refusing any existing binary" >&2
     return 1
   fi
 
-  ls -t "${bins[@]}" | head -n 1
+  python3 "${CARGO_ARTIFACT_HELPER}" resolve \
+    --messages "${messages}" \
+    --manifest "${manifest}" \
+    --workspace-root "${WORKSPACE_ROOT}" \
+    --source-at-build "${SOURCE_AT_BUILD}" \
+    --target "${name}" \
+    --target-source "${target_source}" \
+    --package rvoip-sip \
+    --profile release \
+    --features "${PERF_FEATURES}" \
+    --default-features enabled
 }
+
+RECEIVER_BIN="$(build_exact_test_bin perf_soak_receiver)"
+CALLER_BIN="$(build_exact_test_bin perf_soak_caller)"
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AFTER_BUILD}" >/dev/null
+python3 "${CARGO_ARTIFACT_HELPER}" assert-source \
+  --expected "${SOURCE_AT_BUILD}" \
+  --actual "${SOURCE_AFTER_BUILD}" \
+  --label "while building split-soak executables" >/dev/null
+printf 'receiver=%s\ncaller=%s\n' "${RECEIVER_BIN}" "${CALLER_BIN}" \
+  >"${BUILD_DIR}/executables.txt"
 
 start_ps_sampler() {
   local role="$1"
@@ -242,13 +265,8 @@ enable_malloc_stack_logging_if_requested() {
   fi
 }
 
-RECEIVER_BIN="$(find_test_bin perf_soak_receiver)"
-CALLER_BIN="$(find_test_bin perf_soak_caller)"
-
-RUN_DIR="${PERF_DIR}/perf_soak_split_$(date +%Y%m%d_%H%M%S)_$$"
 READY_FILE="${RUN_DIR}/receiver.ready"
 STOP_FILE="${RUN_DIR}/receiver.stop"
-mkdir -p "${RUN_DIR}"
 if [[ "${RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER}" == "1" ]]; then
   export RVOIP_PERF_PROFILE_EXTERNAL_RESOURCE_DIR="${RUN_DIR}"
 fi
@@ -363,6 +381,14 @@ fi
 caller_heap_pid=""
 trap - EXIT INT TERM
 
+python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
+  --workspace-root "${WORKSPACE_ROOT}" \
+  --output "${SOURCE_AT_FINALIZE}" >/dev/null
+python3 "${CARGO_ARTIFACT_HELPER}" assert-source \
+  --expected "${SOURCE_AT_BUILD}" \
+  --actual "${SOURCE_AT_FINALIZE}" \
+  --label "during the split-soak run" >/dev/null
+
 echo "Split soak reports:"
 if [[ "${RVOIP_PERF_DHAT}" == "1" ]]; then
   echo "  allocator: dhat"
@@ -386,6 +412,7 @@ if [[ "${RVOIP_PERF_DHAT}" == "1" ]]; then
   echo "  dhat profiles : ${RUN_DIR}/diagnostics"
 fi
 echo "  run dir : ${RUN_DIR}"
+echo "  build evidence: ${BUILD_DIR}"
 
 if (( caller_status != 0 || receiver_status != 0 )); then
   echo "Split soak failed: caller=${caller_status} receiver=${receiver_status}" >&2

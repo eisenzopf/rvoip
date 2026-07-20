@@ -128,6 +128,7 @@ pub enum PortPairingStrategy {
 // Re-export submodules
 mod allocator;
 pub mod security_transport;
+mod symmetric;
 mod tcp;
 mod udp;
 mod validation;
@@ -135,9 +136,10 @@ mod validation;
 // Re-export transport implementations
 pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
-    DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
+    PortAllocatorDiagnostics, DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 pub use security_transport::SecurityRtpTransport;
+pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, UdpRtpTransport};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};

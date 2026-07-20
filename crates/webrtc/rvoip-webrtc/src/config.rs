@@ -1,8 +1,22 @@
 use rvoip_core::capability::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::Zeroize;
 
 use crate::identity::DtlsFingerprint;
+
+/// Candidate class used when a deployment supplies a static one-to-one NAT
+/// mapping. This deliberately mirrors only the two modes supported by the
+/// underlying WebRTC setting engine instead of exposing dependency types.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nat1To1CandidateType {
+    /// Replace private host candidates with the configured public address.
+    #[default]
+    Host,
+    /// Publish the configured public address as a server-reflexive candidate.
+    Srflx,
+}
 
 /// Policy applied to inbound trickle ICE candidates whose hostname ends in
 /// `.local` (RFC 8839 mDNS-style anonymized candidates).
@@ -79,12 +93,32 @@ impl IceServerConfig {
     }
 }
 
+impl Drop for IceServerConfig {
+    fn drop(&mut self) {
+        if let Some(username) = self.username.as_mut() {
+            username.zeroize();
+        }
+        if let Some(credential) = self.credential.as_mut() {
+            credential.zeroize();
+        }
+    }
+}
+
 /// ICE / media configuration shared by peer connections and the adapter.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct WebRtcConfig {
     /// UDP bind address passed to `PeerConnectionBuilder::with_udp_addrs`.
     /// Use `"0.0.0.0:0"` or `"127.0.0.1:0"` for ephemeral ports.
     pub udp_bind: String,
+
+    /// Static public IPs advertised by ICE for one-to-one NAT deployments.
+    /// Empty retains normal host/STUN/TURN candidate discovery.
+    #[serde(default)]
+    pub nat_1to1_ips: Vec<String>,
+
+    /// Candidate class used for [`Self::nat_1to1_ips`].
+    #[serde(default)]
+    pub nat_1to1_candidate_type: Nat1To1CandidateType,
 
     /// STUN/TURN servers (username/credential for TURN relay).
     #[serde(default)]
@@ -93,6 +127,11 @@ pub struct WebRtcConfig {
     /// Maximum time to wait for ICE gathering to complete (full SDP, no trickle).
     #[serde(default = "default_gather_timeout_secs")]
     pub gather_timeout_secs: u64,
+
+    /// Absolute wait for the peer connection to reach `Connected`, covering
+    /// ICE selection and the DTLS handshake after signaling completes.
+    #[serde(default = "default_connection_timeout_secs")]
+    pub connection_timeout_secs: u64,
 
     /// Default capabilities advertised by [`crate::adapter::WebRtcAdapter`].
     #[serde(default = "default_capabilities")]
@@ -199,8 +238,11 @@ impl fmt::Debug for WebRtcConfig {
         formatter
             .debug_struct("WebRtcConfig")
             .field("udp_bind_present", &!self.udp_bind.is_empty())
+            .field("nat_1to1_ip_count", &self.nat_1to1_ips.len())
+            .field("nat_1to1_candidate_type", &self.nat_1to1_candidate_type)
             .field("ice_server_count", &self.ice_servers.len())
             .field("gather_timeout_secs", &self.gather_timeout_secs)
+            .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("handler_channel_capacity", &self.handler_channel_capacity)
             .field("inbound_send_deadline_ms", &self.inbound_send_deadline_ms)
             .field("session_idle_ttl_secs", &self.session_idle_ttl_secs)
@@ -292,6 +334,10 @@ fn default_gather_timeout_secs() -> u64 {
     5
 }
 
+fn default_connection_timeout_secs() -> u64 {
+    15
+}
+
 fn default_capabilities() -> CapabilityDescriptor {
     crate::sdp::capability::default_webrtc_capabilities()
 }
@@ -332,8 +378,11 @@ impl Default for WebRtcConfig {
     fn default() -> Self {
         Self {
             udp_bind: "0.0.0.0:0".into(),
+            nat_1to1_ips: Vec::new(),
+            nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![IceServerConfig::stun("stun:stun.l.google.com:19302")],
             gather_timeout_secs: default_gather_timeout_secs(),
+            connection_timeout_secs: default_connection_timeout_secs(),
             capabilities: default_capabilities(),
             handler_channel_capacity: default_handler_channel_capacity(),
             inbound_send_deadline_ms: default_inbound_send_deadline_ms(),
@@ -358,8 +407,11 @@ impl WebRtcConfig {
     pub fn loopback() -> Self {
         Self {
             udp_bind: "127.0.0.1:0".into(),
+            nat_1to1_ips: Vec::new(),
+            nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![],
             gather_timeout_secs: 5,
+            connection_timeout_secs: default_connection_timeout_secs(),
             capabilities: crate::sdp::capability::default_webrtc_capabilities(),
             handler_channel_capacity: default_handler_channel_capacity(),
             inbound_send_deadline_ms: default_inbound_send_deadline_ms(),

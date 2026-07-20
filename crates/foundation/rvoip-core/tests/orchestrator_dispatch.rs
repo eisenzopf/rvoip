@@ -7,7 +7,8 @@ use rvoip_core::adapter::{
     AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, InboundConnectionContext, InboundRoutingHint,
     InboundSignalingMetadata, OrchestratorAdapterEvent, OriginateContext, OriginateRequest,
-    OutboundActivation, RejectReason, SignatureHeaders, TransferTarget,
+    OutboundActivation, RejectReason, SignatureHeaders, TransferAttemptId, TransferStatus,
+    TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::commands::InboundAction;
@@ -4271,17 +4272,53 @@ async fn operational_stream_orders_dtmf_data_and_transfer_outcomes() {
     ));
 
     let target = TransferTarget::Uri("sip:private-target@example.invalid".into());
+    let attempt_id = TransferAttemptId::new();
     orchestrator
-        .transfer_connection(connection_id.clone(), target)
+        .transfer_connection_with_attempt(connection_id.clone(), attempt_id.clone(), target)
         .await
         .unwrap();
     let transferred = operational.recv().await.unwrap();
     assert!(matches!(
         transferred.kind,
         OperationalEventKind::Transfer {
+            attempt_id: Some(ref observed_attempt_id),
             target: OperationalTransferTarget::Uri,
-            outcome: OperationalTransferOutcome::Succeeded,
-        }
+            outcome: OperationalTransferOutcome::Submitted,
+        } if observed_attempt_id == &attempt_id
+    ));
+
+    let mut normalized = orchestrator.subscribe_events();
+    sender
+        .send(AdapterEvent::TransferStatus {
+            connection_id: connection_id.clone(),
+            attempt_id: Some(attempt_id.clone()),
+            status: TransferStatus::Progress {
+                status_code: 180,
+                reason: "Ringing".into(),
+            },
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        operational.recv().await.unwrap().kind,
+        OperationalEventKind::TransferStatus {
+            attempt_id: Some(ref observed_attempt_id),
+            status: TransferStatus::Progress {
+                status_code: 180,
+                ref reason,
+            },
+        } if observed_attempt_id == &attempt_id && reason == "Ringing"
+    ));
+    assert!(matches!(
+        normalized.recv().await.unwrap(),
+        Event::ConnectionTransferStatus {
+            connection_id: id,
+            status: TransferStatus::Progress {
+                status_code: 180,
+                ref reason,
+            },
+            ..
+        } if id == connection_id && reason == "Ringing"
     ));
 
     adapter.set_transfer_behavior(COMMAND_FAIL);
@@ -4295,6 +4332,7 @@ async fn operational_stream_orders_dtmf_data_and_transfer_outcomes() {
     assert!(matches!(
         operational.recv().await.unwrap().kind,
         OperationalEventKind::Transfer {
+            attempt_id: None,
             target: OperationalTransferTarget::Uri,
             outcome: OperationalTransferOutcome::Failed,
         }

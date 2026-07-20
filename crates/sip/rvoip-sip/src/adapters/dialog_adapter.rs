@@ -21,15 +21,26 @@
 //! All dialog creation is now done through `send_invite_with_details()` which
 //! properly creates the dialog in dialog-core and sends the INVITE.
 
+use crate::adapters::outbound_request_tracker::{
+    OutboundInDialogRequestTracker, TrackedInDialogOptions,
+};
 use crate::api::types::DialogIdentity;
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
+use crate::retained_tasks::RetainedTasks;
+use crate::session_lifecycle::{
+    ManagedResourceReleaseError, ManagedSessionResource, OwnedOperation, OwnedOperationCompletion,
+    ResourceDescriptor, ResourceSpec, SessionOperationKind,
+};
+use crate::session_registry::{SessionRegistry, SessionRegistryError, SessionRegistryHandle};
 use crate::session_store::SessionStore;
+use crate::sip_data_message::{
+    build_sip_data_request, SipDataMessage, SipDataMessageDispatchLanes,
+};
 use crate::state_table::types::{DialogId, SessionId};
 use dashmap::DashMap;
 use rvoip_infra_common::events::{
-    coordinator::GlobalEventCoordinator,
-    cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
+    coordinator::GlobalEventCoordinator, cross_crate::RvoipCrossCrateEvent,
 };
 use rvoip_sip_core::{Response, StatusCode, Uri};
 use rvoip_sip_dialog::{
@@ -38,13 +49,180 @@ use rvoip_sip_dialog::{
         NotifyRequestOptions, ReferRequestOptions, SubscribeRequestOptions, UnifiedDialogApi,
         UpdateRequestOptions,
     },
-    transaction::TransactionKey,
-    DialogId as RvoipDialogId,
+    transaction::{
+        dialog::DialogRequestTemplate, transport::multiplexed::exact_next_hop_uri_for_request,
+        TransactionKey,
+    },
+    DialogId as RvoipDialogId, DialogState, InitialInviteOwner, InitialInviteWireOutcome,
 };
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
+
+const INITIAL_INVITE_OWNED_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const INITIAL_INVITE_RESOURCE_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
+const INITIAL_INVITE_PROTOCOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const DATA_MESSAGE_FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const BYE_FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
+const REGISTRATION_REFRESH_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+const OWNED_INVITE_INSTALLED: u8 = 0;
+const OWNED_INVITE_SENT: u8 = 1;
+const OWNED_INVITE_WIRE_UNKNOWN: u8 = 2;
+const OWNED_INVITE_ZERO_WIRE: u8 = 3;
+
+fn exact_response_method_class(method: &rvoip_sip_core::Method) -> &'static str {
+    use rvoip_sip_core::Method;
+
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
+
+fn exact_response_transaction_diagnostics(
+    transaction_id: &TransactionKey,
+) -> (&'static str, &'static str) {
+    let direction = if transaction_id.is_server() {
+        "server"
+    } else {
+        "client"
+    };
+    (
+        exact_response_method_class(transaction_id.method()),
+        direction,
+    )
+}
+
+struct RegistrationRefreshTask {
+    generation: u64,
+    cancel: tokio::sync::oneshot::Sender<()>,
+}
+
+struct RegistrationRefreshCompletion {
+    admission: Arc<StdMutex<()>>,
+    tasks: Arc<DashMap<SessionId, RegistrationRefreshTask>>,
+    session_id: SessionId,
+    generation: u64,
+}
+
+impl Drop for RegistrationRefreshCompletion {
+    fn drop(&mut self) {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.tasks.remove_if(&self.session_id, |_, current| {
+            current.generation == self.generation
+        });
+    }
+}
+
+#[derive(Clone)]
+struct DataMessageAuthChallenge {
+    status: u16,
+    value: String,
+}
+
+#[derive(Clone)]
+struct OutboundByeTransaction {
+    generation: u64,
+    transaction_id: TransactionKey,
+    /// Request-URI captured from the dialog remote target immediately before
+    /// this generation is built. Local teardown owns the dialog from that
+    /// point, so target-refresh requests are no longer admitted; retaining the
+    /// value also keeps Digest retry independent of compact transaction
+    /// tombstones, which intentionally do not retain non-INVITE request wire.
+    request_uri: String,
+}
+
+fn data_message_auth_realm(selected: &crate::auth::ClientAuthHeader) -> String {
+    if let Some(challenge) = selected.digest_challenge.as_ref() {
+        return challenge.realm.clone();
+    }
+
+    match &selected.scheme {
+        crate::auth::SipAuthScheme::Digest => "digest",
+        crate::auth::SipAuthScheme::Bearer => "bearer",
+        crate::auth::SipAuthScheme::Basic => "basic",
+        crate::auth::SipAuthScheme::Aka => "aka",
+        crate::auth::SipAuthScheme::Other(_) => "other",
+    }
+    .to_string()
+}
+
+/// Mutate retained authentication state on the latest revision of one exact
+/// session lifetime.
+///
+/// Authentication callers intentionally capture only the generation-qualified
+/// lifecycle handle from their read snapshot.  Using the snapshot revision as
+/// a compare-and-swap fence would reject a valid request whenever an unrelated
+/// state-machine update lands between that read and Digest bookkeeping.  The
+/// exact handle still rejects replacement lifetimes, while the per-session
+/// update lock serializes nonce-count and credential changes with the latest
+/// benign state revision.
+fn update_retained_auth_exact<R>(
+    store: &SessionStore,
+    handle: &SessionRegistryHandle,
+    unavailable: &'static str,
+    update: impl FnOnce(&mut crate::session_store::SessionState) -> Result<R>,
+) -> Result<R> {
+    store
+        .update_session_exact_with(handle, None, update)
+        .map_err(|_| SessionError::InvalidTransition(unavailable.to_string()))?
+}
+
+#[derive(Clone)]
+struct OutboundInitialInviteBinding {
+    handle: SessionRegistryHandle,
+    owner: InitialInviteOwner,
+    resource: Weak<OutboundInitialInviteResource>,
+}
+
+impl OutboundInitialInviteBinding {
+    fn matches(&self, handle: &SessionRegistryHandle, owner: &InitialInviteOwner) -> bool {
+        self.handle == *handle && self.owner == *owner
+    }
+}
+
+/// Exact lower-layer ownership retained by the session lifecycle authority.
+///
+/// Adapter maps still expose their historical raw-ID shapes, so a separate
+/// exact binding fences every mutation and rollback. The weak self-reference
+/// lets explicit CANCEL/BYE paths mark protocol teardown without creating a
+/// resource/map reference cycle.
+struct OutboundInitialInviteResource {
+    dialog_api: Arc<UnifiedDialogApi>,
+    registry: Arc<SessionRegistry>,
+    handle: SessionRegistryHandle,
+    owner: InitialInviteOwner,
+    bindings: Arc<DashMap<SessionId, OutboundInitialInviteBinding>>,
+    session_to_dialog: Arc<DashMap<SessionId, RvoipDialogId>>,
+    dialog_to_session: Arc<DashMap<RvoipDialogId, SessionId>>,
+    callid_to_session: Arc<DashMap<String, SessionId>>,
+    outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
+    phase: AtomicU8,
+    protocol_teardown_owned_by_upper: AtomicBool,
+    session_map_installed: AtomicBool,
+    dialog_map_installed: AtomicBool,
+    call_id_map_installed: AtomicBool,
+    registry_map_installed: AtomicBool,
+    transaction_map_installed: AtomicBool,
+}
 
 /// Deterministic SIP Call-ID used by every outbound dialog construction path.
 /// Media routing may derive its lookup key before dialog-core returns, so this
@@ -146,6 +324,327 @@ fn register_auth_scheme_class(scheme: &crate::auth::SipAuthScheme) -> &'static s
     }
 }
 
+impl OutboundInitialInviteResource {
+    fn new(
+        adapter: &DialogAdapter,
+        handle: SessionRegistryHandle,
+        owner: InitialInviteOwner,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            dialog_api: Arc::clone(&adapter.dialog_api),
+            registry: Arc::clone(adapter.store.registry()),
+            handle,
+            owner,
+            bindings: Arc::clone(&adapter.outbound_initial_invites),
+            session_to_dialog: Arc::clone(&adapter.session_to_dialog),
+            dialog_to_session: Arc::clone(&adapter.dialog_to_session),
+            callid_to_session: Arc::clone(&adapter.callid_to_session),
+            outgoing_invite_tx: Arc::clone(&adapter.outgoing_invite_tx),
+            phase: AtomicU8::new(OWNED_INVITE_INSTALLED),
+            protocol_teardown_owned_by_upper: AtomicBool::new(false),
+            session_map_installed: AtomicBool::new(false),
+            dialog_map_installed: AtomicBool::new(false),
+            call_id_map_installed: AtomicBool::new(false),
+            registry_map_installed: AtomicBool::new(false),
+            transaction_map_installed: AtomicBool::new(false),
+        })
+    }
+
+    fn install_adapter_bindings(self: &Arc<Self>) -> std::result::Result<(), &'static str> {
+        use dashmap::mapref::entry::Entry;
+
+        let session_id = self.handle.session_id().clone();
+        match self.bindings.entry(session_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(OutboundInitialInviteBinding {
+                    handle: self.handle.clone(),
+                    owner: self.owner.clone(),
+                    resource: Arc::downgrade(self),
+                });
+            }
+            Entry::Occupied(_) => return Err("exact outbound INVITE binding already exists"),
+        }
+
+        match self.session_to_dialog.entry(session_id.clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(self.owner.dialog_id().clone());
+                self.session_map_installed.store(true, Ordering::Release);
+            }
+            Entry::Occupied(_) => return Err("session already owns a dialog mapping"),
+        }
+        match self.dialog_to_session.entry(self.owner.dialog_id().clone()) {
+            Entry::Vacant(entry) => {
+                entry.insert(session_id.clone());
+                self.dialog_map_installed.store(true, Ordering::Release);
+            }
+            Entry::Occupied(_) => return Err("dialog already owns a session mapping"),
+        }
+        match self
+            .callid_to_session
+            .entry(self.owner.call_id().to_string())
+        {
+            Entry::Vacant(entry) => {
+                entry.insert(session_id);
+                self.call_id_map_installed.store(true, Ordering::Release);
+            }
+            Entry::Occupied(_) => return Err("Call-ID already owns a session mapping"),
+        }
+
+        self.registry
+            .map_dialog_handle(&self.handle, self.owner.dialog_id().clone().into())
+            .map_err(|_| "exact session registry dialog mapping failed")?;
+        self.registry_map_installed.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn record_wire_outcome(&self, outcome: InitialInviteWireOutcome) {
+        let phase = match outcome {
+            InitialInviteWireOutcome::ZeroWire => OWNED_INVITE_ZERO_WIRE,
+            InitialInviteWireOutcome::Sent => OWNED_INVITE_SENT,
+            InitialInviteWireOutcome::Unknown => OWNED_INVITE_WIRE_UNKNOWN,
+        };
+        self.phase.store(phase, Ordering::Release);
+    }
+
+    fn install_transaction(&self, transaction_id: TransactionKey) -> bool {
+        use dashmap::mapref::entry::Entry;
+
+        let session_id = self.handle.session_id().clone();
+        if !self
+            .bindings
+            .get(&session_id)
+            .is_some_and(|binding| binding.matches(&self.handle, &self.owner))
+        {
+            return false;
+        }
+        match self.outgoing_invite_tx.entry(session_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(transaction_id);
+                self.transaction_map_installed
+                    .store(true, Ordering::Release);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    fn mark_protocol_teardown_owned_by_upper(&self) {
+        self.protocol_teardown_owned_by_upper
+            .store(true, Ordering::Release);
+    }
+
+    // The arguments are an immutable teardown snapshot. Keeping them flat
+    // makes the retained cleanup task independent of the owning guard.
+    #[allow(clippy::too_many_arguments)]
+    async fn release_exact(
+        dialog_api: Arc<UnifiedDialogApi>,
+        registry: Arc<SessionRegistry>,
+        handle: SessionRegistryHandle,
+        owner: InitialInviteOwner,
+        bindings: Arc<DashMap<SessionId, OutboundInitialInviteBinding>>,
+        session_to_dialog: Arc<DashMap<SessionId, RvoipDialogId>>,
+        dialog_to_session: Arc<DashMap<RvoipDialogId, SessionId>>,
+        callid_to_session: Arc<DashMap<String, SessionId>>,
+        outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
+        phase: u8,
+        protocol_teardown_owned_by_upper: bool,
+        session_map_installed: bool,
+        dialog_map_installed: bool,
+        call_id_map_installed: bool,
+        registry_map_installed: bool,
+        transaction_map_installed: bool,
+    ) -> std::result::Result<(), ManagedResourceReleaseError> {
+        let retained = dialog_api.initial_invite_owner_is_retained(&owner);
+        if retained {
+            match phase {
+                OWNED_INVITE_INSTALLED => {
+                    let _ = dialog_api.compensate_initial_invite(&owner).await;
+                }
+                OWNED_INVITE_SENT => {
+                    let active = dialog_api
+                        .list_active_dialogs()
+                        .await
+                        .iter()
+                        .any(|dialog_id| dialog_id == owner.dialog_id());
+                    // A peer-originated BYE can retire the dialog before this
+                    // exact resource release runs. Missing from the manager's
+                    // active-dialog index is then a confirmed terminal
+                    // condition, not an uncertain sent INVITE that needs a
+                    // synthetic BYE/CANCEL supervisor. If the dialog races
+                    // away between the index read and state read, recheck the
+                    // authoritative index; a state-read failure on a still-
+                    // live dialog remains fail-closed.
+                    let terminal = if !active {
+                        true
+                    } else {
+                        match dialog_api.get_dialog_state(owner.dialog_id()).await {
+                            Ok(DialogState::Terminated) => true,
+                            Ok(_) => false,
+                            Err(_) => !dialog_api
+                                .list_active_dialogs()
+                                .await
+                                .iter()
+                                .any(|dialog_id| dialog_id == owner.dialog_id()),
+                        }
+                    };
+                    if protocol_teardown_owned_by_upper || terminal {
+                        let _ = dialog_api.finish_initial_invite_teardown(&owner).await;
+                    } else {
+                        let _ = dialog_api.supervise_initial_invite_teardown(&owner);
+                    }
+                }
+                OWNED_INVITE_WIRE_UNKNOWN => {
+                    let _ = dialog_api.supervise_initial_invite_teardown(&owner);
+                }
+                OWNED_INVITE_ZERO_WIRE => {
+                    let _ = dialog_api.compensate_initial_invite(&owner).await;
+                }
+                _ => return Err(ManagedResourceReleaseError::new("invite-phase-invalid")),
+            }
+        }
+
+        if dialog_api.initial_invite_owner_is_retained(&owner) {
+            let deadline = tokio::time::Instant::now() + INITIAL_INVITE_PROTOCOL_DRAIN_TIMEOUT;
+            loop {
+                if !dialog_api.initial_invite_owner_is_retained(&owner) {
+                    break;
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(ManagedResourceReleaseError::new(
+                        "invite-protocol-teardown-pending",
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+
+        let session_id = handle.session_id().clone();
+        let binding_matches = bindings
+            .get(&session_id)
+            .is_some_and(|binding| binding.matches(&handle, &owner));
+        if !binding_matches {
+            return Ok(());
+        }
+
+        if registry_map_installed {
+            match registry.clear_dialog_handle_retained(&handle, owner.dialog_id().clone().into()) {
+                Ok(_)
+                | Err(SessionRegistryError::SlotMissing)
+                | Err(SessionRegistryError::RevisionMismatch) => {}
+                Err(_) => {
+                    return Err(ManagedResourceReleaseError::new(
+                        "invite-registry-release-failed",
+                    ));
+                }
+            }
+        }
+
+        if bindings
+            .remove_if(&session_id, |_, binding| binding.matches(&handle, &owner))
+            .is_none()
+        {
+            return Ok(());
+        }
+
+        if session_map_installed {
+            session_to_dialog.remove_if(&session_id, |_, dialog_id| dialog_id == owner.dialog_id());
+        }
+        if dialog_map_installed {
+            dialog_to_session.remove_if(owner.dialog_id(), |_, mapped_session| {
+                mapped_session == &session_id
+            });
+        }
+        if call_id_map_installed {
+            callid_to_session.remove_if(owner.call_id(), |_, mapped_session| {
+                mapped_session == &session_id
+            });
+        }
+        if transaction_map_installed {
+            outgoing_invite_tx.remove(&session_id);
+        }
+        Ok(())
+    }
+}
+
+impl ManagedSessionResource for OutboundInitialInviteResource {
+    fn descriptor(&self) -> ResourceDescriptor {
+        ResourceDescriptor::new("sip-initial-invite", self.owner.dialog_id().to_string())
+    }
+
+    fn cancel(&self) {
+        // The authority's owned operation/dispatch supervisors remain retained
+        // across caller cancellation. Phase-specific protocol work belongs in
+        // the async release path where its outcome can be observed.
+    }
+
+    fn release(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = std::result::Result<(), ManagedResourceReleaseError>>
+                + Send
+                + 'static,
+        >,
+    > {
+        let dialog_api = Arc::clone(&self.dialog_api);
+        let registry = Arc::clone(&self.registry);
+        let handle = self.handle.clone();
+        let owner = self.owner.clone();
+        let bindings = Arc::clone(&self.bindings);
+        let session_to_dialog = Arc::clone(&self.session_to_dialog);
+        let dialog_to_session = Arc::clone(&self.dialog_to_session);
+        let callid_to_session = Arc::clone(&self.callid_to_session);
+        let outgoing_invite_tx = Arc::clone(&self.outgoing_invite_tx);
+        let phase = self.phase.load(Ordering::Acquire);
+        let protocol_teardown_owned_by_upper = self
+            .protocol_teardown_owned_by_upper
+            .load(Ordering::Acquire);
+        let session_map_installed = self.session_map_installed.load(Ordering::Acquire);
+        let dialog_map_installed = self.dialog_map_installed.load(Ordering::Acquire);
+        let call_id_map_installed = self.call_id_map_installed.load(Ordering::Acquire);
+        let registry_map_installed = self.registry_map_installed.load(Ordering::Acquire);
+        let transaction_map_installed = self.transaction_map_installed.load(Ordering::Acquire);
+        Box::pin(Self::release_exact(
+            dialog_api,
+            registry,
+            handle,
+            owner,
+            bindings,
+            session_to_dialog,
+            dialog_to_session,
+            callid_to_session,
+            outgoing_invite_tx,
+            phase,
+            protocol_teardown_owned_by_upper,
+            session_map_installed,
+            dialog_map_installed,
+            call_id_map_installed,
+            registry_map_installed,
+            transaction_map_installed,
+        ))
+    }
+}
+
+async fn rollback_owned_invite<T>(
+    operation: OwnedOperation,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    operation
+        .rollback(value)
+        .await
+        .unwrap_or_else(|_| panic!("initial INVITE exact rollback failed"))
+}
+
+async fn commit_owned_invite<T>(
+    operation: OwnedOperation,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    match operation.commit() {
+        Ok(committed) => committed.complete(value),
+        Err(failure) => rollback_owned_invite(failure.into_operation(), value).await,
+    }
+}
+
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
@@ -163,6 +662,28 @@ pub struct DialogAdapter {
 
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
     pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
+
+    /// Latest in-dialog BYE transaction for each exact live session. The
+    /// generation lets a 401/407-driven retry supersede the challenged
+    /// transaction without a late initial dispatch overwriting it.
+    outgoing_bye_tx: Arc<DashMap<SessionId, OutboundByeTransaction>>,
+    /// Exact per-session generation notification. Authentication retries wake
+    /// the owning BYE waiter directly instead of requiring 10 ms polling.
+    outgoing_bye_generation_watch: Arc<DashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
+    next_outgoing_bye_generation: Arc<AtomicU64>,
+
+    /// Exact in-dialog request ownership for methods whose builder futures
+    /// return after first transport write while authentication/final response
+    /// arrives asynchronously.
+    pub(crate) outbound_request_tracker: OutboundInDialogRequestTracker,
+
+    /// Exact owner for each staged outbound initial INVITE. Raw compatibility
+    /// maps are mutated or removed only while this binding still matches.
+    outbound_initial_invites: Arc<DashMap<SessionId, OutboundInitialInviteBinding>>,
+
+    /// FIFO serialization for reliable-ordered SIP DataMessages. A lane is
+    /// scoped to an exact dialog ID and removed by exact dialog cleanup.
+    data_message_dispatch_lanes: Arc<SipDataMessageDispatchLanes>,
 
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped on
     /// every outbound message the state machine emits automatically
@@ -207,7 +728,10 @@ pub struct DialogAdapter {
     /// Automatic registration refresh settings and task registry.
     registration_auto_refresh: bool,
     registration_refresh_jitter_percent: u8,
-    registration_refresh_tasks: Arc<DashMap<SessionId, tokio::task::AbortHandle>>,
+    registration_refresh_admission: Arc<StdMutex<()>>,
+    registration_refresh_tasks: Arc<DashMap<SessionId, RegistrationRefreshTask>>,
+    registration_refresh_retained: Arc<RetainedTasks>,
+    next_registration_refresh_generation: Arc<AtomicU64>,
 
     /// Perf diagnostics for dialog mapping cleanup balance.
     cleanup_attempt_total: Arc<AtomicU64>,
@@ -215,6 +739,9 @@ pub struct DialogAdapter {
     cleanup_missing_total: Arc<AtomicU64>,
     cleanup_call_ids_removed_total: Arc<AtomicU64>,
     cleanup_outgoing_invite_removed_total: Arc<AtomicU64>,
+
+    #[cfg(test)]
+    cleanup_pause: Arc<std::sync::Mutex<Option<Arc<DialogCleanupPause>>>>,
 
     /// SIP_API_DESIGN_2 §12.4 — pluggable trace-output redactor. When
     /// `Some`, the trace path consults this hook before emitting each
@@ -237,6 +764,9 @@ impl DialogAdapter {
     /// `outbound_contact_params` is the RFC 5626 §4 instance + reg-id pair
     /// attached to REGISTER Contact headers when outbound registration is
     /// enabled. Pass `None` for pre-5626 REGISTER Contact shape.
+    // Preserve the established public constructor while the builder API is
+    // introduced separately.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dialog_api: Arc<UnifiedDialogApi>,
         store: Arc<SessionStore>,
@@ -249,6 +779,12 @@ impl DialogAdapter {
         auto_emit_extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
         trace_redactor: Option<Arc<dyn crate::api::trace_redactor::TraceRedactor>>,
     ) -> Self {
+        let non_invite_transaction_timeout = dialog_api
+            .dialog_manager()
+            .core()
+            .transaction_manager()
+            .timer_settings()
+            .transaction_timeout;
         Self {
             dialog_api,
             store,
@@ -256,6 +792,14 @@ impl DialogAdapter {
             dialog_to_session: Arc::new(DashMap::new()),
             callid_to_session: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
+            outgoing_bye_tx: Arc::new(DashMap::new()),
+            outgoing_bye_generation_watch: Arc::new(DashMap::new()),
+            next_outgoing_bye_generation: Arc::new(AtomicU64::new(1)),
+            outbound_request_tracker: OutboundInDialogRequestTracker::new(
+                non_invite_transaction_timeout,
+            ),
+            outbound_initial_invites: Arc::new(DashMap::new()),
+            data_message_dispatch_lanes: Arc::new(SipDataMessageDispatchLanes::default()),
             auto_emit_extra_headers,
             global_coordinator,
             state_machine: Arc::new(std::sync::OnceLock::new()),
@@ -264,14 +808,30 @@ impl DialogAdapter {
             symmetric_flow_params,
             registration_auto_refresh,
             registration_refresh_jitter_percent,
+            registration_refresh_admission: Arc::new(StdMutex::new(())),
             registration_refresh_tasks: Arc::new(DashMap::new()),
+            registration_refresh_retained: RetainedTasks::new(),
+            next_registration_refresh_generation: Arc::new(AtomicU64::new(1)),
             cleanup_attempt_total: Arc::new(AtomicU64::new(0)),
             cleanup_mapped_total: Arc::new(AtomicU64::new(0)),
             cleanup_missing_total: Arc::new(AtomicU64::new(0)),
             cleanup_call_ids_removed_total: Arc::new(AtomicU64::new(0)),
             cleanup_outgoing_invite_removed_total: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            cleanup_pause: Arc::new(std::sync::Mutex::new(None)),
             trace_redactor,
         }
+    }
+
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn pause_next_cleanup_before_core_for_test(&self) -> Arc<DialogCleanupPause> {
+        let pause = Arc::new(DialogCleanupPause::new());
+        *self
+            .cleanup_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        pause
     }
 
     /// Wire the state machine after construction. Idempotent — subsequent
@@ -332,8 +892,12 @@ impl DialogAdapter {
 
     pub(crate) fn abort_registration_refresh(&self, session_id: &SessionId) {
         let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, &session_id.0);
-        if let Some((_, handle)) = self.registration_refresh_tasks.remove(session_id) {
-            handle.abort();
+        let _admission = self
+            .registration_refresh_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((_, task)) = self.registration_refresh_tasks.remove(session_id) {
+            let _ = task.cancel.send(());
         }
         guard.finish_success();
     }
@@ -346,6 +910,8 @@ impl DialogAdapter {
             "dialog_to_session": self.dialog_to_session.len(),
             "callid_to_session": self.callid_to_session.len(),
             "outgoing_invite_tx": self.outgoing_invite_tx.len(),
+            "outgoing_bye_tx": self.outgoing_bye_tx.len(),
+            "outbound_initial_invites": self.outbound_initial_invites.len(),
             "registration_refresh_tasks": self.registration_refresh_tasks.len(),
             "lifecycle": {
                 "cleanup_attempt_total": self.cleanup_attempt_total.load(Ordering::Relaxed),
@@ -357,18 +923,47 @@ impl DialogAdapter {
         })
     }
 
-    pub(crate) fn abort_all_registration_refreshes(&self) {
-        let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, "all");
-        let handles: Vec<_> = self
-            .registration_refresh_tasks
-            .iter()
-            .map(|entry| entry.value().clone())
-            .collect();
-        self.registration_refresh_tasks.clear();
-        for handle in handles {
-            handle.abort();
+    pub(crate) async fn abort_all_registration_refreshes_and_wait(&self) -> Result<()> {
+        let cleanup_guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, "all");
+        {
+            // This short synchronous gate makes close, replacement and task
+            // publication one ordered admission history. Network work never
+            // runs while the gate is held.
+            let _admission = self
+                .registration_refresh_admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.registration_refresh_retained.close();
+            let session_ids: Vec<_> = self
+                .registration_refresh_tasks
+                .iter()
+                .map(|entry| entry.key().clone())
+                .collect();
+            for session_id in session_ids {
+                if let Some((_, task)) = self.registration_refresh_tasks.remove(&session_id) {
+                    let _ = task.cancel.send(());
+                }
+            }
         }
-        guard.finish_success();
+        cleanup_guard.finish_success();
+        if tokio::time::timeout(
+            REGISTRATION_REFRESH_DRAIN_TIMEOUT,
+            self.registration_refresh_retained.wait_idle(),
+        )
+        .await
+        .is_err()
+        {
+            return Err(SessionError::InternalError(format!(
+                "registration refresh drain timed out with {} retained tasks",
+                self.registration_refresh_retained.count()
+            )));
+        }
+        if self.registration_refresh_retained.panicked() {
+            return Err(SessionError::InternalError(
+                "registration refresh task panicked during drain".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn compute_registration_refresh_at(&self, now: Instant, accepted_expires: u32) -> Instant {
@@ -389,96 +984,129 @@ impl DialogAdapter {
         session_id: SessionId,
         next_refresh_at: Option<Instant>,
     ) {
-        self.abort_registration_refresh(&session_id);
+        let state_machine = self.state_machine.get().cloned();
+        let _admission = self
+            .registration_refresh_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        if let Some((_, previous)) = self.registration_refresh_tasks.remove(&session_id) {
+            let _ = previous.cancel.send(());
+        }
         if !self.registration_auto_refresh {
             return;
         }
-
         let Some(next_refresh_at) = next_refresh_at else {
             return;
         };
-        let Some(state_machine) = self.state_machine.get().cloned() else {
+        let Some(state_machine) = state_machine else {
             return;
         };
 
+        let generation = self
+            .next_registration_refresh_generation
+            .fetch_add(1, Ordering::Relaxed);
+        let (cancel, mut cancelled) = tokio::sync::oneshot::channel();
         let session_id_for_task = session_id.clone();
-        let tasks = self.registration_refresh_tasks.clone();
+        let completion_admission = Arc::clone(&self.registration_refresh_admission);
+        let completion_tasks = Arc::clone(&self.registration_refresh_tasks);
         let adapter = self.clone();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(next_refresh_at)).await;
-            tasks.remove(&session_id_for_task);
+        let spawned = self.registration_refresh_retained.spawn(async move {
+            // Construct inside the spawned future. If admission rejects and
+            // drops the unpolled future while the caller owns the gate, there
+            // is no completion destructor trying to reacquire that gate.
+            let _completion = RegistrationRefreshCompletion {
+                admission: completion_admission,
+                tasks: completion_tasks,
+                session_id: session_id_for_task.clone(),
+                generation,
+            };
+            let refresh = async {
+                tokio::time::sleep_until(tokio::time::Instant::from_std(next_refresh_at)).await;
 
-            match state_machine
-                .process_event(
-                    &session_id_for_task,
-                    crate::state_table::types::EventType::RefreshRegistration,
-                )
-                .await
-            {
-                Ok(result) if result.transition.is_some() => {}
-                Ok(_) => {
-                    tracing::warn!(
-                        "Automatic registration refresh had no state-table transition for session {}; falling back to direct REGISTER",
-                        session_id_for_task
-                    );
-                    if let Err(e) = adapter
-                        .send_registration_refresh_direct(&session_id_for_task)
-                        .await
-                    {
+                match state_machine
+                    .process_event(
+                        &session_id_for_task,
+                        crate::state_table::types::EventType::RefreshRegistration,
+                    )
+                    .await
+                {
+                    Ok(result) if result.transition.is_some() => {}
+                    Ok(_) => {
                         tracing::warn!(
-                            "Automatic direct registration refresh failed for session {}: {}",
+                            "Automatic registration refresh had no state-table transition for session {}; falling back to direct REGISTER",
+                            session_id_for_task
+                        );
+                        if let Err(e) = adapter
+                            .send_registration_refresh_direct(&session_id_for_task)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Automatic direct registration refresh failed for session {}: {}",
+                                session_id_for_task,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Automatic registration refresh failed for session {}: {}",
                             session_id_for_task,
                             e
                         );
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        "Automatic registration refresh failed for session {}: {}",
-                        session_id_for_task,
-                        e
-                    );
-                }
+            };
+            tokio::select! {
+                biased;
+                _ = &mut cancelled => return,
+                _ = refresh => {}
             }
-        })
-        .abort_handle();
-
-        self.registration_refresh_tasks.insert(session_id, handle);
+        });
+        if spawned {
+            let replaced = self
+                .registration_refresh_tasks
+                .insert(session_id, RegistrationRefreshTask { generation, cancel });
+            debug_assert!(replaced.is_none());
+        }
     }
 
     async fn send_registration_refresh_direct(&self, session_id: &SessionId) -> Result<()> {
-        let session = self.store.get_session(session_id).await?;
-        if !session.is_registered {
+        let refresh = self.store.with_session(session_id, |session| {
+            if !session.is_registered {
+                return Ok::<_, SessionError>(None);
+            }
+            let from_uri = session.local_uri.clone().ok_or_else(|| {
+                SessionError::InternalError("local_uri not set for refresh".into())
+            })?;
+            let registrar_uri = session
+                .registrar_uri
+                .clone()
+                .or_else(|| session.remote_uri.clone())
+                .ok_or_else(|| {
+                    SessionError::InternalError("registrar_uri not set for refresh".into())
+                })?;
+            let contact_uri = session
+                .registration_contact
+                .clone()
+                .or_else(|| session.local_uri.clone())
+                .ok_or_else(|| {
+                    SessionError::InternalError("contact_uri not set for refresh".into())
+                })?;
+            let expires = session.registration_expires.unwrap_or(3600);
+            let auth = session
+                .auth
+                .clone()
+                .or_else(|| session.credentials.clone().map(Into::into));
+            Ok::<_, SessionError>(Some((from_uri, registrar_uri, contact_uri, expires, auth)))
+        })??;
+        let Some((from_uri, registrar_uri, contact_uri, expires, auth)) = refresh else {
             tracing::debug!(
                 "Skipping automatic registration refresh for unregistered session {}",
                 session_id
             );
             return Ok(());
-        }
-
-        let from_uri = session
-            .local_uri
-            .clone()
-            .ok_or_else(|| SessionError::InternalError("local_uri not set for refresh".into()))?;
-        let registrar_uri = session
-            .registrar_uri
-            .clone()
-            .or_else(|| session.remote_uri.clone())
-            .ok_or_else(|| {
-                SessionError::InternalError("registrar_uri not set for refresh".into())
-            })?;
-        let contact_uri = session
-            .registration_contact
-            .clone()
-            .or_else(|| session.local_uri.clone())
-            .ok_or_else(|| SessionError::InternalError("contact_uri not set for refresh".into()))?;
-        let expires = session.registration_expires.unwrap_or(3600);
-        let auth = session
-            .auth
-            .clone()
-            .or_else(|| session.credentials.clone().map(Into::into));
-        drop(session);
+        };
 
         let mut attempt_expires = expires;
         for _ in 0..=2 {
@@ -510,10 +1138,12 @@ impl DialogAdapter {
                         .await;
                 }
                 RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
-                    let mut session = self.store.get_session(session_id).await?;
-                    session.registration_expires = Some(min_expires);
-                    session.registration_retry_count += 1;
-                    self.store.update_session(session).await?;
+                    self.store
+                        .update_session_with(session_id, |session| {
+                            session.registration_expires = Some(min_expires);
+                            session.registration_retry_count += 1;
+                        })
+                        .await?;
                     attempt_expires = min_expires;
                 }
                 RegisterAttemptOutcome::Failure {
@@ -725,19 +1355,21 @@ impl DialogAdapter {
             None
         };
 
-        let mut session = self.store.get_session(session_id).await?;
-        session.is_registered = true;
-        session.registration_expires = Some(accepted_expires);
-        session.registration_accepted_expires = Some(accepted_expires);
-        session.registration_registered_at = Some(now);
-        session.registration_next_refresh_at = next_refresh_at;
-        session.registration_last_failure = None;
-        session.registration_retry_count = 0;
         let registration_route = metadata.transport_route;
-        session.registration_service_route = metadata.service_route;
-        session.registration_pub_gruu = metadata.pub_gruu;
-        session.registration_temp_gruu = metadata.temp_gruu;
-        self.store.update_session(session).await?;
+        self.store
+            .update_session_with(session_id, |session| {
+                session.is_registered = true;
+                session.registration_expires = Some(accepted_expires);
+                session.registration_accepted_expires = Some(accepted_expires);
+                session.registration_registered_at = Some(now);
+                session.registration_next_refresh_at = next_refresh_at;
+                session.registration_last_failure = None;
+                session.registration_retry_count = 0;
+                session.registration_service_route = metadata.service_route;
+                session.registration_pub_gruu = metadata.pub_gruu;
+                session.registration_temp_gruu = metadata.temp_gruu;
+            })
+            .await?;
 
         tracing::info!(
             "✅ Registration successful - session {} marked as registered",
@@ -759,17 +1391,19 @@ impl DialogAdapter {
         registrar_uri: &str,
     ) -> Result<()> {
         self.abort_registration_refresh(session_id);
-        let mut session = self.store.get_session(session_id).await?;
-        session.is_registered = false;
-        session.registration_accepted_expires = None;
-        session.registration_registered_at = None;
-        session.registration_next_refresh_at = None;
-        session.registration_last_failure = None;
-        session.registration_retry_count = 0;
-        session.registration_service_route = None;
-        session.registration_pub_gruu = None;
-        session.registration_temp_gruu = None;
-        self.store.update_session(session).await?;
+        self.store
+            .update_session_with(session_id, |session| {
+                session.is_registered = false;
+                session.registration_accepted_expires = None;
+                session.registration_registered_at = None;
+                session.registration_next_refresh_at = None;
+                session.registration_last_failure = None;
+                session.registration_retry_count = 0;
+                session.registration_service_route = None;
+                session.registration_pub_gruu = None;
+                session.registration_temp_gruu = None;
+            })
+            .await?;
 
         tracing::info!(
             "✅ Unregistration successful - session {} marked as unregistered",
@@ -790,24 +1424,28 @@ impl DialogAdapter {
     ) -> Result<()> {
         self.abort_registration_refresh(session_id);
         let reason = reason.into();
-        let mut session = self.store.get_session(session_id).await?;
-        let failure_summary = if session.registration_retry_count > 0 {
-            format!(
-                "{} after {} retry attempt(s)",
-                reason, session.registration_retry_count
-            )
-        } else {
-            reason.clone()
-        };
-        session.is_registered = false;
-        session.registration_accepted_expires = None;
-        session.registration_registered_at = None;
-        session.registration_next_refresh_at = None;
-        session.registration_last_failure = Some(failure_summary.clone());
-        session.registration_service_route = None;
-        session.registration_pub_gruu = None;
-        session.registration_temp_gruu = None;
-        self.store.update_session(session).await?;
+        let failure_summary = self
+            .store
+            .update_session_with(session_id, |session| {
+                let failure_summary = if session.registration_retry_count > 0 {
+                    format!(
+                        "{} after {} retry attempt(s)",
+                        reason, session.registration_retry_count
+                    )
+                } else {
+                    reason.clone()
+                };
+                session.is_registered = false;
+                session.registration_accepted_expires = None;
+                session.registration_registered_at = None;
+                session.registration_next_refresh_at = None;
+                session.registration_last_failure = Some(failure_summary.clone());
+                session.registration_service_route = None;
+                session.registration_pub_gruu = None;
+                session.registration_temp_gruu = None;
+                failure_summary
+            })
+            .await?;
 
         self.publish_api_event(crate::api::events::Event::RegistrationFailed {
             registrar: registrar_uri.to_string(),
@@ -825,17 +1463,19 @@ impl DialogAdapter {
     ) -> Result<()> {
         self.abort_registration_refresh(session_id);
         let reason = reason.into();
-        let mut session = self.store.get_session(session_id).await?;
-        session.is_registered = false;
-        session.registration_accepted_expires = None;
-        session.registration_registered_at = None;
-        session.registration_next_refresh_at = None;
-        session.registration_last_failure = Some(reason.clone());
-        session.registration_retry_count = 0;
-        session.registration_service_route = None;
-        session.registration_pub_gruu = None;
-        session.registration_temp_gruu = None;
-        self.store.update_session(session).await?;
+        self.store
+            .update_session_with(session_id, |session| {
+                session.is_registered = false;
+                session.registration_accepted_expires = None;
+                session.registration_registered_at = None;
+                session.registration_next_refresh_at = None;
+                session.registration_last_failure = Some(reason.clone());
+                session.registration_retry_count = 0;
+                session.registration_service_route = None;
+                session.registration_pub_gruu = None;
+                session.registration_temp_gruu = None;
+            })
+            .await?;
 
         self.publish_api_event(crate::api::events::Event::UnregistrationFailed {
             registrar: registrar_uri.to_string(),
@@ -875,11 +1515,35 @@ impl DialogAdapter {
             let session_id = entry.value().clone();
             drop(entry);
 
+            self.mark_initial_invite_protocol_teardown(&session_id);
+
             // Send BYE through dialog API
-            self.dialog_api
+            let request_uri = self
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .get_dialog(&rvoip_dialog_id)
+                .map_err(|_| {
+                    SessionError::InvalidTransition(
+                        "SIP BYE exact dialog is no longer available".to_string(),
+                    )
+                })?
+                .remote_target
+                .to_string();
+            let generation = self.next_outgoing_bye_generation();
+            let transaction_id = self
+                .dialog_api
                 .send_bye_with_options(&rvoip_dialog_id, ByeRequestOptions::default())
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
+            self.retain_outgoing_bye_transaction(
+                &session_id,
+                generation,
+                transaction_id,
+                request_uri,
+            );
+            self.wait_for_outgoing_bye_final_response(&session_id)
+                .await?;
 
             tracing::info!("Sent BYE for session {}", session_id.0);
         } else {
@@ -997,12 +1661,10 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::InviteAuthRetryOptions,
         apply_global_proxy: bool,
     ) -> Result<()> {
-        // Fast-RTT race: an auth challenge can arrive while the original
-        // `SendINVITE` action is still awaiting dialog-core's
-        // `make_call_for_session`. The dialog exists in dialog-core, but the
-        // session-core s2d map is inserted immediately after that await
-        // returns. Poll briefly so the retry can reuse the just-created
-        // dialog instead of failing spuriously with SessionNotFound.
+        // Compatibility wait: the staged initial-INVITE path now installs
+        // this mapping before wire dispatch, but retained responses from an
+        // older call path may still race a rolling upgrade. Poll briefly so
+        // the retry can reuse the exact dialog instead of failing spuriously.
         use tokio::time::{Duration, Instant};
         let start = Instant::now();
         let dialog_id = loop {
@@ -1044,13 +1706,10 @@ impl DialogAdapter {
         session_secs: u32,
         min_se: u32,
     ) -> Result<()> {
-        // Fast-RTT race: when the UAS answers 422 on a loopback socket the
-        // response can be processed before the initial `make_call_for_session`
-        // call has returned and inserted the s2d mapping (see
-        // `send_invite_with_details` below — the insert happens after the
-        // await). Poll briefly for the mapping to appear. Cap at 1s; a
-        // timeout here propagates as `SessionNotFound` which the retry
-        // action's error path converts into a terminal `CallFailed`.
+        // Compatibility wait for retained responses from the pre-staged
+        // initial-INVITE path during rolling upgrades. New calls install the
+        // exact s2d mapping before wire dispatch. Cap the wait at 1s; timeout
+        // propagates as `SessionNotFound` and becomes terminal `CallFailed`.
         use tokio::time::{Duration, Instant};
         let start = Instant::now();
         let dialog_id = loop {
@@ -1102,6 +1761,212 @@ impl DialogAdapter {
 
     // ===== Outbound Actions (from state machine) =====
 
+    /// Record that the accepted upper-layer transition owns protocol teardown.
+    ///
+    /// Call this immediately before awaiting CANCEL/BYE dispatch. A loopback
+    /// peer can return a final response during that await and drive exact
+    /// session release before the send future unwinds. Marking afterward loses
+    /// the retained initial-INVITE owner and can make shutdown supervise a
+    /// teardown that the upper layer already sent. A dispatch error remains an
+    /// ambiguous at-most-once attempt, so lower cleanup must not synthesize a
+    /// competing CANCEL/BYE in that case either.
+    pub(crate) fn mark_initial_invite_protocol_teardown(&self, session_id: &SessionId) {
+        let Some(binding) = self.outbound_initial_invites.get(session_id) else {
+            return;
+        };
+        if let Some(resource) = binding.resource.upgrade() {
+            resource.mark_protocol_teardown_owned_by_upper();
+        }
+    }
+
+    async fn send_initial_invite_staged(
+        &self,
+        session_id: &SessionId,
+        opts: rvoip_sip_dialog::api::unified::InviteRequestOptions,
+        failure: InviteDispatchFailure,
+    ) -> Result<()> {
+        tracing::trace!(
+            session_id = %session_id,
+            operation = failure.diagnostic(),
+            "staged initial INVITE entering planner"
+        );
+        let handle = self.store.lifecycle_handle(session_id).ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Session {} has no current lifecycle handle",
+                session_id.0
+            ))
+        })?;
+        let plan = self
+            .dialog_api
+            .plan_initial_invite(Some(session_id.0.clone()), opts)
+            .await
+            .map_err(|error| redacted_invite_dispatch_error(failure, error))?;
+        tracing::trace!(
+            session_id = %session_id,
+            operation = failure.diagnostic(),
+            "staged initial INVITE plan ready"
+        );
+        let resource =
+            OutboundInitialInviteResource::new(self, handle.clone(), plan.owner().clone());
+        let dialog_api = Arc::clone(&self.dialog_api);
+        let authority = Arc::clone(self.store.authority());
+        let operation_resource = Arc::clone(&resource);
+
+        let waiter = authority
+            .spawn_owned_exact(
+                handle.key(),
+                SessionOperationKind::Signaling,
+                INITIAL_INVITE_OWNED_OPERATION_TIMEOUT,
+                move |mut operation| async move {
+                    tracing::trace!("staged initial INVITE owned operation started");
+                    let spec = ResourceSpec::new(
+                        operation_resource.descriptor(),
+                        Vec::new(),
+                        INITIAL_INVITE_RESOURCE_RELEASE_TIMEOUT,
+                    )
+                    .unwrap_or_else(|_| panic!("initial INVITE resource spec is invalid"));
+                    let attempt = match operation.reserve_resource(spec) {
+                        Ok(attempt) => attempt,
+                        Err(_) => {
+                            return rollback_owned_invite(
+                                operation,
+                                Err(SessionError::InternalError(
+                                    "initial INVITE resource reservation failed (class=lifecycle)"
+                                        .to_string(),
+                                )),
+                            )
+                            .await;
+                        }
+                    };
+                    let installation_sink = attempt
+                        .dispatch()
+                        .unwrap_or_else(|_| panic!("initial INVITE dispatch permit failed"))
+                        .into_installation_sink();
+                    // `install_initial_invite_with_sink` may reject a plan
+                    // before invoking its sink (for example, when an exact
+                    // session mapping is still occupied). Keep the sink in a
+                    // shared single-use slot so that path can prove the
+                    // reservation unused instead of dropping it as an
+                    // unresolvable lifecycle orphan.
+                    let installation_sink = Arc::new(std::sync::Mutex::new(Some(
+                        installation_sink,
+                    )));
+                    let callback_installation_sink = Arc::clone(&installation_sink);
+                    let sink_resource = Arc::clone(&operation_resource);
+                    let installed = match dialog_api.install_initial_invite_with_sink(
+                        plan,
+                        move |_installed| {
+                            let installation_sink = callback_installation_sink
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .take()
+                                .ok_or_else(|| rvoip_sip_dialog::ApiError::Dialog {
+                                    message: "Initial INVITE lifecycle sink was already resolved"
+                                        .to_string(),
+                                })?;
+                            installation_sink
+                                .capture_at_install(
+                                    Arc::clone(&sink_resource)
+                                        as Arc<dyn ManagedSessionResource>,
+                                )
+                                .map_err(|_| rvoip_sip_dialog::ApiError::Dialog {
+                                    message: "Initial INVITE lifecycle capture failed".to_string(),
+                                })?;
+                            sink_resource.install_adapter_bindings().map_err(|_| {
+                                rvoip_sip_dialog::ApiError::Dialog {
+                                    message: "Initial INVITE adapter binding failed".to_string(),
+                                }
+                            })
+                        },
+                    ) {
+                        Ok(installed) => {
+                            tracing::trace!("staged initial INVITE installed");
+                            installed
+                        }
+                        Err(error) => {
+                            tracing::trace!("staged initial INVITE installation rejected");
+                            let unused_sink = installation_sink
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .take();
+                            if let Some(unused_sink) = unused_sink {
+                                if unused_sink.confirm_unused().is_err() {
+                                    return rollback_owned_invite(
+                                        operation,
+                                        Err(SessionError::InternalError(
+                                            "initial INVITE unused reservation confirmation failed (class=lifecycle)"
+                                                .to_string(),
+                                        )),
+                                    )
+                                    .await;
+                                }
+                            }
+                            return rollback_owned_invite(
+                                operation,
+                                Err(redacted_invite_dispatch_error(failure, error)),
+                            )
+                            .await;
+                        }
+                    };
+
+                    tracing::trace!("staged initial INVITE dispatch starting");
+                    let completion = dialog_api.dispatch_initial_invite(installed).wait().await;
+                    tracing::trace!("staged initial INVITE dispatch completed");
+                    let wire_outcome = completion.wire_outcome();
+                    operation_resource.record_wire_outcome(wire_outcome);
+                    match completion.into_result() {
+                        Ok((owner, transaction_id)) => {
+                            if owner != operation_resource.owner {
+                                panic!("initial INVITE dispatch returned a different exact owner");
+                            }
+                            if !operation_resource.install_transaction(transaction_id) {
+                                return commit_owned_invite(
+                                    operation,
+                                    Err(SessionError::InternalError(
+                                        "initial INVITE transaction binding failed (class=lifecycle)"
+                                            .to_string(),
+                                    )),
+                                )
+                                .await;
+                            }
+                            commit_owned_invite(operation, Ok(())).await
+                        }
+                        Err(error) => {
+                            let value = Err(redacted_invite_dispatch_error(failure, error));
+                            match wire_outcome {
+                                InitialInviteWireOutcome::ZeroWire => {
+                                    rollback_owned_invite(operation, value).await
+                                }
+                                InitialInviteWireOutcome::Sent
+                                | InitialInviteWireOutcome::Unknown => {
+                                    commit_owned_invite(operation, value).await
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            .map_err(|_| {
+                SessionError::InternalError(
+                    "initial INVITE owned operation admission failed (class=lifecycle)".to_string(),
+                )
+            })?;
+
+        let result = waiter.await.map_err(|_| {
+            SessionError::InternalError(
+                "initial INVITE owned operation failed (class=lifecycle)".to_string(),
+            )
+        })?;
+        if result.is_ok() {
+            tracing::debug!(
+                session_id = %session_id,
+                dialog_id = %resource.owner.dialog_id(),
+                "staged initial INVITE committed with exact lifecycle ownership"
+            );
+        }
+        result
+    }
+
     /// Send INVITE for UAC - this is the primary method for initiating calls
     ///
     /// This method:
@@ -1121,99 +1986,19 @@ impl DialogAdapter {
         to: &str,
         sdp: Option<String>,
     ) -> Result<()> {
-        // Use make_call_with_id to control the Call-ID
         let call_id = deterministic_outbound_call_id(session_id);
-
-        // Fail before publishing any adapter lookup state. Dialog-core repeats
-        // this validation as a defence-in-depth gate, but the adapter's
-        // Call-ID mapping is itself an allocation that must not survive a
-        // malformed request.
-        rvoip_sip_dialog::api::unified::validate_initial_invite_options(
-            &rvoip_sip_dialog::api::unified::InviteRequestOptions {
+        self.send_initial_invite_staged(
+            session_id,
+            rvoip_sip_dialog::api::unified::InviteRequestOptions {
                 from_uri: from.to_string(),
                 to_uri: to.to_string(),
-                sdp: sdp.clone(),
-                call_id: Some(call_id.clone()),
+                sdp,
+                call_id: Some(call_id),
                 ..Default::default()
             },
+            InviteDispatchFailure::Initial,
         )
-        .map_err(|error| redacted_invite_dispatch_error(InviteDispatchFailure::Initial, error))?;
-
-        // Store Call-ID mapping BEFORE making the call to avoid race condition
-        // This ensures any events that come back immediately can find the session
-        self.callid_to_session
-            .insert(call_id.clone(), session_id.clone());
-
-        // Use `make_call_for_session` so the session↔dialog mapping is
-        // installed on dialog-core *before* the INVITE goes on the wire.
-        // This closes the fast-RTT race where a 4xx response (e.g. 420 Bad
-        // Extension on localhost) can be processed by the event loop before
-        // the async `StoreDialogMapping` below has populated the lookup
-        // tables — which would otherwise cause the CallFailed event to be
-        // silently dropped by `event_hub::convert_coordination_to_cross_crate`.
-        let call_handle = match self
-            .dialog_api
-            .make_call_for_session(&session_id.0, from, to, sdp, Some(call_id.clone()))
-            .await
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.callid_to_session.remove(&call_id);
-                return Err(redacted_invite_dispatch_error(
-                    InviteDispatchFailure::Initial,
-                    error,
-                ));
-            }
-        };
-
-        let dialog_id = call_handle.call_id().clone();
-
-        // Store remaining mappings on session-core side
-        self.session_to_dialog
-            .insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session
-            .insert(dialog_id.clone(), session_id.clone());
-
-        // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
-        let event = SessionToDialogEvent::StoreDialogMapping {
-            session_id: session_id.0.clone(),
-            dialog_id: dialog_id.to_string(),
-        };
-        if let Err(_error) = self
-            .global_coordinator
-            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
-            .await
-        {
-            // Dialog-core already pre-registered this exact mapping before the
-            // INVITE went on wire and the adapter maps above are live. Treat
-            // this compatibility notification as best-effort: returning an
-            // error here would make the caller tear down local state without
-            // sending CANCEL to a UAS that may already be ringing.
-            tracing::warn!(
-                session_id = %session_id,
-                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
-            );
-        }
-
-        tracing::info!(
-            "Published StoreDialogMapping for session {} -> dialog {}",
-            session_id.0,
-            dialog_id
-        );
-
-        // Store the transaction ID for later ACK sending
-        // Note: CallHandle might not expose transaction_id directly
-        // For now, we'll rely on dialog-core to handle ACKs internally
-        tracing::debug!(
-            "Dialog {} created for session {} - ACK will be handled by dialog-core",
-            dialog_id,
-            session_id.0
-        );
-
-        // Don't update session store here - the state machine will handle updating the dialog ID
-        tracing::debug!("Dialog {} created for session {}", dialog_id, session_id.0);
-
-        Ok(())
+        .await
     }
 
     /// Like [`send_invite_with_details`](Self::send_invite_with_details) but appends caller-supplied extra
@@ -1292,7 +2077,7 @@ impl DialogAdapter {
             from_uri: from.to_string(),
             to_uri: to.to_string(),
             sdp,
-            call_id: Some(call_id.clone()),
+            call_id: Some(call_id),
             from_display: None,
             contact_uri: None,
             precomputed_authorization: None,
@@ -1300,66 +2085,12 @@ impl DialogAdapter {
             supported_100rel: false,
             extra_headers,
         };
-        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&opts).map_err(
-            |error| {
-                redacted_invite_dispatch_error(
-                    InviteDispatchFailure::InitialWithExtraHeaders,
-                    error,
-                )
-            },
-        )?;
-
-        self.callid_to_session
-            .insert(call_id.clone(), session_id.clone());
-
-        let call_handle = match self
-            .dialog_api
-            .send_invite_with_options_for_session(&session_id.0, opts)
-            .await
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.callid_to_session.remove(&call_id);
-                return Err(redacted_invite_dispatch_error(
-                    InviteDispatchFailure::InitialWithExtraHeaders,
-                    error,
-                ));
-            }
-        };
-
-        let dialog_id = call_handle.call_id().clone();
-
-        self.session_to_dialog
-            .insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session
-            .insert(dialog_id.clone(), session_id.clone());
-
-        let event = SessionToDialogEvent::StoreDialogMapping {
-            session_id: session_id.0.clone(),
-            dialog_id: dialog_id.to_string(),
-        };
-        if let Err(_error) = self
-            .global_coordinator
-            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
-            .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
-            );
-        }
-
-        tracing::info!(
-            "send_invite_with_extra_headers: published StoreDialogMapping for session {} -> dialog {} ({} extra header(s))",
-            session_id.0,
-            dialog_id,
-            self.session_to_dialog
-                .get(session_id)
-                .map(|_| "ok")
-                .unwrap_or("missing"),
-        );
-
-        Ok(())
+        self.send_initial_invite_staged(
+            session_id,
+            opts,
+            InviteDispatchFailure::InitialWithExtraHeaders,
+        )
+        .await
     }
 
     /// SIP_API_DESIGN_2 Phase B — structured initial-INVITE dispatch. The
@@ -1386,53 +2117,9 @@ impl DialogAdapter {
                 );
             }
         }
-        opts.call_id = Some(call_id.clone());
-        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&opts).map_err(
-            |error| {
-                redacted_invite_dispatch_error(InviteDispatchFailure::InitialWithOptions, error)
-            },
-        )?;
-
-        self.callid_to_session
-            .insert(call_id.clone(), session_id.clone());
-
-        let call_handle = match self
-            .dialog_api
-            .send_invite_with_options_for_session(&session_id.0, opts)
+        opts.call_id = Some(call_id);
+        self.send_initial_invite_staged(session_id, opts, InviteDispatchFailure::InitialWithOptions)
             .await
-        {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.callid_to_session.remove(&call_id);
-                return Err(redacted_invite_dispatch_error(
-                    InviteDispatchFailure::InitialWithOptions,
-                    error,
-                ));
-            }
-        };
-
-        let dialog_id = call_handle.call_id().clone();
-        self.session_to_dialog
-            .insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session
-            .insert(dialog_id.clone(), session_id.clone());
-
-        let event = SessionToDialogEvent::StoreDialogMapping {
-            session_id: session_id.0.clone(),
-            dialog_id: dialog_id.to_string(),
-        };
-        if let Err(_error) = self
-            .global_coordinator
-            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
-            .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                "StoreDialogMapping compatibility notification failed after INVITE dispatch"
-            );
-        }
-
-        Ok(())
     }
 
     /// Send 200 OK response
@@ -1604,26 +2291,104 @@ impl DialogAdapter {
         code: u16,
         sdp: Option<String>,
     ) -> Result<()> {
+        let (transaction_method, transaction_direction) =
+            exact_response_transaction_diagnostics(transaction_id);
         tracing::info!(
-            "DialogAdapter sending {} response for session {} via transaction {} with SDP: {}",
-            code,
-            session_id.0,
-            transaction_id,
-            sdp.is_some()
+            session_id = %session_id.0,
+            status_code = code,
+            transaction_method,
+            transaction_direction,
+            sdp_present = sdp.is_some(),
+            "DialogAdapter sending exact SIP response"
         );
 
         self.dialog_api
             .send_response_for_session_transaction(&session_id.0, transaction_id, code, sdp)
             .await
-            .map_err(|e| {
+            .map_err(|_| {
                 tracing::error!(
-                    "Failed to send response for session {} via transaction {}: {}",
-                    session_id.0,
-                    transaction_id,
-                    e
+                    session_id = %session_id.0,
+                    status_code = code,
+                    transaction_method,
+                    transaction_direction,
+                    error_class = "dialog",
+                    "Failed to send exact SIP response"
                 );
-                SessionError::DialogError(format!("Failed to send response: {}", e))
+                SessionError::DialogError(
+                    "Failed to send exact SIP response (class=dialog)".to_string(),
+                )
             })
+    }
+
+    /// Send an exact final response while preserving the transaction layer's
+    /// authoritative transport-write disposition for cancellation recovery.
+    pub(crate) async fn send_response_for_transaction_classified(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+        sdp: Option<String>,
+    ) -> std::result::Result<
+        rvoip_sip_dialog::FinalResponseCompletionDisposition,
+        rvoip_sip_dialog::ExactResponseSendError,
+    > {
+        self.dialog_api
+            .send_response_for_session_transaction_classified(
+                &session_id.0,
+                transaction_id,
+                code,
+                sdp,
+            )
+            .await
+    }
+
+    /// Send a UAS response with application headers through a known inbound
+    /// server transaction. Dialog-core verifies that the transaction belongs
+    /// to the dialog resolved from `session_id` before writing anything.
+    pub async fn send_response_with_options_for_transaction(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.dialog_api
+            .send_response_with_extras_for_session_transaction(
+                &session_id.0,
+                transaction_id,
+                code,
+                body,
+                extra_headers,
+            )
+            .await
+            .map_err(|_| {
+                SessionError::DialogError("Failed to send exact in-dialog response".to_string())
+            })
+    }
+
+    /// Classified exact response variant that also preserves application
+    /// response headers.
+    pub(crate) async fn send_response_with_options_for_transaction_classified(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> std::result::Result<
+        rvoip_sip_dialog::FinalResponseCompletionDisposition,
+        rvoip_sip_dialog::ExactResponseSendError,
+    > {
+        self.dialog_api
+            .send_response_with_extras_for_session_transaction_classified(
+                &session_id.0,
+                transaction_id,
+                code,
+                body,
+                extra_headers,
+            )
+            .await
     }
 
     /// Send ACK (for UAC after 200 OK)
@@ -1668,10 +2433,13 @@ impl DialogAdapter {
             entry.value().clone()
         };
 
-        self.dialog_api
-            .send_bye_with_options(&dialog_id, ByeRequestOptions::default())
-            .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
+        self.mark_initial_invite_protocol_teardown(session_id);
+        self.send_bye_with_retained_dialog_auth(
+            session_id,
+            &dialog_id,
+            ByeRequestOptions::default(),
+        )
+        .await?;
 
         Ok(())
     }
@@ -1690,18 +2458,16 @@ impl DialogAdapter {
             entry.value().clone()
         };
 
-        self.dialog_api
-            .send_bye_with_options(
-                &dialog_id,
-                ByeRequestOptions {
-                    reason: Some(reason.to_string()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to send BYE with Reason: {}", e))
-            })?;
+        self.mark_initial_invite_protocol_teardown(session_id);
+        self.send_bye_with_retained_dialog_auth(
+            session_id,
+            &dialog_id,
+            ByeRequestOptions {
+                reason: Some(reason.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
 
         Ok(())
     }
@@ -1714,7 +2480,7 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::UpdateRequestOptions,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Update,
             opts.extra_headers,
@@ -1728,8 +2494,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_update_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send UPDATE: {}", e)))?;
-        Ok(())
+            .map_err(|e| SessionError::DialogError(format!("Failed to send UPDATE: {}", e)))
     }
 
     /// SIP_API_DESIGN_2 Phase C — re-INVITE dispatch routed through
@@ -1767,7 +2532,7 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::ReferRequestOptions,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Refer,
             opts.extra_headers,
@@ -1781,8 +2546,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_refer_with_options(&dialog_id, opts)
             .await
-            .map_err(|error| redacted_dialog_operation_error("REFER", error))?;
-        Ok(())
+            .map_err(|error| redacted_dialog_operation_error("REFER", error))
     }
 
     /// SIP_API_DESIGN_2 Phase C — INFO dispatch through the new
@@ -1792,7 +2556,7 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::InfoRequestOptions,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Info,
             opts.extra_headers,
@@ -1806,8 +2570,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_info_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))?;
-        Ok(())
+            .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))
     }
 
     /// SIP_API_DESIGN_2 Phase C — BYE dispatch through the new
@@ -1828,11 +2591,445 @@ impl DialogAdapter {
             .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        self.dialog_api
-            .send_bye_with_options(&dialog_id, opts)
-            .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
+        self.mark_initial_invite_protocol_teardown(session_id);
+        self.send_bye_with_retained_dialog_auth(session_id, &dialog_id, opts)
+            .await?;
         Ok(())
+    }
+
+    /// Apply credentials negotiated by this exact dialog's initial INVITE to
+    /// a locally generated BYE. Listener policies commonly authenticate every
+    /// request, not only INVITE; sending an unauthenticated BYE and relying on
+    /// the Active-state generic retry is unsafe because local hangup has
+    /// already moved the session into its terminal transition. Serialize with
+    /// application MESSAGE so Digest nonce-count updates cannot race.
+    async fn send_bye_with_retained_dialog_auth(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &RvoipDialogId,
+        mut opts: ByeRequestOptions,
+    ) -> Result<()> {
+        let dispatch_lane = self.data_message_dispatch_lanes.lane(dialog_id);
+        let _dispatch_guard = Arc::clone(&dispatch_lane).lock_owned().await;
+        let dialog = self
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .get_dialog(dialog_id)
+            .map_err(|_| {
+                SessionError::InvalidTransition(
+                    "SIP BYE exact dialog is no longer available".to_string(),
+                )
+            })?;
+        let request_uri = dialog.remote_target.to_string();
+        let next_hop = dialog
+            .route_set
+            .first()
+            .unwrap_or(&dialog.remote_target)
+            .to_string();
+        let headers = self
+            .retained_dialog_authorization_headers(
+                session_id,
+                dialog_id,
+                "BYE",
+                &request_uri,
+                &next_hop,
+                None,
+            )
+            .await?;
+        opts.extra_headers.extend(headers);
+        let generation = self.next_outgoing_bye_generation();
+        let transaction_id = self
+            .dialog_api
+            .send_bye_with_options(dialog_id, opts)
+            .await
+            .map_err(|error| redacted_dialog_operation_error("SIP BYE", error))?;
+        self.retain_outgoing_bye_transaction(session_id, generation, transaction_id, request_uri);
+        Ok(())
+    }
+
+    fn next_outgoing_bye_generation(&self) -> u64 {
+        self.next_outgoing_bye_generation
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn retain_outgoing_bye_transaction(
+        &self,
+        session_id: &SessionId,
+        generation: u64,
+        transaction_id: TransactionKey,
+        request_uri: String,
+    ) {
+        let transaction = OutboundByeTransaction {
+            generation,
+            transaction_id,
+            request_uri,
+        };
+        self.outgoing_bye_tx
+            .entry(session_id.clone())
+            .and_modify(|current| {
+                if current.generation < transaction.generation {
+                    *current = transaction.clone();
+                }
+            })
+            .or_insert(transaction);
+        let sender = self
+            .outgoing_bye_generation_watch
+            .entry(session_id.clone())
+            .or_insert_with(|| tokio::sync::watch::channel(0).0)
+            .clone();
+        sender.send_replace(generation);
+    }
+
+    fn latest_outgoing_bye_transaction(
+        &self,
+        session_id: &SessionId,
+        after_generation: u64,
+    ) -> Option<OutboundByeTransaction> {
+        self.outgoing_bye_tx
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .filter(|transaction| transaction.generation > after_generation)
+    }
+
+    /// Capture the exact retained-BYE generation, if any, before a state
+    /// machine dispatch. A caller can later prove that this dispatch reached
+    /// the wire by observing a strictly newer generation for the same
+    /// session; an unrelated session cannot satisfy that proof.
+    pub(crate) fn outgoing_bye_generation(&self, session_id: &SessionId) -> Option<u64> {
+        self.outgoing_bye_tx
+            .get(session_id)
+            .map(|transaction| transaction.generation)
+    }
+
+    /// Return whether this exact session retained a BYE after `generation`.
+    /// This is side-effect evidence, not an error-string classification: the
+    /// coordinator uses it only to join the already-required final-response
+    /// confirmation after post-send bookkeeping loses a concurrent race.
+    pub(crate) fn has_outgoing_bye_after(&self, session_id: &SessionId, generation: u64) -> bool {
+        self.outgoing_bye_tx
+            .get(session_id)
+            .is_some_and(|transaction| transaction.generation > generation)
+    }
+
+    /// Prove that an authentication event owns the latest retained BYE
+    /// generation for this exact session. Stale or cross-session challenge
+    /// events must not be allowed to consume the immutable BYE retry stash.
+    pub(crate) fn outgoing_bye_transaction_matches(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        self.outgoing_bye_tx
+            .get(session_id)
+            .is_some_and(|transaction| transaction.transaction_id == *transaction_id)
+    }
+
+    /// Return the Request-URI from this session's latest exact outbound BYE.
+    ///
+    /// Digest HA2 must use the URI that was actually placed on the challenged
+    /// request line. An established dialog's remote target can differ from the
+    /// original To URI after Contact/target refresh processing, so rebuilding
+    /// it from session metadata would produce invalid credentials.
+    /// Non-INVITE transaction tombstones deliberately do not retain request
+    /// wire. The adapter therefore captures the dialog remote target at the
+    /// local-teardown dispatch fence and carries it with the exact generation.
+    /// A 401/407 retry reuses that captured value rather than consulting
+    /// mutable session metadata or challenge text.
+    pub(crate) async fn outgoing_bye_request_uri(&self, session_id: &SessionId) -> Result<String> {
+        self.outgoing_bye_tx
+            .get(session_id)
+            .map(|entry| entry.request_uri.clone())
+            .ok_or_else(|| {
+                tracing::warn!(
+                    error_class = "missing-retained-transaction",
+                    "SIP BYE authentication retry could not recover its exact request URI"
+                );
+                SessionError::InvalidTransition(
+                    "SIP BYE authentication retry has no retained transaction".to_string(),
+                )
+            })
+    }
+
+    fn clear_outgoing_bye_transaction(
+        &self,
+        session_id: &SessionId,
+        transaction: &OutboundByeTransaction,
+    ) {
+        let removed = self.outgoing_bye_tx.remove_if(session_id, |_, current| {
+            current.generation == transaction.generation
+                && current.transaction_id == transaction.transaction_id
+        });
+        if removed.is_some() {
+            self.outgoing_bye_generation_watch.remove(session_id);
+        }
+    }
+
+    /// Wait until the latest BYE attempt receives a successful final
+    /// response. A 401/407 is not success: the generic request-auth flow may
+    /// install one newer transaction, which this loop follows. Every other
+    /// non-2xx, timeout, or unobservable transaction fails closed.
+    pub(crate) async fn wait_for_outgoing_bye_final_response(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + BYE_FINAL_RESPONSE_TIMEOUT;
+        let mut after_generation = 0;
+        let mut last_transaction = None;
+        let mut generation_changes = self
+            .outgoing_bye_generation_watch
+            .entry(session_id.clone())
+            .or_insert_with(|| tokio::sync::watch::channel(0).0)
+            .subscribe();
+        loop {
+            let transaction = loop {
+                if let Some(transaction) =
+                    self.latest_outgoing_bye_transaction(session_id, after_generation)
+                {
+                    break transaction;
+                }
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    if let Some(transaction) = last_transaction.as_ref() {
+                        self.clear_outgoing_bye_transaction(session_id, transaction);
+                    }
+                    return Err(SessionError::Timeout(
+                        "SIP BYE transaction was not available before its deadline".to_string(),
+                    ));
+                }
+                if !matches!(
+                    tokio::time::timeout(remaining, generation_changes.changed()).await,
+                    Ok(Ok(()))
+                ) {
+                    if let Some(transaction) = last_transaction.as_ref() {
+                        self.clear_outgoing_bye_transaction(session_id, transaction);
+                    }
+                    return Err(SessionError::Timeout(
+                        "SIP BYE transaction was not available before its deadline".to_string(),
+                    ));
+                }
+            };
+            last_transaction = Some(transaction.clone());
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                self.clear_outgoing_bye_transaction(session_id, &transaction);
+                return Err(SessionError::Timeout(
+                    "SIP BYE final response timed out".to_string(),
+                ));
+            }
+            let response = self
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .transaction_manager()
+                .wait_for_final_response(&transaction.transaction_id, remaining)
+                .await;
+            let newer_transaction = self
+                .latest_outgoing_bye_transaction(session_id, transaction.generation)
+                .is_some();
+            match response {
+                Ok(Some(response)) if (200..=299).contains(&response.status_code()) => {
+                    self.clear_outgoing_bye_transaction(session_id, &transaction);
+                    return Ok(());
+                }
+                Ok(Some(response)) if matches!(response.status_code(), 401 | 407) => {
+                    after_generation = transaction.generation;
+                }
+                Ok(Some(_)) => {
+                    self.clear_outgoing_bye_transaction(session_id, &transaction);
+                    return Err(SessionError::ProtocolError(
+                        "SIP BYE received a non-success final response".to_string(),
+                    ));
+                }
+                Ok(None) => {
+                    if newer_transaction {
+                        after_generation = transaction.generation;
+                        continue;
+                    }
+                    self.clear_outgoing_bye_transaction(session_id, &transaction);
+                    return Err(SessionError::Timeout(
+                        "SIP BYE final response timed out".to_string(),
+                    ));
+                }
+                Err(_) => {
+                    if newer_transaction {
+                        after_generation = transaction.generation;
+                        continue;
+                    }
+                    self.clear_outgoing_bye_transaction(session_id, &transaction);
+                    return Err(SessionError::DialogError(
+                        "SIP BYE final response could not be observed".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn retained_dialog_authorization_headers(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &RvoipDialogId,
+        method: &'static str,
+        request_uri: &str,
+        next_hop: &str,
+        body: Option<&[u8]>,
+    ) -> Result<Vec<rvoip_sip_core::types::TypedHeader>> {
+        use crate::session_store::state::InviteCredentialKind;
+
+        let snapshot = self
+            .store
+            .get_session_snapshot(session_id)
+            .await
+            .map_err(|_| {
+                SessionError::InvalidTransition(
+                    "SIP request exact session is no longer available".to_string(),
+                )
+            })?;
+        let handle = snapshot.state().lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::InvalidTransition(
+                "SIP request exact session has no lifecycle authority".to_string(),
+            )
+        })?;
+        if snapshot
+            .state()
+            .dialog_id
+            .as_ref()
+            .is_none_or(|current| current.as_uuid() != &dialog_id.0)
+        {
+            return Err(SessionError::InvalidTransition(
+                "SIP request exact dialog no longer owns its session".to_string(),
+            ));
+        }
+        // The ordinary unauthenticated BYE path must remain read-only.  The
+        // exact-cell update below clones and publishes a complete session
+        // revision, so entering it when there is no retained credential would
+        // add a full hot-path state write to every successful call teardown.
+        if snapshot.state().invite_authorization_credentials.is_empty() {
+            return Ok(Vec::new());
+        }
+        let transport = self.outbound_transport_context_for_uri(next_hop);
+        update_retained_auth_exact(
+            self.store.as_ref(),
+            &handle,
+            "SIP request exact session changed during authentication",
+            |session| -> Result<Vec<_>> {
+                if session
+                    .dialog_id
+                    .as_ref()
+                    .is_none_or(|current| current.as_uuid() != &dialog_id.0)
+                {
+                    return Err(SessionError::InvalidTransition(
+                        "SIP request exact dialog no longer owns its session".to_string(),
+                    ));
+                }
+                if session.invite_authorization_credentials.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let auth = session
+                    .auth
+                    .clone()
+                    .or_else(|| session.credentials.clone().map(Into::into))
+                    .ok_or_else(|| {
+                        SessionError::AuthError(
+                            "SIP dialog retained a challenge without route credentials".to_string(),
+                        )
+                    })?;
+                let origin_target = session
+                    .remote_uri
+                    .clone()
+                    .unwrap_or_else(|| request_uri.to_string());
+                let mut credentials = session.invite_authorization_credentials.clone();
+                let mut digest_nc = session.digest_nc.clone();
+                let mut headers = Vec::with_capacity(credentials.len());
+                for credential in &mut credentials {
+                    let applies_to_exact_target = match credential.kind {
+                        InviteCredentialKind::Origin => {
+                            credential.protection_target == origin_target
+                        }
+                        InviteCredentialKind::Proxy => credential.protection_target == next_hop,
+                    };
+                    if !applies_to_exact_target {
+                        continue;
+                    }
+                    let preview = auth
+                        .authorization_for_challenge_with_transport_context(
+                            &credential.challenge_raw,
+                            method,
+                            request_uri,
+                            1,
+                            body,
+                            &transport,
+                        )
+                        .map_err(|error| {
+                            crate::errors::redacted_outbound_auth_error(
+                                crate::errors::OutboundAuthOperation::Request,
+                                error,
+                            )
+                        })?;
+                    if let Some(challenge) = preview.digest_challenge.as_ref() {
+                        if challenge.realm != credential.realm
+                            || credential.nonce.as_deref() != Some(challenge.nonce.as_str())
+                        {
+                            return Err(SessionError::AuthError(
+                                "SIP request challenge no longer matches the exact dialog protection space"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    let nonce_count = if let Some(challenge) = preview.digest_challenge.as_ref() {
+                        let key = (challenge.realm.clone(), challenge.nonce.clone());
+                        *digest_nc
+                            .entry(key)
+                            .and_modify(|count| *count = count.saturating_add(1))
+                            .or_insert(1)
+                    } else {
+                        1
+                    };
+                    let selected = if preview.digest_challenge.is_some() && nonce_count != 1 {
+                        auth.authorization_for_challenge_with_transport_context(
+                            &credential.challenge_raw,
+                            method,
+                            request_uri,
+                            nonce_count,
+                            body,
+                            &transport,
+                        )
+                        .map_err(|error| {
+                            crate::errors::redacted_outbound_auth_error(
+                                crate::errors::OutboundAuthOperation::Request,
+                                error,
+                            )
+                        })?
+                    } else {
+                        preview
+                    };
+                    credential.value = selected.value.clone();
+                    let name = match credential.kind {
+                        InviteCredentialKind::Origin => {
+                            rvoip_sip_core::types::HeaderName::Authorization
+                        }
+                        InviteCredentialKind::Proxy => {
+                            rvoip_sip_core::types::HeaderName::ProxyAuthorization
+                        }
+                    };
+                    headers.push(
+                        rvoip_sip_core::validation::validated_authorization_header(
+                            name,
+                            selected.value,
+                        )
+                        .map_err(|_| {
+                            SessionError::AuthError(
+                                "SIP request authorization failed wire-safety validation"
+                                    .to_string(),
+                            )
+                        })?,
+                    );
+                }
+                session.invite_authorization_credentials = credentials;
+                session.digest_nc = digest_nc;
+                Ok(headers)
+            },
+        )
     }
 
     /// SIP_API_DESIGN_2 Phase C — NOTIFY dispatch through the new
@@ -1841,7 +3038,7 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
         mut opts: rvoip_sip_dialog::api::unified::NotifyRequestOptions,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy(
             rvoip_sip_core::types::Method::Notify,
             opts.extra_headers,
@@ -1855,8 +3052,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_notify_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))?;
-        Ok(())
+            .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))
     }
 
     /// SIP_API_DESIGN_2 Phase C — out-of-dialog MESSAGE dispatch
@@ -1948,12 +3144,21 @@ impl DialogAdapter {
             .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        self.dialog_api
+        // Authentication retries must sign and retain the challenged
+        // generation's request target, not reconstruct it from To/session
+        // metadata. Local teardown fences target-refresh processing while the
+        // new BYE is built from the same confirmed dialog.
+        let request_uri = self.outgoing_bye_request_uri(session_id).await?;
+        self.mark_initial_invite_protocol_teardown(session_id);
+        let generation = self.next_outgoing_bye_generation();
+        let transaction_id = self
+            .dialog_api
             .send_bye_with_options(&dialog_id, opts)
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send BYE with auth: {}", e))
             })?;
+        self.retain_outgoing_bye_transaction(session_id, generation, transaction_id, request_uri);
         Ok(())
     }
 
@@ -1963,7 +3168,7 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::ReferRequestOptions,
         auth_header_name: &str,
         auth_header_value: String,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy_with_auth(
             rvoip_sip_core::types::Method::Refer,
             opts.extra_headers,
@@ -1981,8 +3186,7 @@ impl DialogAdapter {
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send REFER with auth: {}", e))
-            })?;
-        Ok(())
+            })
     }
 
     pub async fn send_notify_with_auth(
@@ -1991,7 +3195,7 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::NotifyRequestOptions,
         auth_header_name: &str,
         auth_header_value: String,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy_with_auth(
             rvoip_sip_core::types::Method::Notify,
             opts.extra_headers,
@@ -2009,8 +3213,7 @@ impl DialogAdapter {
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send NOTIFY with auth: {}", e))
-            })?;
-        Ok(())
+            })
     }
 
     pub async fn send_info_with_auth(
@@ -2019,7 +3222,7 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::InfoRequestOptions,
         auth_header_name: &str,
         auth_header_value: String,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy_with_auth(
             rvoip_sip_core::types::Method::Info,
             opts.extra_headers,
@@ -2035,10 +3238,7 @@ impl DialogAdapter {
         self.dialog_api
             .send_info_with_options(&dialog_id, opts)
             .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to send INFO with auth: {}", e))
-            })?;
-        Ok(())
+            .map_err(|e| SessionError::DialogError(format!("Failed to send INFO with auth: {}", e)))
     }
 
     pub async fn send_update_with_auth(
@@ -2047,7 +3247,7 @@ impl DialogAdapter {
         mut opts: rvoip_sip_dialog::api::unified::UpdateRequestOptions,
         auth_header_name: &str,
         auth_header_value: String,
-    ) -> Result<()> {
+    ) -> Result<TransactionKey> {
         opts.extra_headers = apply_outbound_extras_policy_with_auth(
             rvoip_sip_core::types::Method::Update,
             opts.extra_headers,
@@ -2065,8 +3265,7 @@ impl DialogAdapter {
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send UPDATE with auth: {}", e))
-            })?;
-        Ok(())
+            })
     }
 
     pub async fn send_message_oob_with_auth(
@@ -2143,6 +3342,7 @@ impl DialogAdapter {
             entry.value().clone()
         };
 
+        self.mark_initial_invite_protocol_teardown(session_id);
         self.dialog_api
             .send_cancel_with_options(&dialog_id, CancelRequestOptions::default())
             .await
@@ -2205,6 +3405,7 @@ impl DialogAdapter {
             entry.value().clone()
         };
 
+        self.mark_initial_invite_protocol_teardown(session_id);
         self.dialog_api
             .send_cancel_with_options(&dialog_id, opts)
             .await
@@ -2332,37 +3533,158 @@ impl DialogAdapter {
 
     /// Clean up all mappings and resources for a session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
+        let handle = self.store.lifecycle_handle(session_id).ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Session {} has no current lifecycle handle",
+                session_id.0
+            ))
+        })?;
+        self.cleanup_session_exact(&handle).await
+    }
+
+    /// Clean up only the dialog resources owned by one retained session
+    /// lifetime. The exact store check happens before any lower mutation, so a
+    /// delayed cleanup cannot target a later call that reused the raw ID.
+    pub(crate) async fn cleanup_session_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        self.store
+            .get_session_retained_exact(handle)
+            .await
+            .map_err(|_| {
+                SessionError::SessionNotFound(format!(
+                    "Session {} exact lifetime is unavailable",
+                    handle.session_id().0
+                ))
+            })?;
+        let session_id = handle.session_id();
         let guard = cleanup_diag::stage_guard(CleanupStage::DialogCleanup, &session_id.0);
         self.cleanup_attempt_total.fetch_add(1, Ordering::Relaxed);
-        // Remove from all mappings
-        if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
-            self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
-            self.dialog_to_session.remove(&dialog_id.1);
-            self.dialog_api
-                .dialog_manager()
-                .core()
-                .cleanup_dialog_storage_and_transactions(&dialog_id.1)
-                .await;
-        } else {
-            self.cleanup_missing_total.fetch_add(1, Ordering::Relaxed);
-        }
-
+        // Capture exact identifiers without removing them. The lower core
+        // cleanup suspends; retaining the mappings until it returns makes a
+        // timeout-cancelled caller retryable with the same dialog identity.
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone());
         let call_ids_to_remove: Vec<_> = self
             .callid_to_session
             .iter()
             .filter(|entry| entry.value() == session_id)
             .map(|entry| entry.key().clone())
             .collect();
-        for call_id in call_ids_to_remove {
-            self.callid_to_session.remove(&call_id);
-            self.cleanup_call_ids_removed_total
-                .fetch_add(1, Ordering::Relaxed);
+        let outgoing_invite = self
+            .outgoing_invite_tx
+            .get(session_id)
+            .map(|entry| entry.value().clone());
+        let outbound_initial_invite = self
+            .outbound_initial_invites
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .filter(|binding| {
+                binding.handle == *handle
+                    && dialog_id
+                        .as_ref()
+                        .is_some_and(|dialog_id| binding.owner.dialog_id() == dialog_id)
+            });
+
+        // Serialize cleanup with exact-dialog DataMessage dispatch. Holding
+        // this owner through lower cleanup and mapping removal makes queued
+        // senders observe an unavailable dialog rather than send after close.
+        let data_message_lane = dialog_id
+            .as_ref()
+            .map(|dialog_id| self.data_message_dispatch_lanes.lane(dialog_id));
+        let _data_message_cleanup_guard = match data_message_lane.as_ref() {
+            Some(lane) => Some(Arc::clone(lane).lock_owned().await),
+            None => None,
+        };
+
+        if let Some(dialog_id) = dialog_id.as_ref() {
+            self.cleanup_mapped_total.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
+            let pause = {
+                self.cleanup_pause
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+            };
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.entered.store(true, Ordering::Release);
+                pause.entered_notify.notify_waiters();
+                pause.release.notified().await;
+            }
+            self.dialog_api
+                .dialog_manager()
+                .core()
+                .cleanup_dialog_storage_and_transactions(dialog_id)
+                .await;
+
+            // A final response (including a 3xx followed by a fresh INVITE)
+            // terminates this exact initial-INVITE owner. Retire its lower
+            // ownership and exact registry mapping before allowing a
+            // replacement dialog to install for the same session lifetime.
+            // The managed resource itself remains registered with the
+            // lifecycle authority until whole-session teardown; its exact
+            // release observes that this binding has been superseded and is
+            // therefore harmless.
+            if let Some(binding) = outbound_initial_invite.as_ref() {
+                if self
+                    .dialog_api
+                    .initial_invite_owner_is_retained(&binding.owner)
+                    && !self
+                        .dialog_api
+                        .finish_initial_invite_teardown(&binding.owner)
+                        .await
+                {
+                    return Err(SessionError::InternalError(
+                        "initial INVITE exact retirement failed (class=lifecycle)".to_string(),
+                    ));
+                }
+                self.store
+                    .registry()
+                    .clear_dialog_handle_retained(handle, dialog_id.clone().into())
+                    .map_err(|_| {
+                        SessionError::InternalError(
+                            "initial INVITE registry retirement failed (class=lifecycle)"
+                                .to_string(),
+                        )
+                    })?;
+                self.outbound_initial_invites
+                    .remove_if(session_id, |_, current| {
+                        current.matches(handle, &binding.owner)
+                    });
+            }
+            self.session_to_dialog
+                .remove_if(session_id, |_, mapped| mapped == dialog_id);
+            self.dialog_to_session
+                .remove_if(dialog_id, |_, mapped| mapped == session_id);
+            if let Some(lane) = data_message_lane.as_ref() {
+                self.data_message_dispatch_lanes
+                    .remove_exact(dialog_id, lane);
+            }
+        } else {
+            self.cleanup_missing_total.fetch_add(1, Ordering::Relaxed);
         }
 
-        if self.outgoing_invite_tx.remove(session_id).is_some() {
+        for call_id in call_ids_to_remove {
+            if self
+                .callid_to_session
+                .remove_if(&call_id, |_, mapped| mapped == session_id)
+                .is_some()
+            {
+                self.cleanup_call_ids_removed_total
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        if outgoing_invite.is_some_and(|transaction| {
+            self.outgoing_invite_tx
+                .remove_if(session_id, |_, mapped| mapped == &transaction)
+                .is_some()
+        }) {
             self.cleanup_outgoing_invite_removed_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+        self.outbound_request_tracker.clear_session(session_id);
 
         tracing::debug!(
             "Cleaned up dialog adapter mappings for session {}",
@@ -2422,6 +3744,7 @@ impl DialogAdapter {
     /// stack-managed headers per SIP_API_DESIGN_2.md §7.3. On auth retry
     /// the caller passes the same extras snapshot so headers survive the
     /// 401/407 hop.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn send_register(
         &self,
         session_id: &SessionId,
@@ -2447,38 +3770,46 @@ impl DialogAdapter {
 
         // Build authorization header if auth material provided.
         let (authorization, proxy_authorization) = if let Some(auth) = auth {
-            // Get challenge from session
-            let mut session = self.store.get_session(session_id).await?;
-            if let Some(challenge_raw) = session.auth_challenge_raw.clone().or_else(|| {
-                session.auth_challenge.as_ref().map(|challenge| {
-                    rvoip_auth_core::DigestAuthenticator::new(challenge.realm.clone())
-                        .format_www_authenticate(challenge)
+            let auth_state = self
+                .store
+                .update_session_with(session_id, |session| {
+                    let challenge_raw = session.auth_challenge_raw.clone().or_else(|| {
+                        session.auth_challenge.as_ref().map(|challenge| {
+                            rvoip_auth_core::DigestAuthenticator::new(challenge.realm.clone())
+                                .format_www_authenticate(challenge)
+                        })
+                    })?;
+
+                    let digest_challenge = session.auth_challenge.clone().or_else(|| {
+                        rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
+                    });
+                    let nc_value = if let Some(challenge) = digest_challenge.as_ref() {
+                        let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                        *session
+                            .digest_nc
+                            .entry(nc_key)
+                            .and_modify(|n| *n += 1)
+                            .or_insert(1)
+                    } else {
+                        1
+                    };
+                    let transport_context = session
+                        .pending_auth_transport
+                        .take()
+                        .unwrap_or_else(|| self.outbound_transport_context_for_uri(registrar_uri));
+                    let status = session
+                        .pending_auth
+                        .as_ref()
+                        .map(|(status, _)| *status)
+                        .unwrap_or(401);
+                    Some((challenge_raw, nc_value, transport_context, status))
                 })
-            }) {
+                .await?;
+            if let Some((challenge_raw, nc_value, transport_context, status)) = auth_state {
                 // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
                 // counter before computing. REGISTER reuses one nonce
                 // across many refreshes, so this is exactly the path
                 // where carriers reject `nc=00000001` repeats.
-                let digest_challenge = session.auth_challenge.clone().or_else(|| {
-                    rvoip_auth_core::DigestAuthenticator::parse_challenge(&challenge_raw).ok()
-                });
-                let nc_value = if let Some(challenge) = digest_challenge.as_ref() {
-                    let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-                    *session
-                        .digest_nc
-                        .entry(nc_key)
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1)
-                } else {
-                    1
-                };
-                let transport_context = session
-                    .pending_auth_transport
-                    .clone()
-                    .unwrap_or_else(|| self.outbound_transport_context_for_uri(registrar_uri));
-                session.pending_auth_transport = None;
-                self.store.update_session(session.clone()).await?;
-
                 tracing::info!(
                     registrar_present = !registrar_uri.is_empty(),
                     registrar_bytes = registrar_uri.len(),
@@ -2510,11 +3841,6 @@ impl DialogAdapter {
                     "outbound REGISTER authentication computed"
                 );
 
-                let status = session
-                    .pending_auth
-                    .as_ref()
-                    .map(|(status, _)| *status)
-                    .unwrap_or(401);
                 if status == 407 {
                     (None, Some(selected.value))
                 } else {
@@ -2560,17 +3886,17 @@ impl DialogAdapter {
         // transaction. This is registration-scoped only; dialog-core still owns
         // all in-dialog CSeq state and transaction-layer retransmissions reuse
         // the request created below.
-        let (registration_call_id, registration_cseq) = {
-            let mut session = self.store.get_session(session_id).await?;
-            let call_id = session
-                .registration_call_id
-                .get_or_insert_with(|| format!("reg-{}", uuid::Uuid::new_v4()))
-                .clone();
-            session.registration_cseq = session.registration_cseq.saturating_add(1);
-            let cseq = session.registration_cseq;
-            self.store.update_session(session).await?;
-            (call_id, cseq)
-        };
+        let (registration_call_id, registration_cseq) = self
+            .store
+            .update_session_with(session_id, |session| {
+                let call_id = session
+                    .registration_call_id
+                    .get_or_insert_with(|| format!("reg-{}", uuid::Uuid::new_v4()))
+                    .clone();
+                session.registration_cseq = session.registration_cseq.saturating_add(1);
+                (call_id, session.registration_cseq)
+            })
+            .await?;
 
         // Send REGISTER through dialog-core API and get response.
         // A5 Phase 2a: when the coordinator is configured for RFC 5626 SIP
@@ -2609,9 +3935,12 @@ impl DialogAdapter {
             .map(|context| {
                 crate::auth::SipTransportSecurityContext::from_transport_context(&context)
             });
-        if let Ok(mut session) = self.store.get_session(session_id).await {
-            session.pending_auth_transport = register_transport;
-            self.store.update_session(session).await?;
+        if self.store.with_session(session_id, |_| ()).is_ok() {
+            self.store
+                .update_session_with(session_id, |session| {
+                    session.pending_auth_transport = register_transport;
+                })
+                .await?;
         }
 
         match response.status_code() {
@@ -2822,18 +4151,38 @@ impl DialogAdapter {
             "Sending REFER NOTIFY"
         );
 
-        // Get dialog ID for this session
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::DialogError("No dialog for session".to_string()))?
-            .clone();
-
-        // Send REFER NOTIFY using dialog-core convenience method
-        self.dialog_api
-            .send_refer_notify(&dialog_id, status_code, reason)
+        // Build REFER progress through the same exact, tracked NOTIFY path as
+        // application-generated requests. Keeping the immutable options in
+        // the tracker preserves the sipfrag body for Digest auth-int retry,
+        // correlates the final response to this transaction, and guarantees
+        // automatic operator headers are applied without exposing them in
+        // diagnostics.
+        let subscription_state = if status_code >= 200 {
+            "terminated;reason=noresource"
+        } else {
+            "active;expires=60"
+        };
+        let options = Arc::new(NotifyRequestOptions {
+            event: "refer".to_string(),
+            subscription_state: subscription_state.to_string(),
+            content_type: Some("message/sipfrag".to_string()),
+            body: Some(bytes::Bytes::from(format!(
+                "SIP/2.0 {} {}",
+                status_code, reason
+            ))),
+            subscription_id: None,
+            extra_headers: self.auto_emit_extra_headers.clone(),
+        });
+        let lease = self.outbound_request_tracker.prepare(
+            session_id,
+            TrackedInDialogOptions::Notify(Arc::clone(&options)),
+        )?;
+        let transaction_id = self
+            .send_notify_with_options(session_id, (*options).clone())
             .await
             .map_err(|error| redacted_dialog_operation_error("REFER NOTIFY", error))?;
+        self.outbound_request_tracker
+            .activate(lease, transaction_id)?;
 
         tracing::info!(
             "REFER NOTIFY sent successfully for session {}",
@@ -2843,6 +4192,458 @@ impl DialogAdapter {
     }
 
     // ===== MESSAGE Methods =====
+
+    /// Send a validated, byte-preserving MESSAGE on one exact dialog.
+    ///
+    /// `send_request_in_dialog` currently converts generic bodies through a
+    /// UTF-8 `String`. Build the request with an equal-length placeholder and
+    /// replace only its public `Bytes` body before dispatch, preserving the
+    /// builder's exact Content-Length while retaining arbitrary binary bytes.
+    pub(crate) async fn send_data_message_on_dialog(
+        &self,
+        dialog_id: &RvoipDialogId,
+        message: SipDataMessage,
+    ) -> Result<()> {
+        let dispatch_lane = self.data_message_dispatch_lanes.lane(dialog_id);
+        let _dispatch_guard = Arc::clone(&dispatch_lane).lock_owned().await;
+        let manager = self.dialog_api.dialog_manager().core();
+        let mut fresh_challenge = None;
+
+        // One initial attempt plus one bounded retry for a fresh 401/407.
+        // Creating a new dialog template on each pass advances CSeq as RFC
+        // 3261 requires for the challenged replacement request.
+        for attempt in 0..=1 {
+            let template = {
+                let mut dialog = match manager.get_dialog_mut(dialog_id) {
+                    Ok(dialog) => dialog,
+                    Err(_) => {
+                        // Cleanup may have removed the original lane before this
+                        // already-captured sender entered. Remove only this exact
+                        // replacement lane; a concurrently installed successor is
+                        // left for its own failed dispatch to release.
+                        self.data_message_dispatch_lanes
+                            .remove_exact(dialog_id, &dispatch_lane);
+                        return Err(SessionError::InvalidTransition(
+                            "SIP MESSAGE exact dialog is no longer available".to_string(),
+                        ));
+                    }
+                };
+                if dialog.state != DialogState::Confirmed {
+                    return Err(SessionError::InvalidTransition(
+                        "SIP MESSAGE requires a confirmed dialog".to_string(),
+                    ));
+                }
+                let template = dialog.create_request_template(rvoip_sip_core::Method::Message);
+                let local_tag = template
+                    .local_tag
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        SessionError::InvalidTransition(
+                            "SIP MESSAGE confirmed dialog is missing its local tag".to_string(),
+                        )
+                    })?;
+                let remote_tag = template
+                    .remote_tag
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        SessionError::InvalidTransition(
+                            "SIP MESSAGE confirmed dialog is missing its remote tag".to_string(),
+                        )
+                    })?;
+                let local_address = manager
+                    .local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+                DialogRequestTemplate {
+                    call_id: template.call_id,
+                    from_uri: template.local_uri.to_string(),
+                    from_tag: local_tag,
+                    to_uri: template.remote_uri.to_string(),
+                    to_tag: remote_tag,
+                    request_uri: template.target_uri.to_string(),
+                    cseq: template.cseq_number,
+                    local_address,
+                    route_set: template.route_set,
+                    contact: None,
+                }
+            };
+
+            let mut request = build_sip_data_request(&template, message.clone()).map_err(|_| {
+                SessionError::InvalidInput(
+                    "SIP data message failed local request construction".to_string(),
+                )
+            })?;
+
+            let next_hop = exact_next_hop_uri_for_request(&request).map_err(|_| {
+                SessionError::InvalidInput(
+                    "SIP data message has an unusable exact next hop".to_string(),
+                )
+            })?;
+            let candidates = manager.resolve_uri_to_candidates(&next_hop).await;
+            if candidates.is_empty() {
+                return Err(SessionError::DialogError(
+                    "SIP MESSAGE exact next hop is unavailable".to_string(),
+                ));
+            }
+            self.authorize_data_message_on_dialog(
+                dialog_id,
+                &mut request,
+                &next_hop.to_string(),
+                fresh_challenge.as_ref(),
+            )
+            .await?;
+            let (transaction_id, _) = manager
+                // This operation owns its final response and bounded auth
+                // retry. Deliberately do not publish the transaction through
+                // the generic session AuthRequired path, which otherwise
+                // would race a second MESSAGE retry from the state machine.
+                .send_request_with_candidate_failover(request, candidates, None)
+                .await
+                .map_err(|error| redacted_dialog_operation_error("SIP MESSAGE", error))?;
+            let response = manager
+                .transaction_manager()
+                .wait_for_final_response(&transaction_id, DATA_MESSAGE_FINAL_RESPONSE_TIMEOUT)
+                .await
+                .map_err(|_| {
+                    SessionError::DialogError(
+                        "SIP MESSAGE final response could not be observed".to_string(),
+                    )
+                })?
+                .ok_or_else(|| {
+                    SessionError::DialogError("SIP MESSAGE final response timed out".to_string())
+                })?;
+            match response.status_code() {
+                200..=299 => return Ok(()),
+                status @ (401 | 407) if attempt == 0 => {
+                    use rvoip_sip_core::types::headers::HeaderAccess;
+
+                    let header_name = if status == 407 {
+                        rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
+                    } else {
+                        rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
+                    };
+                    let values = response
+                        .raw_headers(&header_name)
+                        .into_iter()
+                        .map(|value| String::from_utf8(value).map_err(|_| ()))
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|_| {
+                            SessionError::AuthError(
+                                "SIP MESSAGE challenge is not valid header text".to_string(),
+                            )
+                        })?;
+                    if values.is_empty() {
+                        return Err(SessionError::AuthError(
+                            "SIP MESSAGE challenge response omitted its challenge".to_string(),
+                        ));
+                    }
+                    fresh_challenge = Some(DataMessageAuthChallenge {
+                        status,
+                        value: values.join(", "),
+                    });
+                }
+                401 | 407 => {
+                    return Err(SessionError::AuthError(
+                        "SIP MESSAGE authentication retry was rejected".to_string(),
+                    ));
+                }
+                status => {
+                    return Err(SessionError::ProtocolError(format!(
+                        "SIP MESSAGE peer rejected delivery with status {status}"
+                    )));
+                }
+            }
+        }
+
+        Err(SessionError::AuthError(
+            "SIP MESSAGE authentication retry was exhausted".to_string(),
+        ))
+    }
+
+    /// Re-author method-specific origin/proxy credentials negotiated by this
+    /// exact dialog's initial INVITE. Digest credentials cannot be copied from
+    /// INVITE because HA2 binds the request method, URI, and optional body;
+    /// recompute them for MESSAGE while advancing the retained nonce counter.
+    /// No challenge or credential is taken from another session or target.
+    async fn authorize_data_message_on_dialog(
+        &self,
+        dialog_id: &RvoipDialogId,
+        request: &mut rvoip_sip_core::Request,
+        next_hop: &str,
+        fresh_challenge: Option<&DataMessageAuthChallenge>,
+    ) -> Result<()> {
+        use crate::session_store::state::InviteCredentialKind;
+
+        let session_id = self
+            .dialog_to_session
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                SessionError::InvalidTransition(
+                    "SIP MESSAGE exact dialog has no owning session".to_string(),
+                )
+            })?;
+        let snapshot = self
+            .store
+            .get_session_snapshot(&session_id)
+            .await
+            .map_err(|_| {
+                SessionError::InvalidTransition(
+                    "SIP MESSAGE exact session is no longer available".to_string(),
+                )
+            })?;
+        let handle = snapshot.state().lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::InvalidTransition(
+                "SIP MESSAGE exact session has no lifecycle authority".to_string(),
+            )
+        })?;
+        if snapshot
+            .state()
+            .dialog_id
+            .as_ref()
+            .is_none_or(|current| current.as_uuid() != &dialog_id.0)
+        {
+            return Err(SessionError::InvalidTransition(
+                "SIP MESSAGE exact dialog no longer owns its session".to_string(),
+            ));
+        }
+        if !snapshot.state().dialog_established
+            || snapshot.state().call_state == crate::types::CallState::Terminating
+            || snapshot.state().call_state.is_final()
+        {
+            return Err(SessionError::InvalidTransition(
+                "SIP MESSAGE exact dialog is no longer active".to_string(),
+            ));
+        }
+        // Preserve the no-write fast path for ordinary unauthenticated
+        // MESSAGE delivery.  A fresh challenge must still enter the exact
+        // update so installing its protection-space credential and nonce
+        // counter is atomic with any concurrent benign session mutation.
+        if snapshot.state().invite_authorization_credentials.is_empty() && fresh_challenge.is_none()
+        {
+            return Ok(());
+        }
+        let request_uri = request.uri.to_string();
+        let transport = self.outbound_transport_context_for_uri(next_hop);
+        let body = Some(request.body.as_ref());
+        let headers = update_retained_auth_exact(
+            self.store.as_ref(),
+            &handle,
+            "SIP MESSAGE exact session changed during authentication",
+            |session| -> Result<Vec<_>> {
+                if session
+                    .dialog_id
+                    .as_ref()
+                    .is_none_or(|current| current.as_uuid() != &dialog_id.0)
+                {
+                    return Err(SessionError::InvalidTransition(
+                        "SIP MESSAGE exact dialog no longer owns its session".to_string(),
+                    ));
+                }
+                if !session.dialog_established
+                    || session.call_state == crate::types::CallState::Terminating
+                    || session.call_state.is_final()
+                {
+                    return Err(SessionError::InvalidTransition(
+                        "SIP MESSAGE exact dialog is no longer active".to_string(),
+                    ));
+                }
+                if session.invite_authorization_credentials.is_empty() && fresh_challenge.is_none()
+                {
+                    return Ok(Vec::new());
+                }
+                let auth = session
+                    .auth
+                    .clone()
+                    .or_else(|| session.credentials.clone().map(Into::into))
+                    .ok_or_else(|| {
+                        SessionError::AuthError(
+                            "SIP MESSAGE dialog retained a challenge without route credentials"
+                                .to_string(),
+                        )
+                    })?;
+                let mut credentials = session.invite_authorization_credentials.clone();
+                let mut digest_nc = session.digest_nc.clone();
+                let origin_target = session
+                    .remote_uri
+                    .clone()
+                    .unwrap_or_else(|| request_uri.clone());
+
+                if let Some(fresh) = fresh_challenge {
+                    let kind = if fresh.status == 407 {
+                        InviteCredentialKind::Proxy
+                    } else {
+                        InviteCredentialKind::Origin
+                    };
+                    let preview = auth
+                        .authorization_for_challenge_with_transport_context(
+                            &fresh.value,
+                            "MESSAGE",
+                            &request_uri,
+                            1,
+                            body,
+                            &transport,
+                        )
+                        .map_err(|error| {
+                            crate::errors::redacted_outbound_auth_error(
+                                crate::errors::OutboundAuthOperation::Request,
+                                error,
+                            )
+                        })?;
+                    let realm = data_message_auth_realm(&preview);
+                    let nonce = preview
+                        .digest_challenge
+                        .as_ref()
+                        .map(|challenge| challenge.nonce.clone());
+                    let existing = credentials.iter().position(|credential| {
+                        credential.kind == kind && credential.realm == realm
+                    });
+                    if existing.is_none()
+                        && credentials.iter().any(|credential| credential.kind == kind)
+                    {
+                        return Err(SessionError::AuthError(
+                            "SIP MESSAGE challenge changed the exact dialog protection space"
+                                .to_string(),
+                        ));
+                    }
+                    let (protection_target, stale_refreshes) = if let Some(index) = existing {
+                        let credential = &credentials[index];
+                        if !preview.stale
+                            || credential.nonce == nonce
+                            || credential.stale_refreshes >= 1
+                        {
+                            return Err(SessionError::AuthError(
+                                "SIP MESSAGE repeated a non-refreshing authentication challenge"
+                                    .to_string(),
+                            ));
+                        }
+                        (
+                            credential.protection_target.clone(),
+                            credential.stale_refreshes.saturating_add(1),
+                        )
+                    } else {
+                        if credentials.len() >= 8 {
+                            return Err(SessionError::AuthError(
+                                "SIP MESSAGE authentication protection-space limit was reached"
+                                    .to_string(),
+                            ));
+                        }
+                        (
+                            if kind == InviteCredentialKind::Origin {
+                                origin_target.clone()
+                            } else {
+                                next_hop.to_string()
+                            },
+                            0,
+                        )
+                    };
+                    let credential = crate::session_store::state::InviteAuthorizationCredential {
+                        kind,
+                        protection_target,
+                        challenge_raw: fresh.value.clone(),
+                        realm,
+                        nonce,
+                        stale_refreshes,
+                        value: String::new(),
+                    };
+                    if let Some(index) = existing {
+                        credentials[index] = credential;
+                    } else {
+                        credentials.push(credential);
+                    }
+                }
+
+                let mut headers = Vec::with_capacity(credentials.len());
+                for credential in &mut credentials {
+                    let applies_to_exact_target = match credential.kind {
+                        InviteCredentialKind::Origin => {
+                            credential.protection_target == origin_target
+                        }
+                        InviteCredentialKind::Proxy => credential.protection_target == next_hop,
+                    };
+                    if !applies_to_exact_target {
+                        continue;
+                    }
+                    let preview = auth
+                        .authorization_for_challenge_with_transport_context(
+                            &credential.challenge_raw,
+                            "MESSAGE",
+                            &request_uri,
+                            1,
+                            body,
+                            &transport,
+                        )
+                        .map_err(|error| {
+                            crate::errors::redacted_outbound_auth_error(
+                                crate::errors::OutboundAuthOperation::Request,
+                                error,
+                            )
+                        })?;
+                    if let Some(challenge) = preview.digest_challenge.as_ref() {
+                        if challenge.realm != credential.realm
+                            || credential.nonce.as_deref() != Some(challenge.nonce.as_str())
+                        {
+                            return Err(SessionError::AuthError(
+                                "SIP MESSAGE challenge no longer matches the exact dialog protection space"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    let nonce_count = if let Some(challenge) = preview.digest_challenge.as_ref() {
+                        let key = (challenge.realm.clone(), challenge.nonce.clone());
+                        *digest_nc
+                            .entry(key)
+                            .and_modify(|count| *count = count.saturating_add(1))
+                            .or_insert(1)
+                    } else {
+                        1
+                    };
+                    let selected = if preview.digest_challenge.is_some() && nonce_count != 1 {
+                        auth.authorization_for_challenge_with_transport_context(
+                            &credential.challenge_raw,
+                            "MESSAGE",
+                            &request_uri,
+                            nonce_count,
+                            body,
+                            &transport,
+                        )
+                        .map_err(|error| {
+                            crate::errors::redacted_outbound_auth_error(
+                                crate::errors::OutboundAuthOperation::Request,
+                                error,
+                            )
+                        })?
+                    } else {
+                        preview
+                    };
+                    credential.value = selected.value.clone();
+                    let name = match credential.kind {
+                        InviteCredentialKind::Origin => {
+                            rvoip_sip_core::types::HeaderName::Authorization
+                        }
+                        InviteCredentialKind::Proxy => {
+                            rvoip_sip_core::types::HeaderName::ProxyAuthorization
+                        }
+                    };
+                    headers.push(
+                        rvoip_sip_core::validation::validated_authorization_header(
+                            name,
+                            selected.value,
+                        )
+                        .map_err(|_| {
+                            SessionError::AuthError(
+                                "SIP MESSAGE authorization failed wire-safety validation"
+                                    .to_string(),
+                            )
+                        })?,
+                    );
+                }
+                session.invite_authorization_credentials = credentials;
+                session.digest_nc = digest_nc;
+                Ok(headers)
+            },
+        )?;
+        request.headers.extend(headers);
+        Ok(())
+    }
 
     /// Send a MESSAGE request (can be in-dialog or out-of-dialog)
     pub async fn send_message(
@@ -2952,6 +4753,12 @@ impl Clone for DialogAdapter {
             dialog_to_session: self.dialog_to_session.clone(),
             callid_to_session: self.callid_to_session.clone(),
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
+            outgoing_bye_tx: self.outgoing_bye_tx.clone(),
+            outgoing_bye_generation_watch: self.outgoing_bye_generation_watch.clone(),
+            next_outgoing_bye_generation: self.next_outgoing_bye_generation.clone(),
+            outbound_request_tracker: self.outbound_request_tracker.clone(),
+            outbound_initial_invites: self.outbound_initial_invites.clone(),
+            data_message_dispatch_lanes: self.data_message_dispatch_lanes.clone(),
             auto_emit_extra_headers: self.auto_emit_extra_headers.clone(),
             global_coordinator: self.global_coordinator.clone(),
             state_machine: self.state_machine.clone(),
@@ -2960,7 +4767,10 @@ impl Clone for DialogAdapter {
             symmetric_flow_params: self.symmetric_flow_params.clone(),
             registration_auto_refresh: self.registration_auto_refresh,
             registration_refresh_jitter_percent: self.registration_refresh_jitter_percent,
+            registration_refresh_admission: self.registration_refresh_admission.clone(),
             registration_refresh_tasks: self.registration_refresh_tasks.clone(),
+            registration_refresh_retained: self.registration_refresh_retained.clone(),
+            next_registration_refresh_generation: self.next_registration_refresh_generation.clone(),
             cleanup_attempt_total: self.cleanup_attempt_total.clone(),
             cleanup_mapped_total: self.cleanup_mapped_total.clone(),
             cleanup_missing_total: self.cleanup_missing_total.clone(),
@@ -2968,14 +4778,173 @@ impl Clone for DialogAdapter {
             cleanup_outgoing_invite_removed_total: self
                 .cleanup_outgoing_invite_removed_total
                 .clone(),
+            #[cfg(test)]
+            cleanup_pause: self.cleanup_pause.clone(),
             trace_redactor: self.trace_redactor.clone(),
         }
     }
 }
 
 #[cfg(test)]
+pub(crate) struct DialogCleanupPause {
+    entered: std::sync::atomic::AtomicBool,
+    entered_notify: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+impl DialogCleanupPause {
+    fn new() -> Self {
+        Self {
+            entered: std::sync::atomic::AtomicBool::new(false),
+            entered_notify: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+
+    pub(crate) async fn wait_entered(&self) {
+        while !self.entered.load(Ordering::Acquire) {
+            self.entered_notify.notified().await;
+        }
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_waiters();
+    }
+}
+
+#[cfg(test)]
+// Policy helpers remain below this focused diagnostic module so the production
+// API stays grouped with its documentation.
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_response_transaction_diagnostics_are_bounded_and_redacted() {
+        const SECRET_BRANCH: &str = "z9hG4bK-exact-response-secret-branch";
+        const SECRET_METHOD: &str = "X-EXACT-RESPONSE-SECRET-METHOD";
+        let transaction = TransactionKey::new(
+            SECRET_BRANCH.to_string(),
+            rvoip_sip_core::Method::Extension(SECRET_METHOD.to_string()),
+            true,
+        );
+
+        let diagnostics = exact_response_transaction_diagnostics(&transaction);
+        let rendered = format!("{diagnostics:?}");
+        assert_eq!(diagnostics, ("extension", "server"));
+        assert!(!rendered.contains(SECRET_BRANCH));
+        assert!(!rendered.contains(SECRET_METHOD));
+
+        let source = include_str!("dialog_adapter.rs");
+        let forbidden_raw_format = ["via transaction ", "{}"].concat();
+        assert!(
+            !source.contains(&forbidden_raw_format),
+            "exact response diagnostics regained raw transaction formatting"
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_refresh_shutdown_cooperatively_cancels_long_sleep() {
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(
+            crate::api::unified::Config::local("refresh-drain", 0),
+        )
+        .await
+        .expect("coordinator");
+        let adapter = Arc::clone(coordinator.dialog_adapter());
+        adapter.schedule_registration_refresh(
+            SessionId::new(),
+            Some(Instant::now() + Duration::from_secs(60)),
+        );
+        assert_eq!(adapter.registration_refresh_tasks.len(), 1);
+        assert_eq!(adapter.registration_refresh_retained.count(), 1);
+
+        adapter
+            .abort_all_registration_refreshes_and_wait()
+            .await
+            .expect("cooperative refresh cancellation drained");
+        assert!(adapter.registration_refresh_tasks.is_empty());
+        assert_eq!(adapter.registration_refresh_retained.count(), 0);
+        assert!(!adapter.registration_refresh_retained.panicked());
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("coordinator shutdown remains idempotent");
+    }
+
+    #[tokio::test]
+    async fn retained_auth_exact_update_survives_benign_revision_advance() {
+        let store = SessionStore::new();
+        let session_id = SessionId::new();
+        let dialog_id = DialogId::new();
+        store
+            .create_session(session_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create exact retained-auth session");
+        store
+            .update_session_with(&session_id, |session| {
+                session.dialog_id = Some(dialog_id.clone());
+                session.dialog_established = true;
+                session.call_state = crate::types::CallState::Active;
+                session.remote_uri = Some("sip:peer@example.test".to_string());
+            })
+            .await
+            .expect("publish established dialog");
+
+        // Model the old race deterministically: auth captures one exact
+        // lifetime, then an unrelated state-machine field advances the
+        // session revision before Digest nonce bookkeeping runs.
+        let auth_read = store
+            .get_session_snapshot(&session_id)
+            .await
+            .expect("capture auth read");
+        let auth_read_revision = auth_read.revision();
+        let handle = auth_read
+            .state()
+            .lifecycle_handle
+            .clone()
+            .expect("exact retained-auth handle");
+        store
+            .update_session_with(&session_id, |session| {
+                session.call_established_triggered = true;
+                session.sdp_origin_version = session.sdp_origin_version.saturating_add(1);
+            })
+            .await
+            .expect("publish benign concurrent mutation");
+
+        let observed_origin_version = update_retained_auth_exact(
+            &store,
+            &handle,
+            "retained auth exact session changed",
+            |session| {
+                assert_eq!(session.dialog_id.as_ref(), Some(&dialog_id));
+                let nonce_count = session
+                    .digest_nc
+                    .entry(("dialog-realm".to_string(), "dialog-nonce".to_string()))
+                    .or_insert(0);
+                *nonce_count = nonce_count.saturating_add(1);
+                Ok(session.sdp_origin_version)
+            },
+        )
+        .expect("latest exact session revision accepts retained auth update");
+
+        let after = store
+            .get_session_snapshot(&session_id)
+            .await
+            .expect("read retained-auth result");
+        assert!(after.revision() > auth_read_revision);
+        assert!(after.state().call_established_triggered);
+        assert_eq!(after.state().sdp_origin_version, observed_origin_version);
+        assert_eq!(
+            after
+                .state()
+                .digest_nc
+                .get(&("dialog-realm".to_string(), "dialog-nonce".to_string())),
+            Some(&1)
+        );
+    }
 
     #[test]
     fn invite_dispatch_errors_do_not_relay_lower_sources() {

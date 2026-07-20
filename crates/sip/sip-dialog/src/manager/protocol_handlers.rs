@@ -343,13 +343,49 @@ impl MethodHandler for DialogManager {
 
             let transaction_id = server_transaction.id().clone();
 
+            // Retain the exact UAS transaction with the dialog. The INFO
+            // application surface carries this key back to session-core so a
+            // response cannot be misrouted to the retained INVITE or another
+            // concurrent in-dialog request.
+            self.link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
+            self.pending_response_transaction_by_dialog
+                .insert(dialog_id.clone(), transaction_id.clone());
+
             let event = crate::events::SessionCoordinationEvent::ReInvite {
                 dialog_id: dialog_id.clone(),
-                transaction_id,
+                transaction_id: transaction_id.clone(),
                 request: request.clone(),
             };
 
-            self.notify_session_layer(event).await?;
+            if self.notify_session_layer(event).await.is_err() {
+                // The exact transaction was linked only after the request was
+                // matched to this dialog. Revalidate that ownership before
+                // authoring the fail-closed response; a stale or foreign key
+                // must never receive a response for this request.
+                let transaction_dialog = self.find_dialog_for_transaction(&transaction_id)?;
+                if transaction_dialog != dialog_id {
+                    return Err(DialogError::routing_error(
+                        "INFO dispatch failure transaction ownership changed",
+                    ));
+                }
+                let response = crate::transaction::utils::response_builders::create_response(
+                    &request,
+                    StatusCode::ServiceUnavailable,
+                );
+                self.transaction_manager
+                    .send_response(&transaction_id, response)
+                    .await
+                    .map_err(|_| DialogError::TransactionError {
+                        message: "Failed to send INFO dispatch failure response".to_string(),
+                    })?;
+                // No session owner accepted this request, so there will be no
+                // later session-authored response or dialog callback to retire
+                // these exact-correlation indexes. The transaction itself
+                // retains its final response for RFC retransmission handling;
+                // release only the dialog dispatch/pending-response indexes.
+                self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+                return Ok(());
+            }
             debug!(
                 "INFO request forwarded to session layer for dialog {}",
                 dialog_id
@@ -435,7 +471,7 @@ impl MethodHandler for DialogManager {
             let raw_request = self
                 .transaction_manager
                 .take_inbound_bytes(&transaction_id)
-                .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+                .or_else(|| Some(bytes::Bytes::from(request.to_bytes())));
             let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
                 transaction_id: transaction_id.clone(),
@@ -715,7 +751,7 @@ fn extract_notify_fields(
     let raw_request = transaction_key
         .as_ref()
         .and_then(|key| transaction_manager.peek_inbound_bytes(key))
-        .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
+        .or_else(|| Some(bytes::Bytes::from(request.to_bytes())));
     let transport = transaction_key
         .as_ref()
         .and_then(|key| transaction_manager.peek_inbound_transport(key));

@@ -23,6 +23,49 @@ pub mod frame_pump;
 
 pub use cross_handle::CrossBridgeHandle;
 
+/// Enabled media directions for one two-Connection bridge.
+///
+/// The names are relative to the exact `a` and `b` Connection arguments. A
+/// disabled direction neither acquires that source's single-consumer receiver
+/// nor installs a sink route. Application-data bridging remains independent
+/// and bidirectional.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectionalMediaBridgePlan {
+    a_to_b: bool,
+    b_to_a: bool,
+}
+
+impl DirectionalMediaBridgePlan {
+    /// Build a validated directional plan. A bridge with no media direction
+    /// is rejected rather than reserving both Connections without a route.
+    pub fn new(a_to_b: bool, b_to_a: bool) -> crate::Result<Self> {
+        if !a_to_b && !b_to_a {
+            return Err(crate::RvoipError::AdmissionRejected(
+                "media bridge must enable at least one direction",
+            ));
+        }
+        Ok(Self { a_to_b, b_to_a })
+    }
+
+    #[must_use]
+    pub const fn bidirectional() -> Self {
+        Self {
+            a_to_b: true,
+            b_to_a: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn a_to_b(self) -> bool {
+        self.a_to_b
+    }
+
+    #[must_use]
+    pub const fn b_to_a(self) -> bool {
+        self.b_to_a
+    }
+}
+
 /// Map an `audio_codecs` codec name (per CONVERSATION_PROTOCOL.md §8)
 /// to its standard RTP payload type.
 ///

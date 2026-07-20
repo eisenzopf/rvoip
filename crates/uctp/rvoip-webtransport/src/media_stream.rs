@@ -16,7 +16,9 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
-use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
+use rvoip_core::stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+};
 use rvoip_uctp::substrate::datagram::{
     pack_rtp_datagram, unpack_rtp_datagram, RtpDatagram, RtpMediaPayload,
 };
@@ -34,7 +36,7 @@ pub struct WebTransportDatagramMediaStream {
     codec: CodecInfo,
     direction: Direction,
     stream_local_id: u16,
-    in_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
+    in_rx: Arc<StdMutex<Option<mpsc::Receiver<MediaFrame>>>>,
     out_tx: mpsc::Sender<MediaFrame>,
     inbound_tx: mpsc::Sender<MediaFrame>,
     quality: parking_lot::RwLock<QualitySnapshot>,
@@ -168,7 +170,7 @@ impl WebTransportDatagramMediaStream {
             codec,
             direction,
             stream_local_id,
-            in_rx: StdMutex::new(Some(in_rx)),
+            in_rx: Arc::new(StdMutex::new(Some(in_rx))),
             out_tx,
             inbound_tx: in_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
@@ -217,13 +219,29 @@ impl MediaStream for WebTransportDatagramMediaStream {
     }
 
     fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {
-        self.in_rx
+        Ok(self.reserve_frames_in()?.commit())
+    }
+
+    fn reserve_frames_in(&self) -> RvoipResult<MediaReceiverReservation> {
+        let receiver = self
+            .in_rx
             .lock()
             .map_err(|_| RvoipError::InvalidState("WebTransport media receiver lock is poisoned"))?
             .take()
             .ok_or(RvoipError::InvalidState(
                 "WebTransport media receiver has already been acquired",
-            ))
+            ))?;
+        let slot = Arc::clone(&self.in_rx);
+        Ok(MediaReceiverReservation::new(receiver, move |receiver| {
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            debug_assert!(
+                slot.is_none(),
+                "reserved WebTransport receiver slot was replaced"
+            );
+            if slot.is_none() {
+                *slot = Some(receiver);
+            }
+        }))
     }
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
@@ -305,6 +323,16 @@ pub fn spawn_datagram_reader_with_cancel(
                             if binding.is_cancelled() {
                                 continue;
                             }
+                            if !accepts_peer_datagrams(binding.stream().direction()) {
+                                metrics::counter!(
+                                    "uctp_datagram_drops_total",
+                                    "direction" => "in",
+                                    "transport" => "webtransport",
+                                    "reason" => "receive-only-stream"
+                                )
+                                .increment(1);
+                                continue;
+                            }
                             let frame = {
                                 let _span = trace_span!(
                                     "uctp.stream.frame",
@@ -375,6 +403,10 @@ pub fn spawn_datagram_reader_with_cancel(
             }
         }
     })
+}
+
+fn accepts_peer_datagrams(direction: Direction) -> bool {
+    direction == Direction::Inbound
 }
 
 /// Build a peer router for legacy direct-stream tests. The production server
@@ -450,7 +482,7 @@ mod receiver_ownership_tests {
             },
             direction: Direction::Inbound,
             stream_local_id: 1,
-            in_rx: StdMutex::new(Some(inbound_rx)),
+            in_rx: Arc::new(StdMutex::new(Some(inbound_rx))),
             out_tx,
             inbound_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
@@ -458,10 +490,22 @@ mod receiver_ownership_tests {
             outbound_task: StdMutex::new(None),
         };
 
+        let reservation = stream.reserve_frames_in().expect("reserve receiver");
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
+        drop(reservation);
         assert!(stream.try_frames_in().is_ok());
         assert!(matches!(
             stream.try_frames_in(),
             Err(RvoipError::InvalidState(_))
         ));
+    }
+
+    #[test]
+    fn peer_datagrams_are_refused_for_receive_only_streams() {
+        assert!(accepts_peer_datagrams(Direction::Inbound));
+        assert!(!accepts_peer_datagrams(Direction::Outbound));
     }
 }

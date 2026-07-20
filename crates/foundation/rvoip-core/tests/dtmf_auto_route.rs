@@ -28,7 +28,9 @@ use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
-use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
+use rvoip_core::stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+};
 use rvoip_core::{Config, Orchestrator, RvoipError};
 use tokio::sync::{mpsc, Barrier};
 
@@ -43,14 +45,15 @@ struct StreamHandle {
     id: StreamId,
     codec: CodecInfo,
     _in_tx: mpsc::Sender<MediaFrame>,
-    in_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
+    in_rx: Arc<StdMutex<Option<mpsc::Receiver<MediaFrame>>>>,
     out_tx: mpsc::Sender<MediaFrame>,
+    _out_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
 }
 
 impl StreamHandle {
     fn new(codec_name: &str) -> Arc<Self> {
         let (in_tx, in_rx) = mpsc::channel::<MediaFrame>(64);
-        let (out_tx, _out_rx) = mpsc::channel::<MediaFrame>(64);
+        let (out_tx, out_rx) = mpsc::channel::<MediaFrame>(64);
         Arc::new(Self {
             id: StreamId::new(),
             codec: CodecInfo {
@@ -60,8 +63,9 @@ impl StreamHandle {
                 fmtp: None,
             },
             _in_tx: in_tx,
-            in_rx: StdMutex::new(Some(in_rx)),
+            in_rx: Arc::new(StdMutex::new(Some(in_rx))),
             out_tx,
+            _out_rx: StdMutex::new(Some(out_rx)),
         })
     }
 }
@@ -86,6 +90,33 @@ impl MediaStream for StreamHandle {
             .unwrap()
             .take()
             .unwrap_or_else(|| mpsc::channel(1).1)
+    }
+    fn try_frames_in(&self) -> rvoip_core::error::Result<mpsc::Receiver<MediaFrame>> {
+        self.in_rx
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "mock media source receiver was already acquired",
+            ))
+    }
+    fn reserve_frames_in(&self) -> rvoip_core::error::Result<MediaReceiverReservation> {
+        let receiver = self
+            .in_rx
+            .lock()
+            .unwrap()
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "mock media source receiver was already acquired",
+            ))?;
+        let slot = Arc::clone(&self.in_rx);
+        Ok(MediaReceiverReservation::new(receiver, move |receiver| {
+            let mut slot = slot.lock().unwrap();
+            debug_assert!(slot.is_none(), "reserved mock receiver slot was replaced");
+            if slot.is_none() {
+                *slot = Some(receiver);
+            }
+        }))
     }
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
         self.out_tx.clone()

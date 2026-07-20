@@ -2,6 +2,7 @@
 pub mod dialog_adapter;
 pub mod dtls_negotiator;
 pub mod media_adapter;
+pub(crate) mod outbound_request_tracker;
 pub mod registration_adapter;
 pub mod session_api_event;
 pub mod session_event_handler;

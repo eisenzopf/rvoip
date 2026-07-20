@@ -54,24 +54,30 @@ impl VirtualPublisherDescriptor {
 }
 
 struct VirtualPublisherCleanup {
+    orchestrator: Weak<Orchestrator>,
     registry: Arc<PublisherRegistry>,
     session_id: SessionId,
     stream_id: StreamId,
+    publisher_id: ConnectionId,
     registration_id: PublisherRegistrationId,
     active: AtomicBool,
 }
 
 impl VirtualPublisherCleanup {
     fn new(
+        orchestrator: Weak<Orchestrator>,
         registry: Arc<PublisherRegistry>,
+        publisher_id: ConnectionId,
         descriptor: &VirtualPublisherDescriptor,
         registration_id: PublisherRegistrationId,
     ) -> Self {
         metrics::gauge!("rvoip_virtual_publishers_active").increment(1.0);
         Self {
+            orchestrator,
             registry,
             session_id: descriptor.session_id.clone(),
             stream_id: descriptor.stream_id.clone(),
+            publisher_id,
             registration_id,
             active: AtomicBool::new(true),
         }
@@ -90,11 +96,20 @@ impl VirtualPublisherCleanup {
         if !self.active.swap(false, Ordering::AcqRel) {
             return;
         }
-        self.registry.remove_registration(
+        let removed = self.registry.remove_registration(
             &self.session_id,
             self.stream_id.as_str(),
             self.registration_id,
         );
+        if removed {
+            if let Some(orchestrator) = self.orchestrator.upgrade() {
+                orchestrator.drop_publisher_stream_subscriptions(
+                    &self.session_id,
+                    &self.publisher_id,
+                    &self.stream_id,
+                );
+            }
+        }
         metrics::gauge!("rvoip_virtual_publishers_active").decrement(1.0);
     }
 }
@@ -133,7 +148,9 @@ impl ManagedVirtualPublisher {
         registration_id: PublisherRegistrationId,
     ) -> Self {
         let cleanup = Arc::new(VirtualPublisherCleanup::new(
+            orchestrator.clone(),
             registry,
+            source_connection_id.clone(),
             &descriptor,
             registration_id,
         ));

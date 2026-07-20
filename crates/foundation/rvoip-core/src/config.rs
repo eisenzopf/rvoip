@@ -22,6 +22,14 @@ pub struct TenantQuotas {
 #[derive(Clone)]
 pub struct Config {
     pub max_concurrent_setups: usize,
+    /// Maximum number of distinct direct-media subscriber Connections
+    /// admitted by this Orchestrator across every UCTP ingress substrate.
+    ///
+    /// A subscriber with several stream routes consumes one slot. The slot is
+    /// released only after its final route is removed, its Connection closes,
+    /// or its Session is dropped. Relay-backed broadcast fanout is accounted
+    /// separately by the relay implementation.
+    pub max_direct_subscribers: usize,
     pub conversation_store: Arc<dyn ConversationStore>,
     pub vcon_store: Arc<dyn VconStore>,
     /// P4 — message log + history pager. Default in-memory.
@@ -62,6 +70,7 @@ impl Default for Config {
             .unwrap_or(1);
         Self {
             max_concurrent_setups: 256 * cpus,
+            max_direct_subscribers: 1_000,
             conversation_store: Arc::new(MemoryConversationStore::new()),
             vcon_store: Arc::new(MemoryVconStore::new()),
             message_store: Arc::new(MemoryMessageStore::new()),

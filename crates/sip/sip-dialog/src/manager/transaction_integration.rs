@@ -14,15 +14,18 @@
 
 use super::core::DialogManager;
 use crate::api::config::RelUsage;
-use crate::dialog::DialogId;
+use crate::dialog::{dialog_utils::extract_uri_from_contact, DialogId, DialogState};
 use crate::errors::DialogResult;
+use crate::events::session_coordination::tracks_generic_outbound_request_completion;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::dialog_quick;
 use crate::transaction::client::builders::ByeBuilder;
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
+use rvoip_infra_common::events::cross_crate::OutboundRequestOutcome;
 use rvoip_sip_core::{HeaderName, Host, Method, Request, Response, TypedHeader};
+use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
@@ -59,8 +62,40 @@ pub struct CandidateWirePlan {
     pub regenerate_stack_default_contact: bool,
 }
 
+/// Failure from initial-INVITE dispatch with a monotonic wire-boundary
+/// receipt. `ZeroWire` is safe for exact local rollback; `Unknown` must retain
+/// the dialog and transaction route for CANCEL/BYE teardown.
+pub enum InitialInviteSendFailure {
+    ZeroWire(crate::errors::DialogError),
+    Unknown(crate::errors::DialogError),
+}
+
+impl InitialInviteSendFailure {
+    pub fn wire_was_attempted(&self) -> bool {
+        matches!(self, Self::Unknown(_))
+    }
+
+    pub fn into_dialog_error(self) -> crate::errors::DialogError {
+        match self {
+            Self::ZeroWire(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
+impl std::fmt::Debug for InitialInviteSendFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialInviteSendFailure")
+            .field("wire_was_attempted", &self.wire_was_attempted())
+            .finish_non_exhaustive()
+    }
+}
+
 pub(crate) const INVITE_FAILOVER_PLAN_TTL: Duration = Duration::from_secs(90);
 pub(crate) const INVITE_FAILOVER_PRUNE_INTERVAL: usize = 1024;
+const INVITE_FAILOVER_EXPIRY_BATCH: usize = 4096;
+pub(super) const INVITE_FAILOVER_EXPIRY_BUSY_RETRY: Duration = Duration::from_secs(1);
+const INVITE_FAILOVER_DIALOG_CLEANUP_BATCH: usize = INVITE_FAILOVER_EXPIRY_BATCH / 2;
 // Kept as an explicit policy seam so deployments can disable Timer-B and
 // transport-event failover without changing 503/immediate-send behavior.
 // The default is enabled only because exact-route authentication, bounded
@@ -72,10 +107,486 @@ const INVITE_CANDIDATE_COMPENSATION_TIMEOUT: Duration = Duration::from_millis(25
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InviteFailoverPlanPhase {
     Active,
+    /// Wire emission may have occurred and exact CANCEL/BYE teardown has not
+    /// completed. This phase is non-expiring and remains capacity-charged.
+    WireUnknown,
     Accepted,
     Cancelled,
     Exhausted,
     Closed,
+}
+
+impl InviteFailoverPlanPhase {
+    fn has_expiry_deadline(self) -> bool {
+        self != Self::WireUnknown
+    }
+
+    fn is_overflow_evictable(self) -> bool {
+        !matches!(self, Self::Active | Self::WireUnknown)
+    }
+}
+
+/// One versioned wake-up in the retained initial-INVITE expiry scheduler.
+///
+/// Ordering by deadline keeps maintenance proportional to work that is
+/// actually due. The plan generation prevents a deadline captured before a
+/// concurrent close/re-arm from removing the newer retained generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct InviteFailoverExpiryKey {
+    wake_at: Instant,
+    plan_id: u64,
+    generation: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InviteFailoverScheduledExpiry {
+    key: InviteFailoverExpiryKey,
+    overflow_evictable: bool,
+}
+
+/// One exact retry for dialog-owned failover compaction when the plan mutex
+/// was busy during synchronous dialog removal.
+///
+/// This queue is deliberately orthogonal to protocol expiry deadlines: a
+/// short cleanup retry must never replace or extend the retained late-2xx
+/// horizon. The scheduler generation prevents a popped busy retry from
+/// replacing a newer request, while the weak plan identity prevents a
+/// wrapped/reused numeric ID from touching another plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct InviteFailoverDialogCleanupKey {
+    wake_at: Instant,
+    plan_id: u64,
+    generation: u64,
+}
+
+#[derive(Clone)]
+struct InviteFailoverScheduledDialogCleanup {
+    key: InviteFailoverDialogCleanupKey,
+    dialog_id: DialogId,
+    plan: std::sync::Weak<tokio::sync::Mutex<InviteFailoverPlan>>,
+}
+
+/// Exact bounded scheduler for retained initial-INVITE plans.
+///
+/// `current` and the two ordered sets contain at most one entry per plan, so
+/// repeated deadline changes cannot accumulate stale heap nodes. The explicit
+/// capacity is the same as the retained-plan registry capacity. A popped entry
+/// may still race with a re-arm; its generation is checked against the plan
+/// before removal and `restore_after_busy` never replaces a newer entry.
+pub(crate) struct InviteFailoverExpiryScheduler {
+    capacity: usize,
+    deadlines: BTreeSet<InviteFailoverExpiryKey>,
+    overflow_evictable: BTreeSet<InviteFailoverExpiryKey>,
+    current: HashMap<u64, InviteFailoverScheduledExpiry>,
+    dialog_cleanup_deadlines: BTreeSet<InviteFailoverDialogCleanupKey>,
+    dialog_cleanup_current: HashMap<u64, InviteFailoverScheduledDialogCleanup>,
+    next_dialog_cleanup_generation: u64,
+}
+
+impl InviteFailoverExpiryScheduler {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            deadlines: BTreeSet::new(),
+            overflow_evictable: BTreeSet::new(),
+            // `capacity` is the logical correctness bound. Reserving the
+            // complete multi-second churn horizon here made an otherwise
+            // empty manager allocate for every possible retained plan.
+            current: HashMap::with_capacity(capacity.min(4_096)),
+            dialog_cleanup_deadlines: BTreeSet::new(),
+            dialog_cleanup_current: HashMap::with_capacity(capacity.min(256)),
+            next_dialog_cleanup_generation: 1,
+        }
+    }
+
+    /// Diagnostic-only storage shape for retained failover scheduling.
+    ///
+    /// Logical protocol capacity is intentionally distinct from allocated
+    /// hash capacity. Reporting both catches accidental eager reservation of
+    /// the complete high-CPS retention horizon without scanning SIP payloads.
+    pub(crate) fn storage_breakdown(&self) -> serde_json::Value {
+        serde_json::json!({
+            "logical_capacity": self.capacity,
+            "deadlines": self.deadlines.len(),
+            "overflow_evictable": self.overflow_evictable.len(),
+            "current": self.current.len(),
+            "current_hash_capacity": self.current.capacity(),
+            "dialog_cleanup_deadlines": self.dialog_cleanup_deadlines.len(),
+            "dialog_cleanup_current": self.dialog_cleanup_current.len(),
+            "dialog_cleanup_hash_capacity": self.dialog_cleanup_current.capacity(),
+            "record_inline_bytes": {
+                "expiry_key": std::mem::size_of::<InviteFailoverExpiryKey>(),
+                "scheduled_expiry": std::mem::size_of::<InviteFailoverScheduledExpiry>(),
+                "dialog_cleanup_key": std::mem::size_of::<InviteFailoverDialogCleanupKey>(),
+                "scheduled_dialog_cleanup": std::mem::size_of::<InviteFailoverScheduledDialogCleanup>(),
+            },
+        })
+    }
+
+    fn remove_current(&mut self, plan_id: u64) {
+        let Some(previous) = self.current.remove(&plan_id) else {
+            return;
+        };
+        self.deadlines.remove(&previous.key);
+        if previous.overflow_evictable {
+            self.overflow_evictable.remove(&previous.key);
+        }
+    }
+
+    /// Install or replace the sole current deadline for a plan. Wire-unknown
+    /// plans deliberately remove their deadline and remain capacity-charged.
+    fn schedule(
+        &mut self,
+        plan_id: u64,
+        generation: u64,
+        wake_at: Instant,
+        phase: InviteFailoverPlanPhase,
+    ) -> bool {
+        let previous = self.current.get(&plan_id).copied();
+        self.remove_current(plan_id);
+        if !phase.has_expiry_deadline() {
+            return true;
+        }
+        if self.current.len() >= self.capacity {
+            if let Some(previous) = previous {
+                self.insert(previous);
+            }
+            return false;
+        }
+        self.insert(InviteFailoverScheduledExpiry {
+            key: InviteFailoverExpiryKey {
+                wake_at,
+                plan_id,
+                generation,
+            },
+            overflow_evictable: phase.is_overflow_evictable(),
+        });
+        true
+    }
+
+    fn insert(&mut self, expiry: InviteFailoverScheduledExpiry) {
+        self.deadlines.insert(expiry.key);
+        if expiry.overflow_evictable {
+            self.overflow_evictable.insert(expiry.key);
+        }
+        self.current.insert(expiry.key.plan_id, expiry);
+    }
+
+    fn pop_due(&mut self, now: Instant, limit: usize) -> Vec<InviteFailoverScheduledExpiry> {
+        let mut due = Vec::with_capacity(limit.min(self.current.len()));
+        while due.len() < limit {
+            let Some(key) = self.deadlines.first().copied() else {
+                break;
+            };
+            if key.wake_at > now {
+                break;
+            }
+            self.deadlines.remove(&key);
+            let Some(current) = self.current.get(&key.plan_id).copied() else {
+                continue;
+            };
+            if current.key != key {
+                continue;
+            }
+            self.current.remove(&key.plan_id);
+            if current.overflow_evictable {
+                self.overflow_evictable.remove(&key);
+            }
+            due.push(current);
+        }
+        due
+    }
+
+    fn pop_oldest_overflow_evictable(&mut self) -> Option<InviteFailoverScheduledExpiry> {
+        loop {
+            let key = self.overflow_evictable.pop_first()?;
+            let Some(current) = self.current.get(&key.plan_id).copied() else {
+                continue;
+            };
+            if current.key != key || !current.overflow_evictable {
+                continue;
+            }
+            self.current.remove(&key.plan_id);
+            self.deadlines.remove(&key);
+            return Some(current);
+        }
+    }
+
+    /// Requeue a due entry whose plan mutex was busy, without overwriting a
+    /// newer deadline installed while maintenance was attempting the lock.
+    fn restore_after_busy(&mut self, mut expiry: InviteFailoverScheduledExpiry, retry_at: Instant) {
+        if self.current.contains_key(&expiry.key.plan_id) || self.current.len() >= self.capacity {
+            return;
+        }
+        expiry.key.wake_at = retry_at;
+        self.insert(expiry);
+    }
+
+    fn remove_dialog_cleanup_current(&mut self, plan_id: u64) {
+        let Some(previous) = self.dialog_cleanup_current.remove(&plan_id) else {
+            return;
+        };
+        self.dialog_cleanup_deadlines.remove(&previous.key);
+    }
+
+    /// Install or replace the sole dialog-cleanup retry for one exact plan.
+    pub(crate) fn schedule_dialog_cleanup(
+        &mut self,
+        plan_id: u64,
+        dialog_id: &DialogId,
+        plan: std::sync::Weak<tokio::sync::Mutex<InviteFailoverPlan>>,
+        wake_at: Instant,
+    ) -> bool {
+        let replacing = self.dialog_cleanup_current.contains_key(&plan_id);
+        if !replacing && self.dialog_cleanup_current.len() >= self.capacity {
+            return false;
+        }
+        self.remove_dialog_cleanup_current(plan_id);
+        let generation = self.next_dialog_cleanup_generation;
+        self.next_dialog_cleanup_generation =
+            self.next_dialog_cleanup_generation.wrapping_add(1).max(1);
+        let cleanup = InviteFailoverScheduledDialogCleanup {
+            key: InviteFailoverDialogCleanupKey {
+                wake_at,
+                plan_id,
+                generation,
+            },
+            dialog_id: dialog_id.clone(),
+            plan,
+        };
+        self.dialog_cleanup_deadlines.insert(cleanup.key);
+        self.dialog_cleanup_current.insert(plan_id, cleanup);
+        true
+    }
+
+    fn pop_due_dialog_cleanup(
+        &mut self,
+        now: Instant,
+        limit: usize,
+    ) -> Vec<InviteFailoverScheduledDialogCleanup> {
+        let mut due = Vec::with_capacity(limit.min(self.dialog_cleanup_current.len()));
+        while due.len() < limit {
+            let Some(key) = self.dialog_cleanup_deadlines.first().copied() else {
+                break;
+            };
+            if key.wake_at > now {
+                break;
+            }
+            self.dialog_cleanup_deadlines.remove(&key);
+            let Some(current) = self.dialog_cleanup_current.get(&key.plan_id).cloned() else {
+                continue;
+            };
+            if current.key != key {
+                continue;
+            }
+            self.dialog_cleanup_current.remove(&key.plan_id);
+            due.push(current);
+        }
+        due
+    }
+
+    /// Requeue a busy cleanup without overwriting a newer exact generation.
+    fn restore_dialog_cleanup_after_busy(
+        &mut self,
+        mut cleanup: InviteFailoverScheduledDialogCleanup,
+        retry_at: Instant,
+    ) -> bool {
+        if self
+            .dialog_cleanup_current
+            .contains_key(&cleanup.key.plan_id)
+        {
+            return true;
+        }
+        if self.dialog_cleanup_current.len() >= self.capacity {
+            return false;
+        }
+        cleanup.key.wake_at = retry_at;
+        self.dialog_cleanup_deadlines.insert(cleanup.key);
+        self.dialog_cleanup_current
+            .insert(cleanup.key.plan_id, cleanup);
+        true
+    }
+
+    fn remove(&mut self, plan_id: u64) {
+        self.remove_current(plan_id);
+        self.remove_dialog_cleanup_current(plan_id);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.deadlines.clear();
+        self.overflow_evictable.clear();
+        self.current.clear();
+        self.dialog_cleanup_deadlines.clear();
+        self.dialog_cleanup_current.clear();
+    }
+
+    pub(crate) fn counts(&self) -> (usize, usize, usize) {
+        (
+            self.current.len(),
+            self.overflow_evictable.len(),
+            self.dialog_cleanup_current.len(),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteFailoverRemovalOutcome {
+    Removed,
+    Missing,
+    Busy,
+    Stale,
+    NonExpiring,
+    Deferred {
+        wake_at: Instant,
+        overflow_evictable: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteFailoverDialogCleanupOutcome {
+    Complete,
+    Busy,
+    Stale,
+}
+
+#[cfg(test)]
+mod retained_invite_expiry_scheduler_tests {
+    use super::{InviteFailoverExpiryScheduler, InviteFailoverPlan, InviteFailoverPlanPhase};
+    use crate::dialog::DialogId;
+    use std::sync::Weak;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn exact_deadline_order_only_returns_due_plans() {
+        let now = Instant::now();
+        let mut scheduler = InviteFailoverExpiryScheduler::new(4);
+        assert!(scheduler.schedule(
+            1,
+            1,
+            now - Duration::from_millis(1),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        assert!(scheduler.schedule(
+            2,
+            1,
+            now + Duration::from_secs(30),
+            InviteFailoverPlanPhase::Closed,
+        ));
+
+        let due = scheduler.pop_due(now, 4);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].key.plan_id, 1);
+        assert_eq!(scheduler.counts(), (1, 1, 0));
+        assert!(scheduler.pop_due(now, 4).is_empty());
+    }
+
+    #[test]
+    fn stale_popped_deadline_cannot_replace_new_generation() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(30);
+        let mut scheduler = InviteFailoverExpiryScheduler::new(2);
+        assert!(scheduler.schedule(
+            7,
+            1,
+            now - Duration::from_millis(1),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        let stale = scheduler.pop_due(now, 1).pop().expect("old deadline");
+
+        assert!(scheduler.schedule(7, 2, later, InviteFailoverPlanPhase::Closed));
+        scheduler.restore_after_busy(stale, now);
+
+        assert!(scheduler.pop_due(now, 1).is_empty());
+        let current = scheduler
+            .pop_due(later + Duration::from_millis(1), 1)
+            .pop()
+            .expect("new deadline");
+        assert_eq!(current.key.plan_id, 7);
+        assert_eq!(current.key.generation, 2);
+    }
+
+    #[test]
+    fn wire_unknown_is_unscheduled_and_capacity_stays_bounded() {
+        let now = Instant::now();
+        let mut scheduler = InviteFailoverExpiryScheduler::new(2);
+        assert!(scheduler.schedule(
+            1,
+            1,
+            now + Duration::from_secs(10),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        assert!(scheduler.schedule(1, 2, now, InviteFailoverPlanPhase::WireUnknown,));
+        assert_eq!(scheduler.counts(), (0, 0, 0));
+        assert!(scheduler
+            .pop_due(now + Duration::from_secs(60), 2)
+            .is_empty());
+
+        assert!(scheduler.schedule(
+            2,
+            1,
+            now + Duration::from_secs(20),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        assert!(scheduler.schedule(
+            3,
+            1,
+            now + Duration::from_secs(30),
+            InviteFailoverPlanPhase::Active,
+        ));
+        assert!(!scheduler.schedule(
+            4,
+            1,
+            now + Duration::from_secs(40),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        assert_eq!(scheduler.counts(), (2, 1, 0));
+
+        let overflow = scheduler
+            .pop_oldest_overflow_evictable()
+            .expect("closed plan is overflow-eligible");
+        assert_eq!(overflow.key.plan_id, 2);
+        assert!(scheduler.schedule(
+            4,
+            1,
+            now + Duration::from_secs(40),
+            InviteFailoverPlanPhase::Closed,
+        ));
+        assert_eq!(scheduler.counts(), (2, 1, 0));
+    }
+
+    #[test]
+    fn dialog_cleanup_retry_is_exact_deduplicated_and_bounded() {
+        let now = Instant::now();
+        let later = now + Duration::from_secs(30);
+        let dialog_id = DialogId::new();
+        let plan = Weak::<Mutex<InviteFailoverPlan>>::new();
+        let mut scheduler = InviteFailoverExpiryScheduler::new(1);
+
+        assert!(scheduler.schedule_dialog_cleanup(
+            7,
+            &dialog_id,
+            plan.clone(),
+            now - Duration::from_millis(1),
+        ));
+        let stale = scheduler
+            .pop_due_dialog_cleanup(now, 1)
+            .pop()
+            .expect("first cleanup generation");
+        assert!(scheduler.schedule_dialog_cleanup(7, &dialog_id, plan, later));
+        assert!(scheduler.restore_dialog_cleanup_after_busy(stale, now));
+        assert!(scheduler.pop_due_dialog_cleanup(now, 1).is_empty());
+        assert!(!scheduler.schedule_dialog_cleanup(8, &DialogId::new(), Weak::new(), now,));
+
+        let current = scheduler
+            .pop_due_dialog_cleanup(later + Duration::from_millis(1), 1)
+            .pop()
+            .expect("new cleanup generation");
+        assert_eq!(current.key.plan_id, 7);
+        assert_eq!(current.dialog_id, dialog_id);
+        assert_ne!(current.key.generation, 0);
+        assert_eq!(scheduler.counts(), (0, 0, 0));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,15 +596,72 @@ pub(crate) enum InviteFailoverAttemptOutcome {
     ServiceUnavailable,
     TransactionTimeout,
     TransportError,
+    InternalError,
     Accepted,
     Cancelled,
     FinalResponse,
 }
 
 pub(crate) struct InviteFailoverAttempt {
-    pub transaction_id: TransactionKey,
-    pub candidate_index: usize,
+    /// Shared with the exact attempt index. Retained plans therefore keep one
+    /// branch allocation rather than cloning the complete transaction key
+    /// into the plan, attempt map, and dialog reverse index.
+    pub transaction_id: std::sync::Arc<TransactionKey>,
     pub outcome: InviteFailoverAttemptOutcome,
+}
+
+/// Heavy state needed only while an initial INVITE can still advance to a
+/// resolver candidate.
+///
+/// Retained plans deliberately outlive the dialog/active call for late-2xx
+/// ACK+BYE handling. Keeping the immutable request and resolver targets in
+/// those tombstones multiplies call-setup memory by the retention window, even
+/// though terminal processing uses the transaction manager's exact request.
+/// An `Option` makes that lifetime boundary explicit and lets every terminal
+/// transition release the payload immediately.
+pub(crate) struct InviteFailoverActivePayload {
+    pub request: Request,
+    pub candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+    pub wire_plan: CandidateWirePlan,
+    pub next_candidate_index: usize,
+    /// Monotonic token assigned before candidate work leaves the plan mutex.
+    /// Completion may mutate the plan only while this generation is current.
+    pub next_send_generation: u64,
+    pub pending_candidate: Option<(u64, usize)>,
+    pub current_candidate_index: Option<usize>,
+    pub current_send_generation: Option<u64>,
+    pub provisional_seen: bool,
+    pub attempts: Vec<InviteFailoverAttempt>,
+    pub setup_deadline: Instant,
+}
+
+impl InviteFailoverActivePayload {
+    pub(crate) fn new(
+        request: Request,
+        candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+        wire_plan: CandidateWirePlan,
+        setup_deadline: Instant,
+    ) -> Self {
+        Self {
+            request,
+            candidates,
+            wire_plan,
+            next_candidate_index: 0,
+            next_send_generation: 0,
+            pending_candidate: None,
+            current_candidate_index: None,
+            current_send_generation: None,
+            provisional_seen: false,
+            attempts: Vec::new(),
+            setup_deadline,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct InviteFailoverForkCleanup {
+    cleaned: std::collections::HashSet<String>,
+    in_flight: std::collections::HashSet<String>,
 }
 
 /// One logical initial-INVITE operation. The immutable request is finalized
@@ -103,25 +671,202 @@ pub(crate) struct InviteFailoverAttempt {
 pub(crate) struct InviteFailoverPlan {
     pub id: u64,
     pub dialog_id: DialogId,
-    pub request: Request,
-    pub candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
-    pub wire_plan: CandidateWirePlan,
-    pub next_candidate_index: usize,
-    /// Monotonic token assigned before candidate work leaves the plan mutex.
-    /// Completion may mutate the plan only while this generation is current.
-    pub next_send_generation: u64,
-    pub pending_candidate: Option<(u64, usize)>,
-    pub current_transaction: Option<TransactionKey>,
-    pub current_candidate_index: Option<usize>,
-    pub current_send_generation: Option<u64>,
-    pub provisional_seen: bool,
+    /// The active state is boxed so a terminal tombstone does not retain the
+    /// inline size of a complete SIP request, resolver plan, counters, and
+    /// attempt history for the entire late-response horizon.
+    pub active_payload: Option<Box<InviteFailoverActivePayload>>,
+    /// Immutable amount charged to the retained-attempt capacity counter.
+    /// Terminal compaction drops `active_payload.candidates`, so release must
+    /// never infer the reservation from the live vector length.
+    pub reserved_attempt_slots: usize,
+    pub current_transaction: Option<std::sync::Arc<TransactionKey>>,
+    /// Monotonic proof that this logical INVITE crossed the transaction
+    /// layer's wire-attempt boundary. Once true, an error can no longer be
+    /// treated as a local-only rollback.
+    pub wire_attempted: bool,
     pub phase: InviteFailoverPlanPhase,
-    pub attempts: Vec<InviteFailoverAttempt>,
-    pub accepted_transaction: Option<TransactionKey>,
+    /// Compact terminal ownership needed to remove exact attempt indexes at
+    /// expiry. The Arc keys are shared with the attempt map.
+    pub retained_attempts: Box<[std::sync::Arc<TransactionKey>]>,
+    pub accepted_candidate_index: Option<usize>,
     pub accepted_to_tag: Option<String>,
-    pub cleaned_fork_tags: std::collections::HashSet<String>,
-    pub setup_deadline: Instant,
+    /// Allocated only for the exceptional late/forked-2xx cleanup path.
+    pub(crate) fork_cleanup: Option<Box<InviteFailoverForkCleanup>>,
     pub expires_at: Instant,
+    /// Incremented whenever `expires_at` or its expiry eligibility changes.
+    /// Scheduled maintenance may remove only the exact matching generation.
+    pub expiry_generation: u64,
+}
+
+impl InviteFailoverPlan {
+    /// Move a plan to a non-active phase and release all active-only payload.
+    /// The attempt history, selected fork identity, cleanup tags, and exact
+    /// current transaction remain available for late response processing.
+    pub(crate) fn transition_to_terminal(&mut self, phase: InviteFailoverPlanPhase) {
+        debug_assert_ne!(phase, InviteFailoverPlanPhase::Active);
+        self.phase = phase;
+        if let Some(active) = self.active_payload.take() {
+            self.retained_attempts = active
+                .attempts
+                .into_iter()
+                .map(|attempt| attempt.transaction_id)
+                .collect();
+        }
+        if !matches!(
+            phase,
+            InviteFailoverPlanPhase::Cancelled | InviteFailoverPlanPhase::WireUnknown
+        ) {
+            self.current_transaction = None;
+        }
+    }
+
+    fn candidate_count(&self) -> usize {
+        self.active_payload
+            .as_ref()
+            .map_or(0, |payload| payload.candidates.len())
+    }
+
+    fn attempt_transaction_ids(&self) -> Vec<std::sync::Arc<TransactionKey>> {
+        if let Some(active) = self.active_payload.as_ref() {
+            active
+                .attempts
+                .iter()
+                .map(|attempt| attempt.transaction_id.clone())
+                .collect()
+        } else {
+            self.retained_attempts.to_vec()
+        }
+    }
+
+    fn is_cleaned_fork(&self, to_tag: &str) -> bool {
+        self.fork_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.cleaned.contains(to_tag))
+    }
+
+    fn is_fork_cleanup_in_flight(&self, to_tag: &str) -> bool {
+        self.fork_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.in_flight.contains(to_tag))
+    }
+
+    fn mark_fork_cleanup_in_flight(&mut self, to_tag: String) {
+        self.fork_cleanup
+            .get_or_insert_with(|| Box::new(InviteFailoverForkCleanup::default()))
+            .in_flight
+            .insert(to_tag);
+    }
+
+    fn clear_fork_cleanup_in_flight(&mut self, to_tag: &str) {
+        if let Some(cleanup) = self.fork_cleanup.as_mut() {
+            cleanup.in_flight.remove(to_tag);
+        }
+    }
+
+    fn mark_cleaned_fork(&mut self, to_tag: String) {
+        self.fork_cleanup
+            .get_or_insert_with(|| Box::new(InviteFailoverForkCleanup::default()))
+            .cleaned
+            .insert(to_tag);
+    }
+}
+
+#[cfg(test)]
+mod retained_invite_payload_tests {
+    use super::{
+        CandidateWirePlan, InviteFailoverActivePayload, InviteFailoverAttempt,
+        InviteFailoverAttemptOutcome, InviteFailoverForkCleanup, InviteFailoverPlan,
+        InviteFailoverPlanPhase,
+    };
+    use crate::dialog::DialogId;
+    use crate::transaction::TransactionKey;
+    use rvoip_sip_core::{builder::SimpleRequestBuilder, Method};
+    use std::time::{Duration, Instant};
+
+    fn active_plan() -> InviteFailoverPlan {
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .expect("request builder")
+            .from("Alice", "sip:alice@example.com", Some("alice-payload"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("retained-payload")
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-payload"))
+            .max_forwards(70)
+            .build();
+        let transaction_id =
+            TransactionKey::new("z9hG4bK-payload-attempt".into(), Method::Invite, false);
+        let transaction_id = std::sync::Arc::new(transaction_id);
+        let now = Instant::now();
+        let mut active_payload = InviteFailoverActivePayload::new(
+            request,
+            vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                "127.0.0.1:5060".parse().expect("target address"),
+                rvoip_sip_transport::transport::TransportType::Udp,
+            )],
+            CandidateWirePlan {
+                regenerate_stack_default_contact: true,
+            },
+            now + Duration::from_secs(32),
+        );
+        active_payload.next_candidate_index = 1;
+        active_payload.next_send_generation = 1;
+        active_payload.pending_candidate = Some((1, 0));
+        active_payload.current_candidate_index = Some(0);
+        active_payload.current_send_generation = Some(1);
+        active_payload.attempts.push(InviteFailoverAttempt {
+            transaction_id: transaction_id.clone(),
+            outcome: InviteFailoverAttemptOutcome::Active,
+        });
+        InviteFailoverPlan {
+            id: 1,
+            dialog_id: DialogId::new(),
+            active_payload: Some(Box::new(active_payload)),
+            reserved_attempt_slots: 1,
+            current_transaction: Some(transaction_id.clone()),
+            wire_attempted: true,
+            phase: InviteFailoverPlanPhase::Active,
+            retained_attempts: Box::new([]),
+            accepted_candidate_index: Some(0),
+            accepted_to_tag: Some("selected-tag".into()),
+            fork_cleanup: Some(Box::new(InviteFailoverForkCleanup {
+                cleaned: ["cleaned-tag".into()].into_iter().collect(),
+                in_flight: ["pending-tag".into()].into_iter().collect(),
+            })),
+            expires_at: now + Duration::from_secs(90),
+            expiry_generation: 1,
+        }
+    }
+
+    #[test]
+    fn every_terminal_phase_drops_only_active_payload() {
+        for phase in [
+            InviteFailoverPlanPhase::Accepted,
+            InviteFailoverPlanPhase::Cancelled,
+            InviteFailoverPlanPhase::Exhausted,
+            InviteFailoverPlanPhase::Closed,
+            InviteFailoverPlanPhase::WireUnknown,
+        ] {
+            let mut plan = active_plan();
+            plan.transition_to_terminal(phase);
+
+            assert_eq!(plan.phase, phase);
+            assert!(plan.active_payload.is_none());
+            assert_eq!(plan.reserved_attempt_slots, 1);
+            assert_eq!(plan.retained_attempts.len(), 1);
+            if matches!(
+                phase,
+                InviteFailoverPlanPhase::Cancelled | InviteFailoverPlanPhase::WireUnknown
+            ) {
+                assert!(plan.current_transaction.is_some());
+            } else {
+                assert!(plan.current_transaction.is_none());
+            }
+            assert_eq!(plan.accepted_to_tag.as_deref(), Some("selected-tag"));
+            assert!(plan.is_cleaned_fork("cleaned-tag"));
+            assert!(plan.is_fork_cleanup_in_flight("pending-tag"));
+        }
+    }
 }
 
 struct InviteCandidateSendLease {
@@ -185,13 +930,14 @@ impl Drop for InviteCandidateCancellationGuard {
                 (terminate, tokio::runtime::Handle::try_current())
             {
                 let manager = self.manager.clone();
-                let cleanup_operation = manager.enter_invite_failover_operation();
-                handle.spawn(async move {
-                    let _cleanup_operation = cleanup_operation;
-                    manager
-                        .compensate_invite_candidate_transaction(&transaction_id, false)
-                        .await;
-                });
+                if let Some(cleanup_operation) = manager.enter_invite_failover_operation() {
+                    handle.spawn(async move {
+                        let _cleanup_operation = cleanup_operation;
+                        manager
+                            .compensate_invite_candidate_transaction(&transaction_id, false)
+                            .await;
+                    });
+                }
             }
             return;
         }
@@ -200,13 +946,18 @@ impl Drop for InviteCandidateCancellationGuard {
             let manager = self.manager.clone();
             let plan = self.plan.clone();
             let generation = self.generation;
-            let cleanup_operation = manager.enter_invite_failover_operation();
-            handle.spawn(async move {
-                let _cleanup_operation = cleanup_operation;
-                manager
-                    .abandon_invite_candidate_generation(&plan, generation, transaction_id.as_ref())
-                    .await;
-            });
+            if let Some(cleanup_operation) = manager.enter_invite_failover_operation() {
+                handle.spawn(async move {
+                    let _cleanup_operation = cleanup_operation;
+                    manager
+                        .abandon_invite_candidate_generation(
+                            &plan,
+                            generation,
+                            transaction_id.as_ref(),
+                        )
+                        .await;
+                });
+            }
         }
     }
 }
@@ -216,6 +967,11 @@ pub(crate) struct InviteFailoverAttemptIndex {
     pub plan_id: u64,
     pub dialog_id: DialogId,
     pub candidate_index: usize,
+    /// Exact transaction-layer admission owner. Failover tombstones may be
+    /// rearmed after the transaction manager's ordinary late-2xx horizon, so
+    /// the attempt index itself must fence same-wire-key reuse until its exact
+    /// plan removal.
+    pub(crate) _admission_owner: Option<crate::transaction::manager::TransactionAdmissionOwner>,
 }
 
 pub(crate) enum InviteFailoverEventDisposition {
@@ -224,15 +980,19 @@ pub(crate) enum InviteFailoverEventDisposition {
 }
 
 enum InviteCandidateSendError {
-    Recoverable(crate::errors::DialogError),
     Fatal(crate::errors::DialogError),
+    WireUnknown(crate::errors::DialogError),
 }
 
 impl InviteCandidateSendError {
     fn into_dialog_error(self) -> crate::errors::DialogError {
         match self {
-            Self::Recoverable(error) | Self::Fatal(error) => error,
+            Self::Fatal(error) | Self::WireUnknown(error) => error,
         }
+    }
+
+    fn retains_wire_owner(&self) -> bool {
+        matches!(self, Self::WireUnknown(_))
     }
 }
 
@@ -1055,7 +1815,7 @@ impl DialogManager {
             }
         }
 
-        let mut reliable_spawn: Option<(DialogId, u32, Response)> = None;
+        let mut reliable_prepared = None;
         if should_send_reliably(&response) {
             if let Some(dialog_id_ref) = self.transaction_to_dialog.get(transaction_id) {
                 let dialog_id = dialog_id_ref.clone();
@@ -1064,7 +1824,8 @@ impl DialogManager {
                 let our_policy = self.config_100rel_policy();
                 let rseq_opt = match self.get_dialog_mut(&dialog_id) {
                     Ok(mut dialog) => {
-                        if dialog.peer_supports_100rel
+                        if dialog.state != DialogState::Terminated
+                            && dialog.peer_supports_100rel
                             && !matches!(our_policy, RelUsage::NotSupported)
                         {
                             Some(dialog.next_local_rseq())
@@ -1077,7 +1838,28 @@ impl DialogManager {
 
                 if let Some(rseq) = rseq_opt {
                     inject_reliable_provisional_headers(&mut response, rseq);
-                    reliable_spawn = Some((dialog_id, rseq, response.clone()));
+                    reliable_prepared = Some(
+                        crate::transaction::server::reliable_invite::prepare_reliable_provisional_retransmit(
+                            dialog_id.clone(),
+                            rseq,
+                            transaction_id.clone(),
+                            response.clone(),
+                            self.transaction_manager.clone(),
+                            self.reliable_provisional_tasks.clone(),
+                            || {
+                                self.get_dialog(&dialog_id)
+                                    .map(|dialog| dialog.state != DialogState::Terminated)
+                                    .unwrap_or(false)
+                            },
+                        )
+                        .map_err(|_error| crate::errors::DialogError::InternalError {
+                            message: safe_operation_failure(
+                                "reliable_provisional_reserve",
+                                "lifecycle_error",
+                            ),
+                            context: None,
+                        })?,
+                    );
                     debug!(
                         "Wrapping 18x {} as reliable (policy={:?}, rseq={})",
                         response.status_code(),
@@ -1088,23 +1870,66 @@ impl DialogManager {
             }
         }
 
+        // A final response closes the RFC 3262 provisional phase before its
+        // own wire write. No reliable 18x task can therefore retransmit after
+        // the final response.
+        let final_invite_dialog =
+            if !response.status().is_provisional() && transaction_id.method() == &Method::Invite {
+                self.transaction_to_dialog
+                    .get(transaction_id)
+                    .map(|entry| entry.value().clone())
+            } else {
+                None
+            };
+        if let Some(dialog_id) = final_invite_dialog.as_ref() {
+            self.reliable_provisional_tasks
+                .close_transaction(dialog_id, transaction_id)
+                .await
+                .map_err(|_error| crate::errors::DialogError::InternalError {
+                    message: safe_operation_failure(
+                        "reliable_provisional_close",
+                        "lifecycle_error",
+                    ),
+                    context: None,
+                })?;
+        }
+
         // Use transaction-core to send the response
-        self.transaction_manager
+        if let Err(_error) = self
+            .transaction_manager
             .send_response(transaction_id, response)
             .await
-            .map_err(|_error| crate::errors::DialogError::TransactionError {
+        {
+            if let Some(prepared) = reliable_prepared {
+                prepared.cancel().await.map_err(|_error| {
+                    crate::errors::DialogError::InternalError {
+                        message: safe_operation_failure(
+                            "reliable_provisional_cancel",
+                            "lifecycle_error",
+                        ),
+                        context: None,
+                    }
+                })?;
+            }
+            return Err(crate::errors::DialogError::TransactionError {
                 message: safe_operation_failure("transaction_response_send", "transaction_error"),
-            })?;
+            });
+        }
 
-        if let Some((dialog_id, rseq, stored_response)) = reliable_spawn {
-            crate::transaction::server::reliable_invite::spawn_reliable_provisional_retransmit(
-                dialog_id,
-                rseq,
-                transaction_id.clone(),
-                stored_response,
-                self.transaction_manager.clone(),
-                self.reliable_provisional_tasks.clone(),
-            );
+        if let Some(prepared) = reliable_prepared {
+            prepared.activate().await.map_err(|_error| {
+                crate::errors::DialogError::InternalError {
+                    message: safe_operation_failure(
+                        "reliable_provisional_activate",
+                        "lifecycle_error",
+                    ),
+                    context: None,
+                }
+            })?;
+        }
+        if let Some(dialog_id) = final_invite_dialog.as_ref() {
+            self.reliable_provisional_tasks
+                .release_transaction(dialog_id, transaction_id);
         }
 
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Successfully sent response");
@@ -1179,9 +2004,17 @@ mod outward_error_redaction_tests {
             );
         }
 
+        let raw_lower_error_stringifications = production
+            .match_indices("e.to_string()")
+            .filter(|(index, _)| {
+                production[..*index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|character| !character.is_ascii_alphanumeric() && character != '_')
+            })
+            .count();
         assert_eq!(
-            production.matches("e.to_string()").count(),
-            0,
+            raw_lower_error_stringifications, 0,
             "lower transaction errors must never be classified by string contents"
         );
     }
@@ -1286,67 +2119,436 @@ mod outward_error_redaction_tests {
 /// early dialog, so this retry must be routed as a fresh initial INVITE rather
 /// than a re-INVITE. The caller supplies the fully-formatted auth header value.
 impl DialogManager {
-    pub(crate) async fn prune_invite_failover_state(&self) {
-        let now = Instant::now();
-        let plans: Vec<(u64, std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>)> = self
-            .invite_failover_plans
-            .iter()
-            .map(|entry| (*entry.key(), entry.value().clone()))
-            .collect();
-        let mut snapshots = Vec::with_capacity(plans.len());
-        for (plan_id, plan) in plans {
-            // Maintenance shares the dialog event loop. Never let a slow
-            // candidate send, CANCEL, or late-fork cleanup on one plan stall
-            // event delivery for every other dialog; a busy plan is bounded
-            // by the same reservation caps and can be retried next tick.
-            if let Ok(plan) = plan.try_lock() {
-                snapshots.push((plan_id, plan.expires_at, plan.phase));
-            }
+    fn invite_failover_plan_ids_for_dialog(&self, dialog_id: &DialogId) -> Vec<u64> {
+        self.invite_failover_plans_by_dialog
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default()
+    }
+
+    fn invite_failover_attempt_ids_for_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Vec<std::sync::Arc<TransactionKey>> {
+        self.invite_failover_attempts_by_dialog
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default()
+    }
+
+    /// Link a retained plan while `invite_failover_registry_lock` is held.
+    fn index_invite_failover_plan_locked(&self, dialog_id: &DialogId, plan_id: u64) {
+        let mut plan_ids = self
+            .invite_failover_plans_by_dialog
+            .entry(dialog_id.clone())
+            .or_default();
+        if !plan_ids.contains(&plan_id) {
+            plan_ids.push(plan_id);
         }
+    }
 
-        let mut remove_ids: Vec<u64> = snapshots
-            .iter()
-            .filter(|(_, expires_at, _)| *expires_at <= now)
-            .map(|(plan_id, _, _)| *plan_id)
-            .collect();
+    /// Unlink a retained plan while `invite_failover_registry_lock` is held.
+    fn unindex_invite_failover_plan_locked(&self, dialog_id: &DialogId, plan_id: u64) {
+        if let Some(mut plan_ids) = self.invite_failover_plans_by_dialog.get_mut(dialog_id) {
+            plan_ids.retain(|candidate| *candidate != plan_id);
+        }
+        self.invite_failover_plans_by_dialog
+            .remove_if(dialog_id, |_, plan_ids| plan_ids.is_empty());
+    }
 
-        let retained_after_expiry = snapshots.len().saturating_sub(remove_ids.len());
-        if retained_after_expiry > self.invite_failover_plan_capacity {
-            let mut evictable: Vec<(u64, Instant)> = snapshots
-                .iter()
-                .filter(|(plan_id, expires_at, phase)| {
-                    *expires_at > now
-                        && *phase != InviteFailoverPlanPhase::Active
-                        && !remove_ids.contains(plan_id)
-                })
-                .map(|(plan_id, expires_at, _)| (*plan_id, *expires_at))
-                .collect();
-            evictable.sort_by_key(|(_, expires_at)| *expires_at);
-            remove_ids.extend(
-                evictable
-                    .into_iter()
-                    .take(retained_after_expiry - self.invite_failover_plan_capacity)
-                    .map(|(plan_id, _)| plan_id),
+    /// Publish an exact retained attempt and reverse owner while
+    /// `invite_failover_registry_lock` is held.
+    fn index_invite_failover_attempt_locked(
+        &self,
+        transaction_id: std::sync::Arc<TransactionKey>,
+        attempt: InviteFailoverAttemptIndex,
+    ) {
+        if let Some(previous) = self
+            .invite_failover_attempts
+            .insert(transaction_id.clone(), attempt.clone())
+        {
+            self.unindex_invite_failover_attempt_locked(
+                &previous.dialog_id,
+                transaction_id.as_ref(),
             );
         }
+        let mut transaction_ids = self
+            .invite_failover_attempts_by_dialog
+            .entry(attempt.dialog_id)
+            .or_default();
+        if !transaction_ids
+            .iter()
+            .any(|candidate| candidate.as_ref() == transaction_id.as_ref())
+        {
+            transaction_ids.push(transaction_id);
+        }
+    }
 
-        remove_ids.sort_unstable();
-        remove_ids.dedup();
-        for plan_id in remove_ids {
+    fn unindex_invite_failover_attempt_locked(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+    ) {
+        if let Some(mut transaction_ids) =
+            self.invite_failover_attempts_by_dialog.get_mut(dialog_id)
+        {
+            transaction_ids.retain(|candidate| candidate.as_ref() != transaction_id);
+        }
+        self.invite_failover_attempts_by_dialog
+            .remove_if(dialog_id, |_, transaction_ids| transaction_ids.is_empty());
+    }
+
+    /// Remove only the exact retained attempt expected by the caller while
+    /// `invite_failover_registry_lock` is held.
+    fn remove_invite_failover_attempt_locked(
+        &self,
+        transaction_id: &TransactionKey,
+        expected_plan_id: Option<u64>,
+    ) -> Option<InviteFailoverAttemptIndex> {
+        let expected = self
+            .invite_failover_attempts
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())?;
+        if expected_plan_id.is_some_and(|plan_id| expected.plan_id != plan_id) {
+            return None;
+        }
+        let removed = self
+            .invite_failover_attempts
+            .remove_if(transaction_id, |_, current| {
+                current.plan_id == expected.plan_id
+                    && current.dialog_id == expected.dialog_id
+                    && current.candidate_index == expected.candidate_index
+            })?;
+        self.unindex_invite_failover_attempt_locked(&expected.dialog_id, transaction_id);
+        Some(removed.1)
+    }
+
+    /// True only when the exact retained wire-unknown INVITE transaction has
+    /// received a terminal non-2xx response. A CANCEL transaction's own final
+    /// response is not sufficient: RFC 3261 teardown completes when the
+    /// original INVITE resolves (normally 487), while a late 2xx requires the
+    /// separate ACK+BYE path.
+    pub(crate) async fn wire_unknown_invite_has_terminal_failure(
+        &self,
+        dialog_id: &DialogId,
+    ) -> bool {
+        for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
+            let Some(plan) = self
+                .invite_failover_plans
+                .get(&plan_id)
+                .map(|entry| entry.value().clone())
+            else {
+                continue;
+            };
+            let transaction_id = {
+                let plan = plan.lock().await;
+                if plan.id != plan_id
+                    || &plan.dialog_id != dialog_id
+                    || plan.phase != InviteFailoverPlanPhase::WireUnknown
+                {
+                    continue;
+                }
+                plan.current_transaction.clone()
+            };
+            let Some(transaction_id) = transaction_id else {
+                continue;
+            };
+            if self
+                .transaction_manager
+                .last_response(&transaction_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|response| response.status().as_u16() >= 300)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Mark a non-expiring wire-unknown INVITE plan as legally torn down and
+    /// immediately release its retained CANCEL route/reservations.
+    pub(crate) async fn complete_wire_unknown_invite_for_dialog(&self, dialog_id: &DialogId) {
+        let plan_ids = self.invite_failover_plan_ids_for_dialog(dialog_id);
+        for plan_id in &plan_ids {
+            if let Some(plan) = self
+                .invite_failover_plans
+                .get(plan_id)
+                .map(|entry| entry.value().clone())
+            {
+                let mut plan = plan.lock().await;
+                if plan.id == *plan_id
+                    && &plan.dialog_id == dialog_id
+                    && plan.phase == InviteFailoverPlanPhase::WireUnknown
+                {
+                    plan.transition_to_terminal(InviteFailoverPlanPhase::Closed);
+                    self.schedule_invite_failover_plan_expiry(&mut plan, Instant::now());
+                }
+            }
+        }
+        for plan_id in plan_ids {
             self.try_remove_invite_failover_plan(plan_id);
         }
     }
 
+    /// Change a retained plan's deadline/eligibility and atomically replace
+    /// its sole scheduler entry. Callers hold the plan mutex, which makes the
+    /// generation update the ordering boundary for concurrent maintenance.
+    pub(crate) fn schedule_invite_failover_plan_expiry(
+        &self,
+        plan: &mut InviteFailoverPlan,
+        expires_at: Instant,
+    ) -> bool {
+        plan.expires_at = expires_at;
+        plan.expiry_generation = plan.expiry_generation.wrapping_add(1).max(1);
+        let scheduled = self
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .schedule(plan.id, plan.expiry_generation, plan.expires_at, plan.phase);
+        if !scheduled {
+            error!(
+                plan_id = plan.id,
+                "Retained initial-INVITE expiry scheduler reached its hard capacity"
+            );
+        }
+        scheduled
+    }
+
+    pub(crate) async fn prune_invite_failover_state(&self) {
+        let now = Instant::now();
+        // Dialog cleanup has a reserved share of the bounded maintenance
+        // budget so sustained expiry churn cannot starve heavy-state
+        // compaction, while ordinary protocol expiry always retains the
+        // remaining share.
+        let cleanup_due = self
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_due_dialog_cleanup(now, INVITE_FAILOVER_DIALOG_CLEANUP_BATCH);
+        let cleanup_attempts = cleanup_due.len();
+        for cleanup in cleanup_due {
+            match self.try_apply_invite_failover_dialog_cleanup(&cleanup) {
+                InviteFailoverDialogCleanupOutcome::Busy => {
+                    let plan_id = cleanup.key.plan_id;
+                    let restored = self
+                        .invite_failover_expiry_scheduler
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .restore_dialog_cleanup_after_busy(
+                            cleanup,
+                            Instant::now() + INVITE_FAILOVER_EXPIRY_BUSY_RETRY,
+                        );
+                    if !restored {
+                        error!(
+                            plan_id,
+                            "Retained initial-INVITE dialog cleanup retry reached its hard capacity"
+                        );
+                    }
+                }
+                InviteFailoverDialogCleanupOutcome::Complete
+                | InviteFailoverDialogCleanupOutcome::Stale => {}
+            }
+        }
+
+        let expiry_budget = INVITE_FAILOVER_EXPIRY_BATCH.saturating_sub(cleanup_attempts);
+        let due = self
+            .invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_due(now, expiry_budget);
+        for mut expiry in due {
+            match self.try_remove_scheduled_invite_failover_plan(
+                expiry.key.plan_id,
+                expiry.key.generation,
+                false,
+            ) {
+                InviteFailoverRemovalOutcome::Busy => {
+                    self.invite_failover_expiry_scheduler
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .restore_after_busy(
+                            expiry,
+                            Instant::now() + INVITE_FAILOVER_EXPIRY_BUSY_RETRY,
+                        );
+                }
+                InviteFailoverRemovalOutcome::Deferred {
+                    wake_at,
+                    overflow_evictable,
+                } => {
+                    expiry.overflow_evictable = overflow_evictable;
+                    self.invite_failover_expiry_scheduler
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .restore_after_busy(expiry, wake_at);
+                }
+                InviteFailoverRemovalOutcome::Removed
+                | InviteFailoverRemovalOutcome::Missing
+                | InviteFailoverRemovalOutcome::Stale
+                | InviteFailoverRemovalOutcome::NonExpiring => {}
+            }
+        }
+
+        // The registry normally cannot exceed its hard cap. Preserve the
+        // defensive overflow semantics for corrupted/restored state without
+        // scanning every plan: the scheduler has an exact ordered subset of
+        // non-active, non-wire-unknown tombstones.
+        let mut overflow_attempts = 0usize;
+        while self.invite_failover_plans.len() > self.invite_failover_plan_capacity
+            && overflow_attempts < INVITE_FAILOVER_EXPIRY_BATCH
+        {
+            let Some(mut expiry) = self
+                .invite_failover_expiry_scheduler
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_oldest_overflow_evictable()
+            else {
+                break;
+            };
+            overflow_attempts += 1;
+            match self.try_remove_scheduled_invite_failover_plan(
+                expiry.key.plan_id,
+                expiry.key.generation,
+                true,
+            ) {
+                InviteFailoverRemovalOutcome::Busy => {
+                    self.invite_failover_expiry_scheduler
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .restore_after_busy(expiry, now + INVITE_FAILOVER_EXPIRY_BUSY_RETRY);
+                }
+                InviteFailoverRemovalOutcome::Deferred {
+                    wake_at,
+                    overflow_evictable,
+                } => {
+                    expiry.overflow_evictable = overflow_evictable;
+                    self.invite_failover_expiry_scheduler
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .restore_after_busy(expiry, wake_at);
+                }
+                InviteFailoverRemovalOutcome::Removed
+                | InviteFailoverRemovalOutcome::Missing
+                | InviteFailoverRemovalOutcome::Stale
+                | InviteFailoverRemovalOutcome::NonExpiring => {}
+            }
+        }
+    }
+
+    fn try_apply_invite_failover_dialog_cleanup(
+        &self,
+        cleanup: &InviteFailoverScheduledDialogCleanup,
+    ) -> InviteFailoverDialogCleanupOutcome {
+        let Some(expected_plan) = cleanup.plan.upgrade() else {
+            return InviteFailoverDialogCleanupOutcome::Stale;
+        };
+        let Some(registered_plan) = self
+            .invite_failover_plans
+            .get(&cleanup.key.plan_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return InviteFailoverDialogCleanupOutcome::Stale;
+        };
+        if !std::sync::Arc::ptr_eq(&registered_plan, &expected_plan) {
+            return InviteFailoverDialogCleanupOutcome::Stale;
+        }
+        let Ok(mut plan) = expected_plan.try_lock() else {
+            return InviteFailoverDialogCleanupOutcome::Busy;
+        };
+        if plan.id != cleanup.key.plan_id || plan.dialog_id != cleanup.dialog_id {
+            return InviteFailoverDialogCleanupOutcome::Stale;
+        }
+
+        // Wire-unknown teardown remains dialog-addressed and non-expiring.
+        // Consume only the retry; preserve its phase, current transaction,
+        // reverse indexes, and capacity charge for legal CANCEL/BYE recovery.
+        if plan.phase == InviteFailoverPlanPhase::WireUnknown {
+            self.schedule_invite_failover_plan_expiry(
+                &mut plan,
+                Instant::now() + INVITE_FAILOVER_PLAN_TTL,
+            );
+            return InviteFailoverDialogCleanupOutcome::Complete;
+        }
+
+        if plan.phase == InviteFailoverPlanPhase::Active {
+            plan.transition_to_terminal(InviteFailoverPlanPhase::Cancelled);
+        } else {
+            // Restored or test-injected terminal state may still carry the
+            // active-only payload. Reapplying its phase compacts idempotently.
+            let phase = plan.phase;
+            plan.transition_to_terminal(phase);
+        }
+        self.schedule_invite_failover_plan_expiry(
+            &mut plan,
+            Instant::now() + INVITE_FAILOVER_PLAN_TTL,
+        );
+        let attempts = plan.attempt_transaction_ids();
+
+        // Removing active ownership during synchronous dialog cleanup
+        // linearizes the attempt set. These exact unlinks are idempotent and
+        // ensure a captured pre-cleanup route cannot keep the dialog alive.
+        for transaction_id in &attempts {
+            self.unlink_transaction_from_dialog_indexed(transaction_id.as_ref());
+        }
+
+        let _registry = self
+            .invite_failover_registry_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let still_registered = self
+            .invite_failover_plans
+            .get(&cleanup.key.plan_id)
+            .is_some_and(|entry| std::sync::Arc::ptr_eq(entry.value(), &expected_plan));
+        if !still_registered {
+            return InviteFailoverDialogCleanupOutcome::Stale;
+        }
+        self.unindex_invite_failover_plan_locked(&cleanup.dialog_id, cleanup.key.plan_id);
+        for transaction_id in attempts {
+            if self
+                .invite_failover_attempts
+                .get(transaction_id.as_ref())
+                .is_some_and(|attempt| {
+                    attempt.plan_id == cleanup.key.plan_id && attempt.dialog_id == cleanup.dialog_id
+                })
+            {
+                self.unindex_invite_failover_attempt_locked(
+                    &cleanup.dialog_id,
+                    transaction_id.as_ref(),
+                );
+            }
+        }
+        InviteFailoverDialogCleanupOutcome::Complete
+    }
+
     fn try_remove_invite_failover_plan(&self, plan_id: u64) {
+        let _ = self.try_remove_invite_failover_plan_inner(plan_id, None, false);
+    }
+
+    fn try_remove_scheduled_invite_failover_plan(
+        &self,
+        plan_id: u64,
+        generation: u64,
+        permit_overflow: bool,
+    ) -> InviteFailoverRemovalOutcome {
+        self.try_remove_invite_failover_plan_inner(plan_id, Some(generation), permit_overflow)
+    }
+
+    fn try_remove_invite_failover_plan_inner(
+        &self,
+        plan_id: u64,
+        expected_generation: Option<u64>,
+        permit_overflow: bool,
+    ) -> InviteFailoverRemovalOutcome {
         let Some(plan) = self
             .invite_failover_plans
             .get(&plan_id)
             .map(|entry| entry.value().clone())
         else {
-            return;
+            return InviteFailoverRemovalOutcome::Missing;
         };
         let Ok(mut plan_guard) = plan.try_lock() else {
-            return;
+            return InviteFailoverRemovalOutcome::Busy;
         };
         let _registry = self
             .invite_failover_registry_lock
@@ -1357,47 +2559,60 @@ impl DialogManager {
             .get(&plan_id)
             .is_some_and(|entry| std::sync::Arc::ptr_eq(entry.value(), &plan));
         if !still_registered {
-            return;
+            return InviteFailoverRemovalOutcome::Missing;
+        }
+        if expected_generation.is_some_and(|generation| generation != plan_guard.expiry_generation)
+        {
+            return InviteFailoverRemovalOutcome::Stale;
         }
         let expired = plan_guard.expires_at <= Instant::now();
-        let evictable_overflow = plan_guard.phase != InviteFailoverPlanPhase::Active
+        if plan_guard.phase == InviteFailoverPlanPhase::WireUnknown {
+            return InviteFailoverRemovalOutcome::NonExpiring;
+        }
+        let evictable_overflow = permit_overflow
+            && plan_guard.phase.is_overflow_evictable()
             && self.invite_failover_plans.len() > self.invite_failover_plan_capacity;
         if !expired && !evictable_overflow {
-            return;
+            return InviteFailoverRemovalOutcome::Deferred {
+                wake_at: plan_guard.expires_at,
+                overflow_evictable: plan_guard.phase.is_overflow_evictable(),
+            };
         }
         let dialog_id = plan_guard.dialog_id.clone();
-        let candidate_count = plan_guard.candidates.len();
+        let reserved_attempt_slots = plan_guard.reserved_attempt_slots;
+        let attempts = plan_guard.attempt_transaction_ids();
 
         // The plan remains locked until every owner/index is detached and its
         // reservation is released. A worker that captured this Arc before the
         // prune therefore observes a non-active generation and cannot advance
         // an orphan after capacity has been returned.
-        if plan_guard.phase == InviteFailoverPlanPhase::Active {
-            plan_guard.phase = InviteFailoverPlanPhase::Closed;
-        }
-        plan_guard.pending_candidate = None;
-        plan_guard.current_send_generation = None;
+        let terminal_phase = if plan_guard.phase == InviteFailoverPlanPhase::Active {
+            InviteFailoverPlanPhase::Closed
+        } else {
+            plan_guard.phase
+        };
+        plan_guard.transition_to_terminal(terminal_phase);
         self.active_invite_failover_by_dialog
             .remove_if(&dialog_id, |_, active_plan_id| *active_plan_id == plan_id);
 
-        let attempts: Vec<TransactionKey> = self
-            .invite_failover_attempts
-            .iter()
-            .filter(|entry| entry.value().plan_id == plan_id)
-            .map(|entry| entry.key().clone())
-            .collect();
         for transaction_id in attempts {
-            self.invite_failover_attempts.remove(&transaction_id);
-            self.unlink_transaction_from_dialog_indexed(&transaction_id);
+            self.remove_invite_failover_attempt_locked(transaction_id.as_ref(), Some(plan_id));
+            self.unlink_transaction_from_dialog_indexed(transaction_id.as_ref());
         }
         if self.invite_failover_plans.remove(&plan_id).is_none() {
-            return;
+            return InviteFailoverRemovalOutcome::Missing;
         }
+        self.invite_failover_expiry_scheduler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(plan_id);
+        self.unindex_invite_failover_plan_locked(&dialog_id, plan_id);
         Self::release_invite_failover_reservation(&self.invite_failover_plan_reservations, 1);
         Self::release_invite_failover_reservation(
             &self.invite_failover_attempt_reservations,
-            candidate_count,
+            reserved_attempt_slots,
         );
+        InviteFailoverRemovalOutcome::Removed
     }
 
     pub(crate) fn remove_invite_failover_state_for_dialog(&self, dialog_id: &DialogId) {
@@ -1405,20 +2620,28 @@ impl DialogManager {
         // bounded failover tombstone. A forked 2xx can arrive after the
         // application removes a cancelled/failed dialog and still requires
         // an authenticated ACK followed by one BYE. Removing the active
-        // ownership entry prevents any further candidate advancement.
-        {
+        // ownership entry prevents any further candidate advancement. The
+        // retained reverse indexes make this work proportional only to this
+        // dialog, even when its plan mutex is temporarily busy.
+        let (plan_ids, attempts) = {
             let _registry = self
                 .invite_failover_registry_lock
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.active_invite_failover_by_dialog.remove(dialog_id);
-        }
-        let plan_ids: std::collections::HashSet<u64> = self
-            .invite_failover_attempts
-            .iter()
-            .filter(|entry| &entry.value().dialog_id == dialog_id)
-            .map(|entry| entry.value().plan_id)
-            .collect();
+            (
+                self.invite_failover_plan_ids_for_dialog(dialog_id),
+                self.invite_failover_attempt_ids_for_dialog(dialog_id),
+            )
+        };
+        // Ordinary terminal plans remain reachable by their exact transaction
+        // keys for late/forked 2xx processing. Once the dialog itself is
+        // detached, retaining the two dialog-keyed reverse indexes duplicates
+        // every plan/attempt key for the full failover TTL without serving a
+        // protocol lookup. Wire-unknown plans are the exception: their
+        // cancellation/recovery API is deliberately dialog-addressed, so they
+        // keep both reverse indexes until exact teardown completes.
+        let mut terminal_reverse_indexes = Vec::new();
         for plan_id in plan_ids {
             if let Some(plan) = self
                 .invite_failover_plans
@@ -1427,20 +2650,72 @@ impl DialogManager {
             {
                 if let Ok(mut plan) = plan.try_lock() {
                     if plan.phase == InviteFailoverPlanPhase::Active {
-                        plan.phase = InviteFailoverPlanPhase::Cancelled;
+                        plan.transition_to_terminal(InviteFailoverPlanPhase::Cancelled);
                     }
-                    plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
+                    self.schedule_invite_failover_plan_expiry(
+                        &mut plan,
+                        Instant::now() + INVITE_FAILOVER_PLAN_TTL,
+                    );
+                    if plan.phase != InviteFailoverPlanPhase::WireUnknown {
+                        terminal_reverse_indexes.push((plan.id, plan.attempt_transaction_ids()));
+                    }
+                } else {
+                    // Dialog removal is synchronous and must never await a
+                    // candidate worker that owns this plan. Publish one exact,
+                    // bounded retry while the registry is stable; the manager
+                    // maintenance task will compact it after the lock is free.
+                    let scheduled = {
+                        let _registry = self
+                            .invite_failover_registry_lock
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let still_registered = self
+                            .invite_failover_plans
+                            .get(&plan_id)
+                            .is_some_and(|entry| std::sync::Arc::ptr_eq(entry.value(), &plan));
+                        let still_indexed = self
+                            .invite_failover_plans_by_dialog
+                            .get(dialog_id)
+                            .is_some_and(|plan_ids| plan_ids.contains(&plan_id));
+                        if self.is_accepting_work() && still_registered && still_indexed {
+                            self.invite_failover_expiry_scheduler
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .schedule_dialog_cleanup(
+                                    plan_id,
+                                    dialog_id,
+                                    std::sync::Arc::downgrade(&plan),
+                                    Instant::now(),
+                                )
+                        } else {
+                            true
+                        }
+                    };
+                    if !scheduled {
+                        error!(
+                            plan_id,
+                            "Retained initial-INVITE dialog cleanup retry reached its hard capacity"
+                        );
+                    }
                 }
             }
         }
-        let attempts: Vec<TransactionKey> = self
-            .invite_failover_attempts
-            .iter()
-            .filter(|entry| &entry.value().dialog_id == dialog_id)
-            .map(|entry| entry.key().clone())
-            .collect();
-        for transaction_id in attempts {
-            self.transaction_to_dialog.remove(&transaction_id);
+        for transaction_id in &attempts {
+            self.transaction_to_dialog
+                .remove_if(transaction_id, |_, mapped| mapped == dialog_id);
+        }
+
+        if !terminal_reverse_indexes.is_empty() {
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for (plan_id, transaction_ids) in terminal_reverse_indexes {
+                self.unindex_invite_failover_plan_locked(dialog_id, plan_id);
+                for transaction_id in transaction_ids {
+                    self.unindex_invite_failover_attempt_locked(dialog_id, transaction_id.as_ref());
+                }
+            }
         }
     }
 
@@ -1453,8 +2728,27 @@ impl DialogManager {
             | TransactionEvent::TransportError { transaction_id }
             | TransactionEvent::TransactionTerminated { transaction_id }
             | TransactionEvent::StateChanged { transaction_id, .. } => Some(transaction_id),
+            TransactionEvent::Error {
+                transaction_id: Some(transaction_id),
+                ..
+            } => Some(transaction_id),
             _ => None,
         }
+    }
+
+    async fn emit_invite_internal_failure(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+    ) {
+        self.emit_session_coordination_event(SessionCoordinationEvent::RequestFailed {
+            dialog_id: Some(dialog_id),
+            transaction_id,
+            status_code: 500,
+            reason_phrase: "Local transaction processing failed".to_string(),
+            method: Method::Invite.to_string(),
+        })
+        .await;
     }
 
     fn close_active_invite_failover_plan(
@@ -1462,10 +2756,8 @@ impl DialogManager {
         plan: &mut InviteFailoverPlan,
         phase: InviteFailoverPlanPhase,
     ) {
-        plan.phase = phase;
-        plan.pending_candidate = None;
-        plan.current_send_generation = None;
-        plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
+        plan.transition_to_terminal(phase);
+        self.schedule_invite_failover_plan_expiry(plan, Instant::now() + INVITE_FAILOVER_PLAN_TTL);
         let _registry = self
             .invite_failover_registry_lock
             .lock()
@@ -1497,62 +2789,67 @@ impl DialogManager {
                 .is_some_and(|owner| *owner.value() == plan.id);
             if plan.phase != InviteFailoverPlanPhase::Active
                 || !owner_is_current
-                || plan.current_transaction.as_ref() != Some(completed_transaction)
+                || plan.current_transaction.as_deref() != Some(completed_transaction)
             {
                 return false;
             }
             Self::set_invite_attempt_outcome(&mut plan, completed_transaction, outcome);
             plan.current_transaction = None;
-            plan.current_candidate_index = None;
-            plan.current_send_generation = None;
+            if let Some(active) = plan.active_payload.as_mut() {
+                active.current_candidate_index = None;
+                active.current_send_generation = None;
+            }
         }
 
-        loop {
-            let candidate_index = {
-                let mut plan = plan.lock().await;
-                if plan.phase != InviteFailoverPlanPhase::Active {
-                    return false;
-                }
-                if plan.next_candidate_index >= plan.candidates.len() {
-                    self.close_active_invite_failover_plan(
-                        &mut plan,
-                        InviteFailoverPlanPhase::Exhausted,
-                    );
-                    return false;
-                }
-                plan.next_candidate_index
-            };
-            match self.send_invite_failover_candidate(plan).await {
-                Ok((transaction_id, destination)) => {
-                    let plan_id = plan.lock().await.id;
-                    debug!(
-                        plan_id,
-                        candidate_index,
-                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
-                        %destination,
-                        "Advanced retained initial-INVITE failover plan"
-                    );
-                    return true;
-                }
-                Err(InviteCandidateSendError::Recoverable(error)) => {
-                    let plan_id = plan.lock().await.id;
-                    debug!(
-                        plan_id,
-                        candidate_index,
-                        error_class = error.diagnostic_class(),
-                        "Retained initial-INVITE candidate failed at transport send"
-                    );
-                }
-                Err(InviteCandidateSendError::Fatal(error)) => {
-                    let plan_id = plan.lock().await.id;
-                    warn!(
-                        plan_id,
-                        candidate_index,
-                        error_class = error.diagnostic_class(),
-                        "Retained initial-INVITE failover stopped on non-transport failure"
-                    );
-                    return false;
-                }
+        let candidate_index = {
+            let mut plan = plan.lock().await;
+            if plan.phase != InviteFailoverPlanPhase::Active {
+                return false;
+            }
+            let next_candidate_index = plan
+                .active_payload
+                .as_ref()
+                .map_or(0, |active| active.next_candidate_index);
+            if next_candidate_index >= plan.candidate_count() {
+                self.close_active_invite_failover_plan(
+                    &mut plan,
+                    InviteFailoverPlanPhase::Exhausted,
+                );
+                return false;
+            }
+            next_candidate_index
+        };
+        match self.send_invite_failover_candidate(plan).await {
+            Ok((transaction_id, destination)) => {
+                let plan_id = plan.lock().await.id;
+                debug!(
+                    plan_id,
+                    candidate_index,
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+                    %destination,
+                    "Advanced retained initial-INVITE failover plan"
+                );
+                true
+            }
+            Err(InviteCandidateSendError::Fatal(error)) => {
+                let plan_id = plan.lock().await.id;
+                warn!(
+                    plan_id,
+                    candidate_index,
+                    error_class = error.diagnostic_class(),
+                    "Retained initial-INVITE failover stopped on non-transport failure"
+                );
+                false
+            }
+            Err(InviteCandidateSendError::WireUnknown(error)) => {
+                let plan_id = plan.lock().await.id;
+                warn!(
+                    plan_id,
+                    candidate_index,
+                    error_class = error.diagnostic_class(),
+                    "Retained initial-INVITE failover stopped with wire outcome unknown"
+                );
+                false
             }
         }
     }
@@ -1580,7 +2877,7 @@ impl DialogManager {
         })
     }
 
-    async fn send_bye_for_late_invite_success(
+    async fn start_bye_for_late_invite_success(
         &self,
         invite_transaction: &TransactionKey,
         response: &Response,
@@ -1707,11 +3004,74 @@ impl DialogManager {
                 message: safe_operation_failure("late_invite_bye_send", "transport_error"),
             });
         }
+
         Ok(bye_transaction)
+    }
+
+    async fn wait_for_late_invite_bye_success(
+        &self,
+        bye_transaction: &TransactionKey,
+    ) -> DialogResult<()> {
+        // `send_request` confirms the exact first transport write; it does not
+        // mean that the remote fork accepted the BYE. Wait on the
+        // transaction-keyed completion authority rather than allocating a
+        // global observational subscription. The completion is retained past
+        // runner removal, so both response-before-wait and
+        // response-versus-removal races are covered.
+        let completion_deadline = self
+            .transaction_manager
+            .timer_settings()
+            .transaction_timeout
+            .saturating_add(Duration::from_millis(100));
+        let outcome = self
+            .transaction_manager
+            .wait_for_client_transaction_outcome(bye_transaction, completion_deadline)
+            .await
+            .map_err(|_| crate::errors::DialogError::TransactionError {
+                message: safe_operation_failure("late_invite_bye_completion", "transaction_error"),
+            })?;
+
+        match outcome {
+            Some(crate::transaction::ClientTransactionOutcome::FinalResponse(response))
+                if (200..300).contains(&response.status().as_u16()) =>
+            {
+                Ok(())
+            }
+            Some(crate::transaction::ClientTransactionOutcome::FinalResponse(_)) => {
+                Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure(
+                        "late_invite_bye_completion",
+                        "non_success_response",
+                    ),
+                })
+            }
+            Some(crate::transaction::ClientTransactionOutcome::Failure(_)) => {
+                Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure(
+                        "late_invite_bye_completion",
+                        "terminal_failure",
+                    ),
+                })
+            }
+            None => {
+                // The transaction timer should normally publish its typed
+                // failure before this guard expires. If it does not, force
+                // local cleanup and leave the fork tag uncommitted so a
+                // retransmitted late 2xx can retry ACK-then-BYE.
+                let _ = self
+                    .transaction_manager
+                    .terminate_transaction(bye_transaction)
+                    .await;
+                Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("late_invite_bye_completion", "timeout"),
+                })
+            }
+        }
     }
 
     async fn acknowledge_and_cleanup_late_invite_success(
         &self,
+        plan_arc: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
         plan: &mut InviteFailoverPlan,
         transaction_id: &TransactionKey,
         response: &Response,
@@ -1739,30 +3099,72 @@ impl DialogManager {
             );
             return;
         };
-        if plan.cleaned_fork_tags.contains(&to_tag) {
+        if plan.is_cleaned_fork(&to_tag) {
+            return;
+        }
+        if plan.is_fork_cleanup_in_flight(&to_tag) {
+            // Every retransmitted 2xx still receives the ACK above. The
+            // existing BYE owns cleanup until its exact final outcome is
+            // known; do not create a parallel transaction for the same fork.
             return;
         }
 
-        match self
-            .send_bye_for_late_invite_success(transaction_id, response)
+        let Some(cleanup_operation) = self.enter_invite_failover_operation() else {
+            return;
+        };
+        plan.mark_fork_cleanup_in_flight(to_tag.clone());
+
+        // Start the compensating BYE before returning from the authoritative
+        // late-2xx handler. This preserves the event-path ordering contract:
+        // once handling completes, the exact BYE transaction is registered
+        // and its first transport write has either succeeded or cleanup has
+        // already been left retryable. Only the potentially long final-response
+        // wait runs in the drain-tracked background operation.
+        let bye_transaction = match self
+            .start_bye_for_late_invite_success(transaction_id, response)
             .await
         {
-            Ok(bye_transaction) => {
-                plan.cleaned_fork_tags.insert(to_tag);
-                info!(
-                    invite_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
-                    bye_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&bye_transaction),
-                    "ACKed and terminated a non-selected initial-INVITE fork"
-                );
-            }
+            Ok(transaction_id) => transaction_id,
             Err(error) => {
+                plan.clear_fork_cleanup_in_flight(&to_tag);
                 warn!(
                     transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
                     error_class = error.diagnostic_class(),
-                    "Failed to terminate a non-selected initial-INVITE fork"
+                    "Failed to start termination of a non-selected initial-INVITE fork"
                 );
+                return;
             }
-        }
+        };
+
+        let manager = self.clone();
+        let plan_arc = plan_arc.clone();
+        let invite_transaction = transaction_id.clone();
+        tokio::spawn(async move {
+            let _cleanup_operation = cleanup_operation;
+            let result = manager
+                .wait_for_late_invite_bye_success(&bye_transaction)
+                .await;
+            let mut plan = plan_arc.lock().await;
+            plan.clear_fork_cleanup_in_flight(&to_tag);
+
+            match result {
+                Ok(()) => {
+                    plan.mark_cleaned_fork(to_tag);
+                    info!(
+                        invite_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_transaction),
+                        bye_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&bye_transaction),
+                        "ACKed and terminated a non-selected initial-INVITE fork"
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_transaction),
+                        error_class = error.diagnostic_class(),
+                        "Failed to terminate a non-selected initial-INVITE fork"
+                    );
+                }
+            }
+        });
     }
 
     pub(crate) async fn handle_invite_failover_event(
@@ -1784,23 +3186,31 @@ impl DialogManager {
             .get(&attempt_index.plan_id)
             .map(|entry| entry.value().clone())
         else {
-            self.invite_failover_attempts.remove(transaction_id);
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.unindex_invite_failover_plan_locked(
+                &attempt_index.dialog_id,
+                attempt_index.plan_id,
+            );
+            self.remove_invite_failover_attempt_locked(transaction_id, Some(attempt_index.plan_id));
             return InviteFailoverEventDisposition::Continue;
         };
         let mut plan = plan_arc.lock().await;
-        let known_attempt = plan.attempts.iter().any(|attempt| {
-            &attempt.transaction_id == transaction_id
-                && attempt.candidate_index == attempt_index.candidate_index
-        });
-        if plan.id != attempt_index.plan_id
-            || plan.dialog_id != attempt_index.dialog_id
-            || !known_attempt
-        {
-            self.invite_failover_attempts.remove(transaction_id);
+        // The exact transaction-keyed attempt map is authoritative. Keeping
+        // and scanning a second candidate/outcome history in every terminal
+        // plan added duplicate ownership without strengthening this check.
+        if plan.id != attempt_index.plan_id || plan.dialog_id != attempt_index.dialog_id {
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.remove_invite_failover_attempt_locked(transaction_id, Some(attempt_index.plan_id));
             return InviteFailoverEventDisposition::Continue;
         }
 
-        let is_current = plan.current_transaction.as_ref() == Some(transaction_id);
+        let is_current = plan.current_transaction.as_deref() == Some(transaction_id);
         let plan_is_active = plan.phase == InviteFailoverPlanPhase::Active
             && self
                 .active_invite_failover_by_dialog
@@ -1809,7 +3219,9 @@ impl DialogManager {
         match event {
             TransactionEvent::ProvisionalResponse { .. } => {
                 if plan_is_active && is_current {
-                    plan.provisional_seen = true;
+                    if let Some(active) = plan.active_payload.as_mut() {
+                        active.provisional_seen = true;
+                    }
                     InviteFailoverEventDisposition::Continue
                 } else {
                     InviteFailoverEventDisposition::Consumed
@@ -1823,7 +3235,7 @@ impl DialogManager {
                         transaction_id,
                         InviteFailoverAttemptOutcome::Accepted,
                     );
-                    plan.accepted_transaction = Some(transaction_id.clone());
+                    plan.accepted_candidate_index = Some(attempt_index.candidate_index);
                     plan.accepted_to_tag = response_tag;
                     self.close_active_invite_failover_plan(
                         &mut plan,
@@ -1832,7 +3244,7 @@ impl DialogManager {
                     InviteFailoverEventDisposition::Continue
                 } else if plan.accepted_to_tag == response_tag
                     && (response_tag.is_some()
-                        || plan.accepted_transaction.as_ref() == Some(transaction_id))
+                        || plan.accepted_candidate_index == Some(attempt_index.candidate_index))
                 {
                     if let Err(error) = self
                         .transaction_manager
@@ -1848,6 +3260,7 @@ impl DialogManager {
                     InviteFailoverEventDisposition::Consumed
                 } else {
                     self.acknowledge_and_cleanup_late_invite_success(
+                        &plan_arc,
                         &mut plan,
                         transaction_id,
                         response,
@@ -1868,8 +3281,6 @@ impl DialogManager {
                     && response.status_code() == 487
                 {
                     plan.current_transaction = None;
-                    plan.current_candidate_index = None;
-                    plan.current_send_generation = None;
                     return InviteFailoverEventDisposition::Continue;
                 }
 
@@ -1877,8 +3288,12 @@ impl DialogManager {
                     return InviteFailoverEventDisposition::Consumed;
                 }
 
-                if response.status_code() == 503 && !plan.provisional_seen {
-                    if plan.next_candidate_index < plan.candidates.len() {
+                let (provisional_seen, next_candidate_index) =
+                    plan.active_payload.as_ref().map_or((true, 0), |active| {
+                        (active.provisional_seen, active.next_candidate_index)
+                    });
+                if response.status_code() == 503 && !provisional_seen {
+                    if next_candidate_index < plan.candidate_count() {
                         drop(plan);
                         if self
                             .advance_invite_failover_plan(
@@ -1924,9 +3339,13 @@ impl DialogManager {
                 } else {
                     InviteFailoverAttemptOutcome::TransportError
                 };
+                let (provisional_seen, next_candidate_index) =
+                    plan.active_payload.as_ref().map_or((true, 0), |active| {
+                        (active.provisional_seen, active.next_candidate_index)
+                    });
                 if INVITE_TIMEOUT_FAILOVER_ENABLED
-                    && !plan.provisional_seen
-                    && plan.next_candidate_index < plan.candidates.len()
+                    && !provisional_seen
+                    && next_candidate_index < plan.candidate_count()
                 {
                     drop(plan);
                     if self
@@ -1945,6 +3364,69 @@ impl DialogManager {
                     );
                     InviteFailoverEventDisposition::Continue
                 }
+            }
+            TransactionEvent::Error {
+                transaction_id: Some(error_transaction_id),
+                ..
+            } if error_transaction_id == transaction_id => {
+                if !plan_is_active || !is_current {
+                    return InviteFailoverEventDisposition::Consumed;
+                }
+
+                let (provisional_seen, next_candidate_index) =
+                    plan.active_payload.as_ref().map_or((true, 0), |active| {
+                        (active.provisional_seen, active.next_candidate_index)
+                    });
+                if !provisional_seen && next_candidate_index < plan.candidate_count() {
+                    drop(plan);
+                    if self
+                        .advance_invite_failover_plan(
+                            &plan_arc,
+                            transaction_id,
+                            InviteFailoverAttemptOutcome::InternalError,
+                        )
+                        .await
+                    {
+                        return InviteFailoverEventDisposition::Consumed;
+                    }
+
+                    // A zero-wire failure while preparing the replacement may
+                    // have closed the plan. Surface one deterministic call
+                    // failure in that case. WireUnknown keeps its exact route
+                    // alive for a later final response and must not fail early.
+                    let terminal_dialog = {
+                        let plan = plan_arc.lock().await;
+                        matches!(
+                            plan.phase,
+                            InviteFailoverPlanPhase::Closed | InviteFailoverPlanPhase::Exhausted
+                        )
+                        .then(|| plan.dialog_id.clone())
+                    };
+                    if let Some(dialog_id) = terminal_dialog {
+                        self.emit_invite_internal_failure(dialog_id, transaction_id.clone())
+                            .await;
+                    }
+                    return InviteFailoverEventDisposition::Consumed;
+                }
+
+                Self::set_invite_attempt_outcome(
+                    &mut plan,
+                    transaction_id,
+                    InviteFailoverAttemptOutcome::InternalError,
+                );
+                let dialog_id = plan.dialog_id.clone();
+                let phase = if next_candidate_index >= plan.candidate_count() {
+                    InviteFailoverPlanPhase::Exhausted
+                } else {
+                    // A provisional response makes another resolver candidate
+                    // unsafe: the old branch may still establish a dialog.
+                    InviteFailoverPlanPhase::Closed
+                };
+                self.close_active_invite_failover_plan(&mut plan, phase);
+                drop(plan);
+                self.emit_invite_internal_failure(dialog_id, transaction_id.clone())
+                    .await;
+                InviteFailoverEventDisposition::Consumed
             }
             TransactionEvent::TransactionTerminated { .. }
             | TransactionEvent::StateChanged {
@@ -1987,7 +3469,7 @@ impl DialogManager {
                             dialog=%dialog_id,
                             "Selected current retained initial-INVITE attempt for CANCEL"
                         );
-                        return Some(transaction_id);
+                        return Some(transaction_id.as_ref().clone());
                     }
                 }
             }
@@ -2597,6 +4079,54 @@ impl DialogManager {
         Ok(transaction_id)
     }
 
+    /// Initial-INVITE send with an explicit lower-layer wire-boundary receipt.
+    ///
+    /// This preserves the legacy method above while giving lifecycle-aware
+    /// callers enough information to distinguish exact local rollback from a
+    /// required signaling teardown.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_initial_invite_with_wire_receipt(
+        &self,
+        dialog_id: &DialogId,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        from_display: Option<String>,
+        contact_override: Option<String>,
+        outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+        supported_100rel: bool,
+    ) -> Result<TransactionKey, InitialInviteSendFailure> {
+        match self
+            .send_initial_invite_with_extra_headers(
+                dialog_id,
+                body,
+                extra_headers,
+                from_display,
+                contact_override,
+                outbound_proxy_uri,
+                supported_100rel,
+            )
+            .await
+        {
+            Ok(transaction_id) => Ok(transaction_id),
+            Err(error) => {
+                for plan_id in self.invite_failover_plan_ids_for_dialog(dialog_id) {
+                    let Some(plan) = self
+                        .invite_failover_plans
+                        .get(&plan_id)
+                        .map(|entry| entry.value().clone())
+                    else {
+                        continue;
+                    };
+                    let plan = plan.lock().await;
+                    if plan.id == plan_id && &plan.dialog_id == dialog_id && plan.wire_attempted {
+                        return Err(InitialInviteSendFailure::Unknown(error));
+                    }
+                }
+                Err(InitialInviteSendFailure::ZeroWire(error))
+            }
+        }
+    }
+
     async fn register_invite_failover_plan(
         &self,
         dialog_id: &DialogId,
@@ -2604,7 +4134,16 @@ impl DialogManager {
         candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
         wire_plan: CandidateWirePlan,
     ) -> DialogResult<std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>> {
-        self.prune_invite_failover_state().await;
+        // Retained plans are already reaped by the manager's one-second
+        // maintenance task and by the bounded insert cadence below. Scanning
+        // and cloning the complete 90-second retention set for every INVITE
+        // makes admission O(retained calls) and turns sustained CPS into
+        // quadratic work. Only force an admission-side reap when the retained
+        // capacity is actually full, so expired entries get one final chance
+        // to free a slot before overload is reported.
+        if self.invite_failover_plans.len() >= self.invite_failover_plan_capacity {
+            self.prune_invite_failover_state().await;
+        }
         let (plan, inserts) = {
             // Registration is one linearized ownership transition. Two callers
             // cannot both replace the active owner for one dialog, and drain
@@ -2669,28 +4208,55 @@ impl DialogManager {
                     .transaction_manager
                     .timer_settings()
                     .transaction_timeout;
+            let expires_at = setup_deadline + INVITE_FAILOVER_PLAN_TTL;
+            let expiry_generation = 1;
+            let reserved_candidate_count = candidates.len();
             let plan = std::sync::Arc::new(tokio::sync::Mutex::new(InviteFailoverPlan {
                 id: plan_id,
                 dialog_id: dialog_id.clone(),
-                request,
-                candidates,
-                wire_plan,
-                next_candidate_index: 0,
-                next_send_generation: 0,
-                pending_candidate: None,
+                active_payload: Some(Box::new(InviteFailoverActivePayload::new(
+                    request,
+                    candidates,
+                    wire_plan,
+                    setup_deadline,
+                ))),
+                reserved_attempt_slots: reserved_candidate_count,
                 current_transaction: None,
-                current_candidate_index: None,
-                current_send_generation: None,
-                provisional_seen: false,
+                wire_attempted: false,
                 phase: InviteFailoverPlanPhase::Active,
-                attempts: Vec::new(),
-                accepted_transaction: None,
+                retained_attempts: Box::new([]),
+                accepted_candidate_index: None,
                 accepted_to_tag: None,
-                cleaned_fork_tags: std::collections::HashSet::new(),
-                setup_deadline,
-                expires_at: setup_deadline + INVITE_FAILOVER_PLAN_TTL,
+                fork_cleanup: None,
+                expires_at,
+                expiry_generation,
             }));
             self.invite_failover_plans.insert(plan_id, plan.clone());
+            if !self
+                .invite_failover_expiry_scheduler
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .schedule(
+                    plan_id,
+                    expiry_generation,
+                    expires_at,
+                    InviteFailoverPlanPhase::Active,
+                )
+            {
+                self.invite_failover_plans.remove(&plan_id);
+                Self::release_invite_failover_reservation(
+                    &self.invite_failover_plan_reservations,
+                    1,
+                );
+                Self::release_invite_failover_reservation(
+                    &self.invite_failover_attempt_reservations,
+                    reserved_candidate_count,
+                );
+                return Err(crate::errors::DialogError::TransactionError {
+                    message: safe_operation_failure("invite_failover_admission", "expiry_capacity"),
+                });
+            }
+            self.index_invite_failover_plan_locked(dialog_id, plan_id);
             self.active_invite_failover_by_dialog
                 .insert(dialog_id.clone(), plan_id);
             let inserts = self
@@ -2735,12 +4301,14 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         outcome: InviteFailoverAttemptOutcome,
     ) {
-        if let Some(attempt) = plan
-            .attempts
-            .iter_mut()
-            .find(|attempt| &attempt.transaction_id == transaction_id)
-        {
-            attempt.outcome = outcome;
+        if let Some(active) = plan.active_payload.as_mut() {
+            if let Some(attempt) = active
+                .attempts
+                .iter_mut()
+                .find(|attempt| attempt.transaction_id.as_ref() == transaction_id)
+            {
+                attempt.outcome = outcome;
+            }
         }
     }
 
@@ -2757,9 +4325,14 @@ impl DialogManager {
         transaction_hint: Option<&TransactionKey>,
     ) -> Option<TransactionKey> {
         let owns_pending = plan
-            .pending_candidate
+            .active_payload
+            .as_ref()
+            .and_then(|active| active.pending_candidate)
             .is_some_and(|(pending_generation, _)| pending_generation == generation);
-        let owns_current = plan.current_send_generation == Some(generation);
+        let owns_current = plan
+            .active_payload
+            .as_ref()
+            .is_some_and(|active| active.current_send_generation == Some(generation));
         if !owns_pending && !owns_current {
             // A transaction created just before another operation cancelled
             // the pending generation was never published in the plan. It
@@ -2768,9 +4341,11 @@ impl DialogManager {
             return transaction_hint
                 .filter(|transaction_id| {
                     !plan
-                        .attempts
-                        .iter()
-                        .any(|attempt| &attempt.transaction_id == *transaction_id)
+                        .active_payload
+                        .as_ref()
+                        .into_iter()
+                        .flat_map(|active| active.attempts.iter())
+                        .any(|attempt| attempt.transaction_id.as_ref() == *transaction_id)
                 })
                 .cloned();
         }
@@ -2781,7 +4356,8 @@ impl DialogManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let transaction_id = if owns_current {
             plan.current_transaction
-                .clone()
+                .as_deref()
+                .cloned()
                 .or_else(|| transaction_hint.cloned())
         } else {
             transaction_hint.cloned()
@@ -2794,23 +4370,30 @@ impl DialogManager {
             );
         }
         if owns_pending {
-            plan.pending_candidate = None;
+            if let Some(active) = plan.active_payload.as_mut() {
+                active.pending_candidate = None;
+            }
         }
         if owns_current {
             plan.current_transaction = None;
-            plan.current_candidate_index = None;
-            plan.current_send_generation = None;
+            if let Some(active) = plan.active_payload.as_mut() {
+                active.current_candidate_index = None;
+                active.current_send_generation = None;
+            }
         }
         if plan.phase == InviteFailoverPlanPhase::Active {
-            plan.phase = InviteFailoverPlanPhase::Closed;
-            plan.expires_at = Instant::now() + INVITE_FAILOVER_PLAN_TTL;
+            plan.transition_to_terminal(InviteFailoverPlanPhase::Closed);
+            self.schedule_invite_failover_plan_expiry(
+                plan,
+                Instant::now() + INVITE_FAILOVER_PLAN_TTL,
+            );
         }
         self.active_invite_failover_by_dialog
             .remove_if(&plan.dialog_id, |_, active_plan_id| {
                 *active_plan_id == plan.id
             });
         if let Some(transaction_id) = transaction_id.as_ref() {
-            self.invite_failover_attempts.remove(transaction_id);
+            self.remove_invite_failover_attempt_locked(transaction_id, Some(plan.id));
             self.unlink_transaction_from_dialog_indexed(transaction_id);
         }
         transaction_id
@@ -2840,10 +4423,14 @@ impl DialogManager {
     ) {
         let mut plan = plan.lock().await;
         if plan
-            .pending_candidate
+            .active_payload
+            .as_ref()
+            .and_then(|active| active.pending_candidate)
             .is_some_and(|(pending_generation, _)| pending_generation == generation)
         {
-            plan.pending_candidate = None;
+            if let Some(active) = plan.active_payload.as_mut() {
+                active.pending_candidate = None;
+            }
             if plan.phase == InviteFailoverPlanPhase::Active {
                 self.close_active_invite_failover_plan(&mut plan, phase);
             }
@@ -2856,7 +4443,11 @@ impl DialogManager {
         unlink_attempt: bool,
     ) {
         if unlink_attempt {
-            self.invite_failover_attempts.remove(transaction_id);
+            let _registry = self
+                .invite_failover_registry_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.remove_invite_failover_attempt_locked(transaction_id, None);
             self.unlink_transaction_from_dialog_indexed(transaction_id);
         }
         if tokio::time::timeout(
@@ -2874,27 +4465,26 @@ impl DialogManager {
         }
     }
 
-    async fn fail_committed_invite_candidate(
+    async fn retain_wire_unknown_invite_candidate(
         &self,
         plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
         generation: u64,
         transaction_id: &TransactionKey,
         outcome: InviteFailoverAttemptOutcome,
-        terminal_phase: Option<InviteFailoverPlanPhase>,
     ) -> bool {
         let mut plan = plan.lock().await;
-        if plan.current_send_generation != Some(generation)
-            || plan.current_transaction.as_ref() != Some(transaction_id)
+        if !plan
+            .active_payload
+            .as_ref()
+            .is_some_and(|active| active.current_send_generation == Some(generation))
+            || plan.current_transaction.as_deref() != Some(transaction_id)
         {
             return false;
         }
         Self::set_invite_attempt_outcome(&mut plan, transaction_id, outcome);
-        plan.current_transaction = None;
-        plan.current_candidate_index = None;
-        plan.current_send_generation = None;
-        if let Some(phase) = terminal_phase {
-            self.close_active_invite_failover_plan(&mut plan, phase);
-        }
+        // Preserve current_transaction plus tx→dialog/request route indexes so
+        // a compatibility cleanup supervisor can construct the exact CANCEL.
+        self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::WireUnknown);
         true
     }
 
@@ -2921,7 +4511,12 @@ impl DialogManager {
                     },
                 ));
             }
-            if plan.pending_candidate.is_some() || plan.current_transaction.is_some() {
+            if plan
+                .active_payload
+                .as_ref()
+                .is_some_and(|active| active.pending_candidate.is_some())
+                || plan.current_transaction.is_some()
+            {
                 return Err(InviteCandidateSendError::Fatal(
                     crate::errors::DialogError::InvalidState {
                         expected: "idle initial INVITE candidate slot".to_string(),
@@ -2929,7 +4524,18 @@ impl DialogManager {
                     },
                 ));
             }
-            if plan.setup_deadline <= Instant::now() {
+            let plan_id = plan.id;
+            let dialog_id = plan.dialog_id.clone();
+            let Some(active_payload) = plan.active_payload.as_mut() else {
+                self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::Closed);
+                return Err(InviteCandidateSendError::Fatal(
+                    crate::errors::DialogError::InvalidState {
+                        expected: "active initial INVITE payload".to_string(),
+                        actual: "compacted initial INVITE plan".to_string(),
+                    },
+                ));
+            };
+            if active_payload.setup_deadline <= Instant::now() {
                 self.close_active_invite_failover_plan(
                     &mut plan,
                     InviteFailoverPlanPhase::Exhausted,
@@ -2938,8 +4544,8 @@ impl DialogManager {
                     "invite_candidate_reserve",
                 )));
             }
-            let candidate_index = plan.next_candidate_index;
-            let Some(target) = plan.candidates.get(candidate_index).cloned() else {
+            let candidate_index = active_payload.next_candidate_index;
+            let Some(target) = active_payload.candidates.get(candidate_index).cloned() else {
                 self.close_active_invite_failover_plan(
                     &mut plan,
                     InviteFailoverPlanPhase::Exhausted,
@@ -2948,24 +4554,27 @@ impl DialogManager {
                     crate::errors::DialogError::routing_error("INVITE candidate missing"),
                 ));
             };
-            let generation = plan.next_send_generation.wrapping_add(1).max(1);
-            plan.next_send_generation = generation;
-            plan.next_candidate_index = candidate_index + 1;
-            plan.pending_candidate = Some((generation, candidate_index));
+            let request = active_payload.request.clone();
+            let wire_plan = active_payload.wire_plan;
+            let remaining_candidate_count = active_payload
+                .candidates
+                .len()
+                .saturating_sub(candidate_index)
+                .max(1);
+            let generation = active_payload.next_send_generation.wrapping_add(1).max(1);
+            active_payload.next_send_generation = generation;
+            active_payload.next_candidate_index = candidate_index + 1;
+            active_payload.pending_candidate = Some((generation, candidate_index));
             InviteCandidateSendLease {
-                plan_id: plan.id,
-                dialog_id: plan.dialog_id.clone(),
+                plan_id,
+                dialog_id,
                 generation,
                 candidate_index,
                 target,
-                request: plan.request.clone(),
-                wire_plan: plan.wire_plan,
-                setup_deadline: plan.setup_deadline,
-                remaining_candidate_count: plan
-                    .candidates
-                    .len()
-                    .saturating_sub(candidate_index)
-                    .max(1),
+                request,
+                wire_plan,
+                setup_deadline: active_payload.setup_deadline,
+                remaining_candidate_count,
             }
         };
         let mut cancellation_guard =
@@ -3043,7 +4652,7 @@ impl DialogManager {
         let transaction_id = match tokio::time::timeout_at(
             tokio::time::Instant::from_std(lease.setup_deadline),
             self.transaction_manager
-                .create_client_transaction_on_route_with_timeout(
+                .create_client_transaction_on_route_with_timeout_and_owner(
                     request,
                     request_route,
                     attempt_timeout,
@@ -3051,7 +4660,7 @@ impl DialogManager {
         )
         .await
         {
-            Ok(Ok(transaction_id)) => transaction_id,
+            Ok(Ok(allocation)) => allocation,
             Ok(Err(_)) => {
                 self.close_pending_invite_candidate(
                     plan,
@@ -3080,6 +4689,7 @@ impl DialogManager {
                 )));
             }
         };
+        let (transaction_id, failover_admission_owner) = transaction_id;
         cancellation_guard.set_transaction(&transaction_id);
 
         let committed = {
@@ -3096,30 +4706,37 @@ impl DialogManager {
                 && owner_is_current
                 && plan.id == lease.plan_id
                 && plan.phase == InviteFailoverPlanPhase::Active
-                && plan.pending_candidate == Some((lease.generation, lease.candidate_index))
-                && plan.setup_deadline > Instant::now()
+                && plan.active_payload.as_ref().is_some_and(|active| {
+                    active.pending_candidate == Some((lease.generation, lease.candidate_index))
+                        && active.setup_deadline > Instant::now()
+                })
             {
                 self.link_outbound_transaction_to_dialog_indexed(
                     &transaction_id,
                     &lease.dialog_id,
                     &sent_request,
                 );
-                self.invite_failover_attempts.insert(
-                    transaction_id.clone(),
+                let retained_transaction = std::sync::Arc::new(transaction_id.clone());
+                self.index_invite_failover_attempt_locked(
+                    retained_transaction.clone(),
                     InviteFailoverAttemptIndex {
                         plan_id: lease.plan_id,
                         dialog_id: lease.dialog_id.clone(),
                         candidate_index: lease.candidate_index,
+                        _admission_owner: Some(failover_admission_owner),
                     },
                 );
-                plan.pending_candidate = None;
-                plan.current_transaction = Some(transaction_id.clone());
-                plan.current_candidate_index = Some(lease.candidate_index);
-                plan.current_send_generation = Some(lease.generation);
-                plan.provisional_seen = false;
-                plan.attempts.push(InviteFailoverAttempt {
-                    transaction_id: transaction_id.clone(),
-                    candidate_index: lease.candidate_index,
+                plan.current_transaction = Some(retained_transaction.clone());
+                let active = plan
+                    .active_payload
+                    .as_mut()
+                    .expect("active payload validated above");
+                active.pending_candidate = None;
+                active.current_candidate_index = Some(lease.candidate_index);
+                active.current_send_generation = Some(lease.generation);
+                active.provisional_seen = false;
+                active.attempts.push(InviteFailoverAttempt {
+                    transaction_id: retained_transaction,
                     outcome: InviteFailoverAttemptOutcome::Active,
                 });
                 true
@@ -3140,6 +4757,52 @@ impl DialogManager {
                 crate::errors::DialogError::InvalidState {
                     expected: "current admitted initial INVITE generation".to_string(),
                     actual: "stale generation or draining manager".to_string(),
+                },
+            ));
+        }
+
+        let stale_before_wire = {
+            let mut plan = plan.lock().await;
+            if !plan
+                .active_payload
+                .as_ref()
+                .is_some_and(|active| active.current_send_generation == Some(lease.generation))
+                || plan.current_transaction.as_deref() != Some(&transaction_id)
+            {
+                // This transaction was committed to the retained indexes but
+                // this lease has not crossed the wire boundary yet. A
+                // concurrent cancel/drain may have compacted the plan and
+                // invalidated the generation; detach the zero-wire attempt so
+                // it cannot occupy a retained route until TTL. The guard stays
+                // armed across async compensation and retries termination if
+                // this future is itself cancelled.
+                if plan.current_transaction.as_deref() == Some(&transaction_id) {
+                    plan.current_transaction = None;
+                    if let Some(active) = plan.active_payload.as_mut() {
+                        active.current_candidate_index = None;
+                    }
+                }
+                if let Some(active) = plan.active_payload.as_mut() {
+                    active
+                        .attempts
+                        .retain(|attempt| attempt.transaction_id.as_ref() != &transaction_id);
+                }
+                true
+            } else {
+                // Monotonic boundary: after this store, even an immediate
+                // transport error is conservatively wire-unknown.
+                plan.wire_attempted = true;
+                false
+            }
+        };
+        if stale_before_wire {
+            self.compensate_invite_candidate_transaction(&transaction_id, true)
+                .await;
+            cancellation_guard.disarm();
+            return Err(InviteCandidateSendError::Fatal(
+                crate::errors::DialogError::InvalidState {
+                    expected: "current committed INVITE wire lease".to_string(),
+                    actual: "stale INVITE wire lease".to_string(),
                 },
             ));
         }
@@ -3166,98 +4829,66 @@ impl DialogManager {
                     Ok(Ok(())) => Ok((transaction_id, lease.target.addr)),
                     Ok(Err(error)) => {
                         let still_current = self
-                            .fail_committed_invite_candidate(
+                            .retain_wire_unknown_invite_candidate(
                                 plan,
                                 lease.generation,
                                 &transaction_id,
                                 InviteFailoverAttemptOutcome::TransportError,
-                                Some(InviteFailoverPlanPhase::Closed),
                             )
                             .await;
                         if still_current {
-                            self.compensate_invite_candidate_transaction(&transaction_id, true)
-                                .await;
-                            Err(InviteCandidateSendError::Fatal(error))
+                            Err(InviteCandidateSendError::WireUnknown(error))
                         } else {
                             Ok((transaction_id, lease.target.addr))
                         }
                     }
                     Err(_) => {
                         let still_current = self
-                            .fail_committed_invite_candidate(
+                            .retain_wire_unknown_invite_candidate(
                                 plan,
                                 lease.generation,
                                 &transaction_id,
                                 InviteFailoverAttemptOutcome::TransactionTimeout,
-                                Some(InviteFailoverPlanPhase::Exhausted),
                             )
                             .await;
                         if still_current {
-                            self.compensate_invite_candidate_transaction(&transaction_id, true)
-                                .await;
-                            Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
-                                "invite_candidate_post_send",
-                            )))
+                            Err(InviteCandidateSendError::WireUnknown(
+                                Self::invite_setup_timeout("invite_candidate_post_send"),
+                            ))
                         } else {
                             Ok((transaction_id, lease.target.addr))
                         }
                     }
                 }
             }
-            Ok(Err(error)) => {
-                let is_transport_failure = matches!(
-                    error,
-                    crate::transaction::error::Error::TransportError { .. }
-                );
-                let terminal_phase =
-                    (!is_transport_failure).then_some(InviteFailoverPlanPhase::Closed);
-                self.fail_committed_invite_candidate(
+            Ok(Err(_error)) => {
+                self.retain_wire_unknown_invite_candidate(
                     plan,
                     lease.generation,
                     &transaction_id,
                     InviteFailoverAttemptOutcome::ImmediateTransportFailure,
-                    terminal_phase,
                 )
                 .await;
-                self.compensate_invite_candidate_transaction(&transaction_id, true)
-                    .await;
-                if is_transport_failure {
-                    Err(InviteCandidateSendError::Recoverable(
-                        crate::errors::DialogError::TransactionError {
-                            message: safe_operation_failure(
-                                "invite_candidate_send",
-                                "transport_error",
-                            ),
-                        },
-                    ))
-                } else {
-                    Err(InviteCandidateSendError::Fatal(
-                        crate::errors::DialogError::TransactionError {
-                            message: safe_operation_failure(
-                                "invite_candidate_send",
-                                "transaction_error",
-                            ),
-                        },
-                    ))
-                }
+                Err(InviteCandidateSendError::WireUnknown(
+                    crate::errors::DialogError::TransactionError {
+                        message: safe_operation_failure("invite_candidate_send", "wire_unknown"),
+                    },
+                ))
             }
             Err(_) => {
-                self.fail_committed_invite_candidate(
+                self.retain_wire_unknown_invite_candidate(
                     plan,
                     lease.generation,
                     &transaction_id,
                     InviteFailoverAttemptOutcome::TransactionTimeout,
-                    Some(InviteFailoverPlanPhase::Exhausted),
                 )
                 .await;
-                self.compensate_invite_candidate_transaction(&transaction_id, true)
-                    .await;
-                Err(InviteCandidateSendError::Fatal(Self::invite_setup_timeout(
-                    "invite_candidate_send",
-                )))
+                Err(InviteCandidateSendError::WireUnknown(
+                    Self::invite_setup_timeout("invite_candidate_send"),
+                ))
             }
         };
-        if result.is_ok() {
+        if result.is_ok() || matches!(&result, Err(error) if error.retains_wire_owner()) {
             cancellation_guard.disarm();
         }
         result
@@ -3273,36 +4904,9 @@ impl DialogManager {
         let plan = self
             .register_invite_failover_plan(dialog_id, request, candidates, wire_plan)
             .await?;
-        loop {
-            let candidate_index = plan.lock().await.next_candidate_index;
-            match self.send_invite_failover_candidate(&plan).await {
-                Ok(sent) => return Ok(sent),
-                Err(InviteCandidateSendError::Recoverable(error)) => {
-                    let has_next = {
-                        let plan = plan.lock().await;
-                        plan.phase == InviteFailoverPlanPhase::Active
-                            && plan.next_candidate_index < plan.candidates.len()
-                    };
-                    if has_next {
-                        debug!(
-                            candidate_index,
-                            error_class = error.diagnostic_class(),
-                            "Initial INVITE candidate failed before send completion"
-                        );
-                        continue;
-                    }
-                    let mut plan = plan.lock().await;
-                    self.close_active_invite_failover_plan(
-                        &mut plan,
-                        InviteFailoverPlanPhase::Exhausted,
-                    );
-                    return Err(error);
-                }
-                Err(error) => {
-                    let error = error.into_dialog_error();
-                    return Err(error);
-                }
-            }
+        match self.send_invite_failover_candidate(&plan).await {
+            Ok(sent) => Ok(sent),
+            Err(error) => Err(error.into_dialog_error()),
         }
     }
 
@@ -3640,6 +5244,70 @@ impl TransactionHelpers for DialogManager {
 
 // Transaction Event Processing Implementation
 impl DialogManager {
+    /// Resolve the exact Request-URI owned by an outbound client transaction.
+    ///
+    /// Authentication retries must sign the URI that actually crossed the
+    /// wire. Dialog targets and session metadata may already have changed, so
+    /// they are deliberately not used as fallbacks. A method mismatch is a
+    /// correlation failure and therefore fails closed.
+    pub(crate) async fn exact_outbound_request_uri(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<rvoip_sip_core::Uri> {
+        if transaction_id.is_server() {
+            return None;
+        }
+        match self
+            .transaction_manager
+            .original_request(transaction_id)
+            .await
+        {
+            Ok(Some(request)) if &request.method() == transaction_id.method() => {
+                Some(request.uri.clone())
+            }
+            Ok(Some(_)) => {
+                warn!(
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    "Original outbound request method did not match transaction key"
+                );
+                None
+            }
+            Ok(None) | Err(_) => {
+                if let Some(request_uri) = self
+                    .transaction_manager
+                    .auth_challenge_request_uri(transaction_id)
+                {
+                    return Some(request_uri);
+                }
+                warn!(
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    "Exact original outbound request was unavailable"
+                );
+                None
+            }
+        }
+    }
+
+    async fn emit_outbound_request_completed(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+        outcome: OutboundRequestOutcome,
+    ) {
+        if transaction_id.is_server()
+            || !tracks_generic_outbound_request_completion(transaction_id.method())
+        {
+            return;
+        }
+        self.emit_session_coordination_event(SessionCoordinationEvent::OutboundRequestCompleted {
+            dialog_id: dialog_id.clone(),
+            transaction_id: transaction_id.clone(),
+            method: transaction_id.method().clone(),
+            outcome,
+        })
+        .await;
+    }
+
     /// Process a transaction event and update dialog state accordingly
     ///
     /// This is the core event-driven state management for dialogs based on
@@ -3691,6 +5359,62 @@ impl DialogManager {
                 self.handle_transaction_terminated(dialog_id, transaction_id)
                     .await
             }
+
+            TransactionEvent::TransactionTimeout { .. } => {
+                self.emit_outbound_request_completed(
+                    dialog_id,
+                    transaction_id,
+                    OutboundRequestOutcome::Timeout,
+                )
+                .await;
+                Ok(())
+            }
+
+            TransactionEvent::TransportError { .. } => {
+                self.emit_outbound_request_completed(
+                    dialog_id,
+                    transaction_id,
+                    OutboundRequestOutcome::TransportFailure,
+                )
+                .await;
+                Ok(())
+            }
+
+            TransactionEvent::Error {
+                transaction_id: Some(error_transaction_id),
+                ..
+            } if error_transaction_id == *transaction_id => {
+                // A transaction-scoped generic error is published only after
+                // the runner has fenced the exact transaction as Terminated /
+                // Destroyed. Treat its exact key as the earliest authoritative
+                // release observation for tracked INFO/REFER/NOTIFY/UPDATE.
+                // The later TransactionTerminated observation is safe because
+                // session-core removes only the exact current tracker owner.
+                self.emit_outbound_request_completed(
+                    dialog_id,
+                    transaction_id,
+                    OutboundRequestOutcome::TransportFailure,
+                )
+                .await;
+                Ok(())
+            }
+
+            TransactionEvent::Error {
+                transaction_id: Some(error_transaction_id),
+                ..
+            } => {
+                warn!(
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    error_transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&error_transaction_id),
+                    "Ignoring mismatched transaction error correlation"
+                );
+                Ok(())
+            }
+
+            TransactionEvent::Error {
+                transaction_id: None,
+                ..
+            } => Ok(()),
 
             TransactionEvent::TimerTriggered { timer, .. } => {
                 debug!(
@@ -3747,17 +5471,10 @@ impl DialogManager {
 
             TransactionState::Terminated => {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Transaction terminated");
-                // Client INVITE transactions can emit StateChanged(Terminated)
-                // before the final failure response has been routed up to the
-                // dialog manager. Keep that mapping until the explicit
-                // TransactionTerminated cleanup so 487-after-CANCEL reaches
-                // session-core as CallCancelled instead of falling through to
-                // the setup/teardown watchdog.
-                if transaction_id.method() != &rvoip_sip_core::Method::Invite
-                    || transaction_id.is_server()
-                {
-                    self.unlink_transaction_from_dialog_indexed(transaction_id);
-                }
+                // Every transaction emits the explicit terminal observation
+                // after this state transition. Retain both the dialog mapping
+                // and route hash until then so sharded Timer/State/Terminal
+                // delivery cannot reorder or lose BYE terminal association.
             }
 
             _ => {
@@ -3793,6 +5510,42 @@ impl DialogManager {
                 }
             } else {
                 warn!("200 OK response has no To header for dialog {}", dialog_id);
+            }
+
+            // RFC 3261 §12.2.1.2: a successful target-refresh INVITE
+            // replaces the dialog's remote target with the response Contact.
+            // The authenticated initial-INVITE retry reuses the prepared
+            // dialog, so merely updating its tag/state leaves BYE and other
+            // later in-dialog requests aimed at the original Request-URI.
+            // Apply the Contact before publishing confirmation. The dialog
+            // enforces the SIPS downgrade invariant in `update_remote_target`.
+            if response.status_code() == 200
+                && transaction_id.method() == &rvoip_sip_core::Method::Invite
+            {
+                match response.header(&HeaderName::Contact) {
+                    Some(TypedHeader::Contact(contacts)) => match contacts
+                        .0
+                        .first()
+                        .and_then(|contact| extract_uri_from_contact(contact).ok())
+                    {
+                        Some(remote_target) => {
+                            if !dialog.update_remote_target(remote_target) {
+                                warn!(
+                                    dialog=%dialog_id,
+                                    "Rejected insecure Contact target refresh for secure dialog"
+                                );
+                            }
+                        }
+                        None => warn!(
+                            dialog=%dialog_id,
+                            "Successful INVITE response contains an unusable Contact"
+                        ),
+                    },
+                    _ => warn!(
+                        dialog=%dialog_id,
+                        "Successful INVITE response has no Contact target refresh"
+                    ),
+                }
             }
 
             // Update dialog state based on response status and current state
@@ -3865,6 +5618,7 @@ impl DialogManager {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
+            request_uri: None,
         })
         .await;
 
@@ -3944,14 +5698,12 @@ impl DialogManager {
                 }
 
                 // Successful completion - could be call answered, request completed, etc.
-                if !response.body().is_empty() {
-                    if transaction_id.method() == &rvoip_sip_core::Method::Invite {
-                        crate::diagnostics::record_uac_invite_2xx_call_answered_emit();
-                        if let Some(session_id) = session_id_for_diag.as_deref() {
-                            crate::diagnostics::record_call_timing_uac_call_answered_emit(
-                                session_id,
-                            );
-                        }
+                if transaction_id.method() == &rvoip_sip_core::Method::Invite
+                    && !response.body().is_empty()
+                {
+                    crate::diagnostics::record_uac_invite_2xx_call_answered_emit();
+                    if let Some(session_id) = session_id_for_diag.as_deref() {
+                        crate::diagnostics::record_call_timing_uac_call_answered_emit(session_id);
                     }
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.emit_session_coordination_event(SessionCoordinationEvent::CallAnswered {
@@ -3968,12 +5720,16 @@ impl DialogManager {
                         if let Some(secs) = dlg.session_expires_secs {
                             let is_refresher = dlg.is_session_refresher;
                             drop(dlg);
-                            crate::manager::session_timer::spawn_refresh_task(
+                            if let Err(_error) = crate::manager::session_timer::spawn_refresh_task(
                                 self.clone(),
                                 dialog_id.clone(),
                                 secs,
                                 is_refresher,
-                            );
+                            )
+                            .await
+                            {
+                                warn!(dialog=%dialog_id, "Session refresh task was not started");
+                            }
                         }
                     }
                 }
@@ -3997,15 +5753,23 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        if response.status_code() == 487 {
+        if response.status_code() == 487
+            && transaction_id.method() == &rvoip_sip_core::Method::Invite
+        {
             info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received CANCEL terminal response");
         } else {
             warn!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received failure response");
         }
 
+        let request_uri = if response_has_auth_challenge(&response) {
+            self.exact_outbound_request_uri(transaction_id).await
+        } else {
+            None
+        };
+
         // Handle specific failure cases and emit appropriate events
         match response.status_code() {
-            487 => {
+            487 if transaction_id.method() == &rvoip_sip_core::Method::Invite => {
                 // RFC 3261 §15.1.2 — 487 Request Terminated is a
                 // CANCEL-specific termination, distinct from a generic
                 // dialog teardown. Emit only `CallCancelled`; emitting
@@ -4056,7 +5820,7 @@ impl DialogManager {
                     transaction_id: transaction_id.clone(),
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
-                    method: "Unknown".to_string(), // TODO: Extract from transaction context
+                    method: transaction_id.method().to_string(),
                 })
                 .await;
             }
@@ -4081,7 +5845,7 @@ impl DialogManager {
                     transaction_id: transaction_id.clone(),
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
-                    method: "Unknown".to_string(), // TODO: Extract from transaction context
+                    method: transaction_id.method().to_string(),
                 })
                 .await;
             }
@@ -4100,6 +5864,7 @@ impl DialogManager {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
+            request_uri,
         })
         .await;
 
@@ -4251,7 +6016,7 @@ impl DialogManager {
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "Transaction terminated for dialog");
 
         // Clean up transaction-dialog association
-        self.unlink_transaction_from_dialog_indexed(transaction_id);
+        self.unlink_transaction_from_dialog_indexed_preserving_route(transaction_id);
 
         if transaction_id.method() == &rvoip_sip_core::Method::Bye {
             self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
@@ -4505,11 +6270,8 @@ impl DialogManager {
                     let selected = {
                         let mut plan = plan.lock().await;
                         if plan.phase == InviteFailoverPlanPhase::Active {
-                            let selected = plan
-                                .current_transaction
-                                .clone()
-                                .map(|transaction_id| (transaction_id, plan.setup_deadline));
-                            if let Some((current_transaction, _)) = selected.as_ref() {
+                            let selected = plan.current_transaction.clone();
+                            if let Some(current_transaction) = selected.as_ref() {
                                 Self::set_invite_attempt_outcome(
                                     &mut plan,
                                     current_transaction,
@@ -4529,9 +6291,20 @@ impl DialogManager {
                             None
                         }
                     };
-                    if let Some((current_transaction, setup_deadline)) = selected {
+                    if let Some(current_transaction) = selected {
+                        // CANCEL is teardown, not part of the original INVITE
+                        // setup attempt. Give it an independent bounded budget:
+                        // the setup deadline may already have elapsed, and a
+                        // very small configured transaction timeout must not
+                        // race transaction-core's bounded send confirmation.
+                        let cancel_deadline = tokio::time::Instant::now()
+                            + self
+                                .transaction_manager
+                                .timer_settings()
+                                .transaction_timeout
+                                .max(INVITE_CANDIDATE_COMPENSATION_TIMEOUT);
                         let cancel_transaction = match tokio::time::timeout_at(
-                            tokio::time::Instant::from_std(setup_deadline),
+                            cancel_deadline,
                             self.transaction_manager
                                 .cancel_invite_transaction_with_extras(
                                     &current_transaction,
@@ -4578,7 +6351,8 @@ impl DialogManager {
             + self
                 .transaction_manager
                 .timer_settings()
-                .transaction_timeout;
+                .transaction_timeout
+                .max(INVITE_CANDIDATE_COMPENSATION_TIMEOUT);
         let cancel_tx_id = match tokio::time::timeout_at(
             cancel_deadline,
             self.transaction_manager

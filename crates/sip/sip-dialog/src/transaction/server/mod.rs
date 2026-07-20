@@ -46,7 +46,13 @@ mod invite;
 mod non_invite;
 pub mod reliable_invite;
 
-pub use data::{CommandReceiver, CommandSender, CommonServerTransaction, ServerTransactionData};
+#[doc(hidden)]
+pub use data::SupervisedServerResponse;
+pub(crate) use data::SupervisedServerResponseExecution;
+pub use data::{
+    CommandReceiver, CommandSender, CommonServerTransaction, FinalResponseCompletionDisposition,
+    ServerTransactionData,
+};
 pub use invite::ServerInviteTransaction;
 pub use non_invite::ServerNonInviteTransaction;
 

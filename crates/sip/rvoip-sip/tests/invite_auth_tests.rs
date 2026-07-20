@@ -60,6 +60,28 @@ fn registering_auth_required_drives_register_retry() {
 }
 
 #[test]
+fn terminating_auth_required_drives_bye_retry_for_both_dialog_roles() {
+    let table = load();
+    for role in [Role::UAC, Role::UAS] {
+        let transition = table
+            .get(&key(
+                role,
+                CallState::Terminating,
+                EventType::AuthRequired {
+                    status_code: 401,
+                    challenge: String::new(),
+                    method: "BYE".to_string(),
+                },
+            ))
+            .unwrap_or_else(|| panic!("{role:?} Terminating + AuthRequired must exist"));
+
+        assert_eq!(transition.next_state, Some(CallState::Terminating));
+        assert!(transition.actions.contains(&Action::StoreAuthChallenge));
+        assert!(transition.actions.contains(&Action::SendRequestWithAuth));
+    }
+}
+
+#[test]
 fn auth_required_normalizes_for_lookup() {
     // The state table is keyed on normalized EventType — both a populated
     // payload (as would arrive from dialog-core with a real challenge) and

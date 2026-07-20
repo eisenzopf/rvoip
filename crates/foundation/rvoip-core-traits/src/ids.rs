@@ -68,6 +68,7 @@ id_type!(AttachmentId, "att");
 id_type!(AiAttachmentId, "ai");
 id_type!(PlaybackId, "play");
 id_type!(TranscriptionId, "trn");
+id_type!(TransferAttemptId, "xfer");
 
 #[cfg(test)]
 mod diagnostic_tests {
@@ -83,6 +84,7 @@ mod diagnostic_tests {
             format!("{:?}", StreamId::from_string(CANARY)),
             format!("{:?}", MessageId::from_string(CANARY)),
             format!("{:?}", TenantId::from_string(CANARY)),
+            format!("{:?}", TransferAttemptId::from_string(CANARY)),
         ];
         for debug in ids {
             assert!(!debug.contains(CANARY));

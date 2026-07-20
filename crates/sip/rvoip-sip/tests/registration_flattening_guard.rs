@@ -37,7 +37,7 @@ fn register_send_path_does_not_reenter_state_machine() {
     let executor_path = format!("{manifest_dir}/src/state_machine/executor.rs");
     let executor = std::fs::read_to_string(&executor_path).expect("executor source");
     assert!(
-        !executor.contains("Box::pin(self.process_event"),
+        !executor.contains("Box::pin(self.process_event("),
         "StateMachine::process_event should drain queued internal events instead of recursively boxing itself"
     );
 }

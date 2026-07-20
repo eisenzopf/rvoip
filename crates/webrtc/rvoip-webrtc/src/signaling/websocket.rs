@@ -4,6 +4,8 @@
 //! WSS. Once upgraded, every signaling mutation is authorized against the
 //! adapter-owned route identity shared with WHIP/WHEP.
 
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -16,7 +18,8 @@ use rvoip_core::ids::ConnectionId;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use tokio::task::JoinSet;
 use tokio_tungstenite::{
     accept_hdr_async_with_config,
     tungstenite::{
@@ -30,9 +33,12 @@ use tokio_tungstenite::{
 use tracing::warn;
 use webrtc::peer_connection::RTCIceCandidateInit;
 
-use crate::adapter::{RouteAuthorization, WebRtcAdapter};
+use crate::adapter::{RemoteAdmissionOutcome, RouteAuthorization, WebRtcAdapter};
 use crate::errors::{Result, WebRtcError};
-use crate::signaling::auth::{AnonymousAuth, AuthContext, AuthRejection, WsAuthHook};
+use crate::peer::LocalIceEvent;
+use crate::signaling::auth::{
+    AnonymousAuth, AuthContext, AuthRejection, WsAuthHook, SIGNALING_SUBPROTOCOL,
+};
 
 const MAX_HANDSHAKE_BYTES: usize = 16 * 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -47,6 +53,10 @@ pub struct SignalingMessage {
     pub connection_id: String,
     #[serde(default)]
     pub candidate: String,
+    /// Client-generated correlation key for one logical signaling request.
+    /// Required for new `rvoip.webrtc.v1` offers and echoed in replies.
+    #[serde(default, rename = "request_id")]
+    pub request_id: String,
 }
 
 impl std::fmt::Debug for SignalingMessage {
@@ -57,6 +67,7 @@ impl std::fmt::Debug for SignalingMessage {
             .field("sdp_bytes", &self.sdp.len())
             .field("connection_present", &!self.connection_id.is_empty())
             .field("candidate_bytes", &self.candidate.len())
+            .field("request_id_present", &!self.request_id.is_empty())
             .finish()
     }
 }
@@ -116,6 +127,23 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for PrefixedStream<S> {
 
 type WsSink<S> = Arc<AsyncMutex<SplitSink<WebSocketStream<S>, Message>>>;
 
+/// Adapter lifecycle outcomes serialized by the socket owner. Keeping these
+/// on the same loop as SDP, ICE, and BYE preserves frame ordering and binds an
+/// application decision to both halves of the signaling identity.
+enum RouteLifecycleSignal {
+    Ready {
+        connection_id: ConnectionId,
+        request_id: String,
+    },
+    Rejected {
+        connection_id: ConnectionId,
+        request_id: String,
+    },
+    Terminal {
+        connection_id: ConnectionId,
+    },
+}
+
 struct HandshakeMetadata {
     subprotocols: Vec<String>,
     query_token: Option<String>,
@@ -154,20 +182,60 @@ pub async fn serve_listener_with_auth(
     adapter: Arc<WebRtcAdapter>,
     auth: Arc<dyn WsAuthHook>,
 ) -> Result<()> {
-    loop {
-        let (stream, peer_addr) = listener
-            .accept()
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
-        let adapter = Arc::clone(&adapter);
-        let auth = Arc::clone(&auth);
-        tokio::spawn(async move {
-            if let Err(error) = handle_authenticated_stream(stream, adapter, auth, peer_addr).await
-            {
-                warn!("ws signaling connection error: {error}");
+    serve_listener_with_auth_and_shutdown(listener, adapter, auth, std::future::pending()).await
+}
+
+/// Serve authenticated WS signaling with owned connection tasks.
+///
+/// When `shutdown` resolves, accepted connection tasks are aborted and joined
+/// before the listener future returns. This prevents the common
+/// `select!`-drops-the-accept-loop pattern from detaching active sockets.
+pub async fn serve_listener_with_auth_and_shutdown(
+    listener: TcpListener,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WsAuthHook>,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<()> {
+    let mut connections = JoinSet::new();
+    tokio::pin!(shutdown);
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break Ok(()),
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(error_class = "ws-connection-task", error = %error, "WS signaling connection task failed");
+                }
             }
-        });
+            accepted = listener.accept() => {
+                let (mut stream, peer_addr) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(WebRtcError::Signaling(error.to_string())),
+                };
+                let Some(task_guard) = adapter.try_start_inbound_ws_connection_task() else {
+                    let _ = write_overload_rejection(&mut stream).await;
+                    continue;
+                };
+                let adapter = Arc::clone(&adapter);
+                let auth = Arc::clone(&auth);
+                connections.spawn(async move {
+                    let _task_guard = task_guard;
+                    if let Err(error) = handle_authenticated_stream(stream, adapter, auth, peer_addr).await {
+                        warn!("ws signaling connection error: {error}");
+                    }
+                });
+            }
+        }
+    };
+    connections.abort_all();
+    while let Some(completed) = connections.join_next().await {
+        if let Err(error) = completed {
+            if !error.is_cancelled() {
+                warn!(error_class = "ws-connection-task", error = %error, "WS signaling connection task failed during drain");
+            }
+        }
     }
+    result
 }
 
 #[cfg(feature = "tls-rustls")]
@@ -186,28 +254,75 @@ pub async fn serve_tls_listener_with_auth(
     adapter: Arc<WebRtcAdapter>,
     auth: Arc<dyn WsAuthHook>,
 ) -> Result<()> {
-    loop {
-        let (stream, peer_addr) = listener
-            .accept()
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
-        let acceptor = tls.acceptor.clone();
-        let adapter = Arc::clone(&adapter);
-        let auth = Arc::clone(&auth);
-        tokio::spawn(async move {
-            let stream = match acceptor.accept(stream).await {
-                Ok(stream) => stream,
-                Err(_) => {
-                    warn!(error_class = "tls-handshake", "WSS TLS handshake failed");
-                    return;
+    serve_tls_listener_with_auth_and_shutdown(listener, tls, adapter, auth, std::future::pending())
+        .await
+}
+
+#[cfg(feature = "tls-rustls")]
+pub async fn serve_tls_listener_with_auth_and_shutdown(
+    listener: TcpListener,
+    tls: crate::tls::TlsConfig,
+    adapter: Arc<WebRtcAdapter>,
+    auth: Arc<dyn WsAuthHook>,
+    shutdown: impl Future<Output = ()> + Send,
+) -> Result<()> {
+    let mut connections = JoinSet::new();
+    tokio::pin!(shutdown);
+    let result = loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break Ok(()),
+            completed = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    warn!(error_class = "wss-connection-task", error = %error, "WSS signaling connection task failed");
                 }
-            };
-            if let Err(error) = handle_authenticated_stream(stream, adapter, auth, peer_addr).await
-            {
-                warn!("wss signaling connection error: {error}");
             }
-        });
+            accepted = listener.accept() => {
+                let (mut stream, peer_addr) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(WebRtcError::Signaling(error.to_string())),
+                };
+                let Some(task_guard) = adapter.try_start_inbound_ws_connection_task() else {
+                    let _ = stream.shutdown().await;
+                    continue;
+                };
+                let acceptor = tls.acceptor.clone();
+                let adapter = Arc::clone(&adapter);
+                let auth = Arc::clone(&auth);
+                connections.spawn(async move {
+                    let _task_guard = task_guard;
+                    let stream = match acceptor.accept(stream).await {
+                        Ok(stream) => stream,
+                        Err(_) => {
+                            warn!(error_class = "tls-handshake", "WSS TLS handshake failed");
+                            return;
+                        }
+                    };
+                    if let Err(error) = handle_authenticated_stream(stream, adapter, auth, peer_addr).await {
+                        warn!("wss signaling connection error: {error}");
+                    }
+                });
+            }
+        }
+    };
+    connections.abort_all();
+    while let Some(completed) = connections.join_next().await {
+        if let Err(error) = completed {
+            if !error.is_cancelled() {
+                warn!(error_class = "wss-connection-task", error = %error, "WSS signaling connection task failed during drain");
+            }
+        }
     }
+    result
+}
+
+async fn write_overload_rejection(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    stream
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nRetry-After: 1\r\nCache-Control: no-store\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await?;
+    stream.shutdown().await
 }
 
 async fn handle_authenticated_stream<S>(
@@ -219,12 +334,12 @@ async fn handle_authenticated_stream<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Some((ws, auth_context)) =
+    let Some((ws, auth_context, route_leases)) =
         upgrade_with_auth(stream, &adapter, auth.as_ref(), peer_addr).await?
     else {
         return Ok(());
     };
-    drive_ws_loop(ws, adapter, auth_context).await
+    drive_ws_loop(ws, adapter, auth_context, route_leases).await
 }
 
 async fn upgrade_with_auth<S>(
@@ -232,7 +347,7 @@ async fn upgrade_with_auth<S>(
     adapter: &Arc<WebRtcAdapter>,
     auth: &dyn WsAuthHook,
     peer_addr: SocketAddr,
-) -> Result<Option<(WebSocketStream<PrefixedStream<S>>, AuthContext)>>
+) -> Result<Option<(WebSocketStream<PrefixedStream<S>>, AuthContext, bool)>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -258,6 +373,7 @@ where
     };
 
     let response_protocol = select_response_protocol(&metadata.subprotocols, auth);
+    let route_leases = response_protocol.as_deref() == Some(SIGNALING_SUBPROTOCOL);
     let callback = move |_request: &Request,
                          mut response: HandshakeResponse|
           -> std::result::Result<HandshakeResponse, ErrorResponse> {
@@ -280,7 +396,7 @@ where
     let ws = accept_hdr_async_with_config(stream, callback, config)
         .await
         .map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
-    Ok(Some((ws, auth_context)))
+    Ok(Some((ws, auth_context, route_leases)))
 }
 
 async fn read_http_handshake<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Vec<u8>> {
@@ -357,11 +473,20 @@ fn parse_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata> {
 }
 
 fn select_response_protocol(subprotocols: &[String], auth: &dyn WsAuthHook) -> Option<String> {
+    let _ = auth;
     subprotocols
         .iter()
-        .find(|value| !auth.subprotocol_is_private(value))
-        .cloned()
-        .or_else(|| (!subprotocols.is_empty()).then(|| "rvoip.webrtc.v1".to_string()))
+        .any(|value| value == SIGNALING_SUBPROTOCOL)
+        .then(|| SIGNALING_SUBPROTOCOL.to_owned())
+}
+
+fn valid_request_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b':'))
 }
 
 async fn write_auth_rejection<S: AsyncWrite + Unpin>(
@@ -401,6 +526,7 @@ async fn drive_ws_loop<S>(
     ws: WebSocketStream<S>,
     adapter: Arc<WebRtcAdapter>,
     auth_context: AuthContext,
+    route_leases: bool,
 ) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -410,6 +536,10 @@ where
     let (write, mut read) = ws.split();
     let write: WsSink<S> = Arc::new(AsyncMutex::new(write));
     let mut forwarders = Vec::new();
+    let mut terminal_forwarders = Vec::new();
+    let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel();
+    let mut owned_routes = HashSet::new();
+    let mut request_routes = HashMap::new();
 
     let keepalive_secs = adapter.ws_keepalive_secs();
     let keepalive = if keepalive_secs > 0 {
@@ -435,45 +565,131 @@ where
     };
 
     let loop_result: Result<()> = async {
-        while let Some(message) = read.next().await {
-            let message = message.map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
-            if message.is_pong() || message.is_ping() {
-                continue;
-            }
-            if message.is_close() {
-                break;
-            }
-            if !message.is_text() {
-                continue;
-            }
-            let parsed: SignalingMessage = serde_json::from_str(
-                message
-                    .to_text()
-                    .map_err(|error| WebRtcError::Signaling(format!("ws text: {error}")))?,
-            )
-            .map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
-            let should_close = dispatch_message(
-                &adapter,
-                &write,
-                parsed,
-                &authorization,
-                &mut routing_hint,
-                &mut forwarders,
-            )
-            .await?;
-            if should_close {
-                break;
+        loop {
+            tokio::select! {
+                biased;
+                message = read.next() => {
+                    let Some(message) = message else { break; };
+                    let message = message.map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
+                    if message.is_pong() || message.is_ping() {
+                        continue;
+                    }
+                    if message.is_close() {
+                        break;
+                    }
+                    if !message.is_text() {
+                        continue;
+                    }
+                    let parsed: SignalingMessage = serde_json::from_str(
+                        message
+                            .to_text()
+                            .map_err(|error| WebRtcError::Signaling(format!("ws text: {error}")))?,
+                    )
+                    .map_err(|error| WebRtcError::Signaling(format!("{error}")))?;
+                    let should_close = dispatch_message(
+                        &adapter,
+                        &write,
+                        parsed,
+                        &authorization,
+                        &mut routing_hint,
+                        &mut forwarders,
+                        &mut terminal_forwarders,
+                        &terminal_tx,
+                        route_leases,
+                        &mut owned_routes,
+                        &mut request_routes,
+                    )
+                    .await?;
+                    if should_close {
+                        break;
+                    }
+                }
+                lifecycle = terminal_rx.recv() => {
+                    let Some(lifecycle) = lifecycle else { break; };
+                    let (connection_id, request_id, msg_type, terminal) = match lifecycle {
+                        RouteLifecycleSignal::Ready { connection_id, request_id } => {
+                            (connection_id, request_id, "ready", false)
+                        }
+                        RouteLifecycleSignal::Rejected { connection_id, request_id } => {
+                            (connection_id, request_id, "rejected", true)
+                        }
+                        RouteLifecycleSignal::Terminal { connection_id } => {
+                            (connection_id, String::new(), "bye", true)
+                        }
+                    };
+                    if !owned_routes.contains(&connection_id) {
+                        continue;
+                    }
+                    if msg_type != "bye"
+                        && request_routes.get(&request_id) != Some(&connection_id)
+                    {
+                        // This is an internal invariant failure, not remote
+                        // input. Fail the socket closed rather than emit an
+                        // outcome under the wrong request authority.
+                        return Err(WebRtcError::Signaling(
+                            "WebRTC admission outcome ownership mismatch".into(),
+                        ));
+                    }
+                    send_message(
+                        &write,
+                        &SignalingMessage {
+                            msg_type: msg_type.into(),
+                            sdp: String::new(),
+                            connection_id: connection_id.to_string(),
+                            candidate: String::new(),
+                            request_id,
+                        },
+                    )
+                    .await?;
+                    if !terminal {
+                        continue;
+                    }
+                    owned_routes.remove(&connection_id);
+                    request_routes.retain(|_, route| route != &connection_id);
+                    if let Some(index) = terminal_forwarders
+                        .iter()
+                        .position(|(route, _)| route == &connection_id)
+                    {
+                        let (_, mut task) = terminal_forwarders.swap_remove(index);
+                        let _ = (&mut task).await;
+                    }
+                    if let Some(index) = forwarders
+                        .iter()
+                        .position(|(route, _)| route == &connection_id)
+                    {
+                        let (_, mut task) = forwarders.swap_remove(index);
+                        task.abort();
+                        let _ = (&mut task).await;
+                    }
+                }
             }
         }
         Ok(())
     }
     .await;
 
-    if let Some(task) = keepalive {
+    if let Some(mut task) = keepalive {
         task.abort();
+        let _ = (&mut task).await;
     }
-    for (_, task) in forwarders {
+    for (_, mut task) in terminal_forwarders {
         task.abort();
+        let _ = (&mut task).await;
+    }
+    if route_leases {
+        for connection_id in owned_routes.drain() {
+            let _ = adapter
+                .end_leased_route_owned(
+                    connection_id,
+                    rvoip_core::adapter::EndReason::Normal,
+                    &authorization,
+                )
+                .await;
+        }
+    }
+    for (_, mut task) in forwarders {
+        task.abort();
+        let _ = (&mut task).await;
     }
     if loop_result.is_err() {
         adapter.note_signaling_error();
@@ -488,13 +704,102 @@ async fn dispatch_message<S>(
     authorization: &RouteAuthorization,
     routing_hint: &mut Option<String>,
     forwarders: &mut Vec<(ConnectionId, tokio::task::JoinHandle<()>)>,
+    terminal_forwarders: &mut Vec<(ConnectionId, tokio::task::JoinHandle<()>)>,
+    terminal_tx: &mpsc::UnboundedSender<RouteLifecycleSignal>,
+    route_leases: bool,
+    owned_routes: &mut HashSet<ConnectionId>,
+    request_routes: &mut HashMap<String, ConnectionId>,
 ) -> Result<bool>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     match parsed.msg_type.as_str() {
-        "offer" => {
-            let (conn_id, answer) = if parsed.connection_id.is_empty() {
+        "offer" | "offer-ready" => {
+            // `offer-ready` is an explicit, default-off extension. A legacy
+            // client sends `offer`, so a new server must not emit unfamiliar
+            // readiness frames onto that socket. Conversely, an older server
+            // rejects `offer-ready`, making a required client fail closed.
+            let require_ready = parsed.msg_type == "offer-ready";
+            let creating = parsed.connection_id.is_empty();
+            if require_ready && !creating {
+                return Err(WebRtcError::Signaling(
+                    "offer-ready is valid only for a new WebRTC route".into(),
+                ));
+            }
+            if require_ready && !route_leases {
+                return Err(WebRtcError::Signaling(
+                    "offer-ready requires authenticated rvoip.webrtc.v1 route leasing".into(),
+                ));
+            }
+            if require_ready && !authorization.is_authenticated_principal() {
+                return Err(WebRtcError::Signaling(
+                    "offer-ready requires a non-anonymous authenticated principal".into(),
+                ));
+            }
+            if route_leases && !valid_request_id(&parsed.request_id) {
+                return Err(WebRtcError::Signaling(
+                    "rvoip.webrtc.v1 offer requires a bounded request_id".into(),
+                ));
+            }
+            if creating
+                && !parsed.request_id.is_empty()
+                && request_routes.contains_key(&parsed.request_id)
+            {
+                return Err(WebRtcError::Signaling(
+                    "duplicate WebRTC signaling request_id".into(),
+                ));
+            }
+            if creating && require_ready {
+                let routing_hint = if adapter.supports_inbound_admission_confirmation() {
+                    routing_hint.take()
+                } else {
+                    routing_hint.clone()
+                }
+                .map(InboundRoutingHint::new)
+                .transpose()
+                .map_err(|_| {
+                    WebRtcError::Signaling("authenticated WebSocket session hint is invalid".into())
+                })?;
+                let prepared = adapter
+                    .prepare_offer_ready_authorized_with_hint(
+                        &parsed.sdp,
+                        authorization.clone(),
+                        routing_hint,
+                    )
+                    .await?;
+                let conn_id = prepared.connection_id().clone();
+                let answer = prepared.answer_sdp().to_owned();
+
+                // Lease and subscribe before either the answer or inbound
+                // publication becomes visible. An immediate core accept or
+                // reject is therefore retained under this exact request id.
+                owned_routes.insert(conn_id.clone());
+                request_routes.insert(parsed.request_id.clone(), conn_id.clone());
+                ensure_route_terminal_forwarder(
+                    adapter,
+                    &conn_id,
+                    Some(parsed.request_id.clone()),
+                    terminal_tx,
+                    terminal_forwarders,
+                );
+                send_message(
+                    write,
+                    &SignalingMessage {
+                        msg_type: "answer".into(),
+                        sdp: answer,
+                        connection_id: conn_id.to_string(),
+                        candidate: String::new(),
+                        request_id: parsed.request_id,
+                    },
+                )
+                .await?;
+                if adapter.trickle_ice_enabled() {
+                    ensure_local_ice_forwarder(adapter, &conn_id, write, forwarders);
+                }
+                adapter.publish_prepared_offer_ready(prepared).await?;
+                return Ok(false);
+            }
+            let (conn_id, answer) = if creating {
                 let routing_hint = if adapter.supports_inbound_admission_confirmation() {
                     routing_hint.take()
                 } else {
@@ -528,11 +833,29 @@ where
                 (conn_id, answer)
             } else {
                 let conn_id = ConnectionId::from_string(parsed.connection_id);
+                if route_leases && !owned_routes.contains(&conn_id) {
+                    return Err(WebRtcError::Signaling(
+                        "WebRTC renegotiation route is not leased to this socket".into(),
+                    ));
+                }
                 let answer = adapter
                     .apply_ice_restart_offer_authorized(conn_id.clone(), &parsed.sdp, authorization)
                     .await?;
                 (conn_id, answer)
             };
+            if route_leases && creating {
+                owned_routes.insert(conn_id.clone());
+                request_routes.insert(parsed.request_id.clone(), conn_id.clone());
+            }
+            if route_leases {
+                ensure_route_terminal_forwarder(
+                    adapter,
+                    &conn_id,
+                    require_ready.then(|| parsed.request_id.clone()),
+                    terminal_tx,
+                    terminal_forwarders,
+                );
+            }
             send_message(
                 write,
                 &SignalingMessage {
@@ -540,6 +863,7 @@ where
                     sdp: answer,
                     connection_id: conn_id.to_string(),
                     candidate: String::new(),
+                    request_id: parsed.request_id,
                 },
             )
             .await?;
@@ -557,6 +881,16 @@ where
             adapter
                 .accept_remote_answer_authorized(conn_id.clone(), &parsed.sdp, authorization)
                 .await?;
+            if route_leases {
+                owned_routes.insert(conn_id.clone());
+                ensure_route_terminal_forwarder(
+                    adapter,
+                    &conn_id,
+                    None,
+                    terminal_tx,
+                    terminal_forwarders,
+                );
+            }
             send_message(
                 write,
                 &SignalingMessage {
@@ -564,6 +898,7 @@ where
                     sdp: String::new(),
                     connection_id: parsed.connection_id,
                     candidate: String::new(),
+                    request_id: parsed.request_id,
                 },
             )
             .await?;
@@ -578,23 +913,83 @@ where
                 ));
             }
             let conn_id = ConnectionId::from_string(parsed.connection_id);
+            if route_leases && !owned_routes.contains(&conn_id) {
+                return Err(WebRtcError::Signaling(
+                    "WebRTC ICE route is not leased to this socket".into(),
+                ));
+            }
             let candidate: RTCIceCandidateInit = serde_json::from_str(&parsed.candidate)
                 .map_err(|error| WebRtcError::Signaling(format!("ice-candidate parse: {error}")))?;
             adapter
                 .apply_trickle_candidate_authorized(&conn_id, candidate, authorization)
                 .await?;
         }
+        "ice-complete" => {
+            if parsed.connection_id.is_empty() || !parsed.candidate.is_empty() {
+                return Err(WebRtcError::Signaling(
+                    "ice-complete requires only connection_id".into(),
+                ));
+            }
+            let conn_id = ConnectionId::from_string(parsed.connection_id);
+            if route_leases && !owned_routes.contains(&conn_id) {
+                return Err(WebRtcError::Signaling(
+                    "WebRTC ICE route is not leased to this socket".into(),
+                ));
+            }
+            adapter
+                .apply_trickle_candidate_authorized(
+                    &conn_id,
+                    RTCIceCandidateInit::default(),
+                    authorization,
+                )
+                .await?;
+        }
         "bye" => {
-            if !parsed.connection_id.is_empty() {
+            if parsed.connection_id.is_empty() {
+                return Ok(!route_leases);
+            }
+            let connection_id = ConnectionId::from_string(parsed.connection_id);
+            if route_leases && !owned_routes.contains(&connection_id) {
+                return Err(WebRtcError::Signaling(
+                    "WebRTC BYE route is not leased to this socket".into(),
+                ));
+            }
+            if let Some(index) = terminal_forwarders
+                .iter()
+                .position(|(route, _)| route == &connection_id)
+            {
+                let (_, mut task) = terminal_forwarders.swap_remove(index);
+                task.abort();
+                let _ = (&mut task).await;
+            }
+            if route_leases {
+                adapter
+                    .end_leased_route_owned(
+                        connection_id.clone(),
+                        rvoip_core::adapter::EndReason::Normal,
+                        authorization,
+                    )
+                    .await?;
+            } else {
                 adapter
                     .end_authorized(
-                        ConnectionId::from_string(parsed.connection_id),
+                        connection_id.clone(),
                         rvoip_core::adapter::EndReason::Normal,
                         authorization,
                     )
                     .await?;
             }
-            return Ok(true);
+            owned_routes.remove(&connection_id);
+            request_routes.retain(|_, route| route != &connection_id);
+            if let Some(index) = forwarders
+                .iter()
+                .position(|(route, _)| route == &connection_id)
+            {
+                let (_, mut task) = forwarders.swap_remove(index);
+                task.abort();
+                let _ = (&mut task).await;
+            }
+            return Ok(!route_leases);
         }
         other => {
             return Err(WebRtcError::Signaling(format!(
@@ -603,6 +998,84 @@ where
         }
     }
     Ok(false)
+}
+
+fn ensure_route_terminal_forwarder(
+    adapter: &Arc<WebRtcAdapter>,
+    conn_id: &ConnectionId,
+    request_id: Option<String>,
+    terminal_tx: &mpsc::UnboundedSender<RouteLifecycleSignal>,
+    forwarders: &mut Vec<(ConnectionId, tokio::task::JoinHandle<()>)>,
+) {
+    if let Some(index) = forwarders
+        .iter()
+        .position(|(existing, _)| existing == conn_id)
+    {
+        if !forwarders[index].1.is_finished() {
+            return;
+        }
+        forwarders.swap_remove(index);
+    }
+    let Some((mut cancellation, mut admission)) = adapter.routes().get(conn_id).map(|route| {
+        (
+            route.subscribe_cancellation(),
+            route.subscribe_remote_admission(),
+        )
+    }) else {
+        return;
+    };
+    let conn_id = conn_id.clone();
+    let task_conn_id = conn_id.clone();
+    let terminal_tx = terminal_tx.clone();
+    let task = tokio::spawn(async move {
+        let mut readiness_sent = false;
+        loop {
+            match *admission.borrow_and_update() {
+                RemoteAdmissionOutcome::Accepted if !readiness_sent && request_id.is_some() => {
+                    readiness_sent = true;
+                    if terminal_tx
+                        .send(RouteLifecycleSignal::Ready {
+                            connection_id: conn_id.clone(),
+                            request_id: request_id.clone().expect("checked above"),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                RemoteAdmissionOutcome::Rejected if request_id.is_some() => {
+                    let _ = terminal_tx.send(RouteLifecycleSignal::Rejected {
+                        connection_id: conn_id,
+                        request_id: request_id.expect("checked above"),
+                    });
+                    return;
+                }
+                RemoteAdmissionOutcome::Pending
+                | RemoteAdmissionOutcome::Accepted
+                | RemoteAdmissionOutcome::Rejected => {}
+            }
+            if *cancellation.borrow_and_update() {
+                let _ = terminal_tx.send(RouteLifecycleSignal::Terminal {
+                    connection_id: conn_id,
+                });
+                return;
+            }
+            tokio::select! {
+                biased;
+                changed = admission.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                changed = cancellation.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
+    forwarders.push((task_conn_id, task));
 }
 
 async fn send_message<S>(write: &WsSink<S>, message: &SignalingMessage) -> Result<()>
@@ -652,27 +1125,52 @@ fn ensure_local_ice_forwarder<S>(
             };
             tokio::select! {
                 _ = route.cancel.notified() => return,
-                candidate = route.peer.recv_local_ice() => {
-                    let Some(candidate) = candidate else { return; };
-                    let init = match candidate.to_json() {
-                        Ok(init) => init,
-                        Err(error) => {
-                            warn!("local ICE candidate to_json failed: {error}");
-                            continue;
+                event = route.peer.recv_local_ice_event() => {
+                    let Some(event) = event else { return; };
+                    let complete = matches!(&event, LocalIceEvent::Complete);
+                    let message = match event {
+                        LocalIceEvent::Candidate(candidate) => {
+                            let init = match candidate.to_json() {
+                                Ok(init) => init,
+                                Err(error) => {
+                                    warn!("local ICE candidate to_json failed: {error}");
+                                    continue;
+                                }
+                            };
+                            let payload = match serde_json::to_string(&init) {
+                                Ok(payload) => payload,
+                                Err(error) => {
+                                    warn!("serialize local ICE candidate failed: {error}");
+                                    continue;
+                                }
+                            };
+                            SignalingMessage {
+                                msg_type: "ice-candidate".into(),
+                                sdp: String::new(),
+                                connection_id: conn_id.to_string(),
+                                candidate: payload,
+                                request_id: String::new(),
+                            }
                         }
-                    };
-                    let payload = match serde_json::to_string(&init) {
-                        Ok(payload) => payload,
-                        Err(error) => {
-                            warn!("serialize local ICE candidate failed: {error}");
-                            continue;
+                        LocalIceEvent::Complete => SignalingMessage {
+                            msg_type: "ice-complete".into(),
+                            sdp: String::new(),
+                            connection_id: conn_id.to_string(),
+                            candidate: String::new(),
+                            request_id: String::new(),
+                        },
+                        LocalIceEvent::Overflow => {
+                            warn!(connection_id = %conn_id, "local ICE signaling queue overflowed");
+                            let _ = rvoip_core::adapter::ConnectionAdapter::end(
+                                &*adapter,
+                                conn_id.clone(),
+                                rvoip_core::adapter::EndReason::Failed {
+                                    detail: "local ICE signaling queue overflowed".into(),
+                                },
+                            )
+                            .await;
+                            return;
                         }
-                    };
-                    let message = SignalingMessage {
-                        msg_type: "ice-candidate".into(),
-                        sdp: String::new(),
-                        connection_id: conn_id.to_string(),
-                        candidate: payload,
                     };
                     match tokio::time::timeout(
                         Duration::from_secs(5),
@@ -689,6 +1187,9 @@ fn ensure_local_ice_forwarder<S>(
                             warn!("WS ice-candidate send timed out");
                             return;
                         }
+                    }
+                    if complete {
+                        return;
                     }
                 }
             }
@@ -745,6 +1246,14 @@ mod tests {
             select_response_protocol(&requested, &PrivateHintAuth).as_deref(),
             Some("rvoip.webrtc.v1")
         );
+        assert_eq!(
+            select_response_protocol(
+                &["bridgefu.attach.private".into(), "unknown.protocol".into()],
+                &PrivateHintAuth,
+            ),
+            None,
+            "private and unknown protocols must never be echoed"
+        );
     }
 
     #[test]
@@ -757,5 +1266,14 @@ mod tests {
         let rendered = format!("{metadata:?}");
         assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
         assert_eq!(metadata.query_token.as_deref(), Some(CANARY));
+    }
+
+    #[test]
+    fn v1_request_ids_are_bounded_ascii_tokens() {
+        assert!(valid_request_id("route-123:offer_1"));
+        assert!(!valid_request_id(""));
+        assert!(!valid_request_id("contains space"));
+        assert!(!valid_request_id("contains/route"));
+        assert!(!valid_request_id(&"a".repeat(129)));
     }
 }

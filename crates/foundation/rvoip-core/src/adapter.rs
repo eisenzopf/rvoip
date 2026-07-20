@@ -15,10 +15,11 @@ pub use rvoip_core_traits::adapter::{
     AdapterEvent, AdapterKind, ConnectionHandle, EndReason, ExternalConnectionReference,
     ExternalConnectionReferenceError, InboundConnectionContext, InboundContextError,
     InboundRoutingHint, InboundSignalingMetadata, OriginateContext, OriginateRequest,
-    OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
-    MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
+    OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders, TransferStatus,
+    TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
     MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
+pub use rvoip_core_traits::ids::TransferAttemptId;
 
 /// Core-private adapter-to-Orchestrator event envelope.
 ///
@@ -390,12 +391,40 @@ pub trait ConnectionAdapter: Send + Sync {
         self.activate_outbound(conn).await?;
         Ok(OutboundActivation::default())
     }
+
+    /// Start provisional inbound media without finally accepting the route.
+    ///
+    /// The default is unsupported. SIP adapters use this to negotiate and
+    /// send a 183 response with SDP while an [`InboundAdmission`](crate::InboundAdmission)
+    /// remains unresolved. Implementations must not emit a final answer or a
+    /// transport-neutral `Connected` event from this operation.
+    async fn start_inbound_early_media(&self, _conn: ConnectionId) -> Result<()> {
+        Err(RvoipError::NotImplemented(
+            "adapter does not support provisional inbound early media",
+        ))
+    }
+
     async fn accept(&self, conn: ConnectionId) -> Result<()>;
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> Result<()>;
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> Result<()>;
     async fn hold(&self, conn: ConnectionId) -> Result<()>;
     async fn resume(&self, conn: ConnectionId) -> Result<()>;
     async fn transfer(&self, conn: ConnectionId, target: TransferTarget) -> Result<()>;
+
+    /// Submit a transfer with an application-owned correlation identifier.
+    ///
+    /// The default preserves compatibility by delegating to [`Self::transfer`].
+    /// Adapters that can bind protocol status to the exact submitted transfer
+    /// override this method and echo `attempt_id` in
+    /// [`AdapterEvent::TransferStatus`].
+    async fn transfer_with_attempt(
+        &self,
+        conn: ConnectionId,
+        _attempt_id: TransferAttemptId,
+        target: TransferTarget,
+    ) -> Result<()> {
+        self.transfer(conn, target).await
+    }
 
     async fn streams(&self, conn: ConnectionId) -> Result<Vec<Arc<dyn MediaStream>>>;
 

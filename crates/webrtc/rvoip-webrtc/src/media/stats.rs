@@ -1,5 +1,6 @@
 //! Background polling of webrtc-rs `get_stats` for [`InboundStats`].
 
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 use webrtc::peer_connection::PeerConnection;
 
-use super::pump::InboundStats;
+use super::pump::{InboundStats, MediaTaskGuard};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -19,7 +20,18 @@ pub fn spawn_webrtc_stats_collector(
     peer: Arc<dyn PeerConnection>,
     cancel: Arc<Notify>,
 ) -> JoinHandle<()> {
+    spawn_webrtc_stats_collector_tracked(stats, peer, cancel, None)
+}
+
+pub(crate) fn spawn_webrtc_stats_collector_tracked(
+    stats: Arc<InboundStats>,
+    peer: Arc<dyn PeerConnection>,
+    cancel: Arc<Notify>,
+    task_counter: Option<Arc<AtomicUsize>>,
+) -> JoinHandle<()> {
+    let task_guard = MediaTaskGuard::new(task_counter);
     tokio::spawn(async move {
+        let _task_guard = task_guard;
         let mut interval = tokio::time::interval(POLL_INTERVAL);
         loop {
             tokio::select! {

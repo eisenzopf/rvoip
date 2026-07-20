@@ -244,11 +244,14 @@ async fn loopback_datagram_pump_round_trip() {
         fmtp: None,
     };
 
+    // `Direction::Outbound` represents a receive-only wire offer and must
+    // reject peer-supplied datagrams. This round-trip exercises a sendrecv
+    // binding, which is represented by `Inbound` on both local peers.
     let client_stream = rvoip_quic::QuicDatagramMediaStream::start(
         StreamId::new(),
         StreamKind::Audio,
         codec.clone(),
-        Direction::Outbound,
+        Direction::Inbound,
         1,
         client_conn.clone(),
     );

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::signaling::whip;
-use rvoip_webrtc::{IceServerConfig, WebRtcAdapter, WebRtcConfig};
+use rvoip_webrtc::{sdp_has_inline_ice_candidates, IceServerConfig, WebRtcAdapter, WebRtcConfig};
 
 async fn make_offer() -> String {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -78,6 +78,43 @@ async fn whip_post_returns_etag_and_accept_patch() {
     assert!(
         link.contains("rel=\"ice-server\""),
         "Link: rel=ice-server expected when ice_servers configured. Got: {link}"
+    );
+
+    serve.abort();
+}
+
+#[tokio::test]
+async fn whip_initial_answer_full_gathers_even_when_ws_trickle_is_enabled() {
+    let mut config = WebRtcConfig::loopback();
+    config.trickle_ice = true;
+    let adapter = WebRtcAdapter::new(config);
+    assert!(adapter.trickle_ice_enabled(), "WS policy remains trickle");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let serve = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        async move {
+            let _ = whip::serve_listener(listener, adapter).await;
+        }
+    });
+
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("http")
+        .post(format!("http://{addr}/whip/full-gather"))
+        .header("content-type", "application/sdp")
+        .body(make_offer().await)
+        .send()
+        .await
+        .expect("post");
+    assert_eq!(response.status(), reqwest::StatusCode::CREATED);
+    let answer = response.text().await.expect("answer SDP");
+    assert!(
+        sdp_has_inline_ice_candidates(&answer),
+        "WHIP initial HTTP answer must not inherit the WS trickle policy"
     );
 
     serve.abort();

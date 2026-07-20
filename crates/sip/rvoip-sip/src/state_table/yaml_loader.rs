@@ -386,7 +386,7 @@ impl YamlTableLoader {
                 };
 
                 let Some(conditions) = mapping
-                    .get(&serde_yaml::Value::String("conditions".to_string()))
+                    .get(serde_yaml::Value::String("conditions".to_string()))
                     .and_then(|value| value.as_mapping())
                 else {
                     continue;

@@ -69,7 +69,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -82,6 +81,7 @@ use crate::transaction::runner::run_transaction_loop;
 use crate::transaction::server::{
     CommonServerTransaction, ServerTransaction, ServerTransactionData,
 };
+use crate::transaction::timer::manager::ManagedTimerHandle;
 use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings, TimerType};
 use crate::transaction::timer_utils;
 use crate::transaction::utils;
@@ -115,26 +115,26 @@ pub struct ServerInviteTransaction {
     logic: Arc<ServerInviteLogic>,
 }
 
-/// Holds JoinHandles and dynamic state for timers specific to Server INVITE transactions.
+/// Holds cancellation handles and dynamic state for Server INVITE timers.
 ///
 /// Used by the transaction runner to manage the various timers required by the
 /// INVITE server transaction state machine as defined in RFC 3261.
 #[derive(Default, Debug)]
 struct ServerInviteTimerHandles {
     /// Handle for Timer 100, which controls automatic 100 Trying response
-    timer_100: Option<JoinHandle<()>>,
+    timer_100: Option<ManagedTimerHandle>,
 
     /// Handle for Timer G, which controls response retransmissions
-    timer_g: Option<JoinHandle<()>>,
+    timer_g: Option<ManagedTimerHandle>,
 
     /// Current interval for Timer G, which doubles after each firing (up to T2)
     current_timer_g_interval: Option<Duration>, // For backoff
 
     /// Handle for Timer H, which controls transaction timeout waiting for ACK
-    timer_h: Option<JoinHandle<()>>,
+    timer_h: Option<ManagedTimerHandle>,
 
     /// Handle for Timer I, which controls how long to wait in Confirmed state
-    timer_i: Option<JoinHandle<()>>,
+    timer_i: Option<ManagedTimerHandle>,
 }
 
 /// Implements the TransactionLogic for Server INVITE transactions.
@@ -156,7 +156,7 @@ impl ServerInviteLogic {
         &self,
         data: &Arc<ServerTransactionData>,
         timer_handles: &mut ServerInviteTimerHandles,
-        _command_tx: mpsc::Sender<InternalTransactionCommand>,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) {
         let tx_id = &data.id;
         let timer_config = &data.timer_config;
@@ -168,63 +168,24 @@ impl ServerInviteLogic {
             return;
         }
 
-        // Keep Timer 100 off the transaction command queue. Under high CPS,
-        // enqueuing one timer command per INVITE adds avoidable command-loop
-        // work and can race behind an already-sent final response. A direct
-        // task can check the transaction state and cached last response at the
-        // actual deadline, then quietly exit if the TU has responded.
-        let data = data.clone();
-        let tx_id_for_task = tx_id.clone();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(interval_100).await;
-
-            if data.state.get() != TransactionState::Proceeding {
-                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Timer 100 fired after transaction left Proceeding");
-                return;
+        match timer_utils::start_transaction_timer_managed(
+            self.timer_factory.timer_manager().as_ref(),
+            tx_id,
+            "100",
+            TimerType::Timer100,
+            interval_100,
+            command_tx,
+        )
+        .await
+        {
+            Ok(handle) => {
+                timer_handles.timer_100 = Some(handle);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
             }
-
-            let should_send_100 = data.last_response.lock().await.is_none();
-            if !should_send_100 {
-                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Timer 100 fired but TU already sent a response");
-                return;
+            Err(error) => {
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), "Failed to start automatic 100 Trying timer");
             }
-
-            let request = &data.request;
-            let mut trying_response =
-                rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
-                    request,
-                    rvoip_sip_core::StatusCode::Trying,
-                    Some("Trying"),
-                )
-                .build();
-
-            crate::transaction::utils::stamp_response_via_with_source(
-                &mut trying_response,
-                data.remote_addr,
-            );
-
-            if let Err(e) = data
-                .transport
-                .send_message_via(
-                    Message::Response(trying_response.clone()),
-                    data.response_route.clone(),
-                )
-                .await
-            {
-                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
-                common_logic::send_transport_error_event(&tx_id_for_task, &data.events_tx).await;
-                return;
-            }
-
-            let mut last_response = data.last_response.lock().await;
-            if last_response.is_none() {
-                *last_response = Some(trying_response);
-                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_for_task), "Sent automatic 100 Trying response per RFC 3261");
-            }
-        });
-
-        timer_handles.timer_100 = Some(handle);
-        trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
+        }
     }
 
     /// Cancels Timer 100 (automatic 100 Trying response timer)
@@ -245,65 +206,51 @@ impl ServerInviteLogic {
     async fn handle_timer_100_trigger(
         &self,
         data: &Arc<ServerTransactionData>,
-        current_state: TransactionState,
+        _current_state: TransactionState,
         _command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
-        match current_state {
-            TransactionState::Proceeding => {
+        // The response cache mutex is also the per-transaction wire-write
+        // serializer. Recheck state only after acquiring it and retain it
+        // through the transport write, so a TU final response can never be
+        // followed on the wire by this automatic provisional response.
+        let mut last_response = data.last_response.lock().await;
+        match data.state.get() {
+            TransactionState::Proceeding if last_response.is_none() => {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 triggered, sending automatic 100 Trying response");
-
-                // Check if TU has already sent a provisional response
-                let last_response = data.last_response.lock().await;
-                let should_send_100 = last_response.is_none();
-                drop(last_response);
-
-                if should_send_100 {
-                    // Create 100 Trying response
-                    let original_request: &Request = &data.request;
-                    let request = &*original_request;
-                    let mut trying_response =
-                        rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
-                            request,
-                            rvoip_sip_core::StatusCode::Trying,
-                            Some("Trying"),
-                        )
-                        .build();
-
-                    // RFC 3581 §4 — stamp received= / rport= on the
-                    // auto-100 Trying just like any other server-side
-                    // response.
-                    crate::transaction::utils::stamp_response_via_with_source(
-                        &mut trying_response,
-                        data.remote_addr,
-                    );
-
-                    // Send the 100 Trying response
-                    if let Err(e) = data
-                        .transport
-                        .send_message_via(
-                            Message::Response(trying_response.clone()),
-                            data.response_route.clone(),
-                        )
-                        .await
-                    {
-                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
-                        common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
-                    } else {
-                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "✅ Sent automatic 100 Trying response per RFC 3261");
-
-                        // Store the 100 Trying as last response
-                        let mut last_response = data.last_response.lock().await;
-                        *last_response = Some(trying_response);
-                    }
-                    // `original_request` is a plain `&Request`, no lock to release.
+                let mut trying_response =
+                    rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+                        &data.request,
+                        rvoip_sip_core::StatusCode::Trying,
+                        Some("Trying"),
+                    )
+                    .build();
+                crate::transaction::utils::stamp_response_via_with_source(
+                    &mut trying_response,
+                    data.remote_addr,
+                );
+                if let Err(e) = data
+                    .transport
+                    .send_message_via(
+                        Message::Response(trying_response.clone()),
+                        data.response_route.clone(),
+                    )
+                    .await
+                {
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send automatic 100 Trying response");
+                    drop(last_response);
+                    common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
                 } else {
-                    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 fired but TU already sent provisional response, ignoring");
+                    *last_response = Some(trying_response);
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Sent automatic 100 Trying response per RFC 3261");
                 }
             }
+            TransactionState::Proceeding => {
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer 100 fired but TU already sent a response, ignoring");
+            }
             _ => {
-                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer 100 fired in invalid state, ignoring");
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?data.state.get(), "Timer 100 fired in invalid state, ignoring");
             }
         }
 
@@ -331,7 +278,7 @@ impl ServerInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "G",
@@ -370,7 +317,7 @@ impl ServerInviteLogic {
 
         // Use timer_utils to start the timer
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
+        match timer_utils::start_transaction_timer_managed(
             &timer_manager,
             tx_id,
             "H",
@@ -409,7 +356,7 @@ impl ServerInviteLogic {
 
         // Use timer_utils to start the timer with transition
         let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_timer_with_transition(
+        match timer_utils::start_timer_with_transition_managed(
             &timer_manager,
             tx_id,
             "I",
@@ -699,6 +646,68 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
         &data.timer_config
     }
 
+    async fn send_server_response(
+        &self,
+        data: &Arc<ServerTransactionData>,
+        mut response: Response,
+        current_state: TransactionState,
+        _timer_handles: &mut ServerInviteTimerHandles,
+    ) -> Result<crate::transaction::logic::ServerResponseDisposition> {
+        let is_provisional = response.status().is_provisional();
+        let is_success = response.status().is_success();
+        crate::transaction::utils::stamp_response_via_with_source(&mut response, data.remote_addr);
+
+        let mut response_guard = data.last_response.lock().await;
+        if current_state != TransactionState::Proceeding
+            || response_guard
+                .as_ref()
+                .is_some_and(|prior| !prior.status().is_provisional())
+        {
+            if !is_provisional {
+                data.mark_final_response_failed_before_write();
+            }
+            return Err(Error::Other(format!(
+                "cannot send INVITE server response in {current_state:?} state"
+            )));
+        }
+
+        if !is_provisional {
+            *response_guard = Some(response.clone());
+            data.mark_final_response_write_in_flight();
+        }
+        let write_result = data
+            .transport
+            .send_message_via(
+                Message::Response(response.clone()),
+                data.response_route.clone(),
+            )
+            .await;
+        if let Err(error) = write_result {
+            if !is_provisional {
+                data.mark_final_response_failed_after_write_boundary();
+            }
+            return Err(Error::transport_error(error, "Failed to send response"));
+        }
+        if is_provisional {
+            *response_guard = Some(response);
+        } else {
+            data.mark_final_response_wire_written();
+        }
+        drop(response_guard);
+
+        let next_state = if is_provisional {
+            None
+        } else if is_success {
+            Some(TransactionState::Terminated)
+        } else {
+            Some(TransactionState::Completed)
+        };
+        Ok(crate::transaction::logic::ServerResponseDisposition {
+            next_state,
+            cancel_timer_100: true,
+        })
+    }
+
     fn cancel_all_specific_timers(&self, timer_handles: &mut ServerInviteTimerHandles) {
         if let Some(handle) = timer_handles.timer_100.take() {
             handle.abort();
@@ -935,9 +944,33 @@ impl ServerInviteTransaction {
         request: Request,
         response_route: TransportRoute,
         transport: Arc<dyn Transport>,
-        events_tx: mpsc::Sender<TransactionEvent>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
+    ) -> Result<Self> {
+        let timer_manager = Arc::new(TimerManager::new(timer_config_override.clone()));
+        Self::new_with_response_route_command_capacity_and_timer_manager(
+            id,
+            request,
+            response_route,
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+            timer_manager,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_response_route_command_capacity_and_timer_manager(
+        id: TransactionKey,
+        request: Request,
+        response_route: TransportRoute,
+        transport: Arc<dyn Transport>,
+        events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+        timer_manager: Arc<TimerManager>,
     ) -> Result<Self> {
         if request.method() != Method::Invite {
             return Err(Error::Other(
@@ -955,48 +988,39 @@ impl ServerInviteTransaction {
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
             request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
+            final_response_wire_written: std::sync::atomic::AtomicBool::new(false),
+            final_response_supervision_state: std::sync::atomic::AtomicU64::new(0),
+            final_response_supervision_notify: tokio::sync::Notify::new(),
             remote_addr,
             response_route,
             transport,
-            events_tx,
+            events_tx: events_tx.into(),
             cmd_tx: cmd_tx.clone(),
-            cmd_rx: Arc::new(Mutex::new(local_cmd_rx)),
             event_loop_handle: Arc::new(Mutex::new(None)),
+            termination_cleanup_tx: std::sync::OnceLock::new(),
+            lifecycle_scheduler: std::sync::OnceLock::new(),
+            compact_retention_reservation: std::sync::OnceLock::new(),
+            transaction_admission_owner: std::sync::OnceLock::new(),
+            manager_admission_lifecycle: std::sync::OnceLock::new(),
+            terminal_event_publication:
+                crate::transaction::event_sender::TerminalEventPublication::new(),
             timer_config: timer_config.clone(),
         });
 
         let logic = Arc::new(ServerInviteLogic {
             _data_marker: std::marker::PhantomData,
-            timer_factory: TimerFactory::new(Some(timer_config), Arc::new(TimerManager::new(None))),
+            timer_factory: TimerFactory::new(Some(timer_config), timer_manager),
         });
 
         let data_for_runner = data.clone();
         let logic_for_runner = logic.clone();
 
-        if !timer_config.timer_100_interval.is_zero() {
-            // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state.
-            let initial_cmd_tx = data.cmd_tx.clone();
-            let initial_data = data.clone();
-            let initial_logic = logic.clone();
-
-            tokio::spawn(async move {
-                let mut temp_timer_handles = ServerInviteTimerHandles::default();
-                initial_logic
-                    .start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx)
-                    .await;
-                // Timer handles will be managed by the main transaction loop
-            });
-        }
-
-        // Spawn the generic event loop runner - get the receiver from the data first in a separate tokio task
+        // The receiver has exactly one owner: the transaction runner. Keeping
+        // it out of `ServerTransactionData` avoids a second mutex/Arc and the
+        // dummy replacement receiver that used to be allocated per server
+        // transaction.
         let event_loop_handle = tokio::spawn(async move {
-            let mut cmd_rx_guard = data_for_runner.cmd_rx.lock().await;
-            // Take the receiver out of the Mutex, replacing it with a dummy receiver
-            let cmd_rx = std::mem::replace(&mut *cmd_rx_guard, mpsc::channel(1).1);
-            // Drop the guard to release the lock
-            drop(cmd_rx_guard);
-
-            run_transaction_loop(data_for_runner, logic_for_runner, cmd_rx).await;
+            run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
         });
 
         // Store the handle for cleanup
@@ -1123,88 +1147,39 @@ impl ServerTransaction for ServerInviteTransaction {
         let data = self.data.clone();
 
         Box::pin(async move {
-            let status = response.status();
-            let is_provisional = status.is_provisional();
-            let is_success = status.is_success();
-            let current_state = data.state.get();
-
-            // RFC 3581 §4 / RFC 3261 §18.2.1 — stamp `received=<src_ip>`
-            // and (when the inbound Via carried `;rport`) `rport=<src_port>`
-            // on the top Via BEFORE storing in `last_response`, so the
-            // retransmit paths (Timer G, etc.) emit the same stamped
-            // form. Lets NAT'd UACs discover their externally-visible
-            // address.
-            let mut response = response;
-            crate::transaction::utils::stamp_response_via_with_source(
-                &mut response,
-                data.remote_addr,
-            );
-
-            // Store this response
-            {
-                let mut response_guard = data.last_response.lock().await;
-                *response_guard = Some(response.clone());
+            let final_response = !response.status().is_provisional();
+            if final_response && !data.begin_final_response_supervision() {
+                return Err(Error::Other(
+                    "final server response is already supervised".to_string(),
+                ));
             }
-
-            // **RFC 3261 COMPLIANCE**: Cancel Timer 100 if TU sends any response
-            // This prevents automatic 100 Trying since TU is handling responses
-            if current_state == TransactionState::Proceeding {
-                data.cmd_tx
-                    .send(InternalTransactionCommand::CancelTimer100)
-                    .await
-                    .map_err(|e| {
-                        Error::Other(format!("Failed to send cancel timer command: {}", e))
-                    })?;
-            }
-
-            // Always send the response
-            data.transport
-                .send_message_via(
-                    Message::Response(response.clone()),
-                    data.response_route.clone(),
-                )
+            let operation = match crate::transaction::server::SupervisedServerResponse::new(
+                Arc::clone(&data),
+                response,
+            ) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    if final_response {
+                        data.mark_final_response_failed_before_write();
+                    }
+                    return Err(error);
+                }
+            };
+            if let Err(error) = data
+                .cmd_tx
+                .send(InternalTransactionCommand::SupervisedServerResponse(
+                    Arc::clone(&operation),
+                ))
                 .await
-                .map_err(|e| Error::transport_error(e, "Failed to send response"))?;
-
-            // For preliminary responses in Proceeding state, stay in Proceeding
-            if is_provisional && current_state == TransactionState::Proceeding {
-                // Stays in Proceeding state, no state change
-                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent provisional response, staying in Proceeding state");
-                return Ok(());
+            {
+                if final_response {
+                    data.mark_final_response_failed_before_write();
+                }
+                return Err(Error::Other(format!(
+                    "Failed to enqueue supervised server response: {error}"
+                )));
             }
-
-            // For 2xx responses, directly terminate the transaction
-            if is_success {
-                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent 2xx response, transitioning to Terminated");
-
-                // TU level will handle reliable delivery of 2xx responses
-                data.cmd_tx
-                    .send(InternalTransactionCommand::TransitionTo(
-                        TransactionState::Terminated,
-                    ))
-                    .await
-                    .map_err(|e| {
-                        Error::Other(format!("Failed to send transition command: {}", e))
-                    })?;
-
-                return Ok(());
-            }
-
-            // For >= 300 responses, transition to Completed
-            if !is_provisional && !is_success && current_state == TransactionState::Proceeding {
-                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "Sent >= 300 response, transitioning to Completed");
-
-                data.cmd_tx
-                    .send(InternalTransactionCommand::TransitionTo(
-                        TransactionState::Completed,
-                    ))
-                    .await
-                    .map_err(|e| {
-                        Error::Other(format!("Failed to send transition command: {}", e))
-                    })?;
-            }
-
-            Ok(())
+            operation.wait().await
         })
     }
 
