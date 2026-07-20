@@ -22,7 +22,8 @@ For `clean`, it fixes the experiment at:
 - shared-peer conditioning at 30, 100, 300, and 1,000 CPS, followed by the
   measured 2,000-CPS point;
 - five-second ramp, 30-second steady state, five-second cooldown at every
-  point, then 95 seconds of post-drain resource sampling at 2,000 CPS;
+  point, then a 95-second post-drain structural/allocator settle and a separate
+  600-second RSS gate sample at 2,000 CPS, with raw resource samples embedded;
 - eight Tokio workers and four Alice endpoint shards;
 - Bob's `pbx-media-server` recipe with capacity 8,000;
 - four round-robin UDP parse workers, two transaction workers, four dialog
@@ -121,19 +122,34 @@ then continues without waiting out the anti-reuse horizon. This preserves the
 same overlapping 64–90 second retention pattern as the canonical sweep. It is
 diagnostic evidence only and is always disabled for clean acceptance runs.
 
-Clean mode instead keeps the lightweight process RSS sampler running for 95
-seconds after the measured calls drain. It computes the legacy-compatible
-active slope only from `point_start` through `calls_drained`, computes a
-separate diagnostic post-drain cleanup slope, and computes a robust retained
-RSS delta from median endpoint bands. Requested cleanup coverage is exactly the
-configured 95 seconds; actual sample coverage is reported separately. The
-short-window RSS gate normalizes the robust delta by the actual separation
-between the endpoint bands' median sample timestamps and enforces the
-unadjusted 10 MB/hour intent, while the structural snapshot must still
-converge exactly to zero. Sampling stops before that one compact
-structural-convergence snapshot, and no endpoint retention scan runs inside the
-active clean measurement. The 30-minute and one-hour soaks remain authoritative
-for the same unadjusted 10 MB/hour slope.
+Clean mode instead keeps the lightweight process RSS sampler running after the
+measured calls drain but excludes the first 95 seconds from the RSS gate. That
+settle interval covers the 64-second identifier anti-reuse horizon and allows
+allocator cleanup to finish before sustained growth is measured. A separate
+600-second window then computes a diagnostic least-squares slope and a robust
+retained RSS delta from median endpoint bands. Requested gate coverage is
+exactly the configured 600 seconds; actual sample coverage is reported
+separately. The gate normalizes the robust delta by the actual separation
+between the endpoint bands' median sample timestamps and enforces the unchanged
+10 MB/hour intent. Clean reports embed the raw resource samples so the phase
+boundary and calculation remain auditable. Sampling stops before the compact
+final structural-convergence snapshot. A first compact snapshot is captured at
+the end of the settle and retained throughout the RSS window; both snapshots
+must converge exactly to zero. No endpoint retention scan runs inside the
+active or RSS gate measurement. The endpoint estimator uses bands capped at 60
+seconds and acceptance requires at least 360 seconds between their
+representative timestamps. The 30-minute and one-hour soaks remain
+authoritative for the same unadjusted 10 MB/hour slope.
+
+A qualifying monolithic or split soak gates RSS on the final 600 seconds under
+active load, reported as `rss_gate_window: "active_tail_600s"` and
+`rss_gate_growth_mb_per_hr`. Its `rss_active_tail_*` fields record the robust
+first/last-minute endpoint-median rate, sample count, actual coverage, and
+completeness. Post-drain RSS remains useful
+allocator-settling diagnostics, while `retained_objects_after_drain` and the
+final transaction/session retention checks remain independent hard gates.
+Short diagnostic runs can report a `post_drain` or `tail` fallback, but those
+windows do not qualify long-soak memory stability.
 
 Compare artifacts only when these fields describe the experiment you intended.
 A dirty source fingerprint is valid diagnostic evidence, but it must match
@@ -302,8 +318,10 @@ Every resource report exposes requested and actual tail seconds, sample count,
 and completeness. Phase-selected windows additionally record their phase names,
 first/last sample, actual coverage, and slope. Clean mode's release threshold is
 the active-load slope (`point_start` through `calls_drained`), not a silently
-truncated 60-second tail. It then samples the measured point for 95 seconds
-after drain and takes a compact structural snapshot only after sampling stops.
+truncated 60-second tail. After drain it records a 95-second settle outside the
+RSS gate, measures a separate 600-second RSS window with embedded raw samples,
+and takes compact structural snapshots immediately before and after that gate
+window. Both snapshots must converge to zero.
 
 `memory` mode separately captures endpoint state at
 ramp end, steady end, cooldown end, and after the full 64-second retention

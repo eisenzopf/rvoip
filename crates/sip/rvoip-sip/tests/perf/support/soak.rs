@@ -1852,6 +1852,9 @@ pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_adapter/dialog_to_session",
         "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
+        "/dialog_adapter/outgoing_bye_tx",
+        "/dialog_adapter/outgoing_bye_generation_watch",
+        "/dialog_adapter/outgoing_bye_wait_intents",
         "/dialog_adapter/registration_refresh_tasks",
         "/transaction_manager/total",
         "/transaction_manager/server_invite_dialog_index",
@@ -1995,6 +1998,15 @@ impl RssGrowthGate {
 pub struct RssResultMetrics {
     pub full_growth_mb_per_hr: f64,
     pub sustained_growth_mb_per_hr: f64,
+    pub active_tail_growth_mb_per_hr: f64,
+    pub active_tail_sample_count: usize,
+    pub active_tail_window_secs: f64,
+    pub active_tail_window_complete: bool,
+    pub active_tail_estimator: &'static str,
+    pub active_tail_endpoint_band_secs: f64,
+    pub active_tail_endpoint_separation_secs: f64,
+    pub active_tail_start_sample_count: usize,
+    pub active_tail_end_sample_count: usize,
     pub post_drain_growth_mb_per_hr: f64,
     pub post_drain_sample_count: usize,
     pub post_drain_window_secs: f64,
@@ -2003,17 +2015,58 @@ pub struct RssResultMetrics {
     pub windows: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssGatePolicy {
+    /// Long-soak authority: qualify the final ten minutes under load and fail
+    /// separately if that complete window was not captured.
+    ActiveTail600,
+    /// Short/burst authority: retain the scenario-specific post-drain gate,
+    /// falling back to the sampler tail only when no drain samples exist.
+    PostDrainOrTail,
+}
+
 pub fn rss_result_metrics(
     resources: &ResourceSummary,
-    active_secs: f64,
+    active_load_end_secs: f64,
+    post_drain_start_secs: f64,
     drain_secs: f64,
+    gate_policy: RssGatePolicy,
 ) -> RssResultMetrics {
+    const LONG_SOAK_ACTIVE_WINDOW_SECS: f64 = 600.0;
+    const LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS: f64 = 590.0;
+    const LONG_SOAK_MIN_ACTIVE_SAMPLES: usize = 110;
+
     let full_growth_mb_per_hr = resources.rss_growth_mb_per_min * 60.0;
     let sustained_growth_mb_per_hr = resources.rss_tail_growth_mb_per_min * 60.0;
+    let active_tail_start_secs = (active_load_end_secs - LONG_SOAK_ACTIVE_WINDOW_SECS).max(0.0);
+    let active_tail_samples: Vec<ResourceSample> = resources
+        .samples
+        .iter()
+        .filter(|sample| {
+            sample.t_secs >= active_tail_start_secs && sample.t_secs <= active_load_end_secs
+        })
+        .cloned()
+        .collect();
+    let active_tail_endpoint = rss_endpoint_median_growth_mb_per_hr(&active_tail_samples);
+    let active_tail_growth_mb_per_hr = active_tail_endpoint.as_ref().map_or_else(
+        || rss_growth_mb_per_min(&active_tail_samples) * 60.0,
+        |estimate| estimate.growth_mb_per_hr,
+    );
+    let active_tail_window_secs = match (active_tail_samples.first(), active_tail_samples.last()) {
+        (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
+        _ => 0.0,
+    };
+    let active_tail_window_complete = active_load_end_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS
+        && active_tail_window_secs >= LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS
+        && active_tail_samples.len() >= LONG_SOAK_MIN_ACTIVE_SAMPLES
+        && active_tail_endpoint.is_some();
     let post_drain_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
-        .filter(|sample| sample.t_secs >= active_secs)
+        .filter(|sample| {
+            sample.t_secs >= post_drain_start_secs
+                && sample.t_secs <= post_drain_start_secs + drain_secs
+        })
         .cloned()
         .collect();
     let post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&post_drain_samples) * 60.0;
@@ -2021,22 +2074,123 @@ pub fn rss_result_metrics(
         (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
         _ => 0.0,
     };
-    let (gate_growth_mb_per_hr, gate_window) = if post_drain_samples.len() >= 2 {
-        (post_drain_growth_mb_per_hr, "post_drain")
-    } else {
-        (sustained_growth_mb_per_hr, "tail")
+    // A long soak must be qualified by sustained behavior under active load.
+    // A short post-drain slope can prove allocator settling but can also hide
+    // a per-call leak that plateaus once load stops. Short scenarios retain the
+    // legacy post-drain/tail fallback and are not represented as long soaks.
+    let (gate_growth_mb_per_hr, gate_window) = match gate_policy {
+        RssGatePolicy::ActiveTail600 => (
+            active_tail_growth_mb_per_hr,
+            if active_tail_window_complete {
+                "active_tail_600s"
+            } else {
+                "active_tail_600s_incomplete"
+            },
+        ),
+        RssGatePolicy::PostDrainOrTail if post_drain_samples.len() >= 2 => {
+            (post_drain_growth_mb_per_hr, "post_drain")
+        }
+        RssGatePolicy::PostDrainOrTail => (sustained_growth_mb_per_hr, "tail"),
     };
-    let windows = rss_window_summaries(&resources.samples, active_secs, drain_secs);
+    let windows = rss_window_summaries(
+        &resources.samples,
+        active_load_end_secs,
+        post_drain_start_secs,
+        drain_secs,
+    );
 
     RssResultMetrics {
         full_growth_mb_per_hr,
         sustained_growth_mb_per_hr,
+        active_tail_growth_mb_per_hr,
+        active_tail_sample_count: active_tail_samples.len(),
+        active_tail_window_secs,
+        active_tail_window_complete,
+        active_tail_estimator: if active_tail_endpoint.is_some() {
+            "median_first_last_sixth_capped_60s"
+        } else {
+            "unavailable_ols_diagnostic_only"
+        },
+        active_tail_endpoint_band_secs: active_tail_endpoint
+            .as_ref()
+            .map_or(0.0, |estimate| estimate.band_secs),
+        active_tail_endpoint_separation_secs: active_tail_endpoint
+            .as_ref()
+            .map_or(0.0, |estimate| estimate.separation_secs),
+        active_tail_start_sample_count: active_tail_endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.start_sample_count),
+        active_tail_end_sample_count: active_tail_endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.end_sample_count),
         post_drain_growth_mb_per_hr,
         post_drain_sample_count: post_drain_samples.len(),
         post_drain_window_secs,
         gate_growth_mb_per_hr,
         gate_window,
         windows,
+    }
+}
+
+/// Robust retained-RSS rate across the first and last minute of a selected
+/// window. Medians prevent a single late sampler/allocator spike from turning
+/// into a false long-soak failure while sustained growth remains visible.
+pub struct RssEndpointMedianEstimate {
+    pub growth_mb_per_hr: f64,
+    pub band_secs: f64,
+    pub separation_secs: f64,
+    pub start_sample_count: usize,
+    pub end_sample_count: usize,
+}
+
+pub fn rss_endpoint_median_growth_mb_per_hr(
+    samples: &[ResourceSample],
+) -> Option<RssEndpointMedianEstimate> {
+    const MIN_ENDPOINT_SAMPLES: usize = 3;
+    const MAX_ENDPOINT_BAND_SECS: f64 = 60.0;
+
+    if samples.len() < MIN_ENDPOINT_SAMPLES * 2 {
+        return None;
+    }
+    let first_t = samples.first()?.t_secs;
+    let last_t = samples.last()?.t_secs;
+    let coverage_secs = (last_t - first_t).max(0.0);
+    if coverage_secs <= 0.0 {
+        return None;
+    }
+    let band_secs = (coverage_secs / 6.0).min(MAX_ENDPOINT_BAND_SECS);
+    let start = samples
+        .iter()
+        .take_while(|sample| sample.t_secs <= first_t + band_secs)
+        .collect::<Vec<_>>();
+    let end = samples
+        .iter()
+        .skip_while(|sample| sample.t_secs < last_t - band_secs)
+        .collect::<Vec<_>>();
+    if start.len() < MIN_ENDPOINT_SAMPLES || end.len() < MIN_ENDPOINT_SAMPLES {
+        return None;
+    }
+    let start_rss = median_f64(start.iter().map(|sample| sample.rss_mb).collect());
+    let end_rss = median_f64(end.iter().map(|sample| sample.rss_mb).collect());
+    let start_t = median_f64(start.iter().map(|sample| sample.t_secs).collect());
+    let end_t = median_f64(end.iter().map(|sample| sample.t_secs).collect());
+    let separation_secs = end_t - start_t;
+    (separation_secs > 0.0).then(|| RssEndpointMedianEstimate {
+        growth_mb_per_hr: (end_rss - start_rss) * 3600.0 / separation_secs,
+        band_secs,
+        separation_secs,
+        start_sample_count: start.len(),
+        end_sample_count: end.len(),
+    })
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let midpoint = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[midpoint - 1] + values[midpoint]) / 2.0
+    } else {
+        values[midpoint]
     }
 }
 
@@ -2066,10 +2220,11 @@ pub fn rss_growth_mb_per_min(samples: &[ResourceSample]) -> f64 {
 
 pub fn rss_window_summaries(
     samples: &[ResourceSample],
-    active_secs: f64,
+    active_load_end_secs: f64,
+    post_drain_start_secs: f64,
     drain_secs: f64,
 ) -> Vec<serde_json::Value> {
-    let total_secs = active_secs + drain_secs;
+    let total_secs = post_drain_start_secs + drain_secs;
     let mut windows = Vec::new();
     let mut start = 0.0;
 
@@ -2082,7 +2237,13 @@ pub fn rss_window_summaries(
             .collect();
         if let (Some(first), Some(last)) = (window_samples.first(), window_samples.last()) {
             windows.push(json!({
-                "label": if start >= active_secs { "drain" } else { "active" },
+                "label": if start >= post_drain_start_secs {
+                    "post_drain"
+                } else if start >= active_load_end_secs {
+                    "interprocess_drain"
+                } else {
+                    "active"
+                },
                 "start_secs": round2(start),
                 "end_secs": round2(end),
                 "sample_count": window_samples.len(),
@@ -2097,14 +2258,14 @@ pub fn rss_window_summaries(
 
     let drain_samples: Vec<ResourceSample> = samples
         .iter()
-        .filter(|sample| sample.t_secs >= active_secs)
+        .filter(|sample| sample.t_secs >= post_drain_start_secs && sample.t_secs <= total_secs)
         .cloned()
         .collect();
     if let (Some(first), Some(last)) = (drain_samples.first(), drain_samples.last()) {
         windows.push(json!({
             "label": "post_drain",
-            "start_secs": round2(active_secs),
-            "end_secs": round2(active_secs + drain_secs),
+            "start_secs": round2(post_drain_start_secs),
+            "end_secs": round2(total_secs),
             "sample_count": drain_samples.len(),
             "first_rss_mb": round2(first.rss_mb),
             "last_rss_mb": round2(last.rss_mb),

@@ -203,6 +203,27 @@ impl SessionStore {
         .then(|| (handle.clone(), cell.hangup_control()))
     }
 
+    /// Resolve the async state-machine lane for this exact current lifetime.
+    ///
+    /// Callers retain both the generation-qualified handle and lane while
+    /// waiting. They must revalidate the handle after acquiring the lane so a
+    /// queued event cannot cross raw-ID reuse into a replacement cell.
+    pub(crate) fn state_machine_lane(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(SessionRegistryHandle, Arc<tokio::sync::Mutex<()>>)> {
+        let cell = self
+            .sessions
+            .get(session_id)
+            .map(|entry| Arc::clone(entry.value()))?;
+        let snapshot = cell.snapshot();
+        let handle = snapshot.lifecycle_handle.as_ref()?;
+        (snapshot.session_id == *session_id
+            && handle.session_id() == session_id
+            && self.authority.is_current(handle.key()))
+        .then(|| (handle.clone(), cell.state_machine_lane()))
+    }
+
     fn map_owns_cell(&self, handle: &SessionRegistryHandle, cell: &Arc<SessionStateCell>) -> bool {
         self.sessions
             .get(handle.session_id())
@@ -510,6 +531,44 @@ impl SessionStore {
             .remove_if(expected_media_id, |_, owner| owner == handle);
         session.media_session_id = None;
         session.media_session_ready = false;
+        let _ = cell.publish(session);
+        Ok(true)
+    }
+
+    /// Clear the retained dialog identity only when this exact lifetime still
+    /// owns the expected lower-layer dialog.
+    ///
+    /// Initial-INVITE ownership publishes `dialog_id` before wire dispatch so
+    /// a synchronous response cannot clone an incomplete session revision.
+    /// Managed rollback may subsequently run after quiescing, when ordinary
+    /// state-transition admission is closed. This retained exact mutation
+    /// compensates that pre-wire publication without touching a replacement
+    /// lifetime or a newer dialog identity.
+    pub(crate) fn clear_dialog_session_retained_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        expected_dialog_id: &DialogId,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(cell) = self.cell_for_handle(handle) else {
+            return Ok(false);
+        };
+        let _cell_update = cell.lock_update();
+        let current = cell.snapshot();
+        if !Self::state_matches_handle(current.state(), handle) {
+            return Ok(false);
+        }
+        let mut session = current.state().clone();
+        if session.dialog_id.as_ref() != Some(expected_dialog_id) {
+            return Ok(false);
+        }
+
+        let _mutation = self.lock_mutations();
+        if !self.map_owns_cell(handle, &cell) {
+            return Ok(false);
+        }
+        self.by_dialog
+            .remove_if(expected_dialog_id, |_, owner| owner == handle);
+        session.dialog_id = None;
         let _ = cell.publish(session);
         Ok(true)
     }
@@ -1087,6 +1146,94 @@ mod tests {
         ] {
             assert!(capacity < LOGICAL_CAPACITY);
         }
+    }
+
+    #[tokio::test]
+    async fn retained_exact_dialog_clear_is_expected_value_fenced() {
+        let store = SessionStore::new();
+        let session_id = SessionId::new();
+        let created = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create retained dialog session");
+        let handle = created
+            .lifecycle_handle
+            .clone()
+            .expect("session has exact registry handle");
+        let dialog_id = DialogId::new();
+        store
+            .update_session_with(&session_id, |session| {
+                session.dialog_id = Some(dialog_id);
+            })
+            .await
+            .expect("publish exact dialog identity");
+
+        assert!(!store
+            .clear_dialog_session_retained_exact(&handle, &DialogId::new())
+            .expect("mismatched retained clear is a no-op"));
+        assert_eq!(
+            store
+                .get_session_retained_snapshot_exact(&handle)
+                .expect("read retained dialog after mismatch")
+                .dialog_id,
+            Some(dialog_id)
+        );
+        assert!(store
+            .clear_dialog_session_retained_exact(&handle, &dialog_id)
+            .expect("clear exact retained dialog"));
+        assert_eq!(
+            store
+                .get_session_retained_snapshot_exact(&handle)
+                .expect("read retained dialog after clear")
+                .dialog_id,
+            None
+        );
+        assert!(!store.by_dialog.contains_key(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn exact_state_machine_lane_serializes_same_session_events() {
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId::new();
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create state-machine lane session");
+        let (_, lane) = store
+            .state_machine_lane(&session_id)
+            .expect("resolve exact state-machine lane");
+        let (_, same_lane) = store
+            .state_machine_lane(&session_id)
+            .expect("resolve same exact state-machine lane");
+        assert!(Arc::ptr_eq(&lane, &same_lane));
+
+        let first = lane.lock_owned().await;
+        let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiting_store = Arc::clone(&store);
+        let waiting_session = session_id.clone();
+        let waiting_attempted = Arc::clone(&attempted);
+        let waiting_entered = Arc::clone(&entered);
+        let waiter = tokio::spawn(async move {
+            let (_, lane) = waiting_store
+                .state_machine_lane(&waiting_session)
+                .expect("resolve queued state-machine lane");
+            waiting_attempted.store(true, Ordering::Release);
+            let _guard = lane.lock_owned().await;
+            waiting_entered.store(true, Ordering::Release);
+        });
+        while !attempted.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+        assert!(!entered.load(Ordering::Acquire));
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("queued state-machine event remained blocked")
+            .expect("queued state-machine task panicked");
+        assert!(entered.load(Ordering::Acquire));
     }
 
     #[test]

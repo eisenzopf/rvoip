@@ -24,8 +24,8 @@ use support::soak::{
     in_process_resource_sampler_enabled, media_receive_diagnostics, memory_diagnostic_interval,
     memory_diagnostic_summary, perf_config, read_required_u16_env, resource_sampling_diagnostics,
     retention_drain_wait, round2, rss_result_metrics, DhatProfile, EndpointRetentionSampler,
-    MemoryDiagnosticSampler, ReceiverDiagnostics, RssGrowthGate, SoakLoadSettings, ALICE_PORT_ENV,
-    BOB_PORT_ENV, READY_FILE_ENV, STOP_FILE_ENV,
+    MemoryDiagnosticSampler, ReceiverDiagnostics, RssGatePolicy, RssGrowthGate, SoakLoadSettings,
+    ALICE_PORT_ENV, BOB_PORT_ENV, READY_FILE_ENV, STOP_FILE_ENV,
 };
 use support::{LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
 
@@ -111,7 +111,19 @@ async fn perf_soak_receiver() {
         Some(sampler) => sampler.stop().await,
         None => ResourceSummary::empty(),
     };
-    let rss = rss_result_metrics(&resources, active_secs, retention_drain_wait.as_secs_f64());
+    let active_load_boundary_secs = settings.duration_secs as f64;
+    let rss_gate_policy = if settings.duration_secs >= 600 {
+        RssGatePolicy::ActiveTail600
+    } else {
+        RssGatePolicy::PostDrainOrTail
+    };
+    let rss = rss_result_metrics(
+        &resources,
+        active_load_boundary_secs,
+        active_secs,
+        retention_drain_wait.as_secs_f64(),
+        rss_gate_policy,
+    );
     resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();
 
@@ -128,6 +140,10 @@ async fn perf_soak_receiver() {
         .result("memory_diagnostics_enabled", memory_series.is_some())
         .result("stop_seen", stop_seen)
         .result("active_secs", round2(active_secs))
+        .result(
+            "active_load_boundary_secs",
+            round2(active_load_boundary_secs),
+        )
         .result("configured_duration_secs", settings.duration_secs)
         .result("active_calls_target", settings.active_calls)
         .result("active_calls_initial", settings.initial_active_calls())
@@ -150,6 +166,39 @@ async fn perf_soak_receiver() {
         .result(
             "rss_sustained_growth_mb_per_hr",
             round2(rss.sustained_growth_mb_per_hr),
+        )
+        .result(
+            "rss_active_tail_growth_mb_per_hr",
+            round2(rss.active_tail_growth_mb_per_hr),
+        )
+        .result(
+            "rss_active_tail_sample_count",
+            rss.active_tail_sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_window_secs",
+            round2(rss.active_tail_window_secs),
+        )
+        .result(
+            "rss_active_tail_window_complete",
+            rss.active_tail_window_complete,
+        )
+        .result("rss_active_tail_estimator", rss.active_tail_estimator)
+        .result(
+            "rss_active_tail_endpoint_band_secs",
+            round2(rss.active_tail_endpoint_band_secs),
+        )
+        .result(
+            "rss_active_tail_endpoint_separation_secs",
+            round2(rss.active_tail_endpoint_separation_secs),
+        )
+        .result(
+            "rss_active_tail_start_sample_count",
+            rss.active_tail_start_sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_end_sample_count",
+            rss.active_tail_end_sample_count as u64,
         )
         .result(
             "rss_post_drain_growth_mb_per_hr",
@@ -225,6 +274,12 @@ async fn perf_soak_receiver() {
     let mut gate_failures = Vec::new();
     if !stop_seen {
         gate_failures.push("receiver stop file was not observed".to_string());
+    }
+    if settings.duration_secs >= 600 && !rss.active_tail_window_complete {
+        gate_failures.push(format!(
+            "receiver active RSS gate window incomplete: measured {:.2}s with {} samples; required 600s",
+            rss.active_tail_window_secs, rss.active_tail_sample_count
+        ));
     }
     if rss.gate_growth_mb_per_hr > rss_gate.effective_mb_per_hr {
         gate_failures.push(format!(

@@ -35,6 +35,10 @@
 //!   after resource sampling stops, for bounded A/B diagnostics)
 //! - `RVOIP_PERF_BOUNDARY_SNAPSHOT` (default 0; capture endpoint and allocator
 //!   state once at `calls_drained` without waiting out the retention horizon)
+//! - `RVOIP_PERF_POST_DRAIN_SETTLE_SECS` (default 0; wait before the final
+//!   post-drain RSS gate window)
+//! - `RVOIP_PERF_POST_DRAIN_SAMPLE_SECS` (default 0; length of the final
+//!   post-settle RSS gate window)
 //!
 //! See `docs/BENCHMARKING.md` for full interpretation.
 
@@ -75,7 +79,8 @@ const SAME_HOST_ALICE_MEDIA_END: u16 = 65_535;
 const SIP_SESSION_ANTI_REUSE_HORIZON_SECS: usize = 64;
 const RETAINED_LIFECYCLE_CHURN_HEADROOM_PERCENT: usize = 25;
 const CLEANUP_RSS_INTENT_MB_PER_HOUR: f64 = 10.0;
-const CLEANUP_RSS_ENDPOINT_ESTIMATOR: &str = "median_first_last_sixth_capped_15s";
+const CLEANUP_RSS_ENDPOINT_ESTIMATOR: &str = "median_first_last_sixth_capped_60s";
+const CLEANUP_RSS_MINIMUM_REPRESENTATIVE_SEPARATION_SECS: u64 = 360;
 const BUNDLED_PERFORMANCE_RECIPES: &str = include_str!("../../config/performance-recipes.yaml");
 
 /// Auto-accept handler — every inbound INVITE answered immediately
@@ -444,6 +449,7 @@ async fn run_one_point(
     load: LoadProfile,
     per_call_timeout: Duration,
     max_in_flight: Option<u64>,
+    post_drain_settle: Duration,
     post_drain_sample: Duration,
     effective_config: Value,
 ) -> ScenarioReport {
@@ -593,10 +599,15 @@ async fn run_one_point(
         None
     };
     let active_resource_end = sampler.elapsed();
-    let post_drain_deadline = Instant::now() + post_drain_sample;
+    // The canonical cleanup measurement has two distinct phases. First wait
+    // through the retained-lifecycle horizon so bounded retirement work and
+    // allocator settling cannot be projected into a false hourly leak rate.
+    // Then start a fresh, longer idle window with enough time resolution to
+    // distinguish sub-MB quantization from sustained 10 MB/hour growth.
+    let post_drain_settle_deadline = Instant::now() + post_drain_settle;
     if !post_drain_sample.is_zero() {
         phase_markers.push(phase_marker(
-            "post_drain_cleanup_start",
+            "post_drain_settle_start",
             point_started,
             "actual",
         ));
@@ -617,8 +628,35 @@ async fn run_one_point(
         Duration::ZERO,
         active_resource_end,
     )];
+    let mut cleanup_convergence_at_settle = None;
     if !post_drain_sample.is_zero() {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(post_drain_deadline)).await;
+        tokio::time::sleep_until(tokio::time::Instant::from_std(post_drain_settle_deadline)).await;
+        phase_markers.push(phase_marker(
+            "post_drain_settle_end",
+            point_started,
+            "actual",
+        ));
+
+        cleanup_convergence_at_settle =
+            Some(capture_cleanup_convergence(bob.as_ref(), clients.as_ref()).await);
+        phase_markers.push(phase_marker(
+            "cleanup_convergence_at_settle_captured",
+            point_started,
+            "actual_before_resource_window",
+        ));
+
+        // Capture the exact sampler-clock boundaries after the structural
+        // scan. The returned convergence JSON remains live for the duration
+        // of the window, so any memory it owns is part of both endpoint bands
+        // rather than a mid-window allocation.
+        let post_drain_resource_start = sampler.elapsed();
+        phase_markers.push(phase_marker(
+            "post_drain_cleanup_start",
+            point_started,
+            "actual",
+        ));
+        tokio::time::sleep(post_drain_sample).await;
+        let post_drain_resource_end = sampler.elapsed();
         phase_markers.push(phase_marker(
             "post_drain_cleanup_end",
             point_started,
@@ -626,10 +664,10 @@ async fn run_one_point(
         ));
         resource_windows.push(ResourceWindowSpec::with_requested_coverage(
             "post_drain_cleanup",
-            "calls_drained",
+            "post_drain_cleanup_start",
             "post_drain_cleanup_end",
-            active_resource_end,
-            active_resource_end + post_drain_sample,
+            post_drain_resource_start,
+            post_drain_resource_end,
             post_drain_sample,
         ));
     }
@@ -763,6 +801,12 @@ async fn run_one_point(
         .diagnostic_block("bye_failures", counters.bye_failure_diagnostics())
         .diagnostic_block("phase_markers", Value::Array(phase_markers))
         .with_resources(resources);
+    if let Some(cleanup_convergence_at_settle) = cleanup_convergence_at_settle {
+        report.diagnostic_block(
+            "cleanup_convergence_at_settle",
+            cleanup_convergence_at_settle,
+        );
+    }
     if let Some(cleanup_convergence) = cleanup_convergence {
         report.diagnostic_block("cleanup_convergence", cleanup_convergence);
     }
@@ -835,7 +879,9 @@ const CLEANUP_CONVERGENCE_POINTERS: &[&str] = &[
     "/dialog_adapter/callid_to_session",
     "/dialog_adapter/dialog_to_session",
     "/dialog_adapter/outbound_initial_invites",
+    "/dialog_adapter/outgoing_bye_generation_watch",
     "/dialog_adapter/outgoing_bye_tx",
+    "/dialog_adapter/outgoing_bye_wait_intents",
     "/dialog_adapter/outgoing_invite_tx",
     "/dialog_adapter/session_to_dialog",
     "/dialog_manager/dialog_invite_transactions",
@@ -971,10 +1017,11 @@ fn measurement_identity(
     points: &[f64],
     point_index: usize,
     completed_points: &[Value],
+    post_drain_settle: Duration,
     post_drain_sample: Duration,
 ) -> Value {
     json!({
-        "schema": "rvoip-sip-perf-measurement-identity-v1",
+        "schema": "rvoip-sip-perf-measurement-identity-v2",
         "peer_lifecycle": "shared_for_entire_sweep",
         "sweep_points_cps": points,
         "point_index": point_index,
@@ -999,7 +1046,18 @@ fn measurement_identity(
             "sample_interval_ms": 500,
         },
         "post_drain_cleanup": {
+            "settle_secs": post_drain_settle.as_secs(),
             "requested_secs": post_drain_sample.as_secs(),
+            "start_phase": if post_drain_sample.is_zero() {
+                Value::Null
+            } else {
+                json!("post_drain_cleanup_start")
+            },
+            "end_phase": if post_drain_sample.is_zero() {
+                Value::Null
+            } else {
+                json!("post_drain_cleanup_end")
+            },
             "rss_metric": if post_drain_sample.is_zero() {
                 Value::Null
             } else {
@@ -1025,10 +1083,18 @@ fn measurement_identity(
             } else {
                 json!(CLEANUP_RSS_ENDPOINT_ESTIMATOR)
             },
-            "structural_metric": if post_drain_sample.is_zero() {
+            "minimum_representative_separation_secs": if post_drain_sample.is_zero() {
                 Value::Null
             } else {
-                json!("diagnostics.cleanup_convergence.converged")
+                json!(CLEANUP_RSS_MINIMUM_REPRESENTATIVE_SEPARATION_SECS)
+            },
+            "structural_metrics": if post_drain_sample.is_zero() {
+                Value::Array(Vec::new())
+            } else {
+                json!([
+                    "diagnostics.cleanup_convergence_at_settle",
+                    "diagnostics.cleanup_convergence",
+                ])
             },
         },
     })
@@ -1212,6 +1278,8 @@ async fn perf_call_setup_cps_inner() {
         .ok()
         .map(|value| value != "0")
         .unwrap_or(false);
+    let final_point_post_drain_settle =
+        Duration::from_secs(env_u64("RVOIP_PERF_POST_DRAIN_SETTLE_SECS", 0));
     let final_point_post_drain_sample =
         Duration::from_secs(env_u64("RVOIP_PERF_POST_DRAIN_SAMPLE_SECS", 0));
     let mut point_failures = Vec::new();
@@ -1229,6 +1297,11 @@ async fn perf_call_setup_cps_inner() {
         } else {
             Duration::ZERO
         };
+        let post_drain_settle = if post_drain_sample.is_zero() {
+            Duration::ZERO
+        } else {
+            final_point_post_drain_settle
+        };
         let mut report = run_one_point(
             report_scenario.clone(),
             Arc::clone(&clients),
@@ -1237,13 +1310,20 @@ async fn perf_call_setup_cps_inner() {
             load,
             per_call_timeout,
             max_in_flight,
+            post_drain_settle,
             post_drain_sample,
             point_effective_config,
         )
         .await;
         report.diagnostic_block(
             "measurement_identity",
-            measurement_identity(&points, point_index, &completed_points, post_drain_sample),
+            measurement_identity(
+                &points,
+                point_index,
+                &completed_points,
+                post_drain_settle,
+                post_drain_sample,
+            ),
         );
         let report_json = report.to_json();
         let asr = report_json
@@ -1597,6 +1677,7 @@ fn runtime_switch_snapshot() -> Value {
         "RVOIP_PERF_BOUNDARY_SNAPSHOT",
         "RVOIP_PERF_EMBED_RESOURCE_SAMPLES",
         "RVOIP_PERF_RSS_TAIL_WINDOW_SECS",
+        "RVOIP_PERF_POST_DRAIN_SETTLE_SECS",
         "RVOIP_PERF_POST_DRAIN_SAMPLE_SECS",
         "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS",
         "RVOIP_PERF_MEMORY_DIAGNOSTICS",
@@ -1914,12 +1995,28 @@ fn measurement_identity_records_shared_peer_conditioning() {
         json!({"target_cps": 300.0, "calls_offered": 9750, "calls_succeeded": 9750}),
         json!({"target_cps": 1000.0, "calls_offered": 32500, "calls_succeeded": 32500}),
     ];
-    let identity = measurement_identity(&points, 4, &conditioning, Duration::from_secs(95));
+    let identity = measurement_identity(
+        &points,
+        4,
+        &conditioning,
+        Duration::from_secs(95),
+        Duration::from_secs(600),
+    );
+    assert_eq!(identity["schema"], "rvoip-sip-perf-measurement-identity-v2");
     assert_eq!(identity["peer_lifecycle"], "shared_for_entire_sweep");
     assert_eq!(identity["conditioning"]["calls_offered"], 46_475);
     assert_eq!(identity["conditioning"]["calls_succeeded"], 46_475);
     assert_eq!(identity["resource_window"]["kind"], "active_load");
-    assert_eq!(identity["post_drain_cleanup"]["requested_secs"], 95);
+    assert_eq!(identity["post_drain_cleanup"]["settle_secs"], 95);
+    assert_eq!(identity["post_drain_cleanup"]["requested_secs"], 600);
+    assert_eq!(
+        identity["post_drain_cleanup"]["start_phase"],
+        "post_drain_cleanup_start"
+    );
+    assert_eq!(
+        identity["post_drain_cleanup"]["end_phase"],
+        "post_drain_cleanup_end"
+    );
     assert_eq!(
         identity["post_drain_cleanup"]["rss_metric"],
         "resources.rss_cleanup_endpoint_growth_mb_per_hour"
@@ -1931,6 +2028,21 @@ fn measurement_identity_records_shared_peer_conditioning() {
     assert_eq!(
         identity["post_drain_cleanup"]["rss_intent_mb_per_hour"],
         10.0
+    );
+    assert_eq!(
+        identity["post_drain_cleanup"]["rss_endpoint_estimator"],
+        "median_first_last_sixth_capped_60s"
+    );
+    assert_eq!(
+        identity["post_drain_cleanup"]["minimum_representative_separation_secs"],
+        360
+    );
+    assert_eq!(
+        identity["post_drain_cleanup"]["structural_metrics"],
+        json!([
+            "diagnostics.cleanup_convergence_at_settle",
+            "diagnostics.cleanup_convergence",
+        ])
     );
 }
 

@@ -7,10 +7,23 @@ import json
 import math
 import numbers
 import pathlib
+import struct
 import sys
 
 
 CLEANUP_RSS_INTENT_MB_PER_HOUR = 10.0
+CLEANUP_SETTLE_SECS = 95
+CLEANUP_RSS_WINDOW_SECS = 600
+CLEANUP_RSS_ENDPOINT_BAND_SECS = 60.0
+CLEANUP_RSS_MIN_REPRESENTATIVE_SEPARATION_SECS = 360.0
+CLEANUP_RSS_MIN_SAMPLE_COUNT = 1_180
+CLEANUP_RSS_MIN_ENDPOINT_SAMPLE_COUNT = 110
+CLEANUP_RSS_ENDPOINT_ESTIMATOR = "median_first_last_sixth_capped_60s"
+# Resource-window timestamps use the sampler's monotonic origin, while phase
+# markers use the point runner's monotonic origin. The sampler starts
+# immediately after the point marker, so allow bounded startup/scheduling
+# skew without permitting a report to move a window into another phase.
+RESOURCE_WINDOW_PHASE_TOLERANCE_SECS = 2.0
 
 LIMITS = (
     ("results.achieved_cps", ">=", 1578.53),
@@ -28,11 +41,11 @@ LIMITS = (
     # idle-tail limit; keep the number and give the measurement its honest
     # phase name.
     ("resources.rss_active_growth_mb_per_min", "<=", 2378.44),
-    # Short-window OLS slopes are unstable when projected to an hour. Gate the
-    # robust endpoint-median delta after normalizing it by the actual median
-    # timestamp separation of those endpoint bands. Using the outer 95-second
-    # window here would silently relax the 10 MB/hour intent because the
-    # representative samples are closer together than the window boundaries.
+    # Gate the post-fence endpoint-median delta after normalizing it by the
+    # actual median timestamp separation of the endpoint bands. The canonical
+    # contract requires at least 360 seconds of representative separation so
+    # the unchanged 10 MB/hour threshold has at least 1 MB of measurement
+    # power instead of extrapolating sub-megabyte RSS movement from 95 seconds.
     (
         "resources.rss_cleanup_endpoint_growth_mb_per_hour",
         "<=",
@@ -109,9 +122,10 @@ def canonical_exact_values():
         (f"{runtime}.RVOIP_PERF_REQUIRE_ZERO_ERRORS", "1"),
         (f"{runtime}.RVOIP_PERF_RETENTION_SNAPSHOT", "0"),
         (f"{runtime}.RVOIP_PERF_BOUNDARY_SNAPSHOT", "0"),
-        (f"{runtime}.RVOIP_PERF_EMBED_RESOURCE_SAMPLES", "0"),
+        (f"{runtime}.RVOIP_PERF_EMBED_RESOURCE_SAMPLES", "1"),
         (f"{runtime}.RVOIP_PERF_RSS_TAIL_WINDOW_SECS", "60"),
-        (f"{runtime}.RVOIP_PERF_POST_DRAIN_SAMPLE_SECS", "95"),
+        (f"{runtime}.RVOIP_PERF_POST_DRAIN_SETTLE_SECS", "95"),
+        (f"{runtime}.RVOIP_PERF_POST_DRAIN_SAMPLE_SECS", "600"),
         (f"{runtime}.RVOIP_PERF_CALL_SETUP_DIAGNOSTICS", "0"),
         (f"{runtime}.RVOIP_PERF_MEMORY_DIAGNOSTICS", "0"),
         (f"{runtime}.RVOIP_PERF_ALLOCATOR_DIAGNOSTICS", "0"),
@@ -320,6 +334,8 @@ def phase_marker_identity(report):
         "dispatch_complete",
         "calls_drained",
         "cooldown_end",
+        "post_drain_settle_start",
+        "post_drain_settle_end",
         "post_drain_cleanup_start",
         "post_drain_cleanup_end",
         "resource_sampling_stopped",
@@ -335,12 +351,47 @@ def phase_marker_identity(report):
         return markers, f"missing actual phase markers: {sorted(required_actual - actual_phases)!r}"
     if retention_markers:
         return markers, "clean report contains diagnostic retention snapshots"
+    actual_elapsed = {}
+    for marker in markers:
+        if not isinstance(marker, dict) or marker.get("kind") != "actual":
+            continue
+        phase = marker.get("phase")
+        if phase not in required_actual or phase in actual_elapsed:
+            continue
+        elapsed = marker.get("elapsed_ms")
+        if isinstance(elapsed, bool) or not isinstance(elapsed, int) or elapsed < 0:
+            return markers, f"actual phase {phase!r} has invalid elapsed_ms"
+        actual_elapsed[phase] = elapsed
+    ordered = (
+        "point_start",
+        "dispatch_complete",
+        "calls_drained",
+        "post_drain_settle_start",
+        "post_drain_settle_end",
+        "post_drain_cleanup_start",
+        "post_drain_cleanup_end",
+        "resource_sampling_stopped",
+    )
+    if any(actual_elapsed[left] > actual_elapsed[right] for left, right in zip(ordered, ordered[1:])):
+        return markers, "actual resource phase markers are not monotonic"
+    settle_elapsed = (
+        actual_elapsed["post_drain_settle_end"]
+        - actual_elapsed["post_drain_settle_start"]
+    )
+    cleanup_elapsed = (
+        actual_elapsed["post_drain_cleanup_end"]
+        - actual_elapsed["post_drain_cleanup_start"]
+    )
+    if settle_elapsed < (CLEANUP_SETTLE_SECS * 1_000 - 1_000):
+        return markers, f"post-drain settle marker coverage is too short: {settle_elapsed} ms"
+    if cleanup_elapsed < (CLEANUP_RSS_WINDOW_SECS * 1_000 - 1_000):
+        return markers, f"post-drain cleanup marker coverage is too short: {cleanup_elapsed} ms"
     return markers, None
 
 
 def canonical_measurement_identity_checks(checks, report):
     expected = (
-        ("diagnostics.measurement_identity.schema", "rvoip-sip-perf-measurement-identity-v1"),
+        ("diagnostics.measurement_identity.schema", "rvoip-sip-perf-measurement-identity-v2"),
         ("diagnostics.measurement_identity.peer_lifecycle", "shared_for_entire_sweep"),
         ("diagnostics.measurement_identity.sweep_points_cps", CANONICAL_SWEEP),
         ("diagnostics.measurement_identity.point_index", 4),
@@ -354,16 +405,136 @@ def canonical_measurement_identity_checks(checks, report):
         ("diagnostics.measurement_identity.resource_window.start_phase", "point_start"),
         ("diagnostics.measurement_identity.resource_window.end_phase", "calls_drained"),
         ("diagnostics.measurement_identity.resource_window.sample_interval_ms", 500),
-        ("diagnostics.measurement_identity.post_drain_cleanup.requested_secs", 95),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.settle_secs",
+            CLEANUP_SETTLE_SECS,
+        ),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.requested_secs",
+            CLEANUP_RSS_WINDOW_SECS,
+        ),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.start_phase",
+            "post_drain_cleanup_start",
+        ),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.end_phase",
+            "post_drain_cleanup_end",
+        ),
         ("diagnostics.measurement_identity.post_drain_cleanup.rss_metric", "resources.rss_cleanup_endpoint_growth_mb_per_hour"),
         ("diagnostics.measurement_identity.post_drain_cleanup.rss_retained_delta_metric", "resources.rss_cleanup_retained_growth_mb"),
         ("diagnostics.measurement_identity.post_drain_cleanup.rss_trend_metric", "resources.rss_cleanup_growth_mb_per_hour"),
         ("diagnostics.measurement_identity.post_drain_cleanup.rss_intent_mb_per_hour", CLEANUP_RSS_INTENT_MB_PER_HOUR),
-        ("diagnostics.measurement_identity.post_drain_cleanup.rss_endpoint_estimator", "median_first_last_sixth_capped_15s"),
-        ("diagnostics.measurement_identity.post_drain_cleanup.structural_metric", "diagnostics.cleanup_convergence.converged"),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.minimum_representative_separation_secs",
+            CLEANUP_RSS_MIN_REPRESENTATIVE_SEPARATION_SECS,
+        ),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.rss_endpoint_estimator",
+            CLEANUP_RSS_ENDPOINT_ESTIMATOR,
+        ),
+        (
+            "diagnostics.measurement_identity.post_drain_cleanup.structural_metrics",
+            [
+                "diagnostics.cleanup_convergence_at_settle",
+                "diagnostics.cleanup_convergence",
+            ],
+        ),
     )
     for path, value in expected:
         add_exact_check(checks, report, path, value)
+
+
+def add_resource_window_phase_binding_check(checks, report):
+    """Bind report-selected raw-sample windows to their actual phase markers."""
+    errors = []
+    actual = None
+    try:
+        markers = dotted_get(report, "diagnostics.phase_markers")
+        windows = dotted_get(report, "resources.rss_windows")
+        if not isinstance(markers, list):
+            raise ValueError("diagnostics.phase_markers must be an array")
+        if not isinstance(windows, dict):
+            raise ValueError("resources.rss_windows must be an object")
+
+        required_phases = {
+            "point_start",
+            "calls_drained",
+            "post_drain_cleanup_start",
+            "post_drain_cleanup_end",
+        }
+        elapsed_by_phase = {}
+        for marker in markers:
+            if not isinstance(marker, dict) or marker.get("kind") != "actual":
+                continue
+            phase = marker.get("phase")
+            if phase not in required_phases:
+                continue
+            elapsed_ms = marker.get("elapsed_ms")
+            if isinstance(elapsed_ms, bool) or not isinstance(elapsed_ms, int) or elapsed_ms < 0:
+                raise ValueError(f"actual phase {phase!r} has invalid elapsed_ms")
+            if phase in elapsed_by_phase:
+                raise ValueError(f"actual phase {phase!r} is duplicated")
+            elapsed_by_phase[phase] = elapsed_ms
+        missing = required_phases - elapsed_by_phase.keys()
+        if missing:
+            raise ValueError(f"missing actual phase markers: {sorted(missing)!r}")
+
+        point_origin_ms = elapsed_by_phase["point_start"]
+        bindings = (
+            ("active_load", "requested_start_secs", "point_start"),
+            ("active_load", "requested_end_secs", "calls_drained"),
+            (
+                "post_drain_cleanup",
+                "requested_start_secs",
+                "post_drain_cleanup_start",
+            ),
+            (
+                "post_drain_cleanup",
+                "requested_end_secs",
+                "post_drain_cleanup_end",
+            ),
+        )
+        observed = []
+        for window_name, field, phase in bindings:
+            window = windows.get(window_name)
+            if not isinstance(window, dict):
+                raise ValueError(f"resource window {window_name!r} is required")
+            boundary_secs = _finite_number(
+                window.get(field), f"resources.rss_windows.{window_name}.{field}"
+            )
+            marker_secs = (elapsed_by_phase[phase] - point_origin_ms) / 1_000.0
+            skew_secs = boundary_secs - marker_secs
+            observed.append(
+                {
+                    "window": window_name,
+                    "field": field,
+                    "phase": phase,
+                    "boundary_secs": boundary_secs,
+                    "marker_secs": marker_secs,
+                    "skew_secs": skew_secs,
+                }
+            )
+            if abs(skew_secs) > RESOURCE_WINDOW_PHASE_TOLERANCE_SECS:
+                errors.append(
+                    f"{window_name}.{field} differs from {phase} by "
+                    f"{skew_secs:.6f}s"
+                )
+        actual = {"bindings": observed, "mismatches": errors}
+    except (KeyError, TypeError, ValueError) as exc:
+        errors.append(str(exc))
+        actual = {"mismatches": errors}
+
+    checks.append(
+        {
+            "metric": "resources.rss_windows.phase_marker_binding",
+            "operator": "absolute_skew_secs <=",
+            "limit": RESOURCE_WINDOW_PHASE_TOLERANCE_SECS,
+            "actual": actual,
+            "passed": not errors,
+            "error": None if not errors else "; ".join(errors),
+        }
+    )
 
 
 def add_numeric_floor_check(checks, report, path, minimum):
@@ -383,6 +554,350 @@ def add_numeric_floor_check(checks, report, path, minimum):
             "actual": actual,
             "passed": passed,
             "error": error,
+        }
+    )
+
+
+def _finite_number(value, label):
+    if not is_number(value):
+        raise ValueError(f"{label} must be a finite number, found {value!r}")
+    return float(value)
+
+
+def _sample_coverage_secs(samples):
+    if not samples:
+        return 0.0
+    return max(0.0, samples[-1]["t_secs"] - samples[0]["t_secs"])
+
+
+def _sample_interval_estimate_secs(samples):
+    if len(samples) < 2:
+        return 0.0
+    intervals = sorted(
+        max(0.0, right["t_secs"] - left["t_secs"])
+        for left, right in zip(samples, samples[1:])
+    )
+    # Match Rust's upper-middle selection for an even interval count.
+    return intervals[len(intervals) // 2]
+
+
+def _linear_slope_mb_per_sec(samples):
+    if len(samples) < 2:
+        return 0.0
+    count = float(len(samples))
+    sum_x = sum(sample["t_secs"] for sample in samples)
+    sum_y = sum(sample["rss_mb"] for sample in samples)
+    sum_xy = sum(sample["t_secs"] * sample["rss_mb"] for sample in samples)
+    sum_xx = sum(sample["t_secs"] * sample["t_secs"] for sample in samples)
+    denominator = count * sum_xx - sum_x * sum_x
+    if abs(denominator) < sys.float_info.epsilon:
+        return 0.0
+    return (count * sum_xy - sum_x * sum_y) / denominator
+
+
+def _median(values):
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2 == 0:
+        return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+    return ordered[midpoint]
+
+
+def _robust_endpoint_summary(samples):
+    minimum_endpoint_samples = 3
+    if len(samples) < minimum_endpoint_samples * 2:
+        raise ValueError("resource window has too few samples for endpoint medians")
+    coverage = _sample_coverage_secs(samples)
+    if coverage <= 0.0:
+        raise ValueError("resource window has no positive endpoint coverage")
+    band_secs = min(coverage / 6.0, CLEANUP_RSS_ENDPOINT_BAND_SECS)
+    first_t = samples[0]["t_secs"]
+    last_t = samples[-1]["t_secs"]
+    start_samples = [
+        sample for sample in samples if sample["t_secs"] <= first_t + band_secs
+    ]
+    end_samples = [
+        sample for sample in samples if sample["t_secs"] >= last_t - band_secs
+    ]
+    if (
+        len(start_samples) < minimum_endpoint_samples
+        or len(end_samples) < minimum_endpoint_samples
+    ):
+        raise ValueError("resource window endpoint bands have too few samples")
+    start_median = _median([sample["rss_mb"] for sample in start_samples])
+    end_median = _median([sample["rss_mb"] for sample in end_samples])
+    start_time = _median([sample["t_secs"] for sample in start_samples])
+    end_time = _median([sample["t_secs"] for sample in end_samples])
+    separation = end_time - start_time
+    if separation <= 0.0:
+        raise ValueError("resource window endpoint representatives do not have positive separation")
+    retained = end_median - start_median
+    return {
+        "rss_start_median_mb": start_median,
+        "rss_end_median_mb": end_median,
+        "rss_retained_growth_mb": retained,
+        "rss_start_representative_secs": start_time,
+        "rss_end_representative_secs": end_time,
+        "rss_endpoint_separation_secs": separation,
+        "rss_endpoint_growth_mb_per_hour": retained * 3600.0 / separation,
+        "rss_endpoint_band_secs": band_secs,
+        "rss_start_sample_count": len(start_samples),
+        "rss_end_sample_count": len(end_samples),
+    }
+
+
+def recompute_resource_window(samples, window, sample_interval_secs):
+    """Recompute the Rust ResourceWindowSummary from embedded raw samples."""
+    requested_start = _finite_number(
+        window.get("requested_start_secs"), "window.requested_start_secs"
+    )
+    requested_end = _finite_number(
+        window.get("requested_end_secs"), "window.requested_end_secs"
+    )
+    requested_coverage = _finite_number(
+        window.get("requested_coverage_secs"), "window.requested_coverage_secs"
+    )
+    if requested_end < requested_start:
+        raise ValueError("resource window end precedes its start")
+    # `ResourceWindowSpec::with_requested_coverage` deliberately records the
+    # exact sampler-clock stop instant separately from the configured duration.
+    # Allow bounded scheduler overshoot, but never accept a shorter or
+    # materially longer interval as the canonical 600-second experiment.
+    requested_span = requested_end - requested_start
+    if requested_span + 0.001 < requested_coverage or requested_span > requested_coverage + 5.0:
+        raise ValueError(
+            "resource window sampler boundaries are outside requested coverage tolerance"
+        )
+    selected = [
+        sample
+        for sample in samples
+        if requested_start <= sample["t_secs"] <= requested_end
+    ]
+    if len(selected) < 2:
+        raise ValueError("resource window has fewer than two raw samples")
+    coverage = _sample_coverage_secs(selected)
+    boundary_tolerance = max(sample_interval_secs, 0.001) * 1.5
+    complete = (
+        selected[0]["t_secs"] <= requested_start + boundary_tolerance
+        and selected[-1]["t_secs"] + boundary_tolerance >= requested_end
+    )
+    summary = {
+        "first_sample_secs": selected[0]["t_secs"],
+        "last_sample_secs": selected[-1]["t_secs"],
+        "actual_coverage_secs": coverage,
+        "sample_count": len(selected),
+        "boundary_tolerance_secs": boundary_tolerance,
+        "complete": complete,
+        "rss_growth_mb_per_min": _linear_slope_mb_per_sec(selected) * 60.0,
+    }
+    summary.update(_robust_endpoint_summary(selected))
+    return summary
+
+
+def _append_exact_mismatch(errors, label, actual, expected):
+    if actual != expected:
+        errors.append(f"{label}={actual!r}, expected {expected!r}")
+
+
+def _append_numeric_mismatch(errors, label, actual, expected):
+    if not is_number(actual) or not math.isclose(
+        float(actual), float(expected), rel_tol=1e-9, abs_tol=1e-8
+    ):
+        errors.append(f"{label}={actual!r}, recomputed {expected!r}")
+
+
+def _compare_window_to_raw(errors, label, window, recomputed):
+    for field in ("sample_count", "complete", "rss_start_sample_count", "rss_end_sample_count"):
+        _append_exact_mismatch(
+            errors, f"{label}.{field}", window.get(field), recomputed[field]
+        )
+    for field in (
+        "first_sample_secs",
+        "last_sample_secs",
+        "actual_coverage_secs",
+        "boundary_tolerance_secs",
+        "rss_growth_mb_per_min",
+        "rss_start_median_mb",
+        "rss_end_median_mb",
+        "rss_retained_growth_mb",
+        "rss_start_representative_secs",
+        "rss_end_representative_secs",
+        "rss_endpoint_separation_secs",
+        "rss_endpoint_growth_mb_per_hour",
+        "rss_endpoint_band_secs",
+    ):
+        _append_numeric_mismatch(
+            errors, f"{label}.{field}", window.get(field), recomputed[field]
+        )
+
+
+def add_raw_resource_sample_consistency_check(checks, report):
+    """Require canonical RSS summaries to be reproducible from raw evidence."""
+    errors = []
+    actual = None
+    try:
+        resources = dotted_get(report, "resources")
+        raw = dotted_get(report, "resources.rss_samples_mb")
+        if resources.get("rss_samples_embedded") is not True:
+            raise ValueError("resources.rss_samples_embedded must be true")
+        if not isinstance(raw, list) or not raw:
+            raise ValueError("resources.rss_samples_mb must be a non-empty array")
+
+        samples = []
+        previous_time = None
+        for index, value in enumerate(raw):
+            if not isinstance(value, dict):
+                raise ValueError(f"raw sample {index} must be an object")
+            sample = {
+                "t_secs": _finite_number(value.get("t_secs"), f"raw sample {index}.t_secs"),
+                "rss_mb": _finite_number(value.get("rss_mb"), f"raw sample {index}.rss_mb"),
+                # The producer stores CPU as f32, then promotes each value to
+                # f64 for the average. Re-round the JSON number through f32 so
+                # recomputation matches that exact arithmetic.
+                "cpu_pct": struct.unpack(
+                    "!f",
+                    struct.pack(
+                        "!f",
+                        _finite_number(
+                            value.get("cpu_pct"), f"raw sample {index}.cpu_pct"
+                        ),
+                    ),
+                )[0],
+            }
+            if previous_time is not None and sample["t_secs"] <= previous_time:
+                raise ValueError(
+                    f"raw sample timestamps must be strictly increasing at index {index}"
+                )
+            previous_time = sample["t_secs"]
+            samples.append(sample)
+
+        _append_exact_mismatch(
+            errors,
+            "resources.rss_sample_count",
+            resources.get("rss_sample_count"),
+            len(samples),
+        )
+        interval = _sample_interval_estimate_secs(samples)
+        _append_numeric_mismatch(
+            errors,
+            "resources.rss_sample_interval_estimate_secs",
+            resources.get("rss_sample_interval_estimate_secs"),
+            interval,
+        )
+        _append_numeric_mismatch(
+            errors,
+            "resources.baseline_rss_mb",
+            resources.get("baseline_rss_mb"),
+            samples[0]["rss_mb"],
+        )
+        _append_numeric_mismatch(
+            errors,
+            "resources.peak_rss_mb",
+            resources.get("peak_rss_mb"),
+            max(sample["rss_mb"] for sample in samples),
+        )
+        _append_numeric_mismatch(
+            errors,
+            "resources.rss_growth_mb_per_min",
+            resources.get("rss_growth_mb_per_min"),
+            _linear_slope_mb_per_sec(samples) * 60.0,
+        )
+        expected_cpu = (
+            sum(sample["cpu_pct"] for sample in samples[1:]) / (len(samples) - 1)
+            if len(samples) > 1
+            else 0.0
+        )
+        _append_numeric_mismatch(
+            errors, "resources.avg_cpu_pct", resources.get("avg_cpu_pct"), expected_cpu
+        )
+
+        tail_requested = _finite_number(
+            resources.get("rss_tail_window_requested_secs"),
+            "resources.rss_tail_window_requested_secs",
+        )
+        tail_min_t = max(0.0, samples[-1]["t_secs"] - tail_requested)
+        tail = [sample for sample in samples if sample["t_secs"] >= tail_min_t]
+        tail_coverage = _sample_coverage_secs(tail)
+        _append_exact_mismatch(
+            errors,
+            "resources.rss_tail_sample_count",
+            resources.get("rss_tail_sample_count"),
+            len(tail),
+        )
+        _append_exact_mismatch(
+            errors,
+            "resources.rss_tail_window_complete",
+            resources.get("rss_tail_window_complete"),
+            tail_coverage + max(interval, 0.001) * 1.5 >= tail_requested,
+        )
+        _append_numeric_mismatch(
+            errors,
+            "resources.rss_tail_window_secs",
+            resources.get("rss_tail_window_secs"),
+            tail_coverage,
+        )
+        _append_numeric_mismatch(
+            errors,
+            "resources.rss_tail_growth_mb_per_min",
+            resources.get("rss_tail_growth_mb_per_min"),
+            _linear_slope_mb_per_sec(tail) * 60.0,
+        )
+
+        windows = resources.get("rss_windows")
+        if not isinstance(windows, dict):
+            raise ValueError("resources.rss_windows must be an object")
+        active = windows.get("active_load")
+        cleanup = windows.get("post_drain_cleanup")
+        if not isinstance(active, dict) or not isinstance(cleanup, dict):
+            raise ValueError("canonical active and cleanup resource windows are required")
+        active_recomputed = recompute_resource_window(samples, active, interval)
+        cleanup_recomputed = recompute_resource_window(samples, cleanup, interval)
+        _compare_window_to_raw(errors, "resources.rss_windows.active_load", active, active_recomputed)
+        _compare_window_to_raw(
+            errors,
+            "resources.rss_windows.post_drain_cleanup",
+            cleanup,
+            cleanup_recomputed,
+        )
+        for path, expected in (
+            ("rss_active_growth_mb_per_min", active_recomputed["rss_growth_mb_per_min"]),
+            ("rss_cleanup_growth_mb_per_min", cleanup_recomputed["rss_growth_mb_per_min"]),
+            ("rss_cleanup_growth_mb_per_hour", cleanup_recomputed["rss_growth_mb_per_min"] * 60.0),
+            ("rss_cleanup_retained_growth_mb", cleanup_recomputed["rss_retained_growth_mb"]),
+            (
+                "rss_cleanup_endpoint_growth_mb_per_hour",
+                cleanup_recomputed["rss_endpoint_growth_mb_per_hour"],
+            ),
+        ):
+            _append_numeric_mismatch(
+                errors, f"resources.{path}", resources.get(path), expected
+            )
+
+        actual = {
+            "raw_sample_count": len(samples),
+            "sample_interval_estimate_secs": interval,
+            "cleanup_sample_count": cleanup_recomputed["sample_count"],
+            "cleanup_actual_coverage_secs": cleanup_recomputed["actual_coverage_secs"],
+            "cleanup_endpoint_separation_secs": cleanup_recomputed[
+                "rss_endpoint_separation_secs"
+            ],
+            "cleanup_endpoint_growth_mb_per_hour": cleanup_recomputed[
+                "rss_endpoint_growth_mb_per_hour"
+            ],
+            "mismatches": errors,
+        }
+    except (KeyError, TypeError, ValueError, OverflowError, ZeroDivisionError) as exc:
+        errors.append(str(exc))
+        actual = {"mismatches": errors}
+
+    checks.append(
+        {
+            "metric": "resources.raw_resource_sample_consistency",
+            "operator": "recomputes_all_rss_summaries",
+            "limit": True,
+            "actual": actual,
+            "passed": not errors,
+            "error": None if not errors else "; ".join(errors),
         }
     )
 
@@ -473,17 +988,35 @@ def add_cleanup_estimator_consistency_check(checks, report):
 
 def canonical_resource_coverage_checks(checks, report):
     exact = (
+        ("resources.rss_samples_embedded", True),
         ("resources.rss_tail_window_complete", True),
         ("resources.rss_windows.active_load.name", "active_load"),
         ("resources.rss_windows.active_load.start_phase", "point_start"),
         ("resources.rss_windows.active_load.end_phase", "calls_drained"),
         ("resources.rss_windows.active_load.complete", True),
         ("resources.rss_windows.post_drain_cleanup.name", "post_drain_cleanup"),
-        ("resources.rss_windows.post_drain_cleanup.start_phase", "calls_drained"),
+        (
+            "resources.rss_windows.post_drain_cleanup.start_phase",
+            "post_drain_cleanup_start",
+        ),
         ("resources.rss_windows.post_drain_cleanup.end_phase", "post_drain_cleanup_end"),
-        ("resources.rss_windows.post_drain_cleanup.requested_coverage_secs", 95.0),
+        (
+            "resources.rss_windows.post_drain_cleanup.requested_coverage_secs",
+            float(CLEANUP_RSS_WINDOW_SECS),
+        ),
         ("resources.rss_windows.post_drain_cleanup.complete", True),
-        ("resources.rss_windows.post_drain_cleanup.rss_endpoint_band_secs", 15.0),
+        (
+            "resources.rss_windows.post_drain_cleanup.rss_endpoint_band_secs",
+            CLEANUP_RSS_ENDPOINT_BAND_SECS,
+        ),
+        (
+            "diagnostics.cleanup_convergence_at_settle.schema",
+            "rvoip-sip-cleanup-convergence-v1",
+        ),
+        ("diagnostics.cleanup_convergence_at_settle.endpoint_count", 5),
+        ("diagnostics.cleanup_convergence_at_settle.retained_total", 0),
+        ("diagnostics.cleanup_convergence_at_settle.missing_count", 0),
+        ("diagnostics.cleanup_convergence_at_settle.converged", True),
         ("diagnostics.cleanup_convergence.schema", "rvoip-sip-cleanup-convergence-v1"),
         ("diagnostics.cleanup_convergence.endpoint_count", 5),
         ("diagnostics.cleanup_convergence.retained_total", 0),
@@ -497,12 +1030,27 @@ def canonical_resource_coverage_checks(checks, report):
         ("resources.rss_tail_sample_count", 110),
         ("resources.rss_windows.active_load.actual_coverage_secs", 34.0),
         ("resources.rss_windows.active_load.sample_count", 60),
-        ("resources.rss_windows.post_drain_cleanup.actual_coverage_secs", 94.0),
-        ("resources.rss_windows.post_drain_cleanup.sample_count", 180),
-        ("resources.rss_windows.post_drain_cleanup.rss_start_sample_count", 25),
-        ("resources.rss_windows.post_drain_cleanup.rss_end_sample_count", 25),
+        ("resources.rss_windows.post_drain_cleanup.actual_coverage_secs", 599.0),
+        (
+            "resources.rss_windows.post_drain_cleanup.sample_count",
+            CLEANUP_RSS_MIN_SAMPLE_COUNT,
+        ),
+        (
+            "resources.rss_windows.post_drain_cleanup.rss_endpoint_separation_secs",
+            CLEANUP_RSS_MIN_REPRESENTATIVE_SEPARATION_SECS,
+        ),
+        (
+            "resources.rss_windows.post_drain_cleanup.rss_start_sample_count",
+            CLEANUP_RSS_MIN_ENDPOINT_SAMPLE_COUNT,
+        ),
+        (
+            "resources.rss_windows.post_drain_cleanup.rss_end_sample_count",
+            CLEANUP_RSS_MIN_ENDPOINT_SAMPLE_COUNT,
+        ),
     ):
         add_numeric_floor_check(checks, report, path, minimum)
+    add_resource_window_phase_binding_check(checks, report)
+    add_raw_resource_sample_consistency_check(checks, report)
     add_cleanup_estimator_consistency_check(checks, report)
 
 
@@ -676,7 +1224,7 @@ def evaluate(report, expected_scenario, report_path):
 
     passed = all(check["passed"] for check in checks)
     return {
-        "schema": "rvoip-sip-2k-acceptance-v2",
+        "schema": "rvoip-sip-2k-acceptance-v3",
         "status": "PASS" if passed else "FAIL",
         "report": str(report_path),
         "checks": checks,

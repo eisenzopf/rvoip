@@ -7676,6 +7676,7 @@ impl UnifiedCoordinator {
     }
 
     async fn hangup_serialized(&self, session_id: &SessionId) -> Result<()> {
+        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait(session_id);
         let initial_state = self
             .helpers
             .state_machine
@@ -8326,6 +8327,34 @@ impl UnifiedCoordinator {
                 Err(error)
             }
         }
+    }
+
+    /// Dispatch a builder-owned established BYE and join the exact wire
+    /// confirmation even when a synchronous response wins the state-store
+    /// bookkeeping race. The wait owner makes cancellation between dispatch
+    /// and confirmation reclaim the retained receipt synchronously.
+    pub(crate) async fn dispatch_confirmed_outbound_bye(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<()> {
+        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait(session_id);
+        let generation_before_dispatch = self
+            .dialog_adapter
+            .outgoing_bye_generation(session_id)
+            .unwrap_or(0);
+        let dispatch = self
+            .dispatch_outbound(session_id, EventType::SendOutboundBye)
+            .await
+            .map(|_| ());
+        let retained_new_bye = self
+            .dialog_adapter
+            .has_outgoing_bye_after(session_id, generation_before_dispatch);
+        complete_established_bye_dispatch(
+            dispatch,
+            retained_new_bye,
+            self.finalize_confirmed_local_bye(session_id, "Local BYE"),
+        )
+        .await
     }
 
     /// Begin authoritative local reclamation without publishing an app event.

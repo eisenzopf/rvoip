@@ -29,6 +29,11 @@ pub struct ProcessEventResult {
     pub events_published: Vec<EventTemplate>,
 }
 
+#[derive(Default)]
+struct EventStateInput {
+    remote_sdp: Option<String>,
+}
+
 /// The state machine executor that processes events through the state table
 pub struct StateMachine {
     /// The master state table (static rules)
@@ -623,10 +628,11 @@ impl StateMachine {
         session_id: &SessionId,
         slot: PendingOptionsSlot,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let handle = self
-            .store
-            .lifecycle_handle(session_id)
-            .ok_or_else(|| format!("Session {session_id} not found"))?;
+        // Stage through the same exact-lifetime lane as event execution. If
+        // an older transition is still publishing a full working snapshot,
+        // staging outside this lane lets that publication erase the builder's
+        // immutable request options before the matching event can consume it.
+        let (handle, _state_machine_lane) = self.acquire_state_machine_lane(session_id).await?;
         self.stage_outbound_options_exact(&handle, slot)
     }
 
@@ -667,10 +673,7 @@ impl StateMachine {
         session_id: &SessionId,
         slot: PendingOptionsSlot,
     ) -> Result<PendingOptionsStageGuard, Box<dyn std::error::Error + Send + Sync>> {
-        let handle = self
-            .store
-            .lifecycle_handle(session_id)
-            .ok_or_else(|| format!("Session {session_id} not found"))?;
+        let (handle, _state_machine_lane) = self.acquire_state_machine_lane(session_id).await?;
         self.stage_outbound_options_exact(&handle, slot.clone())?;
         Ok(PendingOptionsStageGuard::new(
             Arc::clone(&self.store),
@@ -679,12 +682,45 @@ impl StateMachine {
         ))
     }
 
+    /// Acquire the complete-event lane for one exact session lifetime.
+    ///
+    /// A transition publishes its next state before executing async actions.
+    /// Without this lane, a response-driven event can clone that intermediate
+    /// revision and both events can later publish full snapshots in opposite
+    /// order, erasing fields owned by the other transition. The lane lives on
+    /// `SessionStateCell`, so there is no global contention and raw-ID reuse
+    /// receives a different lock. Revalidate after waiting to reject a queued
+    /// event whose captured lifetime retired in the meantime.
+    async fn acquire_state_machine_lane(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        (SessionRegistryHandle, tokio::sync::OwnedMutexGuard<()>),
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let (handle, lane) = self.store.state_machine_lane(session_id).ok_or_else(|| {
+            Box::new(crate::errors::SessionError::SessionNotFound(
+                session_id.to_string(),
+            )) as Box<dyn std::error::Error + Send + Sync>
+        })?;
+        let guard = lane.lock_owned().await;
+        self.store
+            .get_session_snapshot_exact(&handle)
+            .map_err(|_| {
+                Box::new(crate::errors::SessionError::SessionNotFound(
+                    session_id.to_string(),
+                )) as Box<dyn std::error::Error + Send + Sync>
+            })?;
+        Ok((handle, guard))
+    }
+
     /// Process an event for a session
     pub async fn process_event(
         &self,
         session_id: &SessionId,
         event: EventType,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let (handle, _state_machine_lane) = self.acquire_state_machine_lane(session_id).await?;
         let guard = cleanup_diag::stage_guard(
             state_machine_stage_for_event(&event),
             format!("{}:{}", session_id, state_machine_event_name(&event)),
@@ -692,7 +728,7 @@ impl StateMachine {
         // `process_event_inner` contains the complete queued-event executor.
         // Keep its generated state behind a heap boundary so callers do not
         // combine that large future with their own protocol task stack.
-        let result = Box::pin(self.process_event_inner(session_id, event, None)).await;
+        let result = Box::pin(self.process_event_inner(&handle, event, None, None)).await;
         match &result {
             Ok(_) => guard.finish_success(),
             Err(_) => guard.finish_failure(),
@@ -706,11 +742,36 @@ impl StateMachine {
         event: EventType,
         stage_claim: Arc<StageDispatchClaim>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let (handle, _state_machine_lane) = self.acquire_state_machine_lane(session_id).await?;
         let guard = cleanup_diag::stage_guard(
             state_machine_stage_for_event(&event),
             format!("{}:{}", session_id, state_machine_event_name(&event)),
         );
-        let result = Box::pin(self.process_event_inner(session_id, event, Some(stage_claim))).await;
+        let result =
+            Box::pin(self.process_event_inner(&handle, event, Some(stage_claim), None)).await;
+        match &result {
+            Ok(_) => guard.finish_success(),
+            Err(_) => guard.finish_failure(),
+        }
+        result
+    }
+
+    /// Process a response event while applying its SDP only after acquiring
+    /// the exact session lane. Writing SDP in the cross-crate handler before
+    /// waiting would let an older in-flight transition overwrite that input.
+    pub(crate) async fn process_event_with_remote_sdp(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+        remote_sdp: Option<String>,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let (handle, _state_machine_lane) = self.acquire_state_machine_lane(session_id).await?;
+        let guard = cleanup_diag::stage_guard(
+            state_machine_stage_for_event(&event),
+            format!("{}:{}", session_id, state_machine_event_name(&event)),
+        );
+        let input = EventStateInput { remote_sdp };
+        let result = Box::pin(self.process_event_inner(&handle, event, None, Some(input))).await;
         match &result {
             Ok(_) => guard.finish_success(),
             Err(_) => guard.finish_failure(),
@@ -720,13 +781,15 @@ impl StateMachine {
 
     async fn process_event_inner(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         event: EventType,
         mut initial_stage_claim: Option<Arc<StageDispatchClaim>>,
+        mut initial_state_input: Option<EventStateInput>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use std::collections::VecDeque;
 
         const MAX_INTERNAL_EVENTS: usize = 32;
+        let session_id = handle.session_id();
 
         let mut queue = VecDeque::new();
         queue.push_back(event);
@@ -751,11 +814,17 @@ impl StateMachine {
             } else {
                 None
             };
+            let state_input = if processed == 1 {
+                initial_state_input.take()
+            } else {
+                None
+            };
             let result = Box::pin(self.process_one_event(
-                session_id,
+                handle,
                 event,
                 &mut queue,
                 stage_claim.as_ref(),
+                state_input,
             ))
             .await?;
             if first_result.is_none() {
@@ -774,14 +843,16 @@ impl StateMachine {
 
     async fn process_one_event(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         event: EventType,
         queued_follow_up_events: &mut std::collections::VecDeque<EventType>,
         stage_claim: Option<&Arc<StageDispatchClaim>>,
+        state_input: Option<EventStateInput>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use crate::session_store::history::history_event_snapshot;
         use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
         use std::time::Instant;
+        let session_id = handle.session_id();
 
         debug!(
             "Processing event {} for session {}",
@@ -793,7 +864,7 @@ impl StateMachine {
         let auth_required_event = matches!(&event, EventType::AuthRequired { .. });
 
         // 1. Get current session state
-        let mut session = match self.store.get_session(session_id).await {
+        let mut session = match self.store.get_session_exact(handle).await {
             Ok(s) => s,
             Err(e) => {
                 // Demoted from error — under test teardown races the
@@ -807,6 +878,11 @@ impl StateMachine {
                 );
             }
         };
+        if let Some(input) = state_input {
+            if let Some(remote_sdp) = input.remote_sdp {
+                session.remote_sdp = Some(remote_sdp);
+            }
+        }
         let old_state = session.call_state;
 
         // Initialize tracking for history
@@ -1237,21 +1313,8 @@ impl StateMachine {
         // await) has since committed a different `call_state`. If so,
         // preserve its commit — overwriting would race-clobber the
         // response-driven transition (e.g. HoldPending → OnHold).
-        if let Ok((
-            current_call_state,
-            current_entered_state_at,
-            current_sdp_origin_session_id,
-            current_sdp_origin_version,
-            current_media_security,
-        )) = self.store.with_session(session_id, |current| {
-            (
-                current.call_state.clone(),
-                current.entered_state_at,
-                current.sdp_origin_session_id.clone(),
-                current.sdp_origin_version,
-                current.media_security.clone(),
-            )
-        }) {
+        if let Ok(current) = self.store.get_session_snapshot_exact(handle) {
+            let current_call_state = current.call_state.clone();
             if current_call_state != session.call_state
                 && (transition_state_published_before_actions || current_call_state != old_state)
             {
@@ -1260,14 +1323,14 @@ impl StateMachine {
                     session_id, session.call_state, current_call_state
                 );
                 session.call_state = current_call_state;
-                session.entered_state_at = current_entered_state_at;
+                session.entered_state_at = current.entered_state_at;
             }
-            if current_sdp_origin_version > session.sdp_origin_version {
-                session.sdp_origin_session_id = current_sdp_origin_session_id;
-                session.sdp_origin_version = current_sdp_origin_version;
+            if current.sdp_origin_version > session.sdp_origin_version {
+                session.sdp_origin_session_id = current.sdp_origin_session_id.clone();
+                session.sdp_origin_version = current.sdp_origin_version;
             }
             if session.media_security.is_none() {
-                session.media_security = current_media_security;
+                session.media_security = current.media_security.clone();
             }
         }
 

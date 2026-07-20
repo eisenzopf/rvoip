@@ -37,11 +37,12 @@ use crate::session_store::SessionStore;
 use crate::sip_data_message::{
     build_sip_data_request, SipDataMessage, SipDataMessageDispatchLanes,
 };
-use crate::state_table::types::{DialogId, SessionId};
-use dashmap::DashMap;
-use rvoip_infra_common::events::{
-    coordinator::GlobalEventCoordinator, cross_crate::RvoipCrossCrateEvent,
+use crate::state_table::{
+    types::{DialogId, SessionId},
+    EventType,
 };
+use dashmap::DashMap;
+use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_sip_core::{Response, StatusCode, Uri};
 use rvoip_sip_dialog::{
     api::unified::{
@@ -153,6 +154,48 @@ struct OutboundByeTransaction {
     request_uri: String,
 }
 
+/// Cancellation owner for the gap between BYE dispatch and exact response
+/// confirmation. Terminal cleanup may preserve a completed receipt only while
+/// at least one owner exists; dropping the last owner exact-removes any newer
+/// generation so cancelled builder/adapter futures cannot retain it forever.
+pub(crate) struct OutgoingByeWaitOwner {
+    session_id: SessionId,
+    wait_intents: Arc<DashMap<SessionId, OutgoingByeWaitIntentState>>,
+    transactions: Arc<DashMap<SessionId, OutboundByeTransaction>>,
+    generation_watch: Arc<DashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
+}
+
+#[derive(Clone, Copy)]
+struct OutgoingByeWaitIntentState {
+    owners: usize,
+    min_after_generation: u64,
+}
+
+impl Drop for OutgoingByeWaitOwner {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+
+        if let Entry::Occupied(mut entry) = self.wait_intents.entry(self.session_id.clone()) {
+            if entry.get().owners > 1 {
+                entry.get_mut().owners -= 1;
+                return;
+            }
+
+            // Keep the per-session intent entry occupied through reclamation.
+            // A new owner therefore cannot publish a later generation between
+            // the last-owner decision and remove_if (the same-session ABA).
+            let min_after_generation = entry.get().min_after_generation;
+            let removed = self.transactions.remove_if(&self.session_id, |_, current| {
+                current.generation > min_after_generation
+            });
+            if removed.is_some() && !self.transactions.contains_key(&self.session_id) {
+                self.generation_watch.remove(&self.session_id);
+            }
+            entry.remove();
+        }
+    }
+}
+
 enum OutgoingByeGenerationWake {
     UseExactOutcome(
         rvoip_sip_dialog::transaction::TransactionResult<Option<ClientTransactionOutcome>>,
@@ -180,6 +223,20 @@ fn resolve_outgoing_bye_generation_wake(
         }
         Ok(None) => OutgoingByeGenerationWake::RetryCurrentGeneration,
     }
+}
+
+/// Return whether exact cleanup must interrupt an incomplete local-BYE
+/// confirmation. A terminal completion is the handoff receipt for the
+/// retained hangup owner: response-driven cleanup can run before the sending
+/// state-machine action unwinds, so removing that receipt here would make the
+/// later waiter sleep until Timer F despite an already-recorded wire result.
+fn outgoing_bye_cleanup_should_interrupt_waiter(
+    current_outcome: rvoip_sip_dialog::transaction::TransactionResult<
+        Option<ClientTransactionOutcome>,
+    >,
+    wait_intent_registered: bool,
+) -> bool {
+    matches!(current_outcome, Ok(None)) || !wait_intent_registered
 }
 
 fn data_message_auth_realm(selected: &crate::auth::ClientAuthHeader) -> String {
@@ -218,6 +275,40 @@ fn update_retained_auth_exact<R>(
         .map_err(|_| SessionError::InvalidTransition(unavailable.to_string()))?
 }
 
+/// Publish the exact lower-layer dialog identity before the initial INVITE is
+/// allowed onto the wire.
+///
+/// A loopback peer can answer synchronously during dispatch.  The response
+/// handler must therefore never be able to clone a session revision whose
+/// exact registry mapping is installed but whose state-local `dialog_id` is
+/// still empty.  Publishing here closes that gap; the ordinary state-machine
+/// action later observes and republishes the same identity.
+fn publish_initial_invite_dialog_exact(
+    store: &SessionStore,
+    handle: &SessionRegistryHandle,
+    dialog_id: &RvoipDialogId,
+) -> Result<()> {
+    let session_dialog_id: crate::types::DialogId = dialog_id.clone().into();
+    match store.update_session_exact_with(handle, None, |session| -> Result<()> {
+        match session.dialog_id.as_ref() {
+            Some(current) if current != &session_dialog_id => {
+                return Err(SessionError::InvalidTransition(
+                    "initial INVITE exact dialog changed before wire dispatch".to_string(),
+                ));
+            }
+            Some(_) => return Ok(()),
+            None => {}
+        }
+        session.dialog_id = Some(session_dialog_id);
+        Ok(())
+    }) {
+        Ok(result) => result,
+        Err(_) => Err(SessionError::InternalError(
+            "initial INVITE exact dialog publication failed (class=lifecycle)".to_string(),
+        )),
+    }
+}
+
 #[derive(Clone)]
 struct OutboundInitialInviteBinding {
     handle: SessionRegistryHandle,
@@ -239,6 +330,7 @@ impl OutboundInitialInviteBinding {
 /// resource/map reference cycle.
 struct OutboundInitialInviteResource {
     dialog_api: Arc<UnifiedDialogApi>,
+    store: Arc<SessionStore>,
     registry: Arc<SessionRegistry>,
     handle: SessionRegistryHandle,
     owner: InitialInviteOwner,
@@ -364,6 +456,7 @@ impl OutboundInitialInviteResource {
     ) -> Arc<Self> {
         Arc::new(Self {
             dialog_api: Arc::clone(&adapter.dialog_api),
+            store: Arc::clone(&adapter.store),
             registry: Arc::clone(adapter.store.registry()),
             handle,
             owner,
@@ -470,6 +563,7 @@ impl OutboundInitialInviteResource {
     #[allow(clippy::too_many_arguments)]
     async fn release_exact(
         dialog_api: Arc<UnifiedDialogApi>,
+        store: Arc<SessionStore>,
         registry: Arc<SessionRegistry>,
         handle: SessionRegistryHandle,
         owner: InitialInviteOwner,
@@ -558,6 +652,15 @@ impl OutboundInitialInviteResource {
             return Ok(());
         }
 
+        if store
+            .clear_dialog_session_retained_exact(&handle, &owner.dialog_id().clone().into())
+            .is_err()
+        {
+            return Err(ManagedResourceReleaseError::new(
+                "invite-session-dialog-release-failed",
+            ));
+        }
+
         if registry_map_installed {
             match registry.clear_dialog_handle_retained(&handle, owner.dialog_id().clone().into()) {
                 Ok(_)
@@ -619,6 +722,7 @@ impl ManagedSessionResource for OutboundInitialInviteResource {
         >,
     > {
         let dialog_api = Arc::clone(&self.dialog_api);
+        let store = Arc::clone(&self.store);
         let registry = Arc::clone(&self.registry);
         let handle = self.handle.clone();
         let owner = self.owner.clone();
@@ -638,6 +742,7 @@ impl ManagedSessionResource for OutboundInitialInviteResource {
         let transaction_map_installed = self.transaction_map_installed.load(Ordering::Acquire);
         Box::pin(Self::release_exact(
             dialog_api,
+            store,
             registry,
             handle,
             owner,
@@ -702,6 +807,10 @@ pub struct DialogAdapter {
     /// Exact per-session generation notification. Authentication retries wake
     /// the owning BYE waiter directly instead of requiring 10 ms polling.
     outgoing_bye_generation_watch: Arc<DashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
+    /// Number of cancellation owners spanning dispatch through confirmation.
+    /// A terminal receipt is preserved across response-driven cleanup only
+    /// while this exact session has at least one such owner.
+    outgoing_bye_wait_intents: Arc<DashMap<SessionId, OutgoingByeWaitIntentState>>,
     next_outgoing_bye_generation: Arc<AtomicU64>,
     /// Timer F / configured non-INVITE transaction horizon used by the
     /// retained local-BYE cleanup owner.
@@ -829,6 +938,7 @@ impl DialogAdapter {
             outgoing_invite_tx: Arc::new(DashMap::new()),
             outgoing_bye_tx: Arc::new(DashMap::new()),
             outgoing_bye_generation_watch: Arc::new(DashMap::new()),
+            outgoing_bye_wait_intents: Arc::new(DashMap::new()),
             next_outgoing_bye_generation: Arc::new(AtomicU64::new(1)),
             non_invite_transaction_timeout,
             outbound_request_tracker: OutboundInDialogRequestTracker::new(
@@ -948,6 +1058,7 @@ impl DialogAdapter {
             "outgoing_invite_tx": self.outgoing_invite_tx.len(),
             "outgoing_bye_tx": self.outgoing_bye_tx.len(),
             "outgoing_bye_generation_watch": self.outgoing_bye_generation_watch.len(),
+            "outgoing_bye_wait_intents": self.outgoing_bye_wait_intents.len(),
             "outbound_initial_invites": self.outbound_initial_invites.len(),
             "registration_refresh_tasks": self.registration_refresh_tasks.len(),
             "lifecycle": {
@@ -1551,6 +1662,7 @@ impl DialogAdapter {
         if let Some(entry) = self.dialog_to_session.get(&rvoip_dialog_id) {
             let session_id = entry.value().clone();
             drop(entry);
+            let _bye_wait_owner = self.begin_outgoing_bye_wait(&session_id);
 
             self.mark_initial_invite_protocol_teardown(&session_id);
 
@@ -1850,6 +1962,7 @@ impl DialogAdapter {
         let resource =
             OutboundInitialInviteResource::new(self, handle.clone(), plan.owner().clone());
         let dialog_api = Arc::clone(&self.dialog_api);
+        let store = Arc::clone(&self.store);
         let authority = Arc::clone(self.store.authority());
         let operation_resource = Arc::clone(&resource);
 
@@ -1949,6 +2062,20 @@ impl DialogAdapter {
                             .await;
                         }
                     };
+
+                    // Installation publishes the exact adapter/registry
+                    // mappings. Mirror that identity into SessionState before
+                    // dispatch: a synchronous 200 OK may otherwise publish an
+                    // Active snapshot cloned from the pre-install revision and
+                    // make an immediate BYE fail its ownership check.
+                    if let Err(error) = publish_initial_invite_dialog_exact(
+                        store.as_ref(),
+                        &operation_resource.handle,
+                        operation_resource.owner.dialog_id(),
+                    ) {
+                        drop(installed);
+                        return rollback_owned_invite(operation, Err(error)).await;
+                    }
 
                     tracing::trace!("staged initial INVITE dispatch starting");
                     let completion = dialog_api.dispatch_initial_invite(installed).wait().await;
@@ -2698,6 +2825,33 @@ impl DialogAdapter {
     fn next_outgoing_bye_generation(&self) -> u64 {
         self.next_outgoing_bye_generation
             .fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Publish cancellation-safe intent before any BYE wire dispatch. Exact
+    /// response cleanup can then preserve a terminal receipt across the small
+    /// dispatch-to-wait gap, while dropping the last owner reclaims a receipt
+    /// if its public future is cancelled or exits on a bookkeeping error.
+    pub(crate) fn begin_outgoing_bye_wait(&self, session_id: &SessionId) -> OutgoingByeWaitOwner {
+        let after_generation = self
+            .outgoing_bye_tx
+            .get(session_id)
+            .map_or(0, |transaction| transaction.generation);
+        self.outgoing_bye_wait_intents
+            .entry(session_id.clone())
+            .and_modify(|intent| {
+                intent.owners = intent.owners.saturating_add(1);
+                intent.min_after_generation = intent.min_after_generation.min(after_generation);
+            })
+            .or_insert(OutgoingByeWaitIntentState {
+                owners: 1,
+                min_after_generation: after_generation,
+            });
+        OutgoingByeWaitOwner {
+            session_id: session_id.clone(),
+            wait_intents: Arc::clone(&self.outgoing_bye_wait_intents),
+            transactions: Arc::clone(&self.outgoing_bye_tx),
+            generation_watch: Arc::clone(&self.outgoing_bye_generation_watch),
+        }
     }
 
     fn retain_outgoing_bye_transaction(
@@ -3680,12 +3834,22 @@ impl DialogAdapter {
                         .is_some_and(|dialog_id| binding.owner.dialog_id() == dialog_id)
             });
 
-        // Exact terminal cleanup supersedes further BYE confirmation/auth
-        // work. Drop the retained completion owner before any lower cleanup
-        // suspension so a bounded adapter fallback wakes the retained hangup
-        // supervisor instead of leaving it asleep until Timer F.
+        // Incomplete confirmation/auth work cannot outlive exact terminal
+        // cleanup. Drop that owner before any lower cleanup suspension so its
+        // retained supervisor wakes instead of sleeping until Timer F.
+        //
+        // Preserve an already-terminal completion, however. A fast peer
+        // response can trigger this cleanup before SendBYE unwinds and before
+        // the hangup supervisor enters its confirmation wait. The completion
+        // is then the only exact handoff receipt proving the wire outcome; the
+        // supervisor consumes and clears it as soon as dispatch unwinds.
         if let Some(transaction) = outgoing_bye.as_ref() {
-            self.clear_outgoing_bye_transaction(session_id, transaction);
+            if outgoing_bye_cleanup_should_interrupt_waiter(
+                transaction.completion.current_outcome(),
+                self.outgoing_bye_wait_intents.contains_key(session_id),
+            ) {
+                self.clear_outgoing_bye_transaction(session_id, transaction);
+            }
         }
 
         // Serialize cleanup with exact-dialog DataMessage dispatch. Holding
@@ -4140,7 +4304,7 @@ impl DialogAdapter {
         to_uri: &str,
         event_package: &str,
         expires: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<EventType>> {
         tracing::info!(
             "Sending SUBSCRIBE for session {} from {} to {} for event {}",
             session_id.0,
@@ -4172,28 +4336,18 @@ impl DialogAdapter {
             session_id.0
         );
 
-        // Handle response and potentially store dialog ID
-        if response.status_code() == 200 || response.status_code() == 202 {
-            // Extract dialog ID from response if present
-            // This would normally come from the response headers
-            // For now, emit subscription accepted event
-            let event = RvoipCrossCrateEvent::DialogToSession(
-                rvoip_infra_common::events::cross_crate::DialogToSessionEvent::SubscriptionAccepted {
-                    session_id: session_id.0.clone(),
-                }
-            );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
+        // Return the response-driven follow-up to the state-machine queue.
+        // Publishing it synchronously through the global bus would re-enter
+        // this exact session while its complete-event lane is still held.
+        let follow_up = if response.status_code() == 200 || response.status_code() == 202 {
+            Some(EventType::SubscriptionAccepted)
         } else if response.status_code() >= 400 {
-            let event = RvoipCrossCrateEvent::DialogToSession(
-                rvoip_infra_common::events::cross_crate::DialogToSessionEvent::SubscriptionFailed {
-                    session_id: session_id.0.clone(),
-                    status_code: response.status_code(),
-                },
-            );
-            let _ = self.global_coordinator.publish(Arc::new(event)).await;
-        }
+            Some(EventType::SubscriptionFailed(response.status_code()))
+        } else {
+            None
+        };
 
-        Ok(())
+        Ok(follow_up)
     }
 
     /// Send a NOTIFY request within a subscription dialog
@@ -4755,7 +4909,7 @@ impl DialogAdapter {
         to_uri: &str,
         body: String,
         in_dialog: bool,
-    ) -> Result<()> {
+    ) -> Result<Option<EventType>> {
         tracing::info!(
             "Sending MESSAGE for session {} from {} to {} (in_dialog: {})",
             session_id.0,
@@ -4782,6 +4936,8 @@ impl DialogAdapter {
                 .map_err(|e| {
                     SessionError::DialogError(format!("Failed to send MESSAGE in dialog: {}", e))
                 })?;
+            tracing::info!("MESSAGE sent successfully for session {}", session_id.0);
+            return Ok(None);
         } else {
             // Send MESSAGE as standalone (no dialog). dialog-core owns the
             // wire-ready SIP request construction.
@@ -4797,27 +4953,16 @@ impl DialogAdapter {
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send MESSAGE: {}", e)))?;
 
-            // Handle response
-            if response.status_code() == 200 {
-                let event = RvoipCrossCrateEvent::DialogToSession(
-                    rvoip_infra_common::events::cross_crate::DialogToSessionEvent::MessageDelivered {
-                        session_id: session_id.0.clone(),
-                    }
-                );
-                let _ = self.global_coordinator.publish(Arc::new(event)).await;
+            let follow_up = if response.status_code() == 200 {
+                Some(EventType::MessageDelivered)
             } else if response.status_code() >= 400 {
-                let event = RvoipCrossCrateEvent::DialogToSession(
-                    rvoip_infra_common::events::cross_crate::DialogToSessionEvent::MessageFailed {
-                        session_id: session_id.0.clone(),
-                        status_code: response.status_code(),
-                    },
-                );
-                let _ = self.global_coordinator.publish(Arc::new(event)).await;
-            }
+                Some(EventType::MessageFailed(response.status_code()))
+            } else {
+                None
+            };
+            tracing::info!("MESSAGE sent successfully for session {}", session_id.0);
+            return Ok(follow_up);
         }
-
-        tracing::info!("MESSAGE sent successfully for session {}", session_id.0);
-        Ok(())
     }
 
     // ===== Helper Methods =====
@@ -4857,6 +5002,7 @@ impl Clone for DialogAdapter {
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
             outgoing_bye_tx: self.outgoing_bye_tx.clone(),
             outgoing_bye_generation_watch: self.outgoing_bye_generation_watch.clone(),
+            outgoing_bye_wait_intents: self.outgoing_bye_wait_intents.clone(),
             next_outgoing_bye_generation: self.next_outgoing_bye_generation.clone(),
             non_invite_transaction_timeout: self.non_invite_transaction_timeout,
             outbound_request_tracker: self.outbound_request_tracker.clone(),
@@ -4939,6 +5085,22 @@ mod tests {
     }
 
     #[test]
+    fn recorded_bye_success_survives_cleanup_before_waiter_lookup() {
+        let outcome = Ok(Some(ClientTransactionOutcome::FinalResponse(
+            rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok),
+        )));
+
+        assert!(!outgoing_bye_cleanup_should_interrupt_waiter(outcome, true));
+        assert!(outgoing_bye_cleanup_should_interrupt_waiter(Ok(None), true));
+        assert!(outgoing_bye_cleanup_should_interrupt_waiter(
+            Ok(Some(ClientTransactionOutcome::FinalResponse(
+                rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok),
+            ))),
+            false,
+        ));
+    }
+
+    #[test]
     fn exact_response_transaction_diagnostics_are_bounded_and_redacted() {
         const SECRET_BRANCH: &str = "z9hG4bK-exact-response-secret-branch";
         const SECRET_METHOD: &str = "X-EXACT-RESPONSE-SECRET-METHOD";
@@ -4959,6 +5121,53 @@ mod tests {
         assert!(
             !source.contains(&forbidden_raw_format),
             "exact response diagnostics regained raw transaction formatting"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_invite_publishes_exact_dialog_before_wire_dispatch() {
+        let store = SessionStore::new();
+        let session_id = SessionId::new();
+        let created = store
+            .create_session(session_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create exact initial-INVITE session");
+        let handle = created
+            .lifecycle_handle
+            .clone()
+            .expect("initial INVITE has exact lifecycle handle");
+        let dialog_id = RvoipDialogId::new();
+
+        publish_initial_invite_dialog_exact(&store, &handle, &dialog_id)
+            .expect("publish exact dialog before dispatch");
+        let published = store
+            .get_session_snapshot(&session_id)
+            .await
+            .expect("read pre-wire session publication");
+        assert_eq!(
+            published
+                .dialog_id
+                .as_ref()
+                .map(crate::types::DialogId::as_uuid),
+            Some(&dialog_id.0)
+        );
+
+        publish_initial_invite_dialog_exact(&store, &handle, &dialog_id)
+            .expect("same exact dialog publication is idempotent");
+        let replacement = RvoipDialogId::new();
+        assert!(matches!(
+            publish_initial_invite_dialog_exact(&store, &handle, &replacement),
+            Err(SessionError::InvalidTransition(_))
+        ));
+        assert_eq!(
+            store
+                .get_session_snapshot(&session_id)
+                .await
+                .expect("read exact dialog after rejected replacement")
+                .dialog_id
+                .as_ref()
+                .map(crate::types::DialogId::as_uuid),
+            Some(&dialog_id.0)
         );
     }
 

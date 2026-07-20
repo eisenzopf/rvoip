@@ -1403,9 +1403,12 @@ impl SessionHandle {
     ///
     /// This is the handle-first equivalent of
     /// [`StreamPeer::wait_for_answered`](crate::StreamPeer::wait_for_answered).
-    /// It returns immediately when the current call state is already
-    /// established, otherwise it waits for [`Event::CallAnswered`]. The
-    /// timeout only cancels this wait.
+    /// It returns immediately when authoritative answer evidence has already
+    /// been recorded, otherwise it waits for [`Event::CallAnswered`]. A raw
+    /// `Active` state is not sufficient because the state machine publishes
+    /// its next state before answer actions finish; treating that intermediate
+    /// state as ready could race immediate call control with those actions.
+    /// The timeout only cancels this wait.
     pub async fn wait_for_answered(&self, timeout: Option<Duration>) -> Result<SessionHandle> {
         let rx = self.coordinator.lifecycle_watcher(&self.call_id);
         wait_for_lifecycle(
@@ -1414,7 +1417,7 @@ impl SessionHandle {
             timeout,
             "wait_for_answered timed out",
             |snapshot| {
-                if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+                if snapshot.answered.is_some() {
                     return Ok(Some(self.clone()));
                 }
                 if let Some(err) = terminal_error(snapshot, "answer") {
@@ -1772,6 +1775,51 @@ mod tests {
         .await;
 
         let answered = waiter.await.unwrap().unwrap();
+        assert_eq!(answered.id(), &call_id);
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_handle_wait_for_answered_rejects_intermediate_active_state() {
+        let coordinator = UnifiedCoordinator::new(test_config(35685)).await.unwrap();
+        let call_id = SessionId::new();
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .create_session(call_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create answer-readiness session");
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .update_session_with(&call_id, |session| {
+                session.call_state = CallState::Active;
+            })
+            .await
+            .expect("publish intermediate Active state");
+        let handle = SessionHandle::new(call_id.clone(), coordinator.clone());
+
+        assert!(matches!(
+            handle
+                .wait_for_answered(Some(Duration::from_millis(25)))
+                .await,
+            Err(SessionError::Timeout(_))
+        ));
+
+        publish_synthetic(
+            &coordinator,
+            Event::CallAnswered {
+                call_id: call_id.clone(),
+                sdp: None,
+            },
+        )
+        .await;
+        let answered = handle
+            .wait_for_answered(Some(Duration::from_secs(1)))
+            .await
+            .expect("authoritative answer publication releases waiter");
         assert_eq!(answered.id(), &call_id);
         coordinator.shutdown();
     }

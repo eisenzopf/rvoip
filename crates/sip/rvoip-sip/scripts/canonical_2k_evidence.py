@@ -25,7 +25,8 @@ ACCEPTANCE_SPEC.loader.exec_module(ACCEPTANCE)
 
 CANONICAL_SCENARIO = "perf_call_setup_cps_pbx-media-server"
 MANIFEST_SCHEMA = "rvoip-perf-profile-manifest-v2"
-INDEX_SCHEMA = "rvoip-canonical-2k-evidence-v1"
+INDEX_SCHEMA = "rvoip-canonical-2k-evidence-v2"
+ACCEPTANCE_SCHEMA = "rvoip-sip-2k-acceptance-v3"
 
 
 class EvidenceError(RuntimeError):
@@ -130,6 +131,17 @@ def tree_sha256(root):
     return digest.hexdigest()
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    try:
+        with pathlib.Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as error:
+        raise EvidenceError(f"cannot hash executable {path}: {error}") from error
+    return digest.hexdigest()
+
+
 def parse_timestamp(value, label):
     if not isinstance(value, str):
         raise EvidenceError(f"{label} must be an ISO-8601 string")
@@ -206,7 +218,7 @@ def validate_run(run_dir, expected_fingerprint):
         )
 
     acceptance = load_json(run_dir / "acceptance.json", "acceptance")
-    require_equal(acceptance, "schema", "rvoip-sip-2k-acceptance-v2", "acceptance")
+    require_equal(acceptance, "schema", ACCEPTANCE_SCHEMA, "acceptance")
     require_equal(acceptance, "status", "PASS", "acceptance")
     if not acceptance.get("checks") or any(
         check.get("passed") is not True for check in acceptance["checks"]
@@ -229,6 +241,19 @@ def validate_run(run_dir, expected_fingerprint):
     executable_digest = manifest.get("executable_sha256")
     if not valid_fingerprint(executable_digest):
         raise EvidenceError(f"{run_dir.name} exact executable hash is invalid or unknown")
+    executable_value = manifest.get("executable")
+    if not isinstance(executable_value, str) or not executable_value:
+        raise EvidenceError(f"{run_dir.name} exact executable path is missing")
+    executable_path = pathlib.Path(executable_value).resolve()
+    if not executable_path.is_file():
+        raise EvidenceError(
+            f"{run_dir.name} exact executable does not exist: {executable_path}"
+        )
+    actual_executable_digest = file_sha256(executable_path)
+    if actual_executable_digest != executable_digest:
+        raise EvidenceError(
+            f"{run_dir.name} exact executable content differs from manifest hash"
+        )
 
     captured_at = parse_timestamp(manifest.get("captured_at_utc"), "captured_at_utc")
     return {
@@ -236,6 +261,7 @@ def validate_run(run_dir, expected_fingerprint):
         "captured_at": captured_at,
         "captured_at_utc": manifest["captured_at_utc"],
         "source_fingerprint_sha256": expected_fingerprint,
+        "executable_path": executable_path,
         "executable_sha256": executable_digest,
         "tree_sha256": tree_sha256(run_dir),
     }
@@ -281,6 +307,12 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
     beta_start = require_current_source(workspace_root, beta_start_path)
     fingerprint = beta_start["source_fingerprint_sha256"]
     validated = [validate_run(path, fingerprint) for path in resolved]
+    executable_hashes = {item["executable_sha256"] for item in validated}
+    if len(executable_hashes) != 1:
+        raise EvidenceError(
+            "canonical runs were not produced by one identical exact executable"
+        )
+    common_executable_sha256 = next(iter(executable_hashes))
     timestamps = [item["captured_at"] for item in validated]
     if any(left >= right for left, right in zip(timestamps, timestamps[1:])):
         raise EvidenceError(
@@ -295,6 +327,11 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
         tempfile.mkdtemp(prefix=".canonical-2k-staging-", dir=artifact_dir)
     )
     try:
+        packaged_executable = staging / "executable" / validated[0]["executable_path"].name
+        packaged_executable.parent.mkdir(parents=True)
+        shutil.copy2(validated[0]["executable_path"], packaged_executable)
+        if file_sha256(packaged_executable) != common_executable_sha256:
+            raise EvidenceError("packaged exact executable hash changed during copy")
         runs_index = []
         for index, item in enumerate(validated, start=1):
             target = staging / f"run-{index}"
@@ -323,6 +360,8 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
             "run_count": 3,
             "source_at_beta_start": beta_start,
             "common_source_fingerprint_sha256": fingerprint,
+            "common_executable_sha256": common_executable_sha256,
+            "packaged_executable": packaged_executable.relative_to(staging).as_posix(),
             "runs": runs_index,
         }
         (staging / "index.json").write_text(
@@ -332,7 +371,9 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
             "# Canonical 2,000-CPS Evidence\n\n"
             "Three chronological clean PASS runs, validated against the current "
             "absolute acceptance and relative-audit gates and one beta-start "
-            "source fingerprint. See `index.json` and each `run-N/manifest.json`.\n",
+            "source fingerprint. All runs used one byte-identical executable, "
+            "which is packaged and re-hashed here. See `index.json` and each "
+            "`run-N/manifest.json`.\n",
             encoding="utf-8",
         )
         staging.replace(destination)

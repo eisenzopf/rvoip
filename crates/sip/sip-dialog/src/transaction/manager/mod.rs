@@ -1120,6 +1120,12 @@ enum TransactionManagerEventReceiver {
 struct TransactionAdmissionRegistry {
     entries: DashMap<TransactionKey, u64>,
     next_generation: AtomicU64,
+    /// Exact-key cleanup invoked while the retiring admission generation still
+    /// owns the wire key. The dialog layer uses this as a backstop when its
+    /// authoritative terminal event cannot be observed (for example, because
+    /// the primary event receiver closed).
+    final_release_hook:
+        std::sync::RwLock<Option<Arc<dyn Fn(&TransactionKey) + Send + Sync + 'static>>>,
 }
 
 const MANAGER_ADMISSION_RUNNING: u8 = 0;
@@ -1281,7 +1287,18 @@ impl TransactionAdmissionRegistry {
         Arc::new(Self {
             entries: DashMap::new(),
             next_generation: AtomicU64::new(1),
+            final_release_hook: std::sync::RwLock::new(None),
         })
+    }
+
+    fn install_final_release_hook(
+        &self,
+        hook: Arc<dyn Fn(&TransactionKey) + Send + Sync + 'static>,
+    ) {
+        *self
+            .final_release_hook
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     }
 
     fn try_claim(self: &Arc<Self>, key: &TransactionKey) -> Option<TransactionAdmissionOwner> {
@@ -1312,9 +1329,26 @@ struct TransactionAdmissionOwnerInner {
 
 impl Drop for TransactionAdmissionOwnerInner {
     fn drop(&mut self) {
-        self.registry
-            .entries
-            .remove_if(&self.key, |_, generation| *generation == self.generation);
+        use dashmap::mapref::entry::Entry;
+
+        // Keep the registry entry occupied through the callback. A replacement
+        // generation therefore cannot publish a same-key dialog route between
+        // cleanup and admission release (the ABA case this fence prevents).
+        if let Entry::Occupied(entry) = self.registry.entries.entry(self.key.clone()) {
+            if *entry.get() != self.generation {
+                return;
+            }
+            let hook = self
+                .registry
+                .final_release_hook
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(hook) = hook {
+                hook(&self.key);
+            }
+            entry.remove();
+        }
     }
 }
 
@@ -2349,6 +2383,18 @@ impl TransactionManager {
                 scheduler.require_dialog_terminal_ack();
             }
         }
+    }
+
+    /// Install the integrated dialog consumer's exact-key route cleanup
+    /// backstop. The callback runs before the final admission generation is
+    /// released, after every owner spanning active, compact, delivery, and
+    /// dialog-ack state has gone away.
+    pub(crate) fn install_transaction_admission_release_hook<F>(&self, hook: F)
+    where
+        F: Fn(&TransactionKey) + Send + Sync + 'static,
+    {
+        self.transaction_admissions
+            .install_final_release_hook(Arc::new(hook));
     }
 
     pub(crate) fn dialog_terminal_consumer_attach_state_is_clean(&self) -> bool {

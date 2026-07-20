@@ -1835,6 +1835,13 @@ impl DialogManager {
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
+        let transaction_dialog_route_hash = Arc::new(DashMap::with_capacity(index_capacity));
+        let weak_transaction_dialog_route_hash = Arc::downgrade(&transaction_dialog_route_hash);
+        transaction_manager.install_transaction_admission_release_hook(move |transaction_id| {
+            if let Some(route_hashes) = weak_transaction_dialog_route_hash.upgrade() {
+                route_hashes.remove(transaction_id);
+            }
+        });
 
         // Create dialog event channel for subscription manager
         let (event_tx, _) = mpsc::channel(100);
@@ -1858,7 +1865,7 @@ impl DialogManager {
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_transaction: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_transport_by_request_key: Arc::new(DashMap::with_capacity(index_capacity)),
-            transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
+            transaction_dialog_route_hash,
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             invite_failover_plans: Arc::new(DashMap::with_capacity(
                 retained_plan_capacity.min(INITIAL_RETAINED_PLAN_INDEX_CAPACITY),
@@ -5631,6 +5638,74 @@ mod outbound_flow_handler_tests {
         assert!(!manager
             .transaction_dialog_route_hash
             .contains_key(&invite_tx));
+    }
+
+    #[tokio::test]
+    async fn admission_release_clears_route_when_terminal_observation_is_lost() {
+        use rvoip_sip_transport::transport::TransportRoute;
+
+        let manager = make_manager_with_global_processor().await;
+        let source = dest_addr(5070);
+        let request = dispatch_request(Method::Options, "z9hG4bK-lost-terminal-route", 1);
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction_deferred_events_on_route(
+                request.clone(),
+                TransportRoute::new(source).with_transport_type(TransportType::Tcp),
+            )
+            .await
+            .expect("server transaction");
+        let transaction_id = transaction.id().clone();
+        let fallback = AtomicUsize::new(0);
+
+        manager.dialog_event_dispatch_worker_index(
+            &TransactionEvent::NonInviteRequest {
+                transaction_id: transaction_id.clone(),
+                request,
+                source,
+            },
+            8,
+            &fallback,
+        );
+        assert!(manager
+            .transaction_dialog_route_hash
+            .contains_key(&transaction_id));
+
+        // Simulate the failed terminal-observation path from the soak: the
+        // dialog event consumer disappears after request routing but before
+        // TransactionTerminated can cross it.
+        let event_processor = manager
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .event_processor
+            .take()
+            .expect("dialog event processor");
+        event_processor.abort();
+        let _ = event_processor.await;
+        drop(transaction);
+
+        manager
+            .transaction_manager()
+            .terminate_transaction(&transaction_id)
+            .await
+            .expect("terminate transaction after event consumer loss");
+
+        for _ in 0..50 {
+            if !manager
+                .transaction_dialog_route_hash
+                .contains_key(&transaction_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !manager
+                .transaction_dialog_route_hash
+                .contains_key(&transaction_id),
+            "final admission release must exact-remove a route whose terminal event was lost"
+        );
     }
 
     #[tokio::test]

@@ -202,7 +202,9 @@ async fn perf_burst_receiver() {
     let rss = support::soak::rss_result_metrics(
         &resources,
         active_secs,
+        active_secs,
         retention_drain_wait.as_secs_f64(),
+        support::soak::RssGatePolicy::PostDrainOrTail,
     );
     let rss_gate_enforced =
         rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;

@@ -131,7 +131,7 @@ pub struct ResourceWindowSummary {
     /// timestamp separation.
     pub rss_endpoint_growth_mb_per_hour: Option<f64>,
     /// Target duration of each endpoint band. Bands use the first and last
-    /// sixth of the observed window, capped at 15 seconds.
+    /// sixth of the observed window, capped at 60 seconds.
     pub rss_endpoint_band_secs: f64,
     pub rss_start_sample_count: usize,
     pub rss_end_sample_count: usize,
@@ -435,7 +435,7 @@ struct RobustEndpointSummary {
 /// a signed, operationally meaningful absolute delta.
 fn robust_endpoint_summary(samples: &[ResourceSample]) -> Option<RobustEndpointSummary> {
     const MIN_ENDPOINT_SAMPLES: usize = 3;
-    const MAX_ENDPOINT_BAND_SECS: f64 = 15.0;
+    const MAX_ENDPOINT_BAND_SECS: f64 = 60.0;
 
     if samples.len() < MIN_ENDPOINT_SAMPLES * 2 {
         return None;
@@ -607,27 +607,28 @@ mod tests {
         assert_eq!(summary.sample_count, 71);
         assert_eq!(summary.actual_coverage_secs, 35.0);
         assert!((summary.rss_growth_mb_per_min - 30.0).abs() < 0.001);
+        assert!((summary.rss_endpoint_band_secs - (35.0 / 6.0)).abs() < 0.001);
     }
 
     #[test]
     fn explicit_requested_coverage_ignores_delayed_sampler_stop() {
-        let samples = (0..=190)
+        let samples = (0..=1_200)
             .map(|index| sample(10.0 + index as f64 * 0.5, 4500.0))
             .collect::<Vec<_>>();
         let summary = summarize_window(
             &samples,
             ResourceWindowSpec::with_requested_coverage(
                 "post_drain_cleanup",
-                "calls_drained",
+                "post_drain_cleanup_start",
                 "post_drain_cleanup_end",
                 Duration::from_secs(10),
-                Duration::from_secs_f64(105.001947),
-                Duration::from_secs(95),
+                Duration::from_secs_f64(610.001947),
+                Duration::from_secs(600),
             ),
             0.5,
         );
-        assert_eq!(summary.requested_coverage_secs, 95.0);
-        assert_eq!(summary.actual_coverage_secs, 95.0);
+        assert_eq!(summary.requested_coverage_secs, 600.0);
+        assert_eq!(summary.actual_coverage_secs, 600.0);
         assert!(summary.complete);
     }
 
@@ -646,10 +647,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let summary = robust_endpoint_summary(&samples).expect("robust endpoint summary");
-        assert_eq!(summary.band_secs, 15.0);
+        assert!((summary.band_secs - (95.0 / 6.0)).abs() < 0.001);
         assert!((summary.end_median_mb - summary.start_median_mb - 1.0).abs() < 0.001);
         assert!(
-            (summary.end_representative_secs - summary.start_representative_secs - 80.0).abs()
+            (summary.end_representative_secs - summary.start_representative_secs - 79.5).abs()
                 < 0.001
         );
         assert!(summary.start_sample_count >= 30);
@@ -670,7 +671,7 @@ mod tests {
 
     #[test]
     fn endpoint_rate_uses_representative_timestamp_separation() {
-        let samples = (0..=190)
+        let samples = (0..=1_200)
             .map(|index| {
                 let t_secs = index as f64 * 0.5;
                 sample(t_secs, 4500.0 + 10.5 * t_secs / 3600.0)
@@ -680,15 +681,66 @@ mod tests {
             &samples,
             ResourceWindowSpec::new(
                 "post_drain_cleanup",
-                "calls_drained",
+                "post_drain_cleanup_start",
                 "post_drain_cleanup_end",
                 Duration::ZERO,
-                Duration::from_secs(95),
+                Duration::from_secs(600),
             ),
             0.5,
         );
 
-        assert!((window.rss_endpoint_separation_secs.unwrap() - 80.0).abs() < 0.001);
+        assert_eq!(window.rss_endpoint_band_secs, 60.0);
+        assert!((window.rss_endpoint_separation_secs.unwrap() - 540.0).abs() < 0.001);
         assert!((window.rss_endpoint_growth_mb_per_hour.unwrap() - 10.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn powered_window_does_not_project_sub_mb_allocator_step_above_ten_per_hour() {
+        let samples = (0..=1_200)
+            .map(|index| {
+                let t_secs = index as f64 * 0.5;
+                let bounded_allocator_step = if t_secs >= 300.0 { 0.99 } else { 0.0 };
+                sample(t_secs, 4500.0 + bounded_allocator_step)
+            })
+            .collect::<Vec<_>>();
+        let window = summarize_window(
+            &samples,
+            ResourceWindowSpec::new(
+                "post_drain_cleanup",
+                "post_drain_cleanup_start",
+                "post_drain_cleanup_end",
+                Duration::ZERO,
+                Duration::from_secs(600),
+            ),
+            0.5,
+        );
+
+        assert_eq!(window.rss_endpoint_band_secs, 60.0);
+        assert!((window.rss_retained_growth_mb.unwrap() - 0.99).abs() < 0.001);
+        assert!(window.rss_endpoint_separation_secs.unwrap() >= 360.0);
+        assert!(window.rss_endpoint_growth_mb_per_hour.unwrap() < 10.0);
+    }
+
+    #[test]
+    fn powered_window_still_rejects_sustained_growth_above_ten_per_hour() {
+        let samples = (0..=1_200)
+            .map(|index| {
+                let t_secs = index as f64 * 0.5;
+                sample(t_secs, 4500.0 + 10.01 * t_secs / 3600.0)
+            })
+            .collect::<Vec<_>>();
+        let window = summarize_window(
+            &samples,
+            ResourceWindowSpec::new(
+                "post_drain_cleanup",
+                "post_drain_cleanup_start",
+                "post_drain_cleanup_end",
+                Duration::ZERO,
+                Duration::from_secs(600),
+            ),
+            0.5,
+        );
+
+        assert!(window.rss_endpoint_growth_mb_per_hour.unwrap() > 10.0);
     }
 }

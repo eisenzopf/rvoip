@@ -127,6 +127,12 @@ class CanonicalEvidenceTests(unittest.TestCase):
         update(value)
         path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
+    def rewrite_acceptance(self, run_dir, update):
+        path = run_dir / "acceptance.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        update(value)
+        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
     def test_three_passes_are_validated_copied_and_indexed(self):
         artifact_dir = self.root / "artifacts"
         destination = evidence.import_evidence(
@@ -137,6 +143,10 @@ class CanonicalEvidenceTests(unittest.TestCase):
         self.assertEqual(index["status"], "PASS")
         self.assertEqual(index["run_count"], 3)
         self.assertEqual(index["common_source_fingerprint_sha256"], self.fingerprint)
+        self.assertEqual(index["common_executable_sha256"], self.binary_sha256)
+        packaged_executable = destination / index["packaged_executable"]
+        self.assertTrue(packaged_executable.is_file())
+        self.assertEqual(evidence.file_sha256(packaged_executable), self.binary_sha256)
         for sequence in range(1, 4):
             copied = destination / f"run-{sequence}" / "manifest.json"
             self.assertTrue(copied.is_file())
@@ -147,6 +157,18 @@ class CanonicalEvidenceTests(unittest.TestCase):
             self.runs[1], lambda manifest: manifest.update(overall_status="FAIL")
         )
         with self.assertRaisesRegex(evidence.EvidenceError, "overall_status"):
+            evidence.import_evidence(
+                self.workspace, self.beta_start, self.root / "artifacts", self.runs
+            )
+
+    def test_stale_persisted_acceptance_schema_is_rejected(self):
+        self.rewrite_acceptance(
+            self.runs[0],
+            lambda acceptance: acceptance.update(
+                schema="rvoip-sip-2k-acceptance-v2"
+            ),
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "acceptance.schema"):
             evidence.import_evidence(
                 self.workspace, self.beta_start, self.root / "artifacts", self.runs
             )
@@ -175,6 +197,22 @@ class CanonicalEvidenceTests(unittest.TestCase):
                 self.beta_start,
                 self.root / "artifacts",
                 [self.runs[1], self.runs[0], self.runs[2]],
+            )
+
+    def test_runs_must_share_one_byte_identical_executable(self):
+        other_binary = self.binary.with_name("fixture-bin-other")
+        other_binary.write_bytes(b"different canonical executable")
+        other_binary.chmod(0o755)
+        other_sha256 = evidence.file_sha256(other_binary)
+        self.rewrite_manifest(
+            self.runs[1],
+            lambda manifest: manifest.update(
+                executable=str(other_binary), executable_sha256=other_sha256
+            ),
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "one identical exact executable"):
+            evidence.import_evidence(
+                self.workspace, self.beta_start, self.root / "artifacts", self.runs
             )
 
     def test_run_mutation_during_copy_is_rejected(self):

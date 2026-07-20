@@ -722,6 +722,12 @@ impl SessionHangupControl {
 pub(crate) struct SessionStateCell {
     current: ArcSwap<SessionStateSnapshot>,
     update_lock: StdMutex<()>,
+    /// Async serialization for complete state-machine events on this exact
+    /// lifetime. State transitions execute actions across await points, so the
+    /// synchronous revision lock cannot prevent two event-local snapshots
+    /// from later overwriting one another. Keeping the lane on the cell makes
+    /// raw-ID reuse allocate a distinct owner without a cleanup map.
+    state_machine_lane: OnceLock<Arc<tokio::sync::Mutex<()>>>,
     /// Lazily allocated exact-lifetime serialization for public hangup
     /// control. Keeping it on the cell makes raw-ID reuse allocate a distinct
     /// lane and lets ordinary sessions pay only for an empty `OnceLock`.
@@ -733,6 +739,7 @@ impl SessionStateCell {
         Self {
             current: ArcSwap::from_pointee(SessionStateSnapshot { revision: 1, state }),
             update_lock: StdMutex::new(()),
+            state_machine_lane: OnceLock::new(),
             hangup_control: OnceLock::new(),
         }
     }
@@ -751,6 +758,13 @@ impl SessionStateCell {
         Arc::clone(
             self.hangup_control
                 .get_or_init(|| Arc::new(SessionHangupControl::new())),
+        )
+    }
+
+    pub(crate) fn state_machine_lane(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.state_machine_lane
+                .get_or_init(|| Arc::new(tokio::sync::Mutex::new(()))),
         )
     }
 

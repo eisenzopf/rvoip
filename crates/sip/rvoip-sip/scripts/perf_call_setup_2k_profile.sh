@@ -26,8 +26,10 @@ Usage: perf_call_setup_2k_profile.sh <clean|cpu|timing|memory|boundary>
 
 The clean workload conditions shared peers at 30, 100, 300, and 1,000 CPS,
 then measures 2,000 CPS with a 5s ramp, 30s steady, 5s cooldown, and a
-95-second post-drain cleanup sample. It uses eight Tokio workers, four Alice
-endpoint shards, and the pbx-media-server recipe. Only clean is acceptance.
+95-second post-drain structural/allocator settle followed by a 600-second RSS
+gate sample with raw resource samples embedded. It uses eight Tokio workers,
+four Alice endpoint shards, and the pbx-media-server recipe. Only clean is
+acceptance.
 
 Useful profiler-only overrides:
   RVOIP_PERF_PROFILE_SAMPLY_RATE       samply Hz (default 1000)
@@ -69,6 +71,10 @@ if (( ${#noncanonical_build_env[@]} > 0 )); then
   exit 2
 fi
 
+# Clean evidence separates the retention/allocator settle from the RSS gate and
+# embeds the already-collected samples for attestation review. Profiler modes do
+# not claim post-drain RSS acceptance, so they skip both intervals and leave the
+# clean-only raw-sample requirement disabled.
 case "${MODE}" in
   clean)
     SCENARIO="perf_call_setup_cps_pbx-media-server"
@@ -78,7 +84,9 @@ case "${MODE}" in
     RETENTION_SNAPSHOT="0"
     BOUNDARY_SNAPSHOT="0"
     SWEEP_CPS="30,100,300,1000,2000"
-    POST_DRAIN_SAMPLE_SECS="95"
+    POST_DRAIN_SETTLE_SECS="95"
+    POST_DRAIN_SAMPLE_SECS="600"
+    EMBED_RESOURCE_SAMPLES="1"
     ;;
   cpu|timing)
     SCENARIO="perf_call_setup_cps_pbx-media-server_profile_${MODE}"
@@ -88,7 +96,9 @@ case "${MODE}" in
     RETENTION_SNAPSHOT="0"
     BOUNDARY_SNAPSHOT="0"
     SWEEP_CPS="2000"
+    POST_DRAIN_SETTLE_SECS="0"
     POST_DRAIN_SAMPLE_SECS="0"
+    EMBED_RESOURCE_SAMPLES="0"
     ;;
   memory)
     SCENARIO="perf_call_setup_cps_pbx-media-server_profile_memory"
@@ -98,7 +108,9 @@ case "${MODE}" in
     RETENTION_SNAPSHOT="1"
     BOUNDARY_SNAPSHOT="0"
     SWEEP_CPS="2000"
+    POST_DRAIN_SETTLE_SECS="0"
     POST_DRAIN_SAMPLE_SECS="0"
+    EMBED_RESOURCE_SAMPLES="0"
     ;;
   boundary)
     SCENARIO="perf_call_setup_cps_pbx-media-server_profile_boundary"
@@ -108,7 +120,9 @@ case "${MODE}" in
     RETENTION_SNAPSHOT="0"
     BOUNDARY_SNAPSHOT="1"
     SWEEP_CPS="30,100,300,1000,2000"
+    POST_DRAIN_SETTLE_SECS="0"
     POST_DRAIN_SAMPLE_SECS="0"
+    EMBED_RESOURCE_SAMPLES="0"
     FEATURES="perf-tests,perf-infra-memory-diagnostics"
     ;;
 esac
@@ -150,8 +164,9 @@ export RVOIP_PERF_REQUIRE_ALL_POINTS="${REQUIRE_ALL_POINTS}"
 export RVOIP_PERF_REQUIRE_ZERO_ERRORS="${REQUIRE_ZERO_ERRORS}"
 export RVOIP_PERF_RETENTION_SNAPSHOT="${RETENTION_SNAPSHOT}"
 export RVOIP_PERF_BOUNDARY_SNAPSHOT="${BOUNDARY_SNAPSHOT}"
-export RVOIP_PERF_EMBED_RESOURCE_SAMPLES="0"
+export RVOIP_PERF_EMBED_RESOURCE_SAMPLES="${EMBED_RESOURCE_SAMPLES}"
 export RVOIP_PERF_RSS_TAIL_WINDOW_SECS="60"
+export RVOIP_PERF_POST_DRAIN_SETTLE_SECS="${POST_DRAIN_SETTLE_SECS}"
 export RVOIP_PERF_POST_DRAIN_SAMPLE_SECS="${POST_DRAIN_SAMPLE_SECS}"
 
 # Rejected/diagnostic runtime switches stay off. The retention timeline is

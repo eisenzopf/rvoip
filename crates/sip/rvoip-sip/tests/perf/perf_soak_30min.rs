@@ -9,11 +9,10 @@
 //!
 //! - `latency_drift_pct` — `(setup p99 in last minute) / (setup p99 in
 //!   first minute) - 1`. Should stay well under 50 % on a healthy run.
-//! - `rss_gate_growth_mb_per_hr` — projection of the post-drain RSS slope
-//!   when a drain window is available, otherwise the final tail-window RSS
-//!   slope. This is the release gate because one-time allocator warmup and
-//!   bounded event-ring reservation should not masquerade as an unbounded
-//!   leak.
+//! - `rss_gate_growth_mb_per_hr` — projection of the final 600 seconds under
+//!   active load for a long soak. Short diagnostic runs fall back to the
+//!   post-drain or final tail slope. Qualifying the active window prevents a
+//!   per-call leak from being hidden by the plateau after load stops.
 //! - `errors_per_minute` — distribution; should be 0 across the run.
 //!
 //! Run via:
@@ -64,6 +63,9 @@ const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
 const DEFAULT_CONTROLLED_DRAIN_CPS: f64 = 10.0;
 const DEFAULT_ERROR_SAMPLE_LIMIT: usize = 32;
 const MAX_ERROR_MESSAGE_CHARS: usize = 256;
+const LONG_SOAK_ACTIVE_RSS_WINDOW_SECS: f64 = 600.0;
+const LONG_SOAK_MIN_ACTIVE_RSS_COVERAGE_SECS: f64 = 590.0;
+const LONG_SOAK_MIN_ACTIVE_RSS_SAMPLES: usize = 110;
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -769,6 +771,11 @@ async fn perf_soak_30min() {
     };
     let rss_growth_mb_per_hr = resources.rss_growth_mb_per_min * 60.0;
     let rss_sustained_growth_mb_per_hr = resources.rss_tail_growth_mb_per_min * 60.0;
+    let rss_active_tail = rss_active_tail_metrics(
+        &resources.samples,
+        duration_secs as f64,
+        resources.sample_interval_estimate_secs,
+    );
     let rss_post_drain_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
@@ -776,11 +783,21 @@ async fn perf_soak_30min() {
         .cloned()
         .collect();
     let rss_post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&rss_post_drain_samples) * 60.0;
-    let (rss_gate_growth_mb_per_hr, rss_gate_window) = if rss_post_drain_samples.len() >= 2 {
-        (rss_post_drain_growth_mb_per_hr, "post_drain")
-    } else {
-        (rss_sustained_growth_mb_per_hr, "tail")
-    };
+    let (rss_gate_growth_mb_per_hr, rss_gate_window) =
+        if duration_secs as f64 >= LONG_SOAK_ACTIVE_RSS_WINDOW_SECS {
+            (
+                rss_active_tail.growth_mb_per_hr,
+                if rss_active_tail.complete {
+                    "active_tail_600s"
+                } else {
+                    "active_tail_600s_incomplete"
+                },
+            )
+        } else if rss_post_drain_samples.len() >= 2 {
+            (rss_post_drain_growth_mb_per_hr, "post_drain")
+        } else {
+            (rss_sustained_growth_mb_per_hr, "tail")
+        };
     let rss_windows = rss_window_summaries(
         &resources.samples,
         duration_secs as f64,
@@ -883,6 +900,36 @@ async fn perf_soak_30min() {
             round2(rss_sustained_growth_mb_per_hr),
         )
         .result(
+            "rss_active_tail_growth_mb_per_hr",
+            round2(rss_active_tail.growth_mb_per_hr),
+        )
+        .result(
+            "rss_active_tail_sample_count",
+            rss_active_tail.sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_window_secs",
+            round2(rss_active_tail.window_secs),
+        )
+        .result("rss_active_tail_window_complete", rss_active_tail.complete)
+        .result("rss_active_tail_estimator", rss_active_tail.estimator)
+        .result(
+            "rss_active_tail_endpoint_band_secs",
+            round2(rss_active_tail.endpoint_band_secs),
+        )
+        .result(
+            "rss_active_tail_endpoint_separation_secs",
+            round2(rss_active_tail.endpoint_separation_secs),
+        )
+        .result(
+            "rss_active_tail_start_sample_count",
+            rss_active_tail.start_sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_end_sample_count",
+            rss_active_tail.end_sample_count as u64,
+        )
+        .result(
             "rss_post_drain_growth_mb_per_hr",
             round2(rss_post_drain_growth_mb_per_hr),
         )
@@ -936,6 +983,9 @@ async fn perf_soak_30min() {
             "rss_windows",
             json!({
                 "windows": rss_windows,
+                "active_tail_window_secs": round2(rss_active_tail.window_secs),
+                "active_tail_window_complete": rss_active_tail.complete,
+                "active_tail_growth_mb_per_hr": round2(rss_active_tail.growth_mb_per_hr),
                 "gate_window": rss_gate_window,
                 "gate_growth_mb_per_hr": round2(rss_gate_growth_mb_per_hr),
             }),
@@ -964,6 +1014,14 @@ async fn perf_soak_30min() {
     drop(alice);
 
     let mut gate_failures = Vec::new();
+    if duration_secs as f64 >= LONG_SOAK_ACTIVE_RSS_WINDOW_SECS && !rss_active_tail.complete {
+        gate_failures.push(format!(
+            "active RSS gate window incomplete: measured {:.2}s with {} samples; required {:.0}s",
+            rss_active_tail.window_secs,
+            rss_active_tail.sample_count,
+            LONG_SOAK_ACTIVE_RSS_WINDOW_SECS
+        ));
+    }
     if rss_gate_growth_mb_per_hr > rss_gate.effective_mb_per_hr {
         gate_failures.push(format!(
             "RSS gate growth {:.2} MB/hr over {} window exceeded effective threshold {:.2} MB/hr ({})",
@@ -1648,6 +1706,7 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_adapter/outgoing_invite_tx",
         "/dialog_adapter/outgoing_bye_tx",
         "/dialog_adapter/outgoing_bye_generation_watch",
+        "/dialog_adapter/outgoing_bye_wait_intents",
         "/dialog_adapter/outbound_initial_invites",
         "/dialog_adapter/registration_refresh_tasks",
         "/app_event_publisher/dispatcher/queued_current",
@@ -1914,6 +1973,64 @@ fn round4(v: f64) -> f64 {
     (v * 10_000.0).round() / 10_000.0
 }
 
+struct ActiveTailRssMetrics {
+    growth_mb_per_hr: f64,
+    sample_count: usize,
+    window_secs: f64,
+    complete: bool,
+    estimator: &'static str,
+    endpoint_band_secs: f64,
+    endpoint_separation_secs: f64,
+    start_sample_count: usize,
+    end_sample_count: usize,
+}
+
+fn rss_active_tail_metrics(
+    samples: &[ResourceSample],
+    active_secs: f64,
+    _sample_interval_secs: f64,
+) -> ActiveTailRssMetrics {
+    let start_secs = (active_secs - LONG_SOAK_ACTIVE_RSS_WINDOW_SECS).max(0.0);
+    let selected: Vec<ResourceSample> = samples
+        .iter()
+        .filter(|sample| sample.t_secs >= start_secs && sample.t_secs <= active_secs)
+        .cloned()
+        .collect();
+    let actual_secs = match (selected.first(), selected.last()) {
+        (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
+        _ => 0.0,
+    };
+    let endpoint = support::soak::rss_endpoint_median_growth_mb_per_hr(&selected);
+    let complete = active_secs >= LONG_SOAK_ACTIVE_RSS_WINDOW_SECS
+        && actual_secs >= LONG_SOAK_MIN_ACTIVE_RSS_COVERAGE_SECS
+        && selected.len() >= LONG_SOAK_MIN_ACTIVE_RSS_SAMPLES
+        && endpoint.is_some();
+    ActiveTailRssMetrics {
+        growth_mb_per_hr: endpoint.as_ref().map_or_else(
+            || rss_growth_mb_per_min(&selected) * 60.0,
+            |estimate| estimate.growth_mb_per_hr,
+        ),
+        sample_count: selected.len(),
+        window_secs: actual_secs,
+        complete,
+        estimator: if endpoint.is_some() {
+            "median_first_last_sixth_capped_60s"
+        } else {
+            "unavailable_ols_diagnostic_only"
+        },
+        endpoint_band_secs: endpoint.as_ref().map_or(0.0, |estimate| estimate.band_secs),
+        endpoint_separation_secs: endpoint
+            .as_ref()
+            .map_or(0.0, |estimate| estimate.separation_secs),
+        start_sample_count: endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.start_sample_count),
+        end_sample_count: endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.end_sample_count),
+    }
+}
+
 fn rss_growth_mb_per_min(samples: &[ResourceSample]) -> f64 {
     if samples.len() < 2 {
         return 0.0;
@@ -2061,6 +2178,131 @@ mod tests {
         });
     }
 
+    fn linear_rss_samples(end_secs: u64) -> Vec<ResourceSample> {
+        (0..=end_secs)
+            .step_by(5)
+            .map(|second| ResourceSample {
+                t_secs: second as f64,
+                rss_mb: 100.0 + second as f64 * 0.01,
+                cpu_pct: 0.0,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn active_tail_measurement_requires_and_covers_ten_minutes() {
+        let samples = linear_rss_samples(640);
+        let metrics = rss_active_tail_metrics(&samples, 640.0, 5.0);
+        assert!(metrics.complete);
+        assert_eq!(metrics.sample_count, 121);
+        assert_eq!(metrics.window_secs, 600.0);
+        assert_eq!(metrics.estimator, "median_first_last_sixth_capped_60s");
+        assert!((metrics.growth_mb_per_hr - 36.0).abs() < 0.000_001);
+
+        assert!(!rss_active_tail_metrics(&samples, 599.0, 5.0).complete);
+
+        let sparse = vec![
+            ResourceSample {
+                t_secs: 0.0,
+                rss_mb: 100.0,
+                cpu_pct: 0.0,
+            },
+            ResourceSample {
+                t_secs: 400.0,
+                rss_mb: 101.0,
+                cpu_pct: 0.0,
+            },
+        ];
+        assert!(!rss_active_tail_metrics(&sparse, 600.0, 400.0).complete);
+
+        let endpoint_gap = std::iter::once(ResourceSample {
+            t_secs: 0.0,
+            rss_mb: 100.0,
+            cpu_pct: 0.0,
+        })
+        .chain((12..=120).map(|index| ResourceSample {
+            t_secs: index as f64 * 5.0,
+            rss_mb: 100.0,
+            cpu_pct: 0.0,
+        }))
+        .collect::<Vec<_>>();
+        assert_eq!(endpoint_gap.len(), 110);
+        let endpoint_gap_metrics = rss_active_tail_metrics(&endpoint_gap, 600.0, 5.0);
+        assert!(!endpoint_gap_metrics.complete);
+        assert_eq!(
+            endpoint_gap_metrics.estimator,
+            "unavailable_ols_diagnostic_only"
+        );
+    }
+
+    #[test]
+    fn shared_long_soak_gate_selects_active_tail_not_post_drain() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = linear_rss_samples(680);
+        resources.sample_interval_estimate_secs = 5.0;
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            640.0,
+            640.0,
+            40.0,
+            support::soak::RssGatePolicy::ActiveTail600,
+        );
+        assert!(rss.active_tail_window_complete);
+        assert_eq!(rss.gate_window, "active_tail_600s");
+        assert!((rss.gate_growth_mb_per_hr - 36.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn shared_burst_policy_keeps_post_drain_gate_for_long_wall_time() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = linear_rss_samples(680);
+        for sample in &mut resources.samples {
+            if sample.t_secs >= 640.0 {
+                sample.rss_mb = 106.4;
+            }
+        }
+        resources.sample_interval_estimate_secs = 5.0;
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            640.0,
+            640.0,
+            40.0,
+            support::soak::RssGatePolicy::PostDrainOrTail,
+        );
+        assert_eq!(rss.gate_window, "post_drain");
+        assert!(rss.gate_growth_mb_per_hr.abs() < 0.000_001);
+        assert!(rss.active_tail_growth_mb_per_hr > 30.0);
+    }
+
+    #[test]
+    fn active_tail_endpoint_medians_ignore_one_sample_spike_but_keep_growth() {
+        let mut spike_samples = (0..=120)
+            .map(|index| ResourceSample {
+                t_secs: index as f64 * 5.0,
+                rss_mb: 100.0,
+                cpu_pct: 0.0,
+            })
+            .collect::<Vec<_>>();
+        spike_samples.last_mut().unwrap().rss_mb += 100.0;
+        let spike_rate = support::soak::rss_endpoint_median_growth_mb_per_hr(&spike_samples)
+            .expect("endpoint rate");
+        assert!(spike_rate.growth_mb_per_hr.abs() < 0.000_001);
+
+        let growth_samples = (0..=120)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 100.0 + 10.01 * t_secs / 3600.0,
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let growth_rate = support::soak::rss_endpoint_median_growth_mb_per_hr(&growth_samples)
+            .expect("endpoint rate");
+        assert!((growth_rate.growth_mb_per_hr - 10.01).abs() < 0.000_001);
+    }
+
     #[test]
     fn cycling_hold_duration_stays_inside_configured_range() {
         for slot in 0..64 {
@@ -2188,6 +2430,7 @@ mod tests {
             "dialog_adapter": {
                 "outgoing_bye_tx": 1,
                 "outgoing_bye_generation_watch": 1,
+                "outgoing_bye_wait_intents": 1,
                 "outbound_initial_invites": 1,
             },
             "app_event_publisher": {
@@ -2200,6 +2443,6 @@ mod tests {
                 },
             },
         });
-        assert_eq!(endpoint_retained_total(&snapshot), 6);
+        assert_eq!(endpoint_retained_total(&snapshot), 7);
     }
 }

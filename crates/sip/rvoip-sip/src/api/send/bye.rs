@@ -64,13 +64,7 @@ impl ByeBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(
-                &self.session_id,
-                crate::state_table::EventType::SendOutboundBye,
-            )
-            .await?;
-        self.coord
-            .finalize_confirmed_local_bye(&self.session_id, "Local BYE")
+            .dispatch_confirmed_outbound_bye(&self.session_id)
             .await?;
         Ok(())
     }

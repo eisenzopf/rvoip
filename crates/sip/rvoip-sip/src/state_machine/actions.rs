@@ -2815,7 +2815,7 @@ pub(crate) async fn execute_action(
                 .ok_or_else(|| "to_uri not set for subscription".to_string())?;
             let event_package = "presence"; // Default to presence, could be stored in session
             let expires = 3600; // Default 1 hour subscription
-            dialog_adapter
+            if let Some(follow_up) = dialog_adapter
                 .send_subscribe(
                     &session.session_id,
                     from_uri,
@@ -2823,7 +2823,10 @@ pub(crate) async fn execute_action(
                     event_package,
                     expires,
                 )
-                .await?;
+                .await?
+            {
+                return Ok(ActionOutcome::with_event(follow_up));
+            }
         }
         Action::ProcessNOTIFY => {
             debug!("Processing NOTIFY for session {}", session.session_id);
@@ -2851,9 +2854,12 @@ pub(crate) async fn execute_action(
                 .clone()
                 .unwrap_or_else(|| "Test message".to_string());
             let in_dialog = session.dialog_id.is_some(); // Send in-dialog if we have a dialog
-            dialog_adapter
+            if let Some(follow_up) = dialog_adapter
                 .send_message(&session.session_id, from_uri, to_uri, body, in_dialog)
-                .await?;
+                .await?
+            {
+                return Ok(ActionOutcome::with_event(follow_up));
+            }
         }
         Action::ProcessMESSAGE => {
             debug!("Processing MESSAGE for session {}", session.session_id);

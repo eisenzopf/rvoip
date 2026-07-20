@@ -23,6 +23,7 @@ use tokio::sync::oneshot;
 const CALLER_PORT: u16 = 17_602;
 const CONCURRENT_CALLER_PORT: u16 = 17_603;
 const DELAYED_FAILURE_CALLER_PORT: u16 = 17_604;
+const CANCELLED_BUILDER_CALLER_PORT: u16 = 17_605;
 
 fn caller_config() -> Config {
     let mut config = Config::local("fast-bye-caller", CALLER_PORT);
@@ -42,6 +43,16 @@ fn delayed_failure_caller_config() -> Config {
     let mut config = Config::local("delayed-failure-bye-caller", DELAYED_FAILURE_CALLER_PORT);
     config.media_port_start = 27_801;
     config.media_port_end = 27_900;
+    config
+}
+
+fn cancelled_builder_caller_config() -> Config {
+    let mut config = Config::local(
+        "cancelled-builder-bye-caller",
+        CANCELLED_BUILDER_CALLER_PORT,
+    );
+    config.media_port_start = 27_901;
+    config.media_port_end = 28_000;
     config
 }
 
@@ -206,11 +217,156 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
         "media cleanup must be exact-once"
     );
 
+    #[cfg(feature = "perf-tests")]
+    {
+        let diagnostics = caller.perf_diagnostic_snapshot().await;
+        assert_eq!(
+            diagnostics["dialog_adapter"]["outgoing_bye_tx"].as_u64(),
+            Some(0),
+            "fast BYE confirmation retained its exact transaction receipt"
+        );
+        assert_eq!(
+            diagnostics["dialog_adapter"]["outgoing_bye_generation_watch"].as_u64(),
+            Some(0),
+            "fast BYE confirmation retained its generation watch"
+        );
+        assert_eq!(
+            diagnostics["dialog_adapter"]["outgoing_bye_wait_intents"].as_u64(),
+            Some(0),
+            "fast BYE confirmation retained its wait owner"
+        );
+    }
+
     uas_task.await.expect("capture UAS task");
     caller
         .shutdown_gracefully(Some(Duration::from_secs(1)))
         .await
         .expect("terminal BYE must retire the retained initial-INVITE owner");
+}
+
+#[cfg(feature = "perf-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn cancelled_bye_builder_reclaims_wait_owner_and_transaction_receipt() {
+    let uas = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("cancelled-builder UAS bind");
+    let uas_port = uas.local_addr().expect("cancelled-builder address").port();
+    let (bye_seen_tx, bye_seen_rx) = oneshot::channel();
+    let (allow_response_tx, allow_response_rx) = oneshot::channel();
+
+    let uas_task = tokio::spawn(async move {
+        let mut bye_seen_tx = Some(bye_seen_tx);
+        let mut allow_response_rx = Some(allow_response_rx);
+        let mut packet = vec![0u8; 8_192];
+        loop {
+            let (bytes, peer) = uas.recv_from(&mut packet).await.expect("UAS receive");
+            let Message::Request(request) =
+                parse_message(&packet[..bytes]).expect("parse captured request")
+            else {
+                continue;
+            };
+            match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    if let Some(TypedHeader::To(to)) = response
+                        .headers
+                        .iter_mut()
+                        .find(|header| matches!(header, TypedHeader::To(_)))
+                    {
+                        to.set_tag("cancelled-builder-uas");
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
+                    ));
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send INVITE 200");
+                }
+                Method::Ack => {}
+                Method::Bye => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    if let Some(sender) = bye_seen_tx.take() {
+                        let _ = sender.send(());
+                    }
+                    if let Some(receiver) = allow_response_rx.take() {
+                        let _ = receiver.await;
+                    }
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send delayed BYE 200");
+                    return;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let caller = UnifiedCoordinator::new(cancelled_builder_caller_config())
+        .await
+        .expect("caller coordinator");
+    let target = format!("sip:callee@127.0.0.1:{uas_port}");
+    let session_id = caller
+        .invite(Some("sip:caller@127.0.0.1".to_string()), &target)
+        .send()
+        .await
+        .expect("INVITE dispatch");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(caller.get_state(&session_id).await, Ok(CallState::Active)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("caller never became active");
+
+    let bye_task = {
+        let caller = Arc::clone(&caller);
+        let session_id = session_id.clone();
+        tokio::spawn(async move { caller.bye(&session_id).send().await })
+    };
+    tokio::time::timeout(Duration::from_secs(5), bye_seen_rx)
+        .await
+        .expect("UAS never saw builder BYE")
+        .expect("UAS ended before builder BYE");
+    bye_task.abort();
+    assert!(bye_task
+        .await
+        .expect_err("builder task was not cancelled")
+        .is_cancelled());
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let diagnostics = caller.perf_diagnostic_snapshot().await;
+            if diagnostics["dialog_adapter"]["outgoing_bye_tx"].as_u64() == Some(0)
+                && diagnostics["dialog_adapter"]["outgoing_bye_generation_watch"].as_u64()
+                    == Some(0)
+                && diagnostics["dialog_adapter"]["outgoing_bye_wait_intents"].as_u64() == Some(0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled builder retained its exact BYE receipt owner");
+
+    let _ = allow_response_tx.send(());
+    uas_task.await.expect("cancelled-builder UAS task");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !caller.list_sessions().await.is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled builder session did not reach terminal cleanup");
+    caller
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("cancelled builder shutdown");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

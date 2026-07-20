@@ -109,6 +109,21 @@ async fn process_event_on_fresh_task(
     join_state_machine_task(task).await
 }
 
+async fn process_event_with_remote_sdp_on_fresh_task(
+    state_machine: Arc<StateMachineExecutor>,
+    session_id: SessionId,
+    event: EventType,
+    remote_sdp: Option<String>,
+) -> StateMachineProcessResult {
+    let task_session_id = session_id.clone();
+    let task = AbortStateMachineTaskOnDrop::new(tokio::spawn(async move {
+        state_machine
+            .process_event_with_remote_sdp(&task_session_id, event, remote_sdp)
+            .await
+    }));
+    join_state_machine_task(task).await
+}
+
 fn is_missing_credentials_for_auth_error(
     error: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> bool {
@@ -2747,21 +2762,12 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
-        if let Some(sdp) = &sdp_answer {
-            let _ = self
-                .state_machine
-                .store
-                .update_session_with(&session_id, |session| {
-                    session.remote_sdp = Some(sdp.clone());
-                })
-                .await;
-        }
-
         let mut publish_answered = true;
-        match process_event_on_fresh_task(
+        match process_event_with_remote_sdp_on_fresh_task(
             Arc::clone(&self.state_machine),
             session_id.clone(),
             EventType::Dialog200OK,
+            sdp_answer.clone(),
         )
         .await
         {
@@ -3449,22 +3455,6 @@ impl SessionCrossCrateEventHandler {
                     .replace("\\\"", "\"")
             });
 
-        // Store remote SDP if present
-        if let Some(sdp) = &sdp_answer {
-            info!(
-                "Stored remote SDP from CallEstablished for session {}",
-                session_id
-            );
-            // Update the session with remote SDP
-            let _ = self
-                .state_machine
-                .store
-                .update_session_with(&session_id, |session| {
-                    session.remote_sdp = Some(sdp.clone());
-                })
-                .await;
-        }
-
         // CallEstablished maps to Dialog200OK for state machine processing.
         // If this is a late 200 OK after local cancel intent, dialog-core has
         // already sent the required ACK; the state table sends BYE and we must
@@ -3472,7 +3462,7 @@ impl SessionCrossCrateEventHandler {
         let mut publish_answered = true;
         match self
             .state_machine
-            .process_event(&session_id, EventType::Dialog200OK)
+            .process_event_with_remote_sdp(&session_id, EventType::Dialog200OK, sdp_answer.clone())
             .await
         {
             Ok(result) => {
@@ -4481,16 +4471,6 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
-        if let Some(ref sdp_body) = sdp {
-            let _ = self
-                .state_machine
-                .store
-                .update_session_with(&sid, |session| {
-                    session.remote_sdp = Some(sdp_body.clone());
-                })
-                .await;
-        }
-
         let state_event = match status_code {
             183 if sdp.is_some() => Some(EventType::Dialog183SessionProgress),
             101..=199 => Some(EventType::Dialog180Ringing),
@@ -4498,7 +4478,11 @@ impl SessionCrossCrateEventHandler {
         };
 
         if let Some(event_type) = state_event {
-            if let Err(e) = self.state_machine.process_event(&sid, event_type).await {
+            if let Err(e) = self
+                .state_machine
+                .process_event_with_remote_sdp(&sid, event_type, sdp.clone())
+                .await
+            {
                 error!("Failed to process CallProgress for {}: {}", sid, e);
             }
         }
