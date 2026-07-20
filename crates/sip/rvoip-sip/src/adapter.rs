@@ -3492,6 +3492,7 @@ async fn run_outbound_cleanup(
 ) {
     let (wire, remote_terminal) = route.cleanup_snapshot();
     let mut wire_teardown_success = wire == SipOutboundWireState::NotStarted || remote_terminal;
+    let mut confirmed_hangup_timed_out = false;
     let mut local_release_success = true;
     if wire != SipOutboundWireState::NotStarted {
         if !remote_terminal {
@@ -3499,22 +3500,27 @@ async fn run_outbound_cleanup(
             // on dialog phase it emits the one legal CANCEL or BYE; this
             // helper never retries it and therefore cannot duplicate the
             // teardown request.
-            wire_teardown_success = matches!(
-                tokio::time::timeout(
-                    SIP_CONFIRMED_HANGUP_TIMEOUT,
-                    coordinator.hangup(&route.session_id),
-                )
-                .await,
-                Ok(Ok(()))
-            );
+            let hangup = tokio::time::timeout(
+                SIP_CONFIRMED_HANGUP_TIMEOUT,
+                coordinator.hangup(&route.session_id),
+            )
+            .await;
+            confirmed_hangup_timed_out = hangup.is_err();
+            wire_teardown_success = matches!(hangup, Ok(Ok(())));
         }
 
         // Early CANCEL returns after dispatch and the coordinator's normal
         // peer-terminal watchdog is intentionally much longer than adapter
         // drain. Give the peer one bounded window, then release local dialog,
-        // media, and session ownership without sending another packet.
-        local_release_success =
-            wait_for_outbound_session_release(&coordinator, &route.session_id).await;
+        // media, and session ownership without sending another packet. An
+        // established BYE whose confirmed-hangup deadline already elapsed has
+        // consumed that bounded window, so proceed directly to exact local
+        // finalization instead of spending a second full wait interval.
+        local_release_success = if confirmed_hangup_timed_out {
+            false
+        } else {
+            wait_for_outbound_session_release(&coordinator, &route.session_id).await
+        };
         if !local_release_success {
             let finalized = matches!(
                 tokio::time::timeout(

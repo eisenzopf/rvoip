@@ -693,11 +693,12 @@ impl MediaSessionController {
         config.port_range_end = max_port;
         config.validate_ports = false;
         config.capacity_hint = capacity_hint;
-        if capacity_hint > 0 {
-            config.allocation_strategy = AllocationStrategy::Incremental;
-            config.prefer_port_reuse = false;
-            config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
-        }
+        // Media controllers perform the authoritative bind in RtpSession. Use
+        // the indexed unvalidated pool for every custom range so controllers
+        // with the same bind domain share reservations before that bind.
+        config.allocation_strategy = AllocationStrategy::Incremental;
+        config.prefer_port_reuse = false;
+        config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
 
         controller.port_allocator = Some(Arc::new(PortAllocator::with_config(config)));
         info!(
@@ -866,11 +867,24 @@ impl MediaSessionController {
         let mut created_session = None;
         for attempt in 1..=RTP_SESSION_BIND_RETRIES {
             let allocate_started = Instant::now();
-            let (local_rtp_addr, _) = allocator
+            let allocation = allocator
                 .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
-                .await
-                .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
+                .await;
             diagnostics::record_rtp_port_allocate(allocate_started.elapsed());
+            let (local_rtp_addr, _) = match allocation {
+                Ok(allocation) => allocation,
+                Err(e) => {
+                    let failure_kind = if last_bind_error.is_some() {
+                        "rtp_bind_collision"
+                    } else {
+                        "port_pool_exhausted"
+                    };
+                    return Err(Error::config(format!(
+                        "Media allocation failed [kind={}]: {}",
+                        failure_kind, e
+                    )));
+                }
+            };
             let mut reservation_guard =
                 MediaPortReservationGuard::new(allocator.clone(), dialog_session_id.clone());
 
@@ -903,10 +917,17 @@ impl MediaSessionController {
                 Err(e) => {
                     diagnostics::record_rtp_session_new(session_started.elapsed());
                     reservation_guard.disarm();
-                    let _ = allocator.release_session(&dialog_session_id).await;
-                    let should_retry =
-                        is_retryable_rtp_bind_error(&e) && attempt < RTP_SESSION_BIND_RETRIES;
-                    if should_retry {
+                    if is_retryable_rtp_bind_error(&e) {
+                        if let Err(quarantine_error) =
+                            allocator.quarantine_session(&dialog_session_id).await
+                        {
+                            warn!(
+                                "Failed to quarantine RTP bind candidate for {}: {}",
+                                dialog_id, quarantine_error
+                            );
+                            let _ = allocator.release_session(&dialog_session_id).await;
+                        }
+
                         // Try the next reserved port. The allocator no longer probe-binds
                         // for media-controller sessions; the real RTP socket bind is the
                         // authoritative availability check.
@@ -915,11 +936,15 @@ impl MediaSessionController {
                             dialog_id, local_rtp_addr, attempt, RTP_SESSION_BIND_RETRIES, e
                         );
                         last_bind_error = Some(e);
-                        continue;
+                        if attempt < RTP_SESSION_BIND_RETRIES {
+                            continue;
+                        }
+                        break;
                     }
 
+                    let _ = allocator.release_session(&dialog_session_id).await;
                     return Err(Error::config(format!(
-                        "Failed to create RTP session on {}: {}",
+                        "Media allocation failed [kind=rtp_session_creation] on {}: {}",
                         local_rtp_addr, e
                     )));
                 }
@@ -929,7 +954,7 @@ impl MediaSessionController {
         let (local_rtp_addr, rtp_session, mut reservation_guard) =
             created_session.ok_or_else(|| {
                 Error::config(format!(
-                    "Failed to create RTP session after {} bind attempts: {}",
+                    "Media allocation failed [kind=rtp_bind_collision] after {} bind attempts: {}",
                     RTP_SESSION_BIND_RETRIES,
                     last_bind_error
                         .map(|e| e.to_string())

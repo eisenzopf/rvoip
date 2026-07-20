@@ -1711,34 +1711,51 @@ impl SessionCrossCrateEventHandler {
             }
         };
         let coordinator = self.coordinator.get().and_then(|weak| weak.upgrade());
+        let publication_timeout = dialog_adapter.non_invite_transaction_timeout();
         tokio::spawn(async move {
             let release_guard =
                 cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
-            let publication_succeeded = if let Err(e) = publisher.publish_now(api_event).await {
-                tracing::warn!(
-                    "Failed to publish terminal event to global coordinator: {}",
-                    e
-                );
-                false
-            } else {
-                true
-            };
-            let release = match coordinator {
+            let outcome = match coordinator {
                 Some(coordinator) => {
-                    crate::api::unified::release_exact_local_resources(
-                        store,
-                        Arc::clone(&coordinator.helpers),
-                        dialog_adapter,
-                        media_adapter,
-                        handle,
-                    )
-                    .await
+                    publisher
+                        .publish_terminal_then_release_bounded(
+                            api_event,
+                            crate::api::unified::release_exact_local_resources_with_retry(
+                                store,
+                                Arc::clone(&coordinator.helpers),
+                                dialog_adapter,
+                                media_adapter,
+                                handle,
+                            ),
+                            publication_timeout,
+                        )
+                        .await
                 }
-                None => Err(SessionError::InternalError(
-                    "terminal cleanup had no exact session owner".to_string(),
-                )),
+                None => {
+                    publisher
+                        .publish_terminal_then_release_bounded(
+                            api_event,
+                            async {
+                                Err(SessionError::InternalError(
+                                    "terminal cleanup had no exact session owner".to_string(),
+                                ))
+                            },
+                            publication_timeout,
+                        )
+                        .await
+                }
             };
-            let release_succeeded = match release {
+            let publication_succeeded = match outcome.publication {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to publish terminal event to global coordinator: {}",
+                        error
+                    );
+                    false
+                }
+            };
+            let release_succeeded = match outcome.release {
                 Ok(()) => {
                     release_guard.finish_success();
                     true

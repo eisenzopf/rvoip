@@ -51,7 +51,7 @@ use rvoip_sip_dialog::{
     },
     transaction::{
         dialog::DialogRequestTemplate, transport::multiplexed::exact_next_hop_uri_for_request,
-        TransactionKey,
+        ClientTransactionCompletionHandle, ClientTransactionOutcome, TransactionKey,
     },
     DialogId as RvoipDialogId, DialogState, InitialInviteOwner, InitialInviteWireOutcome,
 };
@@ -64,7 +64,6 @@ const INITIAL_INVITE_OWNED_OPERATION_TIMEOUT: Duration = Duration::from_secs(30)
 const INITIAL_INVITE_RESOURCE_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
 const INITIAL_INVITE_PROTOCOL_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const DATA_MESSAGE_FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
-const BYE_FINAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const REGISTRATION_REFRESH_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const OWNED_INVITE_INSTALLED: u8 = 0;
@@ -142,12 +141,45 @@ struct DataMessageAuthChallenge {
 struct OutboundByeTransaction {
     generation: u64,
     transaction_id: TransactionKey,
+    /// Completion captured atomically with transaction creation. This exact
+    /// authority remains valid after the manager retires the key-indexed
+    /// transaction entry.
+    completion: ClientTransactionCompletionHandle,
     /// Request-URI captured from the dialog remote target immediately before
     /// this generation is built. Local teardown owns the dialog from that
     /// point, so target-refresh requests are no longer admitted; retaining the
     /// value also keeps Digest retry independent of compact transaction
     /// tombstones, which intentionally do not retain non-INVITE request wire.
     request_uri: String,
+}
+
+enum OutgoingByeGenerationWake {
+    UseExactOutcome(
+        rvoip_sip_dialog::transaction::TransactionResult<Option<ClientTransactionOutcome>>,
+    ),
+    FollowNewerGeneration,
+    RetryCurrentGeneration,
+    CleanupInterrupted,
+}
+
+fn resolve_outgoing_bye_generation_wake(
+    current_outcome: rvoip_sip_dialog::transaction::TransactionResult<
+        Option<ClientTransactionOutcome>,
+    >,
+    newer_generation_exists: bool,
+    generation_watch_closed: bool,
+    retained_transaction_exists: bool,
+) -> OutgoingByeGenerationWake {
+    match current_outcome {
+        current @ Ok(Some(_)) | current @ Err(_) => {
+            OutgoingByeGenerationWake::UseExactOutcome(current)
+        }
+        Ok(None) if newer_generation_exists => OutgoingByeGenerationWake::FollowNewerGeneration,
+        Ok(None) if generation_watch_closed && !retained_transaction_exists => {
+            OutgoingByeGenerationWake::CleanupInterrupted
+        }
+        Ok(None) => OutgoingByeGenerationWake::RetryCurrentGeneration,
+    }
 }
 
 fn data_message_auth_realm(selected: &crate::auth::ClientAuthHeader) -> String {
@@ -671,6 +703,9 @@ pub struct DialogAdapter {
     /// the owning BYE waiter directly instead of requiring 10 ms polling.
     outgoing_bye_generation_watch: Arc<DashMap<SessionId, tokio::sync::watch::Sender<u64>>>,
     next_outgoing_bye_generation: Arc<AtomicU64>,
+    /// Timer F / configured non-INVITE transaction horizon used by the
+    /// retained local-BYE cleanup owner.
+    non_invite_transaction_timeout: Duration,
 
     /// Exact in-dialog request ownership for methods whose builder futures
     /// return after first transport write while authentication/final response
@@ -795,6 +830,7 @@ impl DialogAdapter {
             outgoing_bye_tx: Arc::new(DashMap::new()),
             outgoing_bye_generation_watch: Arc::new(DashMap::new()),
             next_outgoing_bye_generation: Arc::new(AtomicU64::new(1)),
+            non_invite_transaction_timeout,
             outbound_request_tracker: OutboundInDialogRequestTracker::new(
                 non_invite_transaction_timeout,
             ),
@@ -911,6 +947,7 @@ impl DialogAdapter {
             "callid_to_session": self.callid_to_session.len(),
             "outgoing_invite_tx": self.outgoing_invite_tx.len(),
             "outgoing_bye_tx": self.outgoing_bye_tx.len(),
+            "outgoing_bye_generation_watch": self.outgoing_bye_generation_watch.len(),
             "outbound_initial_invites": self.outbound_initial_invites.len(),
             "registration_refresh_tasks": self.registration_refresh_tasks.len(),
             "lifecycle": {
@@ -1531,15 +1568,19 @@ impl DialogAdapter {
                 .remote_target
                 .to_string();
             let generation = self.next_outgoing_bye_generation();
-            let transaction_id = self
+            let (transaction_id, completion) = self
                 .dialog_api
-                .send_bye_with_options(&rvoip_dialog_id, ByeRequestOptions::default())
+                .send_bye_with_options_and_completion(
+                    &rvoip_dialog_id,
+                    ByeRequestOptions::default(),
+                )
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
             self.retain_outgoing_bye_transaction(
                 &session_id,
                 generation,
                 transaction_id,
+                completion,
                 request_uri,
             );
             self.wait_for_outgoing_bye_final_response(&session_id)
@@ -2639,12 +2680,18 @@ impl DialogAdapter {
             .await?;
         opts.extra_headers.extend(headers);
         let generation = self.next_outgoing_bye_generation();
-        let transaction_id = self
+        let (transaction_id, completion) = self
             .dialog_api
-            .send_bye_with_options(dialog_id, opts)
+            .send_bye_with_options_and_completion(dialog_id, opts)
             .await
             .map_err(|error| redacted_dialog_operation_error("SIP BYE", error))?;
-        self.retain_outgoing_bye_transaction(session_id, generation, transaction_id, request_uri);
+        self.retain_outgoing_bye_transaction(
+            session_id,
+            generation,
+            transaction_id,
+            completion,
+            request_uri,
+        );
         Ok(())
     }
 
@@ -2658,11 +2705,13 @@ impl DialogAdapter {
         session_id: &SessionId,
         generation: u64,
         transaction_id: TransactionKey,
+        completion: ClientTransactionCompletionHandle,
         request_uri: String,
     ) {
         let transaction = OutboundByeTransaction {
             generation,
             transaction_id,
+            completion,
             request_uri,
         };
         self.outgoing_bye_tx
@@ -2700,6 +2749,11 @@ impl DialogAdapter {
         self.outgoing_bye_tx
             .get(session_id)
             .map(|transaction| transaction.generation)
+    }
+
+    /// Configured Timer F horizon for non-INVITE client transactions.
+    pub(crate) fn non_invite_transaction_timeout(&self) -> Duration {
+        self.non_invite_transaction_timeout
     }
 
     /// Return whether this exact session retained a BYE after `generation`.
@@ -2773,7 +2827,7 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
     ) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + BYE_FINAL_RESPONSE_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.non_invite_transaction_timeout;
         let mut after_generation = 0;
         let mut last_transaction = None;
         let mut generation_changes = self
@@ -2817,31 +2871,61 @@ impl DialogAdapter {
                     "SIP BYE final response timed out".to_string(),
                 ));
             }
-            let response = self
-                .dialog_api
-                .dialog_manager()
-                .core()
-                .transaction_manager()
-                .wait_for_final_response(&transaction.transaction_id, remaining)
-                .await;
+            let response = tokio::select! {
+                response = transaction.completion.wait_for_outcome(remaining) => response,
+                generation_change = generation_changes.changed() => {
+                    // Response processing records the exact completion before
+                    // publishing any event that can run terminal cleanup. If
+                    // both futures become ready together, the watch branch is
+                    // allowed to win the select; re-read the completion cell so
+                    // cleanup cannot turn a successful BYE into a false timeout.
+                    let newer_generation_exists = self
+                        .latest_outgoing_bye_transaction(session_id, transaction.generation)
+                        .is_some();
+                    let retained_transaction_exists =
+                        self.outgoing_bye_tx.get(session_id).is_some();
+                    match resolve_outgoing_bye_generation_wake(
+                        transaction.completion.current_outcome(),
+                        newer_generation_exists,
+                        generation_change.is_err(),
+                        retained_transaction_exists,
+                    ) {
+                        OutgoingByeGenerationWake::UseExactOutcome(current) => current,
+                        OutgoingByeGenerationWake::FollowNewerGeneration => {
+                            after_generation = transaction.generation;
+                            continue;
+                        }
+                        OutgoingByeGenerationWake::RetryCurrentGeneration => continue,
+                        OutgoingByeGenerationWake::CleanupInterrupted => {
+                            return Err(SessionError::Timeout(
+                                "SIP BYE confirmation ended during exact local cleanup".to_string(),
+                            ));
+                        }
+                    }
+                }
+            };
             let newer_transaction = self
                 .latest_outgoing_bye_transaction(session_id, transaction.generation)
                 .is_some();
             match response {
-                Ok(Some(response)) if (200..=299).contains(&response.status_code()) => {
+                Ok(Some(ClientTransactionOutcome::FinalResponse(response)))
+                    if (200..=299).contains(&response.status_code()) =>
+                {
                     self.clear_outgoing_bye_transaction(session_id, &transaction);
                     return Ok(());
                 }
-                Ok(Some(response)) if matches!(response.status_code(), 401 | 407) => {
+                Ok(Some(ClientTransactionOutcome::FinalResponse(response)))
+                    if matches!(response.status_code(), 401 | 407) =>
+                {
                     after_generation = transaction.generation;
                 }
-                Ok(Some(_)) => {
+                Ok(Some(ClientTransactionOutcome::FinalResponse(_))) => {
                     self.clear_outgoing_bye_transaction(session_id, &transaction);
                     return Err(SessionError::ProtocolError(
                         "SIP BYE received a non-success final response".to_string(),
                     ));
                 }
-                Ok(None) => {
+                Ok(Some(ClientTransactionOutcome::Failure(_))) | Ok(None) => {
                     if newer_transaction {
                         after_generation = transaction.generation;
                         continue;
@@ -3151,14 +3235,20 @@ impl DialogAdapter {
         let request_uri = self.outgoing_bye_request_uri(session_id).await?;
         self.mark_initial_invite_protocol_teardown(session_id);
         let generation = self.next_outgoing_bye_generation();
-        let transaction_id = self
+        let (transaction_id, completion) = self
             .dialog_api
-            .send_bye_with_options(&dialog_id, opts)
+            .send_bye_with_options_and_completion(&dialog_id, opts)
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send BYE with auth: {}", e))
             })?;
-        self.retain_outgoing_bye_transaction(session_id, generation, transaction_id, request_uri);
+        self.retain_outgoing_bye_transaction(
+            session_id,
+            generation,
+            transaction_id,
+            completion,
+            request_uri,
+        );
         Ok(())
     }
 
@@ -3575,6 +3665,10 @@ impl DialogAdapter {
             .outgoing_invite_tx
             .get(session_id)
             .map(|entry| entry.value().clone());
+        let outgoing_bye = self
+            .outgoing_bye_tx
+            .get(session_id)
+            .map(|entry| entry.value().clone());
         let outbound_initial_invite = self
             .outbound_initial_invites
             .get(session_id)
@@ -3585,6 +3679,14 @@ impl DialogAdapter {
                         .as_ref()
                         .is_some_and(|dialog_id| binding.owner.dialog_id() == dialog_id)
             });
+
+        // Exact terminal cleanup supersedes further BYE confirmation/auth
+        // work. Drop the retained completion owner before any lower cleanup
+        // suspension so a bounded adapter fallback wakes the retained hangup
+        // supervisor instead of leaving it asleep until Timer F.
+        if let Some(transaction) = outgoing_bye.as_ref() {
+            self.clear_outgoing_bye_transaction(session_id, transaction);
+        }
 
         // Serialize cleanup with exact-dialog DataMessage dispatch. Holding
         // this owner through lower cleanup and mapping removal makes queued
@@ -4756,6 +4858,7 @@ impl Clone for DialogAdapter {
             outgoing_bye_tx: self.outgoing_bye_tx.clone(),
             outgoing_bye_generation_watch: self.outgoing_bye_generation_watch.clone(),
             next_outgoing_bye_generation: self.next_outgoing_bye_generation.clone(),
+            non_invite_transaction_timeout: self.non_invite_transaction_timeout,
             outbound_request_tracker: self.outbound_request_tracker.clone(),
             outbound_initial_invites: self.outbound_initial_invites.clone(),
             data_message_dispatch_lanes: self.data_message_dispatch_lanes.clone(),
@@ -4820,6 +4923,20 @@ impl DialogCleanupPause {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recorded_bye_success_wins_simultaneous_cleanup_watch_close() {
+        let outcome = Ok(Some(ClientTransactionOutcome::FinalResponse(
+            rvoip_sip_core::Response::new(rvoip_sip_core::StatusCode::Ok),
+        )));
+
+        match resolve_outgoing_bye_generation_wake(outcome, false, true, false) {
+            OutgoingByeGenerationWake::UseExactOutcome(Ok(Some(
+                ClientTransactionOutcome::FinalResponse(response),
+            ))) => assert_eq!(response.status_code(), 200),
+            _ => panic!("the recorded exact BYE response must outrank cleanup watch closure"),
+        }
+    }
 
     #[test]
     fn exact_response_transaction_diagnostics_are_bounded_and_redacted() {

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use rvoip_sip::adapters::media_adapter::cleanup_session_diag;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
-use rvoip_sip::{CallState, Event};
+use rvoip_sip::{CallState, Event, SessionError};
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::prelude::{Message, Method, StatusCode};
 use rvoip_sip_core::types::header::HeaderName;
@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 
 const CALLER_PORT: u16 = 17_602;
 const CONCURRENT_CALLER_PORT: u16 = 17_603;
+const DELAYED_FAILURE_CALLER_PORT: u16 = 17_604;
 
 fn caller_config() -> Config {
     let mut config = Config::local("fast-bye-caller", CALLER_PORT);
@@ -34,6 +35,13 @@ fn concurrent_caller_config() -> Config {
     let mut config = Config::local("concurrent-bye-caller", CONCURRENT_CALLER_PORT);
     config.media_port_start = 27_701;
     config.media_port_end = 27_800;
+    config
+}
+
+fn delayed_failure_caller_config() -> Config {
+    let mut config = Config::local("delayed-failure-bye-caller", DELAYED_FAILURE_CALLER_PORT);
+    config.media_port_start = 27_801;
+    config.media_port_end = 27_900;
     config
 }
 
@@ -203,6 +211,137 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
         .shutdown_gracefully(Some(Duration::from_secs(1)))
         .await
         .expect("terminal BYE must retire the retained initial-INVITE owner");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn delayed_non_2xx_bye_uses_timer_f_and_returns_only_after_exact_cleanup() {
+    let uas = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("delayed-failure UAS bind");
+    let uas_port = uas
+        .local_addr()
+        .expect("delayed-failure UAS address")
+        .port();
+    let (bye_seen_tx, bye_seen_rx) = oneshot::channel();
+
+    let uas_task = tokio::spawn(async move {
+        let mut bye_seen_tx = Some(bye_seen_tx);
+        let mut packet = vec![0u8; 8_192];
+        loop {
+            let (bytes, peer) = uas
+                .recv_from(&mut packet)
+                .await
+                .expect("delayed-failure UAS receive");
+            let Message::Request(request) =
+                parse_message(&packet[..bytes]).expect("parse delayed-failure request")
+            else {
+                continue;
+            };
+
+            match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    if let Some(TypedHeader::To(to)) = response
+                        .headers
+                        .iter_mut()
+                        .find(|header| matches!(header, TypedHeader::To(_)))
+                    {
+                        to.set_tag("delayed-failure-bye-uas");
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
+                    ));
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send delayed-failure INVITE 200");
+                }
+                Method::Ack => {}
+                Method::Bye => {
+                    if let Some(sender) = bye_seen_tx.take() {
+                        let _ = sender.send(());
+                    }
+                    // This deliberately exceeds the historical hard-coded
+                    // two-second confirmation timeout while remaining well
+                    // inside the configured non-INVITE Timer F horizon.
+                    tokio::time::sleep(Duration::from_millis(2_250)).await;
+                    let response = create_response(&request, StatusCode::ServerInternalError);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send delayed-failure BYE 500");
+                    return;
+                }
+                _ => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send delayed-failure generic response");
+                }
+            }
+        }
+    });
+
+    let cleanup_before = cleanup_session_diag::cleaned_total();
+    let caller = UnifiedCoordinator::new(delayed_failure_caller_config())
+        .await
+        .expect("delayed-failure caller coordinator");
+    let target = format!("sip:callee@127.0.0.1:{uas_port}");
+    let session_id = caller
+        .invite(Some("sip:caller@127.0.0.1".to_string()), &target)
+        .send()
+        .await
+        .expect("delayed-failure INVITE dispatch");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(caller.get_state(&session_id).await, Ok(CallState::Active)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("delayed-failure caller never became active");
+
+    let started = tokio::time::Instant::now();
+    let hangup = tokio::time::timeout(Duration::from_secs(8), caller.hangup(&session_id))
+        .await
+        .expect("delayed-failure hangup exceeded its protocol deadline");
+    let error = hangup.expect_err("BYE 500 must remain visible to the caller");
+    assert!(
+        started.elapsed() >= Duration::from_millis(2_200),
+        "hangup used the removed two-second BYE deadline"
+    );
+    assert!(
+        matches!(error, SessionError::ProtocolError(_)),
+        "unexpected BYE failure: {error}"
+    );
+    bye_seen_rx
+        .await
+        .expect("delayed-failure UAS never observed BYE");
+
+    assert!(
+        caller.list_sessions().await.is_empty(),
+        "BYE error returned before exact session cleanup"
+    );
+    assert_eq!(
+        cleanup_session_diag::cleaned_total(),
+        cleanup_before + 1,
+        "BYE error must release media exactly once before returning"
+    );
+    #[cfg(feature = "perf-tests")]
+    assert_eq!(
+        caller.perf_diagnostic_snapshot().await["dialog_adapter"]["outgoing_bye_tx"].as_u64(),
+        Some(0),
+        "BYE error retained its exact transaction owner"
+    );
+
+    uas_task.await.expect("delayed-failure UAS task");
+    caller
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("delayed-failure BYE cleanup must retire the exact session");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

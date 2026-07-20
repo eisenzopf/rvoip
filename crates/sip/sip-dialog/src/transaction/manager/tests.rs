@@ -5620,8 +5620,8 @@ mod tests {
             .max_forwards(70)
             .build();
         let destination: SocketAddr = "192.0.2.11:5060".parse().unwrap();
-        let transaction = manager
-            .create_client_transaction(request.clone(), destination)
+        let (transaction, exact_completion) = manager
+            .create_client_transaction_with_completion(request.clone(), destination)
             .await?;
         manager.send_request(&transaction).await?;
 
@@ -5709,6 +5709,16 @@ mod tests {
         .expect("Timer K scheduler must expire its exact completion owner");
         assert!(manager.client_completion(&transaction).is_none());
         assert_eq!(manager.client_completion_retention_counts().deadlines, 0);
+        assert!(
+            matches!(
+                exact_completion
+                    .wait_for_outcome(Duration::from_millis(100))
+                    .await?,
+                Some(crate::transaction::ClientTransactionOutcome::FinalResponse(exact))
+                    if exact == response
+            ),
+            "the creation-time completion handle must outlive every key-indexed retention record"
+        );
 
         manager.shutdown().await;
         Ok(())

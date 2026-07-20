@@ -98,6 +98,8 @@ Environment:
   BETA_DENY_WARNINGS=0           Allow Rust warnings during beta gates. Defaults to 1.
   BETA_TEST_LOG_FILTER           Runtime tracing filter for cargo test/build gates.
                                   Defaults to off for clean release evidence.
+  BETA_REQUIRE_CLEAN_SOURCE=0    Allow a dirty or changing source fingerprint for a full gate.
+                                  Full gates require clean, unchanged source by default; other modes do not.
   BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1
                                   Require exactly three pre-run canonical clean PASS artifacts.
                                   Defaults to 0 for development gates.
@@ -160,6 +162,15 @@ Environment:
   RVOIP_PERF_SOAK_MIN_HOLD_SECS  Minimum cycling active-call hold. Defaults to 10.
   RVOIP_PERF_SOAK_MAX_HOLD_SECS  Maximum cycling active-call hold. Defaults to 360.
   RVOIP_PERF_SOAK_CPS            Optional immediate hangup churn. Defaults to 0.
+  RVOIP_PERF_SOAK_DRAIN_CPS      Paced monolithic-soak teardown rate. Defaults to 10.
+  RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT
+                                  Bounded structured failure samples. Defaults to 32.
+  RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS
+                                  Monolithic post-drain retention/RSS window. Defaults to 120
+                                  in the beta gate (the direct-test default is 40).
+  RVOIP_PERF_MASS_TEARDOWN_CALLS Simultaneous teardown stress call count. Defaults to 500.
+  RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS
+                                  Setup rate for mass teardown stress. Defaults to 30.
   RVOIP_PERF_MEMORY_DIAGNOSTICS  Write memory diagnostic JSONL during soak. Defaults to 0.
   RVOIP_PERF_ALLOCATOR_DIAGNOSTICS
                                   Include mimalloc snapshots in memory diagnostics. Defaults to 0.
@@ -199,6 +210,15 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ -z "${BETA_REQUIRE_CLEAN_SOURCE+x}" ]; then
+  if [ "$MODE" = "full" ]; then
+    BETA_REQUIRE_CLEAN_SOURCE=1
+  else
+    BETA_REQUIRE_CLEAN_SOURCE=0
+  fi
+fi
+export BETA_REQUIRE_CLEAN_SOURCE
 
 # Capture the source before creating any beta artifact. This keeps a custom
 # artifact directory inside the checkout from changing the identity it is
@@ -301,6 +321,25 @@ bool_env_enabled() {
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+verify_clean_source_fingerprint() {
+  python3 - "$BETA_SOURCE_AT_START" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = json.loads(path.read_text(encoding="utf-8"))
+if source.get("git_dirty") is not False:
+    print(
+        "beta release source must be a clean Git worktree; "
+        f"captured git_dirty={source.get('git_dirty')!r}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+print(f"clean source fingerprint: {source['source_fingerprint_sha256']}")
+PY
 }
 
 append_feature() {
@@ -551,6 +590,7 @@ write_environment_report() {
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
 - source_at_beta_start: \`environment/source-at-beta-start.json\`
+- beta_require_clean_source: \`${BETA_REQUIRE_CLEAN_SOURCE}\`
 - beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
@@ -617,6 +657,7 @@ write_summary_gate_table_header() {
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
 - source_at_beta_start: \`environment/source-at-beta-start.json\`
+- beta_require_clean_source: \`${BETA_REQUIRE_CLEAN_SOURCE}\`
 - beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
 - beta_canonical_2k_run_dirs: \`${BETA_CANONICAL_2K_RUN_DIRS:-not supplied}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
@@ -650,6 +691,11 @@ write_summary_gate_table_header() {
 - rvoip_perf_soak_min_hold_secs: \`${RVOIP_PERF_SOAK_MIN_HOLD_SECS:-10}\`
 - rvoip_perf_soak_max_hold_secs: \`${RVOIP_PERF_SOAK_MAX_HOLD_SECS:-360}\`
 - rvoip_perf_soak_cps: \`${RVOIP_PERF_SOAK_CPS:-0}\`
+- rvoip_perf_soak_drain_cps: \`${RVOIP_PERF_SOAK_DRAIN_CPS:-10}\`
+- rvoip_perf_soak_error_sample_limit: \`${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}\`
+- rvoip_perf_retention_drain_wait_secs: \`${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-120}\`
+- rvoip_perf_mass_teardown_calls: \`${RVOIP_PERF_MASS_TEARDOWN_CALLS:-500}\`
+- rvoip_perf_mass_teardown_setup_cps: \`${RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS:-30}\`
 - rvoip_perf_memory_diagnostics: \`${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}\`
 - rvoip_perf_allocator_diagnostics: \`${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}\`
 - rvoip_perf_memory_diag_interval_secs: \`${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}\`
@@ -1306,7 +1352,17 @@ run_perf_gates() {
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_media_churn perf_media_churn -- --exact --ignored --nocapture
     run_gate "perf monolithic soak" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}" \
+      RVOIP_PERF_SOAK_DRAIN_CPS="${RVOIP_PERF_SOAK_DRAIN_CPS:-10}" \
+      RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
+      RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-120}" \
+      RVOIP_PERF_ARCHIVE_DIR="$ARTIFACT_DIR/perf-results" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_30min perf_soak_30min -- --exact --ignored --nocapture
+    run_gate "perf mass teardown stress" env \
+      RVOIP_PERF_MASS_TEARDOWN_CALLS="${RVOIP_PERF_MASS_TEARDOWN_CALLS:-500}" \
+      RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS="${RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS:-30}" \
+      RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
+      RVOIP_PERF_ARCHIVE_DIR="$ARTIFACT_DIR/perf-results" \
+      cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_30min perf_mass_teardown_stress -- --exact --ignored --nocapture
   fi
   run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features "$features" --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
   local burst_smoke_covered_by_matrix=0
@@ -1389,6 +1445,13 @@ run_perf_gates() {
 write_environment_report
 write_summary_gate_table_header
 
+if bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
+  if ! run_gate "clean beta source fingerprint" verify_clean_source_fingerprint; then
+    echo "Release-candidate gates require a clean source fingerprint. Set BETA_REQUIRE_CLEAN_SOURCE=0 only for development diagnostics." >&2
+    exit 1
+  fi
+fi
+
 if canonical_2k_evidence_requested; then
   run_canonical_2k_evidence_gate
 fi
@@ -1420,6 +1483,11 @@ esac
 
 if canonical_2k_evidence_requested; then
   run_gate "canonical 2k beta source unchanged" \
+    python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
+      --workspace-root "$WORKSPACE_ROOT" \
+      --beta-start "$BETA_SOURCE_AT_START"
+elif bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
+  run_gate "beta source unchanged" \
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
       --workspace-root "$WORKSPACE_ROOT" \
       --beta-start "$BETA_SOURCE_AT_START"

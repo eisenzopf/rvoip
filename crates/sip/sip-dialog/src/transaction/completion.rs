@@ -45,6 +45,55 @@ pub enum ClientTransactionOutcome {
     Failure(ClientTransactionFailure),
 }
 
+/// Exact completion authority for one admitted client transaction.
+///
+/// The handle is captured while the transaction is created, before its runner
+/// is published or any request can reach the wire. Holding it keeps the
+/// authoritative completion cell observable even after the transaction
+/// manager retires its key-indexed entry. Protocol owners such as local BYE
+/// teardown should carry this handle from dispatch through confirmation
+/// instead of looking the completion back up by
+/// [`TransactionKey`](crate::transaction::TransactionKey).
+#[derive(Clone)]
+pub struct ClientTransactionCompletionHandle {
+    completion: Arc<ClientTransactionCompletion>,
+}
+
+impl ClientTransactionCompletionHandle {
+    pub(crate) fn new(completion: Arc<ClientTransactionCompletion>) -> Self {
+        Self { completion }
+    }
+
+    /// Wait for this exact transaction's terminal response or failure.
+    ///
+    /// `None` means the caller-supplied observation deadline elapsed. The
+    /// transaction's own RFC timers may still complete the cell later.
+    pub async fn wait_for_outcome(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Option<ClientTransactionOutcome>> {
+        self.completion.wait_for_outcome(timeout).await
+    }
+
+    /// Read the exact transaction outcome without waiting.
+    ///
+    /// Protocol owners use this after a concurrent local-cleanup notification:
+    /// response processing records this cell before publishing any event that
+    /// can trigger cleanup, so an already-recorded wire result must win over a
+    /// simultaneous observer shutdown.
+    pub fn current_outcome(&self) -> Result<Option<ClientTransactionOutcome>> {
+        self.completion.outcome()
+    }
+}
+
+impl std::fmt::Debug for ClientTransactionCompletionHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientTransactionCompletionHandle")
+            .finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for ClientTransactionOutcome {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

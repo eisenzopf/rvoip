@@ -1360,6 +1360,48 @@ impl DialogManager {
         body: Option<bytes::Bytes>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
+        self.send_request_in_dialog_with_extras_owned(dialog_id, method, body, extra_headers)
+            .await
+            .map(|(transaction_id, _completion)| transaction_id)
+    }
+
+    /// In-dialog request dispatch that returns the exact transaction
+    /// completion captured before the request can reach the wire.
+    pub(crate) async fn send_request_in_dialog_with_extras_and_completion(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> DialogResult<(
+        TransactionKey,
+        crate::transaction::ClientTransactionCompletionHandle,
+    )> {
+        let method_for_error = method.clone();
+        let (transaction_id, completion) = self
+            .send_request_in_dialog_with_extras_owned(dialog_id, method, body, extra_headers)
+            .await?;
+        let completion =
+            completion.ok_or_else(|| crate::errors::DialogError::TransactionError {
+                message: safe_method_operation_failure(
+                    "dialog_completion_capture",
+                    "missing_exact_completion",
+                    &method_for_error,
+                ),
+            })?;
+        Ok((transaction_id, completion))
+    }
+
+    async fn send_request_in_dialog_with_extras_owned(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> DialogResult<(
+        TransactionKey,
+        Option<crate::transaction::ClientTransactionCompletionHandle>,
+    )> {
         debug!(method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method), dialog=%dialog_id, "Sending request using dialog functions");
 
         // Get dialog context and build the request. Destination is resolved
@@ -1748,8 +1790,13 @@ impl DialogManager {
         // INVITE gets the benign-terminate suppression so non-INVITE
         // methods (BYE / REFER / UPDATE / etc.) still surface real
         // transport failures.
-        let (transaction_id, _addr) = self
-            .send_request_with_candidate_wire_plan(request, candidates, Some(dialog_id), wire_plan)
+        let (transaction_id, _addr, completion) = self
+            .send_request_with_candidate_wire_plan_owned(
+                request,
+                candidates,
+                Some(dialog_id),
+                wire_plan,
+            )
             .await?;
 
         debug!(
@@ -1759,7 +1806,7 @@ impl DialogManager {
             "Sent request via candidate failover path"
         );
 
-        Ok(transaction_id)
+        Ok((transaction_id, completion))
     }
 
     /// Send a response using transaction-core
@@ -4971,6 +5018,27 @@ impl DialogManager {
         tx_to_dialog: Option<&DialogId>,
         wire_plan: CandidateWirePlan,
     ) -> DialogResult<(TransactionKey, std::net::SocketAddr)> {
+        self.send_request_with_candidate_wire_plan_owned(
+            request,
+            candidates,
+            tx_to_dialog,
+            wire_plan,
+        )
+        .await
+        .map(|(transaction_id, destination, _completion)| (transaction_id, destination))
+    }
+
+    async fn send_request_with_candidate_wire_plan_owned(
+        &self,
+        request: rvoip_sip_core::Request,
+        candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+        tx_to_dialog: Option<&DialogId>,
+        wire_plan: CandidateWirePlan,
+    ) -> DialogResult<(
+        TransactionKey,
+        std::net::SocketAddr,
+        Option<crate::transaction::ClientTransactionCompletionHandle>,
+    )> {
         use crate::manager::RequestLifecycle;
 
         let _operation = self.enter_invite_failover_operation().ok_or_else(|| {
@@ -4999,7 +5067,8 @@ impl DialogManager {
             return Box::pin(
                 self.send_initial_invite_plan(dialog_id, request, candidates, wire_plan),
             )
-            .await;
+            .await
+            .map(|(transaction_id, destination)| (transaction_id, destination, None));
         }
 
         let total = candidates.len();
@@ -5025,10 +5094,10 @@ impl DialogManager {
             }
             let tx_result = self
                 .transaction_manager
-                .create_client_transaction_on_route(req, request_route)
+                .create_client_transaction_on_route_with_completion(req, request_route)
                 .await;
-            let tx_id = match tx_result {
-                Ok(id) => id,
+            let (tx_id, completion) = match tx_result {
+                Ok(created) => created,
                 Err(_error) => {
                     last_err = Some(crate::errors::DialogError::TransactionError {
                         message: safe_method_operation_failure(
@@ -5067,7 +5136,7 @@ impl DialogManager {
                             attempt - 1
                         );
                     }
-                    return Ok((tx_id, target.addr));
+                    return Ok((tx_id, target.addr, Some(completion)));
                 }
                 Err(e) => {
                     let is_transport_failure =

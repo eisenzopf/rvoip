@@ -28,6 +28,8 @@
 //! - `RVOIP_PERF_SOAK_MIN_HOLD_SECS` (default 10)
 //! - `RVOIP_PERF_SOAK_MAX_HOLD_SECS` (default 360)
 //! - `RVOIP_PERF_SOAK_CPS`           (default 0 — optional immediate hangup churn)
+//! - `RVOIP_PERF_SOAK_DRAIN_CPS`     (default 10 — paced end-of-soak hangups)
+//! - `RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT` (default 32)
 //! - `RVOIP_PERF_SOAK_MEDIA_CALLS`   (legacy alias for active calls)
 //! - `RVOIP_PERF_CALL_TIMEOUT_SECS`  (default 30)
 //! - `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR` (default from `Config`)
@@ -38,8 +40,10 @@
 
 #![allow(clippy::needless_return)]
 
+use std::collections::BTreeMap;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rvoip_sip::api::callback_peer::{
@@ -47,6 +51,7 @@ use rvoip_sip::api::callback_peer::{
 };
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{AudioSource, Config, UnifiedCoordinator};
+use rvoip_sip::{SessionError, SessionId};
 use serde_json::json;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -56,6 +61,9 @@ use support::{LatencyHistogram, LoadProfile, ResourceSample, ResourceSampler, Sc
 
 const DEFAULT_PERF_APP_EVENT_CHANNEL_CAPACITY: usize = Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY;
 const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
+const DEFAULT_CONTROLLED_DRAIN_CPS: f64 = 10.0;
+const DEFAULT_ERROR_SAMPLE_LIMIT: usize = 32;
+const MAX_ERROR_MESSAGE_CHARS: usize = 256;
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -130,6 +138,152 @@ async fn boot_alice(cfg: Config) -> Arc<UnifiedCoordinator> {
     coord
 }
 
+#[derive(Default)]
+struct FailureDiagnosticsState {
+    total: u64,
+    by_phase_and_class: BTreeMap<(String, String), u64>,
+    samples: Vec<serde_json::Value>,
+}
+
+#[derive(Clone)]
+struct FailureDiagnostics {
+    sample_limit: usize,
+    state: Arc<Mutex<FailureDiagnosticsState>>,
+}
+
+impl FailureDiagnostics {
+    fn new(sample_limit: usize) -> Self {
+        Self {
+            sample_limit,
+            state: Arc::new(Mutex::new(FailureDiagnosticsState::default())),
+        }
+    }
+
+    fn record(
+        &self,
+        phase: &'static str,
+        error: &SessionError,
+        call_id: Option<&SessionId>,
+        elapsed: Duration,
+    ) {
+        let error_class = session_error_class(error);
+        self.record_class(phase, error_class, call_id, elapsed, error_class);
+    }
+
+    fn record_class(
+        &self,
+        phase: &'static str,
+        error_class: &'static str,
+        call_id: Option<&SessionId>,
+        elapsed: Duration,
+        message: &str,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("failure diagnostics lock poisoned");
+        state.total += 1;
+        *state
+            .by_phase_and_class
+            .entry((phase.to_string(), error_class.to_string()))
+            .or_default() += 1;
+        if state.samples.len() < self.sample_limit {
+            let sequence = state.total;
+            let sample = json!({
+                "sequence": sequence,
+                "phase": phase,
+                "error_class": error_class,
+                "call_id_hash": call_id.map(hash_session_id),
+                "elapsed_ms": round2(elapsed.as_secs_f64() * 1_000.0),
+                "message": truncate_chars(message, MAX_ERROR_MESSAGE_CHARS),
+            });
+            state.samples.push(sample);
+        }
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        let state = self
+            .state
+            .lock()
+            .expect("failure diagnostics lock poisoned");
+        let counts = state
+            .by_phase_and_class
+            .iter()
+            .map(|((phase, error_class), count)| {
+                json!({
+                    "phase": phase,
+                    "error_class": error_class,
+                    "count": count,
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "total": state.total,
+            "sample_limit": self.sample_limit,
+            "sampled": state.samples.len(),
+            "dropped_samples": state.total.saturating_sub(state.samples.len() as u64),
+            "by_phase_and_class": counts,
+            "samples": state.samples.clone(),
+        })
+    }
+}
+
+fn session_error_class(error: &SessionError) -> &'static str {
+    match error {
+        SessionError::SessionNotFound(_) => "session_not_found",
+        SessionError::InvalidTransition(_) => "invalid_transition",
+        SessionError::DialogError(_) => "dialog_error",
+        SessionError::MediaError(detail) => classify_media_detail(detail, "media_error"),
+        SessionError::MediaIntegration { reason } => {
+            classify_media_detail(reason, "media_integration")
+        }
+        SessionError::SDPNegotiationFailed(_) => "sdp_negotiation",
+        SessionError::ConfigurationError(_) | SessionError::ConfigError(_) => "configuration",
+        SessionError::InvalidInput(_) => "invalid_input",
+        SessionError::Timeout(_) => "timeout",
+        SessionError::NetworkError(_) => "network_error",
+        SessionError::ProtocolError(_) => "protocol_error",
+        SessionError::IoError(error) => match error.kind() {
+            std::io::ErrorKind::AddrInUse => "io_address_in_use",
+            std::io::ErrorKind::AddrNotAvailable => "io_address_not_available",
+            std::io::ErrorKind::ConnectionRefused => "io_connection_refused",
+            std::io::ErrorKind::TimedOut => "io_timeout",
+            _ => "io_error",
+        },
+        SessionError::InternalError(_) => "internal_error",
+        SessionError::Other(_) => "other",
+        _ => "session_error",
+    }
+}
+
+fn classify_media_detail(detail: &str, fallback: &'static str) -> &'static str {
+    if detail.contains("[kind=port_pool_exhausted]") {
+        "port_pool_exhausted"
+    } else if detail.contains("[kind=rtp_bind_collision]") {
+        "rtp_bind_collision"
+    } else if detail.contains("[kind=rtp_session_creation]") {
+        "rtp_session_creation"
+    } else {
+        fallback
+    }
+}
+
+fn hash_session_id(session_id: &SessionId) -> String {
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 fn perf_config(name: &str, port: u16) -> Config {
     let app_event_capacity = read_positive_usize_env("RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY")
         .or_else(|| read_positive_usize_env("RVOIP_PERF_GLOBAL_EVENT_CHANNEL_CAPACITY"))
@@ -190,6 +344,10 @@ async fn perf_soak_30min() {
             .and_then(|s| s.parse().ok())
             .unwrap_or(30),
     );
+    let controlled_drain_cps =
+        read_positive_f64_env("RVOIP_PERF_SOAK_DRAIN_CPS").unwrap_or(DEFAULT_CONTROLLED_DRAIN_CPS);
+    let error_sample_limit = read_positive_usize_env("RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT")
+        .unwrap_or(DEFAULT_ERROR_SAMPLE_LIMIT);
 
     let bob_port = support::ports::next_sip_port();
     let alice_port = support::ports::next_sip_port();
@@ -216,6 +374,7 @@ async fn perf_soak_30min() {
     let first_minute_hist = Arc::new(LatencyHistogram::new("setup_latency_minute_1"));
     let last_minute_hist = Arc::new(LatencyHistogram::new("setup_latency_last_minute"));
     let counters = Arc::new(SoakCounters::default());
+    let failures = Arc::new(FailureDiagnostics::new(error_sample_limit));
 
     let total = Duration::from_secs(duration_secs);
     let started = std::time::Instant::now();
@@ -228,15 +387,17 @@ async fn perf_soak_30min() {
         Duration::from_secs(5),
     );
 
-    // Cycling active media pool. Each slot keeps one call active until its
-    // hold timer expires, tears it down, then immediately replenishes the slot
-    // until the soak window closes.
-    let mut active_tasks = JoinSet::<()>::new();
+    // Cycling active media pool. Replenishment stops early enough to avoid
+    // starting calls that cannot complete inside the active window. Calls
+    // still active at the deadline are handed to the paced drain below rather
+    // than all dispatching BYE at the same instant.
+    let mut active_tasks = JoinSet::<Option<PendingDrain>>::new();
     for slot in 0..active_calls {
         let alice = Arc::clone(&alice);
         let from = from.clone();
         let target_uri = target_uri.clone();
         let counters = Arc::clone(&counters);
+        let failures = Arc::clone(&failures);
         let setup_hist = Arc::clone(&setup_hist);
         let first_minute_hist = Arc::clone(&first_minute_hist);
         let last_minute_hist = Arc::clone(&last_minute_hist);
@@ -245,14 +406,14 @@ async fn perf_soak_30min() {
             loop {
                 let now = std::time::Instant::now();
                 if now >= active_deadline {
-                    break;
+                    return None;
                 }
                 let remaining_before_stop = active_deadline.saturating_duration_since(now);
                 if remaining_before_stop <= setup_teardown_budget(call_timeout) {
                     if !remaining_before_stop.is_zero() {
                         tokio::time::sleep(remaining_before_stop).await;
                     }
-                    break;
+                    return None;
                 }
 
                 let dispatch_at = std::time::Instant::now();
@@ -264,19 +425,36 @@ async fn perf_soak_30min() {
                     .await
                 {
                     Ok(id) => id,
-                    Err(_) => {
+                    Err(error) => {
                         counters.failed.fetch_add(1, Ordering::Relaxed);
-                        counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+                        counters.invite_send_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record("active_invite_send", &error, None, dispatch_at.elapsed());
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
                 let handle = alice.session(&call_id);
-                if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
+                if let Err(error) = handle.wait_for_answered(Some(call_timeout)).await {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
-                    counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-                    if handle.hangup_and_wait(Some(call_timeout)).await.is_err() {
+                    counters.answer_failed.fetch_add(1, Ordering::Relaxed);
+                    if matches!(&error, SessionError::Timeout(_)) {
+                        counters.answer_timeout.fetch_add(1, Ordering::Relaxed);
+                    }
+                    failures.record(
+                        "active_wait_answered",
+                        &error,
+                        Some(&call_id),
+                        dispatch_at.elapsed(),
+                    );
+                    let cleanup_started = std::time::Instant::now();
+                    if let Err(error) = handle.hangup_and_wait(Some(call_timeout)).await {
                         counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record(
+                            "active_setup_failure_cleanup",
+                            &error,
+                            Some(&call_id),
+                            cleanup_started.elapsed(),
+                        );
                     }
                     continue;
                 }
@@ -294,7 +472,7 @@ async fn perf_soak_30min() {
                     last_minute_hist.record_nanos(ns);
                 }
 
-                if alice
+                if let Err(error) = alice
                     .set_audio_source(
                         &call_id,
                         AudioSource::Tone {
@@ -303,27 +481,60 @@ async fn perf_soak_30min() {
                         },
                     )
                     .await
-                    .is_err()
                 {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
                     counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-                    let _ = handle.hangup_and_wait(Some(call_timeout)).await;
+                    failures.record(
+                        "active_audio_source",
+                        &error,
+                        Some(&call_id),
+                        dispatch_at.elapsed(),
+                    );
+                    let cleanup_started = std::time::Instant::now();
+                    if let Err(error) = handle.hangup_and_wait(Some(call_timeout)).await {
+                        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record(
+                            "active_media_failure_cleanup",
+                            &error,
+                            Some(&call_id),
+                            cleanup_started.elapsed(),
+                        );
+                    }
                     continue;
                 }
 
                 let hold = cycling_hold_duration(slot, cycle, min_hold_secs, max_hold_secs);
-                let hold_deadline = (std::time::Instant::now() + hold).min(active_deadline);
+                let natural_hold_deadline = std::time::Instant::now() + hold;
+                let hold_deadline = natural_hold_deadline.min(active_deadline);
                 let remaining = hold_deadline.saturating_duration_since(std::time::Instant::now());
                 if !remaining.is_zero() {
                     tokio::time::sleep(remaining).await;
                 }
 
-                if handle.hangup_and_wait(Some(call_timeout)).await.is_ok() {
-                    counters.succeeded.fetch_add(1, Ordering::Relaxed);
-                    counters.active_succeeded.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    counters.failed.fetch_add(1, Ordering::Relaxed);
-                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                if natural_hold_deadline >= active_deadline {
+                    return Some(PendingDrain {
+                        slot,
+                        cycle,
+                        call_id,
+                    });
+                }
+
+                let teardown_started = std::time::Instant::now();
+                match handle.hangup_and_wait(Some(call_timeout)).await {
+                    Ok(_) => {
+                        counters.succeeded.fetch_add(1, Ordering::Relaxed);
+                        counters.active_succeeded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        counters.failed.fetch_add(1, Ordering::Relaxed);
+                        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record(
+                            "active_natural_hangup",
+                            &error,
+                            Some(&call_id),
+                            teardown_started.elapsed(),
+                        );
+                    }
                 }
                 cycle += 1;
             }
@@ -338,7 +549,17 @@ async fn perf_soak_30min() {
         let tick = Duration::from_secs_f64(1.0 / soak_cps);
         loop {
             while let Some(result) = churn_tasks.try_join_next() {
-                let _ = result;
+                if let Err(_error) = result {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                    failures.record_class(
+                        "churn_task_join",
+                        "task_join_error",
+                        None,
+                        started.elapsed(),
+                        "task join failed before producing a result",
+                    );
+                }
             }
 
             let elapsed = started.elapsed();
@@ -352,6 +573,7 @@ async fn perf_soak_30min() {
             let first_minute_hist = Arc::clone(&first_minute_hist);
             let last_minute_hist = Arc::clone(&last_minute_hist);
             let counters = Arc::clone(&counters);
+            let failures = Arc::clone(&failures);
             churn_tasks.spawn(async move {
                 let dispatch_at = std::time::Instant::now();
                 let t_send = dispatch_at;
@@ -359,16 +581,35 @@ async fn perf_soak_30min() {
                 counters.churn_offered.fetch_add(1, Ordering::Relaxed);
                 let call_id = match alice.invite(Some(from), target_uri).send().await {
                     Ok(id) => id,
-                    Err(_) => {
+                    Err(error) => {
                         counters.failed.fetch_add(1, Ordering::Relaxed);
+                        counters.invite_send_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record("churn_invite_send", &error, None, dispatch_at.elapsed());
                         return;
                     }
                 };
                 let handle = alice.session(&call_id);
-                if handle.wait_for_answered(Some(call_timeout)).await.is_err() {
+                if let Err(error) = handle.wait_for_answered(Some(call_timeout)).await {
                     counters.failed.fetch_add(1, Ordering::Relaxed);
-                    if handle.hangup_and_wait(Some(call_timeout)).await.is_err() {
+                    counters.answer_failed.fetch_add(1, Ordering::Relaxed);
+                    if matches!(&error, SessionError::Timeout(_)) {
+                        counters.answer_timeout.fetch_add(1, Ordering::Relaxed);
+                    }
+                    failures.record(
+                        "churn_wait_answered",
+                        &error,
+                        Some(&call_id),
+                        dispatch_at.elapsed(),
+                    );
+                    let cleanup_started = std::time::Instant::now();
+                    if let Err(error) = handle.hangup_and_wait(Some(call_timeout)).await {
                         counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record(
+                            "churn_setup_failure_cleanup",
+                            &error,
+                            Some(&call_id),
+                            cleanup_started.elapsed(),
+                        );
                     }
                     return;
                 }
@@ -393,12 +634,22 @@ async fn perf_soak_30min() {
                 {
                     last_minute_hist.record_nanos(ns);
                 }
-                if handle.hangup_and_wait(Some(call_timeout)).await.is_ok() {
-                    counters.succeeded.fetch_add(1, Ordering::Relaxed);
-                    counters.churn_succeeded.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    counters.failed.fetch_add(1, Ordering::Relaxed);
-                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                let teardown_started = std::time::Instant::now();
+                match handle.hangup_and_wait(Some(call_timeout)).await {
+                    Ok(_) => {
+                        counters.succeeded.fetch_add(1, Ordering::Relaxed);
+                        counters.churn_succeeded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        counters.failed.fetch_add(1, Ordering::Relaxed);
+                        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                        failures.record(
+                            "churn_hangup",
+                            &error,
+                            Some(&call_id),
+                            teardown_started.elapsed(),
+                        );
+                    }
                 }
             });
             tokio::time::sleep(tick).await;
@@ -410,7 +661,17 @@ async fn perf_soak_30min() {
     // Drain churn calls.
     let drain_result = tokio::time::timeout(drain_join_timeout(call_timeout), async {
         while let Some(result) = churn_tasks.join_next().await {
-            let _ = result;
+            if let Err(_error) = result {
+                counters.failed.fetch_add(1, Ordering::Relaxed);
+                counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                failures.record_class(
+                    "churn_task_join",
+                    "task_join_error",
+                    None,
+                    started.elapsed(),
+                    "task join failed before producing a result",
+                );
+            }
         }
     })
     .await;
@@ -419,26 +680,76 @@ async fn perf_soak_30min() {
         while let Some(result) = churn_tasks.join_next().await {
             let _ = result;
         }
+        counters.failed.fetch_add(1, Ordering::Relaxed);
+        counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+        failures.record_class(
+            "churn_task_drain",
+            "join_timeout",
+            None,
+            drain_join_timeout(call_timeout),
+            "churn tasks did not finish inside the drain deadline",
+        );
     }
 
-    // Stop active cycling calls. Each slot clamps its current hold to the
-    // active deadline, then hangs up the current call and exits.
-    let active_drain_result = tokio::time::timeout(drain_join_timeout(call_timeout), async {
+    // Collect calls that were still active at the steady-load deadline, then
+    // dispatch their hangups in stable slot/cycle order at the configured
+    // rate. This keeps steady-state soak teardown distinct from burst teardown.
+    let mut pending_drains = Vec::new();
+    let active_collection_result = tokio::time::timeout(drain_join_timeout(call_timeout), async {
         while let Some(result) = active_tasks.join_next().await {
-            let _ = result;
+            match result {
+                Ok(Some(pending)) => pending_drains.push(pending),
+                Ok(None) => {}
+                Err(_error) => {
+                    counters.failed.fetch_add(1, Ordering::Relaxed);
+                    counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                    failures.record_class(
+                        "active_task_join",
+                        "task_join_error",
+                        None,
+                        Duration::ZERO,
+                        "task join failed before producing a result",
+                    );
+                }
+            }
         }
     })
     .await;
-    if active_drain_result.is_err() {
-        force_teardown_remaining_sessions(Arc::clone(&alice), call_timeout, &counters).await;
+    let controlled_drain = if active_collection_result.is_err() {
         active_tasks.abort_all();
         while let Some(result) = active_tasks.join_next().await {
             let _ = result;
         }
         counters.failed.fetch_add(1, Ordering::Relaxed);
         counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
-    }
+        failures.record_class(
+            "active_task_collection",
+            "join_timeout",
+            None,
+            drain_join_timeout(call_timeout),
+            "active slot tasks did not hand off inside the collection deadline",
+        );
+        force_teardown_remaining_sessions(Arc::clone(&alice), call_timeout, &counters, &failures)
+            .await;
+        ControlledDrainSummary::default()
+    } else {
+        controlled_drain_calls(
+            Arc::clone(&alice),
+            pending_drains,
+            controlled_drain_cps,
+            call_timeout,
+            &counters,
+            &failures,
+        )
+        .await
+    };
 
+    // Anchor the post-drain window to observed wall time after churn joins,
+    // active-task handoff, and the controlled BYE drain have all completed.
+    // Using nominal duration + paced-drain time alone can misclassify task
+    // collection/cleanup samples as post-drain stability evidence.
+    let rss_post_drain_start_secs = started.elapsed().as_secs_f64();
+    let teardown_phase_elapsed_secs = (rss_post_drain_start_secs - duration_secs as f64).max(0.0);
     tokio::time::sleep(retention_drain_wait).await;
     let retention_samples = retention_sampler.stop().await;
     let final_retention = retention_samples
@@ -461,7 +772,7 @@ async fn perf_soak_30min() {
     let rss_post_drain_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
-        .filter(|sample| sample.t_secs >= duration_secs as f64)
+        .filter(|sample| sample.t_secs >= rss_post_drain_start_secs)
         .cloned()
         .collect();
     let rss_post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&rss_post_drain_samples) * 60.0;
@@ -473,11 +784,15 @@ async fn perf_soak_30min() {
     let rss_windows = rss_window_summaries(
         &resources.samples,
         duration_secs as f64,
+        teardown_phase_elapsed_secs,
         retention_drain_wait.as_secs_f64(),
     );
     let offered = counters.offered.load(Ordering::Relaxed);
     let succeeded = counters.succeeded.load(Ordering::Relaxed);
     let failed = counters.failed.load(Ordering::Relaxed);
+    let invite_send_failed = counters.invite_send_failed.load(Ordering::Relaxed);
+    let answer_failed = counters.answer_failed.load(Ordering::Relaxed);
+    let answer_timeout = counters.answer_timeout.load(Ordering::Relaxed);
     let media_setup_failed = counters.media_setup_failed.load(Ordering::Relaxed);
     let teardown_failed = counters.teardown_failed.load(Ordering::Relaxed);
     let active_offered = counters.active_offered.load(Ordering::Relaxed);
@@ -491,6 +806,7 @@ async fn perf_soak_30min() {
         .completed_audio_receivers
         .load(Ordering::Relaxed);
     let received_frames = bob_diagnostics.received_frames.load(Ordering::Relaxed);
+    let failure_diagnostics = failures.snapshot();
     let asr = if offered > 0 {
         succeeded as f64 / offered as f64
     } else {
@@ -501,7 +817,7 @@ async fn perf_soak_30min() {
         target_cps: soak_cps,
         ramp_secs: 0,
         steady_secs: duration_secs,
-        cooldown_secs: retention_drain_wait.as_secs(),
+        cooldown_secs: controlled_drain.elapsed.as_secs() + retention_drain_wait.as_secs(),
     };
     let mut report = ScenarioReport::new("perf_soak_30min", load);
     let cores = report.environment().cpu_count_physical() as f64;
@@ -517,6 +833,22 @@ async fn perf_soak_30min() {
         .result("media_calls_held", active_calls)
         .result("active_call_min_hold_secs", min_hold_secs)
         .result("active_call_max_hold_secs", max_hold_secs)
+        .result("controlled_drain_cps", controlled_drain_cps)
+        .result("controlled_drain_calls", controlled_drain.queued)
+        .result("controlled_drain_succeeded", controlled_drain.succeeded)
+        .result("controlled_drain_failed", controlled_drain.failed)
+        .result(
+            "controlled_drain_elapsed_secs",
+            round2(controlled_drain.elapsed.as_secs_f64()),
+        )
+        .result(
+            "teardown_phase_elapsed_secs",
+            round2(teardown_phase_elapsed_secs),
+        )
+        .result(
+            "replenishment_stop_budget_secs",
+            setup_teardown_budget(call_timeout).as_secs(),
+        )
         .result("global_event_channel_capacity", app_event_capacity)
         .result(
             "session_event_dispatcher_channel_capacity",
@@ -557,6 +889,10 @@ async fn perf_soak_30min() {
         .result(
             "rss_post_drain_sample_count",
             rss_post_drain_samples.len() as u64,
+        )
+        .result(
+            "rss_post_drain_start_secs",
+            round2(rss_post_drain_start_secs),
         )
         .result(
             "rss_gate_growth_mb_per_hr",
@@ -604,10 +940,14 @@ async fn perf_soak_30min() {
                 "gate_growth_mb_per_hr": round2(rss_gate_growth_mb_per_hr),
             }),
         )
+        .diagnostic_block("call_failures", failure_diagnostics)
         .result(
             "errors",
             json!({
                 "call_failed":          failed,
+                "invite_send_failed":   invite_send_failed,
+                "answer_failed":        answer_failed,
+                "answer_timeout":       answer_timeout,
                 "media_setup_failed":   media_setup_failed,
                 "teardown_failed":      teardown_failed,
             }),
@@ -635,6 +975,14 @@ async fn perf_soak_30min() {
     }
     if failed != 0 {
         gate_failures.push(format!("call_failed={failed}"));
+    }
+    if invite_send_failed != 0 {
+        gate_failures.push(format!("invite_send_failed={invite_send_failed}"));
+    }
+    if answer_failed != 0 {
+        gate_failures.push(format!(
+            "answer_failed={answer_failed} (timeouts={answer_timeout})"
+        ));
     }
     if media_setup_failed != 0 {
         gate_failures.push(format!("media_setup_failed={media_setup_failed}"));
@@ -799,6 +1147,238 @@ async fn perf_session_churn_leak() {
     assert_eq!(
         active_audio_receivers, 0,
         "completed call churn left audio receiver tasks active"
+    );
+}
+
+/// Deliberately releases every established call through one barrier. The
+/// steady soak uses a paced drain; this separate scenario retains coverage for
+/// the worst-case synchronized BYE burst without conflating the two workloads.
+#[ignore]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn perf_mass_teardown_stress() {
+    let requested_calls = read_positive_usize_env("RVOIP_PERF_MASS_TEARDOWN_CALLS").unwrap_or(500);
+    let setup_cps = read_positive_f64_env("RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS").unwrap_or(30.0);
+    let call_timeout = Duration::from_secs(
+        std::env::var("RVOIP_PERF_CALL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30),
+    );
+    let retention_drain_wait = retention_drain_wait();
+    let failures = Arc::new(FailureDiagnostics::new(
+        read_positive_usize_env("RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT")
+            .unwrap_or(DEFAULT_ERROR_SAMPLE_LIMIT),
+    ));
+
+    let bob_port = support::ports::next_sip_port();
+    let alice_port = support::ports::next_sip_port();
+    let bob_diagnostics = BobHandlerDiagnostics::default();
+    let bob = boot_bob(
+        perf_config("perf-mass-teardown-bob", bob_port),
+        bob_diagnostics.clone(),
+    )
+    .await;
+    let alice = boot_alice(perf_config("perf-mass-teardown-alice", alice_port)).await;
+    let from = format!("sip:alice@127.0.0.1:{alice_port}");
+    let target_uri = format!("sip:bob@127.0.0.1:{bob_port}");
+    let sampler = ResourceSampler::start(Duration::from_secs(1));
+    let started = std::time::Instant::now();
+
+    let setup_interval = Duration::from_secs_f64(1.0 / setup_cps);
+    let setup_started = std::time::Instant::now();
+    let mut setup_tasks = JoinSet::new();
+    for sequence in 0..requested_calls {
+        let scheduled_at = setup_started + setup_interval.mul_f64(sequence as f64);
+        let remaining = scheduled_at.saturating_duration_since(std::time::Instant::now());
+        if !remaining.is_zero() {
+            tokio::time::sleep(remaining).await;
+        }
+        let alice = Arc::clone(&alice);
+        let from = from.clone();
+        let target_uri = target_uri.clone();
+        let failures = Arc::clone(&failures);
+        setup_tasks.spawn(async move {
+            let dispatched_at = std::time::Instant::now();
+            let call_id = match alice.invite(Some(from), target_uri).send().await {
+                Ok(call_id) => call_id,
+                Err(error) => {
+                    failures.record(
+                        "mass_teardown_invite_send",
+                        &error,
+                        None,
+                        dispatched_at.elapsed(),
+                    );
+                    return None;
+                }
+            };
+            let handle = alice.session(&call_id);
+            if let Err(error) = handle.wait_for_answered(Some(call_timeout)).await {
+                failures.record(
+                    "mass_teardown_wait_answered",
+                    &error,
+                    Some(&call_id),
+                    dispatched_at.elapsed(),
+                );
+                let cleanup_started = std::time::Instant::now();
+                if let Err(error) = handle.hangup_and_wait(Some(call_timeout)).await {
+                    failures.record(
+                        "mass_teardown_setup_cleanup",
+                        &error,
+                        Some(&call_id),
+                        cleanup_started.elapsed(),
+                    );
+                }
+                return None;
+            }
+            if let Err(error) = alice
+                .set_audio_source(
+                    &call_id,
+                    AudioSource::Tone {
+                        frequency: 440.0,
+                        amplitude: 0.25,
+                    },
+                )
+                .await
+            {
+                failures.record(
+                    "mass_teardown_audio_source",
+                    &error,
+                    Some(&call_id),
+                    dispatched_at.elapsed(),
+                );
+                let cleanup_started = std::time::Instant::now();
+                if let Err(error) = handle.hangup_and_wait(Some(call_timeout)).await {
+                    failures.record(
+                        "mass_teardown_media_cleanup",
+                        &error,
+                        Some(&call_id),
+                        cleanup_started.elapsed(),
+                    );
+                }
+                return None;
+            }
+            Some(call_id)
+        });
+    }
+
+    let mut established = Vec::with_capacity(requested_calls);
+    while let Some(result) = setup_tasks.join_next().await {
+        match result {
+            Ok(Some(call_id)) => established.push(call_id),
+            Ok(None) => {}
+            Err(_error) => failures.record_class(
+                "mass_teardown_setup_join",
+                "task_join_error",
+                None,
+                setup_started.elapsed(),
+                "task join failed before producing a result",
+            ),
+        }
+    }
+    established.sort_by_key(hash_session_id);
+    let setup_failed = requested_calls.saturating_sub(established.len());
+
+    let barrier = Arc::new(tokio::sync::Barrier::new(established.len() + 1));
+    let release_anchor = std::time::Instant::now();
+    let mut teardown_tasks = JoinSet::new();
+    for call_id in established {
+        let barrier = Arc::clone(&barrier);
+        let handle = alice.session(&call_id);
+        teardown_tasks.spawn(async move {
+            barrier.wait().await;
+            let dispatch_offset = release_anchor.elapsed();
+            let teardown_started = std::time::Instant::now();
+            let result = handle.hangup_and_wait(Some(call_timeout)).await;
+            (call_id, dispatch_offset, teardown_started.elapsed(), result)
+        });
+    }
+    barrier.wait().await;
+
+    let mut teardown_succeeded = 0_usize;
+    let mut teardown_failed = 0_usize;
+    let mut first_dispatch = None::<Duration>;
+    let mut last_dispatch = Duration::ZERO;
+    while let Some(result) = teardown_tasks.join_next().await {
+        match result {
+            Ok((_call_id, dispatch_offset, _elapsed, Ok(_))) => {
+                teardown_succeeded += 1;
+                first_dispatch = Some(
+                    first_dispatch.map_or(dispatch_offset, |first| first.min(dispatch_offset)),
+                );
+                last_dispatch = last_dispatch.max(dispatch_offset);
+            }
+            Ok((call_id, dispatch_offset, elapsed, Err(error))) => {
+                teardown_failed += 1;
+                first_dispatch = Some(
+                    first_dispatch.map_or(dispatch_offset, |first| first.min(dispatch_offset)),
+                );
+                last_dispatch = last_dispatch.max(dispatch_offset);
+                failures.record("mass_teardown_hangup", &error, Some(&call_id), elapsed);
+            }
+            Err(_error) => {
+                teardown_failed += 1;
+                failures.record_class(
+                    "mass_teardown_join",
+                    "task_join_error",
+                    None,
+                    release_anchor.elapsed(),
+                    "task join failed before producing a result",
+                );
+            }
+        }
+    }
+    let dispatch_spread = first_dispatch
+        .map(|first| last_dispatch.saturating_sub(first))
+        .unwrap_or_default();
+
+    tokio::time::sleep(retention_drain_wait).await;
+    let final_retention =
+        capture_retention_sample("after_mass_teardown", started, &alice, &bob.coordinator).await;
+    let retained_after_drain = retained_total(&final_retention);
+    let active_audio_receivers = bob_diagnostics
+        .active_audio_receivers
+        .load(Ordering::Relaxed);
+    let resources = sampler.stop().await;
+    let failure_diagnostics = failures.snapshot();
+
+    let load = LoadProfile {
+        target_cps: setup_cps,
+        ramp_secs: 0,
+        steady_secs: release_anchor.duration_since(started).as_secs(),
+        cooldown_secs: retention_drain_wait.as_secs(),
+    };
+    let mut report = ScenarioReport::new("perf_mass_teardown_stress", load);
+    report
+        .result("calls_requested", requested_calls as u64)
+        .result(
+            "calls_established",
+            (teardown_succeeded + teardown_failed) as u64,
+        )
+        .result("setup_failed", setup_failed as u64)
+        .result("teardown_succeeded", teardown_succeeded as u64)
+        .result("teardown_failed", teardown_failed as u64)
+        .result(
+            "teardown_dispatch_spread_ms",
+            round2(dispatch_spread.as_secs_f64() * 1_000.0),
+        )
+        .result("retained_objects_after_drain", retained_after_drain)
+        .result("bob_active_audio_receivers", active_audio_receivers)
+        .diagnostic_block("call_failures", failure_diagnostics)
+        .diagnostic_block("retention_final", final_retention)
+        .with_resources(resources);
+    let json_path = report.write_resources_first_then_write_json_if_supported();
+    report.print_summary(&json_path);
+
+    bob.shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(3), bob.task).await;
+    drop(alice);
+
+    assert_eq!(setup_failed, 0, "mass teardown setup failures");
+    assert_eq!(teardown_failed, 0, "mass teardown hangup failures");
+    assert_eq!(retained_after_drain, 0, "mass teardown retained objects");
+    assert_eq!(
+        active_audio_receivers, 0,
+        "mass teardown left audio receiver tasks active"
     );
 }
 
@@ -1066,7 +1646,13 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_adapter/dialog_to_session",
         "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
+        "/dialog_adapter/outgoing_bye_tx",
+        "/dialog_adapter/outgoing_bye_generation_watch",
+        "/dialog_adapter/outbound_initial_invites",
         "/dialog_adapter/registration_refresh_tasks",
+        "/app_event_publisher/dispatcher/queued_current",
+        "/app_event_publisher/dispatcher/in_flight_current",
+        "/app_event_publisher/exact_terminal_claims/pending",
         "/lifecycle/expired_terminal_entries",
         "/transaction_manager/total",
         "/transaction_manager/terminated_transactions",
@@ -1137,8 +1723,25 @@ struct SoakCounters {
     active_succeeded: AtomicU64,
     churn_offered: AtomicU64,
     churn_succeeded: AtomicU64,
+    invite_send_failed: AtomicU64,
+    answer_failed: AtomicU64,
+    answer_timeout: AtomicU64,
     media_setup_failed: AtomicU64,
     teardown_failed: AtomicU64,
+}
+
+struct PendingDrain {
+    slot: u64,
+    cycle: u64,
+    call_id: SessionId,
+}
+
+#[derive(Default)]
+struct ControlledDrainSummary {
+    queued: u64,
+    succeeded: u64,
+    failed: u64,
+    elapsed: Duration,
 }
 
 fn cycling_hold_duration(slot: u64, cycle: u64, min_secs: u64, max_secs: u64) -> Duration {
@@ -1162,25 +1765,121 @@ fn drain_join_timeout(call_timeout: Duration) -> Duration {
     call_timeout + call_timeout + Duration::from_secs(60)
 }
 
+async fn controlled_drain_calls(
+    alice: Arc<UnifiedCoordinator>,
+    mut pending: Vec<PendingDrain>,
+    drain_cps: f64,
+    call_timeout: Duration,
+    counters: &Arc<SoakCounters>,
+    failures: &Arc<FailureDiagnostics>,
+) -> ControlledDrainSummary {
+    sort_pending_drains(&mut pending);
+    let queued = pending.len() as u64;
+    let interval = Duration::from_secs_f64(1.0 / drain_cps);
+    let started = std::time::Instant::now();
+    let mut tasks = JoinSet::new();
+
+    for (index, pending) in pending.into_iter().enumerate() {
+        let scheduled_at = started + drain_dispatch_offset(index, interval);
+        let remaining = scheduled_at.saturating_duration_since(std::time::Instant::now());
+        if !remaining.is_zero() {
+            tokio::time::sleep(remaining).await;
+        }
+        let handle = alice.session(&pending.call_id);
+        tasks.spawn(async move {
+            let teardown_started = std::time::Instant::now();
+            let result = handle.hangup_and_wait(Some(call_timeout)).await;
+            (pending, teardown_started.elapsed(), result)
+        });
+    }
+
+    let mut succeeded = 0_u64;
+    let mut failed = 0_u64;
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((_pending, _elapsed, Ok(_))) => {
+                succeeded += 1;
+                counters.succeeded.fetch_add(1, Ordering::Relaxed);
+                counters.active_succeeded.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok((pending, elapsed, Err(error))) => {
+                failed += 1;
+                counters.failed.fetch_add(1, Ordering::Relaxed);
+                counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                failures.record(
+                    "active_controlled_drain",
+                    &error,
+                    Some(&pending.call_id),
+                    elapsed,
+                );
+            }
+            Err(_error) => {
+                failed += 1;
+                counters.failed.fetch_add(1, Ordering::Relaxed);
+                counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                failures.record_class(
+                    "active_controlled_drain",
+                    "task_join_error",
+                    None,
+                    started.elapsed(),
+                    "task join failed before producing a result",
+                );
+            }
+        }
+    }
+
+    ControlledDrainSummary {
+        queued,
+        succeeded,
+        failed,
+        elapsed: started.elapsed(),
+    }
+}
+
+fn sort_pending_drains(pending: &mut [PendingDrain]) {
+    pending.sort_by_key(|call| (call.slot, call.cycle));
+}
+
+fn drain_dispatch_offset(index: usize, interval: Duration) -> Duration {
+    interval.mul_f64(index as f64)
+}
+
 async fn force_teardown_remaining_sessions(
     alice: Arc<UnifiedCoordinator>,
     call_timeout: Duration,
     counters: &Arc<SoakCounters>,
+    failures: &Arc<FailureDiagnostics>,
 ) {
     let mut tasks = JoinSet::new();
     for session in alice.list_sessions().await {
         if session.state.is_final() {
             continue;
         }
-        let handle = alice.session(&session.session_id);
-        tasks.spawn(async move { handle.hangup_and_wait(Some(call_timeout)).await.is_ok() });
+        let call_id = session.session_id;
+        let handle = alice.session(&call_id);
+        tasks.spawn(async move {
+            let started = std::time::Instant::now();
+            let result = handle.hangup_and_wait(Some(call_timeout)).await;
+            (call_id, started.elapsed(), result)
+        });
     }
 
     while let Some(result) = tasks.join_next().await {
         match result {
-            Ok(true) => {}
-            _ => {
+            Ok((_call_id, _elapsed, Ok(_))) => {}
+            Ok((call_id, elapsed, Err(error))) => {
                 counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                failures.record("forced_cleanup", &error, Some(&call_id), elapsed);
+            }
+            Err(_error) => {
+                counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
+                failures.record_class(
+                    "forced_cleanup",
+                    "task_join_error",
+                    None,
+                    Duration::ZERO,
+                    "task join failed before producing a result",
+                );
             }
         }
     }
@@ -1242,9 +1941,11 @@ fn rss_growth_mb_per_min(samples: &[ResourceSample]) -> f64 {
 fn rss_window_summaries(
     samples: &[ResourceSample],
     active_secs: f64,
-    drain_secs: f64,
+    controlled_drain_secs: f64,
+    post_drain_secs: f64,
 ) -> Vec<serde_json::Value> {
-    let total_secs = active_secs + drain_secs;
+    let post_drain_start_secs = active_secs + controlled_drain_secs;
+    let total_secs = post_drain_start_secs + post_drain_secs;
     let mut windows = Vec::new();
     let mut start = 0.0;
 
@@ -1256,8 +1957,15 @@ fn rss_window_summaries(
             .cloned()
             .collect();
         if let (Some(first), Some(last)) = (window_samples.first(), window_samples.last()) {
+            let label = if start >= post_drain_start_secs {
+                "post_drain"
+            } else if start >= active_secs {
+                "controlled_drain"
+            } else {
+                "active"
+            };
             windows.push(json!({
-                "label": if start >= active_secs { "drain" } else { "active" },
+                "label": label,
                 "start_secs": round2(start),
                 "end_secs": round2(end),
                 "sample_count": window_samples.len(),
@@ -1272,14 +1980,14 @@ fn rss_window_summaries(
 
     let drain_samples: Vec<ResourceSample> = samples
         .iter()
-        .filter(|sample| sample.t_secs >= active_secs)
+        .filter(|sample| sample.t_secs >= post_drain_start_secs)
         .cloned()
         .collect();
     if let (Some(first), Some(last)) = (drain_samples.first(), drain_samples.last()) {
         windows.push(json!({
             "label": "post_drain",
-            "start_secs": round2(active_secs),
-            "end_secs": round2(active_secs + drain_secs),
+            "start_secs": round2(post_drain_start_secs),
+            "end_secs": round2(total_secs),
             "sample_count": drain_samples.len(),
             "first_rss_mb": round2(first.rss_mb),
             "last_rss_mb": round2(last.rss_mb),
@@ -1370,5 +2078,128 @@ mod tests {
             cycling_hold_duration(42, 7, 30, 30),
             Duration::from_secs(30)
         );
+    }
+
+    #[test]
+    fn failure_diagnostics_preserve_classes_and_bound_samples() {
+        let diagnostics = FailureDiagnostics::new(2);
+        let call_id = SessionId::from_string("sensitive-call-id");
+        diagnostics.record(
+            "invite_send",
+            &SessionError::MediaError("bind failed for sensitive-call-id".to_string()),
+            Some(&call_id),
+            Duration::from_millis(12),
+        );
+        diagnostics.record(
+            "wait_answered",
+            &SessionError::Timeout("answer".to_string()),
+            Some(&call_id),
+            Duration::from_secs(1),
+        );
+        diagnostics.record(
+            "hangup",
+            &SessionError::DialogError("bye".to_string()),
+            Some(&call_id),
+            Duration::from_secs(2),
+        );
+
+        let snapshot = diagnostics.snapshot();
+        assert_eq!(snapshot["total"], 3);
+        assert_eq!(snapshot["sampled"], 2);
+        assert_eq!(snapshot["dropped_samples"], 1);
+        assert_eq!(snapshot["samples"][0]["phase"], "invite_send");
+        assert_eq!(snapshot["samples"][0]["error_class"], "media_error");
+        assert_ne!(snapshot["samples"][0]["call_id_hash"], call_id.as_str());
+        assert_eq!(snapshot["by_phase_and_class"].as_array().unwrap().len(), 3);
+        let encoded = snapshot.to_string();
+        assert!(!encoded.contains("sensitive-call-id"));
+        assert!(!encoded.contains("bind failed"));
+        assert!(!encoded.contains("\"message\":\"answer\""));
+    }
+
+    #[test]
+    fn session_error_classifier_distinguishes_bind_collisions() {
+        let error = SessionError::IoError(std::io::Error::from(std::io::ErrorKind::AddrInUse));
+        assert_eq!(session_error_class(&error), "io_address_in_use");
+        assert_eq!(
+            session_error_class(&SessionError::MediaError(
+                "[kind=rtp_bind_collision] bind failed".to_string()
+            )),
+            "rtp_bind_collision"
+        );
+        assert_eq!(
+            session_error_class(&SessionError::MediaIntegration {
+                reason: "[kind=port_pool_exhausted] no ports".to_string(),
+            }),
+            "port_pool_exhausted"
+        );
+        assert_eq!(
+            session_error_class(&SessionError::Timeout("bye".to_string())),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn controlled_drain_order_is_stable_by_slot_then_cycle() {
+        let mut pending = vec![
+            PendingDrain {
+                slot: 9,
+                cycle: 1,
+                call_id: SessionId::from_string("third"),
+            },
+            PendingDrain {
+                slot: 2,
+                cycle: 7,
+                call_id: SessionId::from_string("second"),
+            },
+            PendingDrain {
+                slot: 2,
+                cycle: 3,
+                call_id: SessionId::from_string("first"),
+            },
+        ];
+        sort_pending_drains(&mut pending);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|call| call.call_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second", "third"]
+        );
+    }
+
+    #[test]
+    fn controlled_drain_schedule_respects_configured_rate() {
+        let interval = Duration::from_secs_f64(1.0 / 10.0);
+        assert_eq!(drain_dispatch_offset(0, interval), Duration::ZERO);
+        assert_eq!(
+            drain_dispatch_offset(1, interval),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            drain_dispatch_offset(9, interval),
+            Duration::from_millis(900)
+        );
+    }
+
+    #[test]
+    fn retention_gate_counts_bye_owners_and_event_work() {
+        let snapshot = json!({
+            "dialog_adapter": {
+                "outgoing_bye_tx": 1,
+                "outgoing_bye_generation_watch": 1,
+                "outbound_initial_invites": 1,
+            },
+            "app_event_publisher": {
+                "dispatcher": {
+                    "queued_current": 1,
+                    "in_flight_current": 1,
+                },
+                "exact_terminal_claims": {
+                    "pending": 1,
+                },
+            },
+        });
+        assert_eq!(endpoint_retained_total(&snapshot), 6);
     }
 }

@@ -198,7 +198,7 @@ use crate::transaction::client::{
 };
 use crate::transaction::completion::{
     ClientTransactionCompletion, ClientTransactionCompletionEntry,
-    RetainedClientTransactionCompletion,
+    ClientTransactionCompletionHandle, RetainedClientTransactionCompletion,
 };
 use crate::transaction::error::{Error, Result};
 use crate::transaction::event_sender::{
@@ -6058,6 +6058,20 @@ impl TransactionManager {
             .await
     }
 
+    /// Create a client transaction and return its exact completion authority.
+    pub async fn create_client_transaction_with_completion(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+    ) -> Result<(TransactionKey, ClientTransactionCompletionHandle)> {
+        let route = crate::transaction::transport::multiplexed::transport_route_for_request(
+            &request,
+            destination,
+        )?;
+        self.create_client_transaction_on_route_with_completion(request, route)
+            .await
+    }
+
     /// Create a client transaction using an explicit resolver-selected route.
     /// The route's transport and authenticated authority govern every initial
     /// send and retransmission; they are not reconstructed from the request.
@@ -6068,7 +6082,23 @@ impl TransactionManager {
     ) -> Result<TransactionKey> {
         self.create_client_transaction_on_route_inner(request, request_route, None)
             .await
-            .map(|(key, _owner)| key)
+            .map(|(key, _owner, _completion)| key)
+    }
+
+    /// Create a client transaction and atomically return its exact completion
+    /// authority with the key.
+    ///
+    /// Protocol owners that must observe a terminal result after manager
+    /// retirement should retain this handle instead of resolving completion
+    /// later through the transaction-key index.
+    pub async fn create_client_transaction_on_route_with_completion(
+        &self,
+        request: Request,
+        request_route: TransportRoute,
+    ) -> Result<(TransactionKey, ClientTransactionCompletionHandle)> {
+        self.create_client_transaction_on_route_inner(request, request_route, None)
+            .await
+            .map(|(key, _owner, completion)| (key, completion))
     }
 
     /// Atomically return the exact allocation owner with the key. Failover
@@ -6084,6 +6114,7 @@ impl TransactionManager {
         timer_settings.transaction_timeout = transaction_timeout.max(Duration::from_millis(1));
         self.create_client_transaction_on_route_inner(request, request_route, Some(timer_settings))
             .await
+            .map(|(key, owner, _completion)| (key, owner))
     }
 
     async fn create_client_transaction_on_route_inner(
@@ -6091,7 +6122,11 @@ impl TransactionManager {
         request: Request,
         mut request_route: TransportRoute,
         timer_settings_override: Option<TimerSettings>,
-    ) -> Result<(TransactionKey, TransactionAdmissionOwner)> {
+    ) -> Result<(
+        TransactionKey,
+        TransactionAdmissionOwner,
+        ClientTransactionCompletionHandle,
+    )> {
         crate::transaction::transport::multiplexed::validate_request_route_security(
             &request,
             &request_route,
@@ -6361,6 +6396,13 @@ impl TransactionManager {
             .data()
             .install_transaction_admission_owner(admission_owner);
 
+        // Capture the exact completion authority from the newly constructed
+        // transaction before publishing either the live runner or its key.
+        // This closes the create/send/retire-versus-observer-lookup race for
+        // protocol owners that carry the returned handle.
+        let completion =
+            ClientTransactionCompletionHandle::new(Arc::clone(&transaction.data().completion));
+
         // Store the authoritative completion cell before publishing the live
         // transaction. Internal waiters never need to subscribe to events.
         let shared_retention_key = Arc::new(key.clone());
@@ -6387,7 +6429,7 @@ impl TransactionManager {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Created CANCEL transaction");
         }
 
-        Ok((key, returned_admission_owner))
+        Ok((key, returned_admission_owner, completion))
     }
 
     /// Creates and sends an ACK request for a 2xx response to an INVITE.

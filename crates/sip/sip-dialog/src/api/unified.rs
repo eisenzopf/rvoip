@@ -3071,6 +3071,25 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ByeRequestOptions,
     ) -> ApiResult<TransactionKey> {
+        self.send_bye_with_options_and_completion(dialog_id, opts)
+            .await
+            .map(|(transaction_id, _completion)| transaction_id)
+    }
+
+    /// BYE dispatch with the exact client-transaction completion authority.
+    ///
+    /// This additive protocol-owner API prevents teardown code from having to
+    /// reacquire completion through a transaction key after the request has
+    /// reached the wire and the runner may already have retired.
+    #[doc(hidden)]
+    pub async fn send_bye_with_options_and_completion(
+        &self,
+        dialog_id: &DialogId,
+        opts: ByeRequestOptions,
+    ) -> ApiResult<(
+        TransactionKey,
+        crate::transaction::ClientTransactionCompletionHandle,
+    )> {
         use rvoip_sip_core::types::reason::Reason;
         use rvoip_sip_core::types::TypedHeader;
 
@@ -3084,7 +3103,7 @@ impl UnifiedDialogApi {
 
         self.manager
             .inner_manager()
-            .send_request_in_dialog_with_extras(dialog_id, Method::Bye, None, extras)
+            .send_request_in_dialog_with_extras_and_completion(dialog_id, Method::Bye, None, extras)
             .await
             .map_err(ApiError::from)
     }

@@ -6,7 +6,8 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -29,6 +30,11 @@ pub const MIN_PORT: u16 = 1024; // Avoid privileged ports
 /// Delay before a port can be reused after being released
 const PORT_REUSE_DELAY_MS: u64 = 1000; // Default 1 second
 
+/// Delay before retrying a port whose authoritative socket bind failed.
+const PORT_BIND_FAILURE_QUARANTINE_MS: u64 = 1000;
+
+static NEXT_ALLOCATOR_ID: AtomicU64 = AtomicU64::new(1);
+
 /// Port allocation strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AllocationStrategy {
@@ -41,7 +47,7 @@ pub enum AllocationStrategy {
 }
 
 /// Port pairing strategy for RTP/RTCP
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PairingStrategy {
     /// Use adjacent ports (RTP on even, RTCP on odd)
     Adjacent,
@@ -118,11 +124,77 @@ struct ReleasedPort {
     released_at: Instant,
 }
 
-struct IndexedAllocatorState {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct IndexedPoolKey {
+    ip: IpAddr,
+    port_range_start: u16,
+    port_range_end: u16,
+    pairing_strategy: PairingStrategy,
+}
+
+struct SharedIndexedAllocatorState {
     available_ports: BTreeSet<u16>,
-    allocated_ports: HashSet<u16>,
-    session_ports: HashMap<String, Vec<(IpAddr, u16)>>,
+    allocated_ports: HashMap<u16, u64>,
+    quarantined_ports: HashMap<u16, Instant>,
     last_port: u16,
+}
+
+struct IndexedAllocatorState {
+    pools: HashMap<IpAddr, Arc<StdMutex<SharedIndexedAllocatorState>>>,
+    session_ports: HashMap<String, Vec<(IpAddr, u16)>>,
+}
+
+type SharedIndexedPool = Arc<StdMutex<SharedIndexedAllocatorState>>;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum BindAddressFamily {
+    Ipv4,
+    Ipv6,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct AuthoritativePortKey {
+    family: BindAddressFamily,
+    port: u16,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AuthoritativePortClaim {
+    ip: IpAddr,
+    owner_id: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AuthoritativePortQuarantine {
+    ip: IpAddr,
+    deadline: Instant,
+}
+
+#[derive(Default)]
+struct AuthoritativePortState {
+    claims: HashMap<AuthoritativePortKey, Vec<AuthoritativePortClaim>>,
+    quarantines: HashMap<AuthoritativePortKey, Vec<AuthoritativePortQuarantine>>,
+}
+
+fn indexed_pool_registry(
+) -> &'static StdMutex<HashMap<IndexedPoolKey, Weak<StdMutex<SharedIndexedAllocatorState>>>> {
+    static REGISTRY: once_cell::sync::OnceCell<
+        StdMutex<HashMap<IndexedPoolKey, Weak<StdMutex<SharedIndexedAllocatorState>>>>,
+    > = once_cell::sync::OnceCell::new();
+    REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn authoritative_port_registry() -> &'static StdMutex<AuthoritativePortState> {
+    static REGISTRY: once_cell::sync::OnceCell<StdMutex<AuthoritativePortState>> =
+        once_cell::sync::OnceCell::new();
+    REGISTRY.get_or_init(|| StdMutex::new(AuthoritativePortState::default()))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PortClaimOutcome {
+    Claimed,
+    Unavailable,
+    BindCollision,
 }
 
 /// Aggregate allocator diagnostics safe for logs and health endpoints.
@@ -137,10 +209,14 @@ pub struct PortAllocatorDiagnostics {
 
 /// Port allocation manager
 pub struct PortAllocator {
+    /// Stable owner identity for reservations held in process-shared pools.
+    allocator_id: u64,
+
     /// Allocator configuration
     config: PortAllocatorConfig,
 
-    /// Single-lock indexed state for high-capacity unvalidated allocators.
+    /// Per-allocator session ownership plus handles to process-shared pools for
+    /// high-capacity unvalidated allocators.
     indexed_state: Option<Arc<StdMutex<IndexedAllocatorState>>>,
 
     /// Currently allocated ports
@@ -148,6 +224,10 @@ pub struct PortAllocator {
 
     /// Recently released ports that can be reused
     released_ports: Arc<Mutex<Vec<ReleasedPort>>>,
+
+    /// Ports rejected by an authoritative socket bind. Unlike ordinary
+    /// releases, these are not candidates for immediate reuse.
+    quarantined_ports: Arc<Mutex<HashMap<(IpAddr, u16), Instant>>>,
 
     /// Last time the released-port list was compacted.
     last_released_cleanup: Arc<Mutex<Instant>>,
@@ -173,20 +253,20 @@ impl PortAllocator {
         let socket_strategy = PlatformSocketStrategy::for_current_platform();
         let indexed_state = Self::indexed_pool_enabled(&config).then(|| {
             Arc::new(StdMutex::new(IndexedAllocatorState {
-                available_ports: (config.port_range_start..=config.port_range_end).collect(),
-                allocated_ports: HashSet::with_capacity(config.capacity_hint),
+                pools: HashMap::new(),
                 session_ports: HashMap::with_capacity(config.capacity_hint),
-                last_port: config.port_range_start,
             }))
         });
 
         Self {
+            allocator_id: NEXT_ALLOCATOR_ID.fetch_add(1, Ordering::Relaxed),
             config: config.clone(),
             indexed_state,
             allocated_ports: Arc::new(Mutex::new(HashSet::with_capacity(config.capacity_hint))),
             released_ports: Arc::new(Mutex::new(Vec::with_capacity(
                 config.capacity_hint.min(1024),
             ))),
+            quarantined_ports: Arc::new(Mutex::new(HashMap::new())),
             last_released_cleanup: Arc::new(Mutex::new(Instant::now())),
             session_ports: Arc::new(Mutex::new(HashMap::with_capacity(config.capacity_hint))),
             last_port: Arc::new(Mutex::new(config.port_range_start)),
@@ -228,9 +308,22 @@ impl PortAllocator {
             let state = state
                 .lock()
                 .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+            let allocated_ports = state.pools.values().try_fold(0usize, |count, pool| {
+                let pool = pool
+                    .lock()
+                    .map_err(|_| Error::Transport("Shared port pool lock poisoned".to_string()))?;
+                Ok::<_, Error>(
+                    count
+                        + pool
+                            .allocated_ports
+                            .values()
+                            .filter(|owner| **owner == self.allocator_id)
+                            .count(),
+                )
+            })?;
             return Ok(PortAllocatorDiagnostics {
                 capacity_ports,
-                allocated_ports: state.allocated_ports.len(),
+                allocated_ports,
                 active_sessions: state.session_ports.len(),
                 recently_released_ports: 0,
             });
@@ -351,17 +444,20 @@ impl PortAllocator {
     /// Allocate a single port for generic usage
     pub async fn allocate_port(&self, ip: IpAddr) -> Result<u16> {
         if self.indexed_state.is_some() {
-            return self.allocate_indexed_unvalidated();
+            return self.allocate_indexed_unvalidated(ip);
         }
 
         let mut retries = 0;
+        let mut bind_collisions = 0;
 
         while retries < self.config.allocation_retries {
             // Try to use a recently released port first if preferred
             if self.config.prefer_port_reuse {
                 if let Some(port) = self.find_reusable_port(ip).await {
-                    if self.claim_port(ip, port).await {
-                        return Ok(port);
+                    match self.claim_port(ip, port).await {
+                        PortClaimOutcome::Claimed => return Ok(port),
+                        PortClaimOutcome::BindCollision => bind_collisions += 1,
+                        PortClaimOutcome::Unavailable => {}
                     }
                 }
             }
@@ -374,16 +470,26 @@ impl PortAllocator {
             };
 
             // Check if the port is available
-            if self.claim_port(ip, port).await {
-                return Ok(port);
+            match self.claim_port(ip, port).await {
+                PortClaimOutcome::Claimed => return Ok(port),
+                PortClaimOutcome::BindCollision => bind_collisions += 1,
+                PortClaimOutcome::Unavailable => {}
             }
 
             retries += 1;
         }
 
-        Err(Error::Transport(
-            "Failed to allocate port after maximum retries".to_string(),
-        ))
+        if bind_collisions > 0 {
+            Err(Error::Transport(format!(
+                "RTP port allocation exhausted after {} attempts ({} OS bind collisions)",
+                self.config.allocation_retries, bind_collisions
+            )))
+        } else {
+            Err(Error::Transport(format!(
+                "RTP port pool exhausted after {} allocation attempts",
+                self.config.allocation_retries
+            )))
+        }
     }
 
     fn allocate_indexed_port_pair(
@@ -391,31 +497,35 @@ impl PortAllocator {
         session_id: &str,
         ip: IpAddr,
     ) -> Result<(SocketAddr, Option<SocketAddr>)> {
-        let state = self
+        let local_state = self
             .indexed_state
             .as_ref()
             .ok_or_else(|| Error::Transport("Indexed port pool is not configured".to_string()))?;
-        let mut state = state
+        let mut local_state = local_state
             .lock()
             .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+        let pool = self.indexed_pool_for(&mut local_state, ip)?;
+        let mut pool = pool
+            .lock()
+            .map_err(|_| Error::Transport("Shared port pool lock poisoned".to_string()))?;
 
         match self.config.pairing_strategy {
             PairingStrategy::Muxed => {
-                let port = self.take_indexed_port(&mut state)?;
-                self.track_indexed_allocation(&mut state, session_id, ip, port);
+                let port = self.take_indexed_port(&mut pool, ip)?;
+                self.track_indexed_allocation(&mut local_state, session_id, ip, port);
                 Ok((SocketAddr::new(ip, port), None))
             }
             PairingStrategy::Separate => {
-                let rtp_port = self.take_indexed_port(&mut state)?;
-                let rtcp_port = match self.take_indexed_port(&mut state) {
+                let rtp_port = self.take_indexed_port(&mut pool, ip)?;
+                let rtcp_port = match self.take_indexed_port(&mut pool, ip) {
                     Ok(port) => port,
                     Err(e) => {
-                        self.release_indexed_port(&mut state, rtp_port);
+                        self.release_indexed_port(&mut pool, ip, rtp_port)?;
                         return Err(e);
                     }
                 };
-                self.track_indexed_allocation(&mut state, session_id, ip, rtp_port);
-                self.track_indexed_allocation(&mut state, session_id, ip, rtcp_port);
+                self.track_indexed_allocation(&mut local_state, session_id, ip, rtp_port);
+                self.track_indexed_allocation(&mut local_state, session_id, ip, rtcp_port);
                 Ok((
                     SocketAddr::new(ip, rtp_port),
                     Some(SocketAddr::new(ip, rtcp_port)),
@@ -427,48 +537,222 @@ impl PortAllocator {
         }
     }
 
-    fn allocate_indexed_unvalidated(&self) -> Result<u16> {
-        let state = self
+    fn allocate_indexed_unvalidated(&self, ip: IpAddr) -> Result<u16> {
+        let local_state = self
             .indexed_state
             .as_ref()
             .ok_or_else(|| Error::Transport("Indexed port pool is not configured".to_string()))?;
-        let mut state = state
+        let mut local_state = local_state
             .lock()
             .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+        let pool = self.indexed_pool_for(&mut local_state, ip)?;
+        let mut pool = pool
+            .lock()
+            .map_err(|_| Error::Transport("Shared port pool lock poisoned".to_string()))?;
 
-        self.take_indexed_port(&mut state)
+        self.take_indexed_port(&mut pool, ip)
     }
 
-    fn take_indexed_port(&self, state: &mut IndexedAllocatorState) -> Result<u16> {
-        loop {
-            let cursor = state.last_port;
-            let port = state
+    fn indexed_pool_for(
+        &self,
+        local_state: &mut IndexedAllocatorState,
+        ip: IpAddr,
+    ) -> Result<SharedIndexedPool> {
+        if let Some(pool) = local_state.pools.get(&ip) {
+            return Ok(pool.clone());
+        }
+
+        let key = IndexedPoolKey {
+            ip,
+            port_range_start: self.config.port_range_start,
+            port_range_end: self.config.port_range_end,
+            pairing_strategy: self.config.pairing_strategy,
+        };
+        let mut registry = indexed_pool_registry()
+            .lock()
+            .map_err(|_| Error::Transport("Shared port pool registry lock poisoned".to_string()))?;
+        registry.retain(|_, pool| pool.strong_count() > 0);
+
+        let pool = registry
+            .get(&key)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let pool = Arc::new(StdMutex::new(SharedIndexedAllocatorState {
+                    available_ports: (self.config.port_range_start..=self.config.port_range_end)
+                        .collect(),
+                    allocated_ports: HashMap::with_capacity(self.config.capacity_hint),
+                    quarantined_ports: HashMap::new(),
+                    last_port: self.config.port_range_start,
+                }));
+                registry.insert(key, Arc::downgrade(&pool));
+                pool
+            });
+        local_state.pools.insert(ip, pool.clone());
+        Ok(pool)
+    }
+
+    fn bind_address_family(ip: IpAddr) -> BindAddressFamily {
+        match ip {
+            IpAddr::V4(_) => BindAddressFamily::Ipv4,
+            IpAddr::V6(_) => BindAddressFamily::Ipv6,
+        }
+    }
+
+    fn bind_ips_conflict(first: IpAddr, second: IpAddr) -> bool {
+        Self::bind_address_family(first) == Self::bind_address_family(second)
+            && (first == second || first.is_unspecified() || second.is_unspecified())
+    }
+
+    fn authoritative_port_key(ip: IpAddr, port: u16) -> AuthoritativePortKey {
+        AuthoritativePortKey {
+            family: Self::bind_address_family(ip),
+            port,
+        }
+    }
+
+    fn try_claim_authoritative_port(&self, ip: IpAddr, port: u16) -> Result<bool> {
+        let key = Self::authoritative_port_key(ip, port);
+        let mut registry = authoritative_port_registry().lock().map_err(|_| {
+            Error::Transport("Authoritative port claim registry lock poisoned".to_string())
+        })?;
+
+        let now = Instant::now();
+        let (quarantine_conflict, quarantine_empty) = registry
+            .quarantines
+            .get_mut(&key)
+            .map(|quarantines| {
+                quarantines.retain(|quarantine| quarantine.deadline > now);
+                (
+                    quarantines
+                        .iter()
+                        .any(|quarantine| Self::bind_ips_conflict(ip, quarantine.ip)),
+                    quarantines.is_empty(),
+                )
+            })
+            .unwrap_or((false, false));
+        if quarantine_empty {
+            registry.quarantines.remove(&key);
+        }
+        if quarantine_conflict {
+            return Ok(false);
+        }
+
+        let claims = registry.claims.entry(key).or_default();
+        if claims
+            .iter()
+            .any(|claim| Self::bind_ips_conflict(ip, claim.ip))
+        {
+            return Ok(false);
+        }
+        claims.push(AuthoritativePortClaim {
+            ip,
+            owner_id: self.allocator_id,
+        });
+        Ok(true)
+    }
+
+    fn release_authoritative_port(&self, ip: IpAddr, port: u16) -> Result<()> {
+        let key = Self::authoritative_port_key(ip, port);
+        let mut registry = authoritative_port_registry().lock().map_err(|_| {
+            Error::Transport("Authoritative port claim registry lock poisoned".to_string())
+        })?;
+        let remove_bucket = registry
+            .claims
+            .get_mut(&key)
+            .map(|claims| {
+                claims.retain(|claim| claim.owner_id != self.allocator_id || claim.ip != ip);
+                claims.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_bucket {
+            registry.claims.remove(&key);
+        }
+        Ok(())
+    }
+
+    fn quarantine_authoritative_port(&self, ip: IpAddr, port: u16) -> Result<()> {
+        let key = Self::authoritative_port_key(ip, port);
+        let mut registry = authoritative_port_registry().lock().map_err(|_| {
+            Error::Transport("Authoritative port claim registry lock poisoned".to_string())
+        })?;
+        let remove_claim_bucket = registry
+            .claims
+            .get_mut(&key)
+            .map(|claims| {
+                claims.retain(|claim| claim.owner_id != self.allocator_id || claim.ip != ip);
+                claims.is_empty()
+            })
+            .unwrap_or(false);
+        if remove_claim_bucket {
+            registry.claims.remove(&key);
+        }
+
+        let deadline = Instant::now() + Duration::from_millis(PORT_BIND_FAILURE_QUARANTINE_MS);
+        let quarantines = registry.quarantines.entry(key).or_default();
+        if let Some(existing) = quarantines
+            .iter_mut()
+            .find(|quarantine| quarantine.ip == ip)
+        {
+            existing.deadline = deadline;
+        } else {
+            quarantines.push(AuthoritativePortQuarantine { ip, deadline });
+        }
+        Ok(())
+    }
+
+    fn release_all_authoritative_ports(&self) {
+        let Ok(mut registry) = authoritative_port_registry().lock() else {
+            return;
+        };
+        registry.claims.retain(|_, claims| {
+            claims.retain(|claim| claim.owner_id != self.allocator_id);
+            !claims.is_empty()
+        });
+    }
+
+    fn take_indexed_port(
+        &self,
+        state: &mut SharedIndexedAllocatorState,
+        ip: IpAddr,
+    ) -> Result<u16> {
+        self.release_expired_indexed_quarantine(state);
+        let mut scan_cursor = state.last_port;
+        let mut process_conflicts = 0usize;
+        for _ in 0..state.available_ports.len() {
+            let Some(port) = state
                 .available_ports
-                .range(cursor..)
+                .range(scan_cursor..)
                 .next()
                 .copied()
-                .or_else(|| state.available_ports.iter().next().copied());
-
-            let Some(port) = port else {
-                return Err(Error::Transport(
-                    "Failed to allocate port after maximum retries".to_string(),
-                ));
+                .or_else(|| state.available_ports.iter().next().copied())
+            else {
+                break;
             };
-
-            state.available_ports.remove(&port);
-
-            if state.allocated_ports.contains(&port) {
-                continue;
-            }
-
-            state.allocated_ports.insert(port);
-            state.last_port = if port >= self.config.port_range_end {
+            scan_cursor = if port >= self.config.port_range_end {
                 self.config.port_range_start
             } else {
                 port + 1
             };
+            if state.allocated_ports.contains_key(&port) {
+                continue;
+            }
+            if !self.try_claim_authoritative_port(ip, port)? {
+                process_conflicts += 1;
+                continue;
+            }
+
+            state.available_ports.remove(&port);
+            state.allocated_ports.insert(port, self.allocator_id);
+            state.last_port = scan_cursor;
             return Ok(port);
         }
+
+        Err(Error::Transport(format!(
+            "RTP port pool exhausted ({} active reservations, {} temporarily quarantined, {} process bind conflicts)",
+            state.allocated_ports.len(),
+            state.quarantined_ports.len(),
+            process_conflicts
+        )))
     }
 
     fn track_indexed_allocation(
@@ -485,25 +769,73 @@ impl PortAllocator {
             .push((ip, port));
     }
 
-    fn release_indexed_port(&self, state: &mut IndexedAllocatorState, port: u16) {
-        if state.allocated_ports.remove(&port)
+    fn release_expired_indexed_quarantine(&self, state: &mut SharedIndexedAllocatorState) {
+        let now = Instant::now();
+        let expired: Vec<u16> = state
+            .quarantined_ports
+            .iter()
+            .filter_map(|(port, deadline)| (*deadline <= now).then_some(*port))
+            .collect();
+        for port in expired {
+            state.quarantined_ports.remove(&port);
+            if !state.allocated_ports.contains_key(&port) {
+                state.available_ports.insert(port);
+            }
+        }
+    }
+
+    fn release_indexed_port(
+        &self,
+        state: &mut SharedIndexedAllocatorState,
+        ip: IpAddr,
+        port: u16,
+    ) -> Result<()> {
+        if state.allocated_ports.get(&port) == Some(&self.allocator_id)
             && port >= self.config.port_range_start
             && port <= self.config.port_range_end
         {
+            self.release_authoritative_port(ip, port)?;
+            state.allocated_ports.remove(&port);
             state.available_ports.insert(port);
         }
+        Ok(())
+    }
+
+    fn quarantine_indexed_port(
+        &self,
+        state: &mut SharedIndexedAllocatorState,
+        ip: IpAddr,
+        port: u16,
+    ) -> Result<()> {
+        if state.allocated_ports.get(&port) != Some(&self.allocator_id) {
+            return Ok(());
+        }
+
+        self.quarantine_authoritative_port(ip, port)?;
+        state.allocated_ports.remove(&port);
+        state.available_ports.remove(&port);
+        state.quarantined_ports.insert(
+            port,
+            Instant::now() + Duration::from_millis(PORT_BIND_FAILURE_QUARANTINE_MS),
+        );
+        Ok(())
     }
 
     /// Release all ports associated with a session
     pub async fn release_session(&self, session_id: &str) -> Result<()> {
-        if let Some(state) = &self.indexed_state {
-            let mut state = state
+        if let Some(local_state) = &self.indexed_state {
+            let mut local_state = local_state
                 .lock()
                 .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
 
-            if let Some(ports) = state.session_ports.remove(session_id) {
-                for (_ip, port) in ports {
-                    self.release_indexed_port(&mut state, port);
+            if let Some(ports) = local_state.session_ports.remove(session_id) {
+                for (ip, port) in ports {
+                    if let Some(pool) = local_state.pools.get(&ip) {
+                        let mut pool = pool.lock().map_err(|_| {
+                            Error::Transport("Shared port pool lock poisoned".to_string())
+                        })?;
+                        self.release_indexed_port(&mut pool, ip, port)?;
+                    }
                 }
                 return Ok(());
             }
@@ -514,9 +846,8 @@ impl PortAllocator {
             )));
         }
 
-        let mut sessions = self.session_ports.lock().await;
-
-        if let Some(ports) = sessions.remove(session_id) {
+        let ports = self.session_ports.lock().await.remove(session_id);
+        if let Some(ports) = ports {
             // Release each port on the same IP it was allocated for.
             for (ip, port) in ports {
                 self.release_port(ip, port).await;
@@ -531,11 +862,66 @@ impl PortAllocator {
         }
     }
 
+    /// Release a session after an authoritative RTP/RTCP socket bind failed.
+    ///
+    /// Unlike [`Self::release_session`], the rejected ports are quarantined for
+    /// a short bounded interval so an immediate retry advances to a different
+    /// candidate. This is intended for callers that reserve without a probe
+    /// bind and then discover an OS-level collision while creating the real
+    /// transport socket.
+    pub async fn quarantine_session(&self, session_id: &str) -> Result<()> {
+        if let Some(local_state) = &self.indexed_state {
+            let mut local_state = local_state
+                .lock()
+                .map_err(|_| Error::Transport("Indexed port pool lock poisoned".to_string()))?;
+            let ports = local_state
+                .session_ports
+                .remove(session_id)
+                .ok_or_else(|| {
+                    Error::Transport(format!("No session found with ID: {}", session_id))
+                })?;
+
+            for (ip, port) in ports {
+                if let Some(pool) = local_state.pools.get(&ip) {
+                    let mut pool = pool.lock().map_err(|_| {
+                        Error::Transport("Shared port pool lock poisoned".to_string())
+                    })?;
+                    self.quarantine_indexed_port(&mut pool, ip, port)?;
+                }
+            }
+            return Ok(());
+        }
+
+        let ports = self
+            .session_ports
+            .lock()
+            .await
+            .remove(session_id)
+            .ok_or_else(|| Error::Transport(format!("No session found with ID: {}", session_id)))?;
+        for (ip, port) in ports {
+            self.quarantine_port(ip, port).await;
+        }
+        Ok(())
+    }
+
     /// Release a specific port
     pub async fn release_port(&self, ip: IpAddr, port: u16) {
-        if let Some(state) = &self.indexed_state {
-            match state.lock() {
-                Ok(mut state) => self.release_indexed_port(&mut state, port),
+        if let Some(local_state) = &self.indexed_state {
+            match local_state.lock() {
+                Ok(local_state) => {
+                    if let Some(pool) = local_state.pools.get(&ip) {
+                        match pool.lock() {
+                            Ok(mut pool) => {
+                                if let Err(error) = self.release_indexed_port(&mut pool, ip, port) {
+                                    error!("Failed to release authoritative port claim: {}", error);
+                                }
+                            }
+                            Err(_) => {
+                                error!("Shared port pool lock poisoned while releasing {}", port)
+                            }
+                        }
+                    }
+                }
                 Err(_) => error!("Indexed port pool lock poisoned while releasing {}", port),
             }
 
@@ -572,6 +958,22 @@ impl PortAllocator {
         debug!("Released port {} on {}", port, ip);
     }
 
+    async fn quarantine_port(&self, ip: IpAddr, port: u16) {
+        let removed = self.allocated_ports.lock().await.remove(&port);
+        if !removed {
+            return;
+        }
+
+        self.released_ports
+            .lock()
+            .await
+            .retain(|released| released.ip != ip || released.port != port);
+        self.quarantined_ports.lock().await.insert(
+            (ip, port),
+            Instant::now() + Duration::from_millis(PORT_BIND_FAILURE_QUARANTINE_MS),
+        );
+    }
+
     /// Create a validated socket for a given address
     ///
     /// This applies the platform-specific socket settings
@@ -594,7 +996,17 @@ impl PortAllocator {
     pub async fn allocated_count(&self) -> usize {
         if let Some(state) = &self.indexed_state {
             return match state.lock() {
-                Ok(state) => state.allocated_ports.len(),
+                Ok(state) => state
+                    .pools
+                    .values()
+                    .filter_map(|pool| pool.lock().ok())
+                    .map(|pool| {
+                        pool.allocated_ports
+                            .values()
+                            .filter(|owner| **owner == self.allocator_id)
+                            .count()
+                    })
+                    .sum(),
                 Err(_) => 0,
             };
         }
@@ -631,10 +1043,22 @@ impl PortAllocator {
     }
 
     /// Try to claim a port atomically
-    async fn claim_port(&self, ip: IpAddr, port: u16) -> bool {
+    async fn claim_port(&self, ip: IpAddr, port: u16) -> PortClaimOutcome {
         // Check if port is in valid range
         if port < self.config.port_range_start || port > self.config.port_range_end {
-            return false;
+            return PortClaimOutcome::Unavailable;
+        }
+
+        let now = Instant::now();
+        {
+            let mut quarantined = self.quarantined_ports.lock().await;
+            match quarantined.get(&(ip, port)).copied() {
+                Some(deadline) if deadline > now => return PortClaimOutcome::Unavailable,
+                Some(_) => {
+                    quarantined.remove(&(ip, port));
+                }
+                None => {}
+            }
         }
 
         // Lock allocated ports ONCE and hold it through the entire operation
@@ -642,7 +1066,7 @@ impl PortAllocator {
 
         // Check if already allocated while holding the lock
         if allocated.contains(&port) {
-            return false;
+            return PortClaimOutcome::Unavailable;
         }
 
         // If validation is required, try to bind the socket
@@ -674,7 +1098,7 @@ impl PortAllocator {
                         );
                     }
 
-                    true
+                    PortClaimOutcome::Claimed
                 }
                 Err(e) => {
                     debug!("Failed to bind to port {}: {}", port, e);
@@ -682,14 +1106,23 @@ impl PortAllocator {
                     // Remove from allocated since we couldn't bind
                     let mut allocated = self.allocated_ports.lock().await;
                     allocated.remove(&port);
+                    drop(allocated);
 
-                    false
+                    if e.kind() == std::io::ErrorKind::AddrInUse {
+                        self.quarantined_ports.lock().await.insert(
+                            (ip, port),
+                            Instant::now() + Duration::from_millis(PORT_BIND_FAILURE_QUARANTINE_MS),
+                        );
+                        PortClaimOutcome::BindCollision
+                    } else {
+                        PortClaimOutcome::Unavailable
+                    }
                 }
             }
         } else {
             // No validation required, just mark as allocated atomically
             allocated.insert(port);
-            true
+            PortClaimOutcome::Claimed
         }
     }
 
@@ -767,6 +1200,34 @@ impl PortAllocator {
 
         // Remove old entries
         released.retain(|p| now.duration_since(p.released_at) <= reuse_delay);
+    }
+}
+
+impl Drop for PortAllocator {
+    fn drop(&mut self) {
+        if let Some(local_state) = &self.indexed_state {
+            if let Ok(mut local_state) = local_state.lock() {
+                for (ip, pool) in &local_state.pools {
+                    let Ok(mut pool) = pool.lock() else {
+                        continue;
+                    };
+                    let owned_ports: Vec<u16> = pool
+                        .allocated_ports
+                        .iter()
+                        .filter_map(|(port, owner)| (*owner == self.allocator_id).then_some(*port))
+                        .collect();
+                    for port in owned_ports {
+                        let _ = self.release_authoritative_port(*ip, port);
+                        pool.allocated_ports.remove(&port);
+                        if !pool.quarantined_ports.contains_key(&port) {
+                            pool.available_ports.insert(port);
+                        }
+                    }
+                }
+                local_state.session_ports.clear();
+            }
+        }
+        self.release_all_authoritative_ports();
     }
 }
 
@@ -877,6 +1338,25 @@ mod tests {
     use super::*;
     use tokio::runtime::Runtime;
 
+    fn indexed_test_config(
+        port_range_start: u16,
+        port_range_end: u16,
+        pairing_strategy: PairingStrategy,
+        default_ip: IpAddr,
+    ) -> PortAllocatorConfig {
+        PortAllocatorConfig {
+            port_range_start,
+            port_range_end,
+            allocation_strategy: AllocationStrategy::Incremental,
+            pairing_strategy,
+            prefer_port_reuse: false,
+            default_ip,
+            allocation_retries: u32::from(port_range_end - port_range_start) + 1,
+            validate_ports: false,
+            capacity_hint: usize::from(port_range_end - port_range_start) + 1,
+        }
+    }
+
     #[test]
     fn test_port_allocator_creation() {
         let allocator = PortAllocator::new();
@@ -890,8 +1370,8 @@ mod tests {
     #[test]
     fn test_port_allocator_with_custom_config() {
         let config = PortAllocatorConfig {
-            port_range_start: 10000,
-            port_range_end: 20000,
+            port_range_start: 11000,
+            port_range_end: 11999,
             allocation_strategy: AllocationStrategy::Sequential,
             pairing_strategy: PairingStrategy::Adjacent,
             prefer_port_reuse: false,
@@ -955,8 +1435,8 @@ mod tests {
 
         rt.block_on(async {
             let config = PortAllocatorConfig {
-                port_range_start: 10000,
-                port_range_end: 10060,
+                port_range_start: 10200,
+                port_range_end: 10260,
                 allocation_strategy: AllocationStrategy::Incremental,
                 pairing_strategy: PairingStrategy::Muxed,
                 prefer_port_reuse: false,
@@ -966,26 +1446,31 @@ mod tests {
                 capacity_hint: 61,
             };
             let allocator = PortAllocator::with_config(config);
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
 
             {
                 let indexed_state = allocator
                     .indexed_state
                     .as_ref()
                     .expect("indexed state should be enabled");
-                let mut state = indexed_state.lock().expect("indexed state lock");
-                for port in 10000..=10054 {
+                let mut local_state = indexed_state.lock().expect("indexed state lock");
+                let pool = allocator
+                    .indexed_pool_for(&mut local_state, ip)
+                    .expect("shared indexed pool");
+                let mut state = pool.lock().expect("shared indexed pool lock");
+                for port in 10200..=10254 {
                     state.available_ports.remove(&port);
-                    state.allocated_ports.insert(port);
+                    state.allocated_ports.insert(port, allocator.allocator_id);
                 }
-                state.last_port = 10000;
+                state.last_port = 10200;
             }
 
             let port = allocator
-                .allocate_port(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+                .allocate_port(ip)
                 .await
                 .expect("allocator should find the first indexed free port");
 
-            assert_eq!(port, 10055);
+            assert_eq!(port, 10255);
         });
     }
 
@@ -995,8 +1480,8 @@ mod tests {
 
         rt.block_on(async {
             let config = PortAllocatorConfig {
-                port_range_start: 10000,
-                port_range_end: 10002,
+                port_range_start: 10300,
+                port_range_end: 10302,
                 allocation_strategy: AllocationStrategy::Incremental,
                 pairing_strategy: PairingStrategy::Muxed,
                 prefer_port_reuse: false,
@@ -1012,7 +1497,7 @@ mod tests {
             let second = allocator.allocate_port(ip).await.expect("second port");
             let third = allocator.allocate_port(ip).await.expect("third port");
 
-            assert_eq!([first, second, third], [10000, 10001, 10002]);
+            assert_eq!([first, second, third], [10300, 10301, 10302]);
             assert!(allocator.allocate_port(ip).await.is_err());
 
             allocator.release_port(ip, second).await;
@@ -1052,13 +1537,11 @@ mod tests {
                 .allocate_port_pair("tenant-secret-call-b", Some(ip))
                 .await
                 .expect("second reservation");
-            assert!(
-                allocator
-                    .allocate_port_pair("tenant-secret-call-c", Some(ip))
-                    .await
-                    .is_err(),
-                "a bounded pool must fail closed when exhausted"
-            );
+            let exhaustion = allocator
+                .allocate_port_pair("tenant-secret-call-c", Some(ip))
+                .await
+                .expect_err("a bounded pool must fail closed when exhausted");
+            assert!(exhaustion.to_string().contains("RTP port pool exhausted"));
 
             let full = allocator.diagnostics().await.expect("diagnostics");
             assert_eq!(full.capacity_ports, 2);
@@ -1079,6 +1562,484 @@ mod tests {
                 .expect("released capacity is reusable")
                 .0;
             assert_eq!(reused, first);
+        });
+    }
+
+    #[test]
+    fn indexed_allocators_share_reservations_without_sharing_session_namespaces() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let config = PortAllocatorConfig {
+                port_range_start: 15_600,
+                port_range_end: 15_601,
+                allocation_strategy: AllocationStrategy::Incremental,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: false,
+                default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                allocation_retries: 2,
+                validate_ports: false,
+                capacity_hint: 2,
+            };
+            let first_allocator = PortAllocator::with_config(config.clone());
+            let second_allocator = PortAllocator::with_config(config.clone());
+            let ip = config.default_ip;
+
+            // Deliberately use the same session ID in two allocator instances.
+            // Reservation ownership must be shared while release ownership stays
+            // local to each controller/allocator namespace.
+            let first = first_allocator
+                .allocate_port_pair("same-dialog", Some(ip))
+                .await
+                .expect("first reservation")
+                .0;
+            let second = second_allocator
+                .allocate_port_pair("same-dialog", Some(ip))
+                .await
+                .expect("second reservation")
+                .0;
+            assert_ne!(first, second);
+            assert_eq!(first_allocator.allocated_count().await, 1);
+            assert_eq!(second_allocator.allocated_count().await, 1);
+
+            first_allocator
+                .release_session("same-dialog")
+                .await
+                .expect("release first owner");
+            assert_eq!(second_allocator.allocated_count().await, 1);
+
+            let replacement_allocator = PortAllocator::with_config(config);
+            let replacement = replacement_allocator
+                .allocate_port_pair("same-dialog", Some(ip))
+                .await
+                .expect("replacement reservation")
+                .0;
+            assert_eq!(replacement, first);
+
+            second_allocator
+                .release_session("same-dialog")
+                .await
+                .expect("release second owner");
+            assert_eq!(replacement_allocator.allocated_count().await, 1);
+            replacement_allocator
+                .release_session("same-dialog")
+                .await
+                .expect("release replacement owner");
+        });
+    }
+
+    #[test]
+    fn authoritative_claims_coordinate_overlapping_ranges() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            let first_allocator = PortAllocator::with_config(indexed_test_config(
+                19_600,
+                19_601,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+            let overlapping_allocator = PortAllocator::with_config(indexed_test_config(
+                19_601,
+                19_602,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+
+            first_allocator
+                .allocate_port_pair("first", Some(ip))
+                .await
+                .expect("first reservation");
+            let overlap = first_allocator
+                .allocate_port_pair("overlap", Some(ip))
+                .await
+                .expect("overlap reservation")
+                .0;
+            assert_eq!(overlap.port(), 19_601);
+
+            let nonconflicting = overlapping_allocator
+                .allocate_port_pair("other-range", Some(ip))
+                .await
+                .expect("overlapping range should advance past process claim")
+                .0;
+            assert_eq!(nonconflicting.port(), 19_602);
+
+            first_allocator
+                .release_session("overlap")
+                .await
+                .expect("release overlap");
+            let reclaimed = overlapping_allocator
+                .allocate_port_pair("reclaimed-overlap", Some(ip))
+                .await
+                .expect("previously conflicted candidate should remain reusable")
+                .0;
+            assert_eq!(reclaimed.port(), 19_601);
+
+            first_allocator
+                .release_session("first")
+                .await
+                .expect("release first");
+            overlapping_allocator
+                .release_session("other-range")
+                .await
+                .expect("release other range");
+            overlapping_allocator
+                .release_session("reclaimed-overlap")
+                .await
+                .expect("release reclaimed overlap");
+        });
+    }
+
+    #[test]
+    fn authoritative_claims_coordinate_differing_pairing_policies() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            let muxed_allocator = PortAllocator::with_config(indexed_test_config(
+                19_610,
+                19_612,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+            let separate_allocator = PortAllocator::with_config(indexed_test_config(
+                19_610,
+                19_612,
+                PairingStrategy::Separate,
+                ip,
+            ));
+
+            let muxed = muxed_allocator
+                .allocate_port_pair("muxed", Some(ip))
+                .await
+                .expect("muxed reservation")
+                .0;
+            assert_eq!(muxed.port(), 19_610);
+
+            let (rtp, rtcp) = separate_allocator
+                .allocate_port_pair("separate", Some(ip))
+                .await
+                .expect("separate policy should honor muxed process claim");
+            assert_eq!(rtp.port(), 19_611);
+            assert_eq!(rtcp.expect("separate RTCP address").port(), 19_612);
+
+            muxed_allocator
+                .release_session("muxed")
+                .await
+                .expect("release muxed");
+            separate_allocator
+                .release_session("separate")
+                .await
+                .expect("release separate");
+        });
+    }
+
+    #[test]
+    fn authoritative_claims_apply_wildcard_bind_semantics() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let wildcard = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+            let localhost = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            let alternate_loopback = IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2));
+
+            let wildcard_first = PortAllocator::with_config(indexed_test_config(
+                19_620,
+                19_621,
+                PairingStrategy::Muxed,
+                wildcard,
+            ));
+            let concrete_second = PortAllocator::with_config(indexed_test_config(
+                19_620,
+                19_621,
+                PairingStrategy::Muxed,
+                localhost,
+            ));
+            let wildcard_port = wildcard_first
+                .allocate_port_pair("wildcard-first", Some(wildcard))
+                .await
+                .expect("wildcard reservation")
+                .0;
+            let concrete_port = concrete_second
+                .allocate_port_pair("concrete-second", Some(localhost))
+                .await
+                .expect("concrete bind should advance past wildcard claim")
+                .0;
+            assert_eq!(wildcard_port.port(), 19_620);
+            assert_eq!(concrete_port.port(), 19_621);
+
+            let concrete_first = PortAllocator::with_config(indexed_test_config(
+                19_622,
+                19_623,
+                PairingStrategy::Muxed,
+                localhost,
+            ));
+            let wildcard_second = PortAllocator::with_config(indexed_test_config(
+                19_622,
+                19_623,
+                PairingStrategy::Muxed,
+                wildcard,
+            ));
+            let concrete_port = concrete_first
+                .allocate_port_pair("concrete-first", Some(localhost))
+                .await
+                .expect("concrete reservation")
+                .0;
+            let wildcard_port = wildcard_second
+                .allocate_port_pair("wildcard-second", Some(wildcard))
+                .await
+                .expect("wildcard bind should advance past concrete claim")
+                .0;
+            assert_eq!(concrete_port.port(), 19_622);
+            assert_eq!(wildcard_port.port(), 19_623);
+
+            let localhost_allocator = PortAllocator::with_config(indexed_test_config(
+                19_624,
+                19_624,
+                PairingStrategy::Muxed,
+                localhost,
+            ));
+            let alternate_allocator = PortAllocator::with_config(indexed_test_config(
+                19_624,
+                19_624,
+                PairingStrategy::Muxed,
+                alternate_loopback,
+            ));
+            let localhost_port = localhost_allocator
+                .allocate_port_pair("localhost", Some(localhost))
+                .await
+                .expect("localhost reservation")
+                .0;
+            let alternate_port = alternate_allocator
+                .allocate_port_pair("alternate", Some(alternate_loopback))
+                .await
+                .expect("distinct concrete IP may share a port")
+                .0;
+            assert_eq!(localhost_port.port(), alternate_port.port());
+
+            wildcard_first
+                .release_session("wildcard-first")
+                .await
+                .expect("release wildcard first");
+            concrete_second
+                .release_session("concrete-second")
+                .await
+                .expect("release concrete second");
+            concrete_first
+                .release_session("concrete-first")
+                .await
+                .expect("release concrete first");
+            wildcard_second
+                .release_session("wildcard-second")
+                .await
+                .expect("release wildcard second");
+            localhost_allocator
+                .release_session("localhost")
+                .await
+                .expect("release localhost");
+            alternate_allocator
+                .release_session("alternate")
+                .await
+                .expect("release alternate");
+        });
+    }
+
+    #[test]
+    fn shared_indexed_pool_handles_concurrent_capacity_and_churn() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            const ACTIVE_PER_ALLOCATOR: usize = 500;
+            const CHURN_PER_ALLOCATOR: usize = 5_000;
+            let config = PortAllocatorConfig {
+                port_range_start: 18_000,
+                port_range_end: 19_023,
+                allocation_strategy: AllocationStrategy::Incremental,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: false,
+                default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                allocation_retries: 1_024,
+                validate_ports: false,
+                capacity_hint: ACTIVE_PER_ALLOCATOR,
+            };
+            let first_allocator = Arc::new(PortAllocator::with_config(config.clone()));
+            let second_allocator = Arc::new(PortAllocator::with_config(config));
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
+            let allocate_many = |allocator: Arc<PortAllocator>, prefix: &'static str| {
+                tokio::spawn(async move {
+                    let mut ports = Vec::with_capacity(ACTIVE_PER_ALLOCATOR);
+                    for index in 0..ACTIVE_PER_ALLOCATOR {
+                        let session_id = format!("{prefix}-{index}");
+                        let address = allocator
+                            .allocate_port_pair(&session_id, Some(ip))
+                            .await
+                            .expect("shared capacity reservation")
+                            .0;
+                        ports.push((session_id, address.port()));
+                        if index % 32 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                    ports
+                })
+            };
+            let first_active = allocate_many(first_allocator.clone(), "first");
+            let second_active = allocate_many(second_allocator.clone(), "second");
+            let first_active = first_active.await.expect("first allocation task");
+            let second_active = second_active.await.expect("second allocation task");
+
+            let unique_ports: HashSet<u16> = first_active
+                .iter()
+                .chain(&second_active)
+                .map(|(_, port)| *port)
+                .collect();
+            assert_eq!(unique_ports.len(), ACTIVE_PER_ALLOCATOR * 2);
+
+            for (session_id, _) in first_active {
+                first_allocator
+                    .release_session(&session_id)
+                    .await
+                    .expect("release first active reservation");
+            }
+            for (session_id, _) in second_active {
+                second_allocator
+                    .release_session(&session_id)
+                    .await
+                    .expect("release second active reservation");
+            }
+
+            let churn = |allocator: Arc<PortAllocator>| {
+                tokio::spawn(async move {
+                    for index in 0..CHURN_PER_ALLOCATOR {
+                        // The two allocators deliberately reuse the same local
+                        // session IDs while churning the shared port domain.
+                        let session_id = format!("churn-{index}");
+                        allocator
+                            .allocate_port_pair(&session_id, Some(ip))
+                            .await
+                            .expect("churn reservation");
+                        allocator
+                            .release_session(&session_id)
+                            .await
+                            .expect("churn release");
+                        if index % 64 == 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                })
+            };
+            let (first_churn, second_churn) = tokio::join!(
+                churn(first_allocator.clone()),
+                churn(second_allocator.clone())
+            );
+            first_churn.expect("first churn task");
+            second_churn.expect("second churn task");
+
+            assert_eq!(first_allocator.allocated_count().await, 0);
+            assert_eq!(second_allocator.allocated_count().await, 0);
+            assert_eq!(
+                first_allocator
+                    .diagnostics()
+                    .await
+                    .expect("first diagnostics")
+                    .active_sessions,
+                0
+            );
+            assert_eq!(
+                second_allocator
+                    .diagnostics()
+                    .await
+                    .expect("second diagnostics")
+                    .active_sessions,
+                0
+            );
+        });
+    }
+
+    #[test]
+    fn bind_failure_quarantine_advances_shared_pool_candidate() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let config = PortAllocatorConfig {
+                port_range_start: 15_610,
+                port_range_end: 15_611,
+                allocation_strategy: AllocationStrategy::Incremental,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: false,
+                default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                allocation_retries: 2,
+                validate_ports: false,
+                capacity_hint: 2,
+            };
+            let rejected_allocator = PortAllocator::with_config(config.clone());
+            let retry_allocator = PortAllocator::with_config(config.clone());
+            let ip = config.default_ip;
+
+            let rejected = rejected_allocator
+                .allocate_port_pair("bind-failure", Some(ip))
+                .await
+                .expect("initial reservation")
+                .0;
+            rejected_allocator
+                .quarantine_session("bind-failure")
+                .await
+                .expect("quarantine rejected reservation");
+
+            let retry = retry_allocator
+                .allocate_port_pair("retry", Some(ip))
+                .await
+                .expect("retry reservation")
+                .0;
+            assert_ne!(retry, rejected);
+            retry_allocator
+                .release_session("retry")
+                .await
+                .expect("release retry");
+
+            // Even after ordinary capacity is released, the rejected candidate
+            // remains out of circulation during its quarantine interval.
+            let replacement_allocator = PortAllocator::with_config(config);
+            let replacement = replacement_allocator
+                .allocate_port_pair("replacement", Some(ip))
+                .await
+                .expect("replacement reservation")
+                .0;
+            assert_eq!(replacement, retry);
+            replacement_allocator
+                .release_session("replacement")
+                .await
+                .expect("release replacement");
+        });
+    }
+
+    #[test]
+    fn validated_allocator_reports_os_bind_collision_exhaustion() {
+        let rt = Runtime::new().unwrap();
+
+        rt.block_on(async {
+            let held = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("bind occupied port");
+            let occupied_port = held.local_addr().expect("occupied address").port();
+            let allocator = PortAllocator::with_config(PortAllocatorConfig {
+                port_range_start: occupied_port,
+                port_range_end: occupied_port,
+                allocation_strategy: AllocationStrategy::Incremental,
+                pairing_strategy: PairingStrategy::Muxed,
+                prefer_port_reuse: false,
+                default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                allocation_retries: 1,
+                validate_ports: true,
+                capacity_hint: 1,
+            });
+
+            let error = allocator
+                .allocate_port(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+                .await
+                .expect_err("occupied port must fail validation");
+            assert!(error.to_string().contains("OS bind collisions"));
         });
     }
 

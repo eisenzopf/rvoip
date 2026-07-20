@@ -312,6 +312,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn controllers_with_same_bind_domain_share_port_reservations() {
+        let (range_probe, base_port) = bind_adjacent_port_probe();
+        drop(range_probe);
+
+        let first_controller = MediaSessionController::with_port_range(base_port, base_port + 1);
+        let second_controller = MediaSessionController::with_port_range(base_port, base_port + 1);
+        let dialog_id = DialogId::new("same-dialog-id");
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+
+        first_controller
+            .start_media(dialog_id.clone(), config.clone())
+            .await
+            .expect("first controller media start");
+        second_controller
+            .start_media(dialog_id.clone(), config)
+            .await
+            .expect("second controller media start");
+
+        let first_port = first_controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("first session info")
+            .rtp_port;
+        let second_port = second_controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("second session info")
+            .rtp_port;
+        assert_ne!(first_port, second_port);
+
+        first_controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("stop first controller media");
+        assert!(second_controller
+            .get_session_info(&dialog_id)
+            .await
+            .is_some());
+        second_controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("stop second controller media");
+    }
+
+    #[tokio::test]
     async fn test_start_media_retries_when_reserved_port_bind_fails() {
         let (_held_socket, occupied_port) = bind_adjacent_port_probe();
         let mut controller = MediaSessionController::new();

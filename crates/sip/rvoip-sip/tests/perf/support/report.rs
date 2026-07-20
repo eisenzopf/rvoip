@@ -251,14 +251,24 @@ impl ScenarioReport {
     }
 
     /// Write `target/perf-results/<scenario>.json` (creates the
-    /// directory on first call). Returns the absolute path.
+    /// directory on first call). When `RVOIP_PERF_ARCHIVE_DIR` is set, write
+    /// the same completed report there as durable release-gate evidence.
+    /// Returns the primary result path.
     pub fn write_json(&self) -> PathBuf {
         let dir = target_dir().join("perf-results");
         fs::create_dir_all(&dir).expect("create perf-results dir");
         let path = dir.join(format!("{}.json", self.scenario));
         let value = self.to_json();
         let pretty = serde_json::to_string_pretty(&value).expect("serialize");
-        fs::write(&path, pretty).expect("write perf JSON");
+        fs::write(&path, &pretty).expect("write perf JSON");
+        if let Some(archive_dir) = std::env::var_os("RVOIP_PERF_ARCHIVE_DIR") {
+            let archive_dir = PathBuf::from(archive_dir);
+            fs::create_dir_all(&archive_dir).expect("create perf archive dir");
+            let archive_path = archive_dir.join(format!("{}.json", self.scenario));
+            if archive_path != path {
+                fs::write(&archive_path, &pretty).expect("write archived perf JSON");
+            }
+        }
         path
     }
 

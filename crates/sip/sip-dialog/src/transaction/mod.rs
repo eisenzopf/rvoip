@@ -114,7 +114,9 @@ pub mod transport;
 pub mod utils;
 
 // Re-export core types
-pub use completion::{ClientTransactionFailure, ClientTransactionOutcome};
+pub use completion::{
+    ClientTransactionCompletionHandle, ClientTransactionFailure, ClientTransactionOutcome,
+};
 pub use error::{Error as TransactionError, Result as TransactionResult};
 pub use event::*;
 pub use key::*;

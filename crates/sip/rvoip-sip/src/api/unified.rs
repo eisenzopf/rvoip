@@ -1178,6 +1178,7 @@ impl Drop for CoordinatorConstructionGuard {
     }
 }
 
+#[cfg(test)]
 fn exact_terminal_completion_result(completion: ExactTerminalCompletion) -> Result<()> {
     match completion {
         ExactTerminalCompletion::PublishedAndReleased
@@ -5521,34 +5522,102 @@ pub(crate) async fn release_exact_local_resources(
     media_adapter: Arc<MediaAdapter>,
     handle: SessionRegistryHandle,
 ) -> Result<()> {
-    match session_store
-        .quiesce_session_exact(&handle)
-        .await
-        .map_err(|error| {
-            SessionError::InternalError(format!(
-                "exact session quiesce failed (class=lifecycle): {error}"
-            ))
-        })? {
-        TeardownOutcome::Retired { .. } => {}
-        TeardownOutcome::Quarantined { reason, .. } => {
+    // A racing exact owner may already have completed removal. Treat absence
+    // of this generation as idempotent success; never redirect cleanup to a
+    // newer lifetime that reused the raw SessionId.
+    if session_store
+        .get_session_retained_snapshot_exact(&handle)
+        .is_err()
+    {
+        return Ok(());
+    }
+    let teardown = match session_store.quiesce_session_exact(&handle).await {
+        Ok(teardown) => teardown,
+        Err(_)
+            if session_store
+                .get_session_retained_snapshot_exact(&handle)
+                .is_err() =>
+        {
+            return Ok(());
+        }
+        Err(error) => {
             return Err(SessionError::InternalError(format!(
-                "exact session teardown quarantined: {reason:?}"
+                "exact session quiesce failed (class=lifecycle): {error}"
             )));
         }
+    };
+    if let TeardownOutcome::Quarantined { reason, .. } = teardown {
+        // `quiesce_session_exact` also joins the retained teardown supervisor.
+        // A recoverable deadline can therefore remain as sticky diagnostic
+        // evidence after the authority has reached Retired. Let exact removal
+        // verify the final phase instead of stranding a reclaimable session.
+        tracing::warn!(
+            session = %handle.session_id(),
+            ?reason,
+            "exact teardown reported quarantine; attempting final exact reclamation"
+        );
     }
 
     let dialog_result = dialog_adapter.cleanup_session_exact(&handle).await;
     let media_result = media_adapter.cleanup_session_exact(&handle).await;
     helpers.cleanup_session(handle.session_id()).await;
-    dialog_result?;
-    media_result?;
-    session_store
-        .remove_quiesced_session_exact(&handle)
-        .map_err(|error| {
-            SessionError::InternalError(format!(
-                "exact session removal failed (class=lifecycle): {error}"
-            ))
-        })
+    if let Err(error) = dialog_result {
+        return Err(error);
+    }
+    if let Err(error) = media_result {
+        return Err(error);
+    }
+    match session_store.remove_quiesced_session_exact(&handle) {
+        Ok(()) => Ok(()),
+        Err(_)
+            if session_store
+                .get_session_retained_snapshot_exact(&handle)
+                .is_err() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(SessionError::InternalError(format!(
+            "exact session removal failed (class=lifecycle): {error}"
+        ))),
+    }
+}
+
+/// Retry one exact terminal release after a cooperative scheduling turn.
+///
+/// Lower dialog/media cleanup is idempotent and the store slot is retained
+/// until both complete, so a transient lower-layer failure remains safely
+/// retryable without ever targeting a reused raw session identifier.
+pub(crate) async fn release_exact_local_resources_with_retry(
+    session_store: Arc<SessionStore>,
+    helpers: Arc<StateMachineHelpers>,
+    dialog_adapter: Arc<DialogAdapter>,
+    media_adapter: Arc<MediaAdapter>,
+    handle: SessionRegistryHandle,
+) -> Result<()> {
+    let first = release_exact_local_resources(
+        Arc::clone(&session_store),
+        Arc::clone(&helpers),
+        Arc::clone(&dialog_adapter),
+        Arc::clone(&media_adapter),
+        handle.clone(),
+    )
+    .await;
+    if first.is_ok() {
+        return first;
+    }
+    tracing::warn!(
+        session = %handle.session_id(),
+        "exact terminal release failed; retrying the same retained lifetime"
+    );
+    tokio::task::yield_now().await;
+    release_exact_local_resources(
+        session_store,
+        helpers,
+        dialog_adapter,
+        media_adapter,
+        handle,
+    )
+    .await
 }
 
 /// Best-effort lower-resource cleanup remaining after authoritative session
@@ -8130,6 +8199,7 @@ impl UnifiedCoordinator {
         else {
             return Ok(());
         };
+        let publication_timeout = self.dialog_adapter.non_invite_transaction_timeout();
 
         let claim_owner = match self.app_event_publisher.claim_exact_terminal(&handle) {
             ExactTerminalClaim::Owner(owner) => {
@@ -8138,7 +8208,43 @@ impl UnifiedCoordinator {
             }
             ExactTerminalClaim::Observer(observer) => {
                 tracing::debug!(session = %session_id, "local BYE finalizer is joining exact terminal publication");
-                return exact_terminal_completion_result(observer.wait().await);
+                match tokio::time::timeout(publication_timeout, observer.wait()).await {
+                    Ok(
+                        ExactTerminalCompletion::PublishedAndReleased
+                        | ExactTerminalCompletion::PublicationFailed,
+                    ) => return Ok(()),
+                    Ok(completion) => {
+                        tracing::warn!(
+                            session = %session_id,
+                            ?completion,
+                            "local BYE terminal owner did not release exact resources; taking over cleanup"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            session = %session_id,
+                            timeout_ms = publication_timeout.as_millis(),
+                            "local BYE terminal owner exceeded its deadline; taking over exact cleanup"
+                        );
+                    }
+                }
+                let release_guard = crate::cleanup_diag::stage_guard(
+                    crate::cleanup_diag::CleanupStage::TerminalRelease,
+                    &session_id.0,
+                );
+                let release = release_exact_local_resources_with_retry(
+                    Arc::clone(&self.helpers.state_machine.store),
+                    Arc::clone(&self.helpers),
+                    Arc::clone(&self.dialog_adapter),
+                    Arc::clone(&self.media_adapter),
+                    handle,
+                )
+                .await;
+                match release {
+                    Ok(()) => release_guard.finish_success(),
+                    Err(_) => release_guard.finish_failure(),
+                }
+                return release;
             }
         };
 
@@ -8151,17 +8257,19 @@ impl UnifiedCoordinator {
             call_id: session_id.clone(),
             reason: reason.into(),
         };
+        let release_handle = handle.clone();
         let outcome = self
             .app_event_publisher
-            .publish_terminal_then_release(
+            .publish_terminal_then_release_bounded(
                 api_event,
-                release_exact_local_resources(
+                release_exact_local_resources_with_retry(
                     Arc::clone(&self.helpers.state_machine.store),
                     Arc::clone(&self.helpers),
                     Arc::clone(&self.dialog_adapter),
                     Arc::clone(&self.media_adapter),
-                    handle,
+                    release_handle,
                 ),
+                publication_timeout,
             )
             .await;
         let publication_succeeded = match outcome.publication {

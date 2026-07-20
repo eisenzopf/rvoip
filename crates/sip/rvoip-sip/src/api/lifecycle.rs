@@ -1340,6 +1340,7 @@ struct SessionEventDispatcherMetrics {
     best_effort_dropped: AtomicU64,
     closed_admissions: AtomicU64,
     publication_failures: AtomicU64,
+    publication_timeouts: AtomicU64,
     shutdown_timeouts: AtomicU64,
     shutdown_aborted_workers: AtomicU64,
 }
@@ -1649,6 +1650,13 @@ impl SessionEventDispatcher {
         })
     }
 
+    fn record_publication_timeout(&self) {
+        self.metrics
+            .publication_timeouts
+            .fetch_add(1, Ordering::Relaxed);
+        cleanup_diag::record_session_event_publication_timed_out();
+    }
+
     async fn shutdown(&self) {
         let admission = self.admission_gate.write().await;
         let starts_supervisor = match self.state.compare_exchange(
@@ -1786,10 +1794,10 @@ impl SessionEventDispatcher {
             best_effort_dropped: self.metrics.best_effort_dropped.load(Ordering::Relaxed),
             closed_admissions: self.metrics.closed_admissions.load(Ordering::Relaxed),
             publication_failures: self.metrics.publication_failures.load(Ordering::Relaxed),
-            // Aggregate publication cancellation was removed because it can
-            // split delivery across handlers and the bus. Keep the diagnostic
-            // field as a compatibility zero for existing perf report readers.
-            publication_timeouts: 0,
+            // Only terminal publication owners use a deadline, and they do so
+            // to guarantee exact release. Ordinary observational publication
+            // remains uncancelled so it cannot split handler delivery.
+            publication_timeouts: self.metrics.publication_timeouts.load(Ordering::Relaxed),
             shutdown_timeouts: self.metrics.shutdown_timeouts.load(Ordering::Relaxed),
             shutdown_aborted_workers: self
                 .metrics
@@ -1949,6 +1957,40 @@ impl SessionEventPublisher {
         F: Future<Output = Result<()>>,
     {
         let publication = self.publish_now(event).await;
+        let release = release.await;
+        TerminalEventReleaseOutcome {
+            publication,
+            release,
+        }
+    }
+
+    /// Attempt ordered terminal publication for at most `publication_timeout`,
+    /// then always run exact release.
+    ///
+    /// A stalled observational consumer must not retain a SIP call after its
+    /// protocol teardown has reached a terminal outcome. The lifecycle record
+    /// is committed synchronously before dispatcher admission, so timing out
+    /// this delivery wait preserves late-waiter semantics while allowing the
+    /// authoritative resource owner to finish.
+    pub(crate) async fn publish_terminal_then_release_bounded<F>(
+        &self,
+        event: Event,
+        release: F,
+        publication_timeout: Duration,
+    ) -> TerminalEventReleaseOutcome
+    where
+        F: Future<Output = Result<()>>,
+    {
+        let publication =
+            match tokio::time::timeout(publication_timeout, self.publish_now(event)).await {
+                Ok(publication) => publication,
+                Err(_) => {
+                    self.dispatcher.record_publication_timeout();
+                    Err(SessionError::Other(
+                        "Failed to publish app-level event (class=publication-timeout)".to_string(),
+                    ))
+                }
+            };
         let release = release.await;
         TerminalEventReleaseOutcome {
             publication,
