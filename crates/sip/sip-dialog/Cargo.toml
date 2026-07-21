@@ -66,7 +66,7 @@ name = "transaction_manager"
 harness = false
 
 [features]
-default = ["recovery", "events"]
+default = ["recovery", "events", "ws", "wss"]
 generated-validation = ["rvoip-sip-core/generated-validation"]
 
 # Dialog recovery features
@@ -78,11 +78,13 @@ events = []
 # Testing features
 testing = []
 
-# WebSocket transport support. Declared so the cfg gates in
-# transport/mod.rs compile cleanly; enabling it on its own is a no-op
-# until the corresponding rvoip-sip-transport `ws` feature is wired
-# through.
-ws = []
+# WebSocket transport support. Propagates to rvoip-sip-transport/ws so
+# the cfg gates in transport/mod.rs activate the actual WS bind path.
+ws = ["rvoip-sip-transport/ws"]
+
+# Secure WebSocket transport support (WSS). Wires TlsConnector for
+# outbound wss:// dials in add_websocket_transport.
+wss = ["ws", "rvoip-sip-transport/wss"]
 
 # Development features (additional debugging)
 dev = ["recovery", "events", "testing"]

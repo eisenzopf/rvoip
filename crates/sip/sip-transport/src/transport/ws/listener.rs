@@ -4,12 +4,13 @@ use futures_util::StreamExt;
 use http::HeaderValue;
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{tungstenite, WebSocketStream};
+use tokio_tungstenite::WebSocketStream;
 use tracing::{debug, error, info};
 
 #[cfg(feature = "wss")]
@@ -18,7 +19,7 @@ use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 use super::connection::WebSocketConnection;
-use super::{SipWsStream, SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
+use super::{SipWsStream, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 
 /// WebSocket listener for accepting SIP WebSocket connections
@@ -154,66 +155,45 @@ impl WebSocketListener {
             SipWsStream::Plain(stream)
         };
 
-        // Custom callback for WebSocket handshake to handle subprotocol negotiation
-        let callback = |request: &Request, response: Response| {
-            // Check for subprotocol request
-            let protocols = request
-                .headers()
-                .get("Sec-WebSocket-Protocol")
-                .and_then(|h| h.to_str().ok())
-                .map(|p| p.split(',').map(|s| s.trim()).collect::<Vec<_>>());
+        // RFC 7118 §4.1: server MUST include "sip" in the
+        // Sec-WebSocket-Protocol response header when the client
+        // offered it. Both WS and WSS use the same subprotocol name.
+        // Use an AtomicBool (Send + Sync) so the closure is Send —
+        // required because accept() is awaited inside a spawned task.
+        let sip_offered = Arc::new(AtomicBool::new(false));
+        let sip_offered_inner = sip_offered.clone();
 
-            let mut response = response;
-            let mut selected_protocol = String::new();
+        let ws_stream = tokio_tungstenite::accept_hdr_async(
+            maybe_tls_stream,
+            move |req: &Request, mut resp: Response| {
+                let offered = req
+                    .headers()
+                    .get("Sec-WebSocket-Protocol")
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.split(',').any(|p| p.trim() == SIP_WS_SUBPROTOCOL))
+                    .unwrap_or(false);
 
-            if let Some(protocols) = protocols {
-                // Check if the client supports our subprotocols
-                let supported_protocol = if self.secure {
-                    if protocols.contains(&SIP_WSS_SUBPROTOCOL) {
-                        Some(SIP_WSS_SUBPROTOCOL)
-                    } else {
-                        None
-                    }
-                } else {
-                    if protocols.contains(&SIP_WS_SUBPROTOCOL) {
-                        Some(SIP_WS_SUBPROTOCOL)
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(protocol) = supported_protocol {
-                    response.headers_mut().append(
+                if offered {
+                    resp.headers_mut().insert(
                         "Sec-WebSocket-Protocol",
-                        HeaderValue::from_str(protocol).unwrap(),
+                        HeaderValue::from_static(SIP_WS_SUBPROTOCOL),
                     );
-                    selected_protocol = protocol.to_string();
+                    sip_offered_inner.store(true, Ordering::Relaxed);
                 }
-            }
+                Ok(resp)
+            },
+        )
+        .await
+        .map_err(|e| {
+            error!("WebSocket handshake failed with {}: {}", peer_addr, e);
+            Error::WebSocketHandshakeFailed(e.to_string())
+        })?;
 
-            Ok((response, selected_protocol))
-        };
-
-        // Perform WebSocket handshake
-        let (ws_stream, selected_protocol) =
-            Self::accept_async_with_subprotocol(maybe_tls_stream, callback)
-                .await
-                .map_err(|e| {
-                    error!("WebSocket handshake failed with {}: {}", peer_addr, e);
-                    Error::WebSocketHandshakeFailed(e.to_string())
-                })?;
-
-        // Default to 'sip' if no subprotocol was selected
-        let subprotocol = if selected_protocol.is_empty() {
-            if self.secure {
-                SIP_WSS_SUBPROTOCOL
-            } else {
-                SIP_WS_SUBPROTOCOL
-            }
-            .to_string()
-        } else {
-            selected_protocol
-        };
+        // Subprotocol is "sip" if the client offered it (RFC 7118 §4.1).
+        // If the client did not advertise it at all we still carry the
+        // constant so the connection wrapper is consistently typed.
+        let subprotocol = SIP_WS_SUBPROTOCOL.to_string();
+        let _ = sip_offered; // was checked to set the response header
 
         // Split the stream for separate reading and writing
         let (ws_writer, ws_reader) = ws_stream.split();
@@ -223,28 +203,6 @@ impl WebSocketListener {
             WebSocketConnection::from_writer(ws_writer, peer_addr, self.secure, subprotocol);
 
         Ok((connection, ws_reader))
-    }
-
-    /// Helper to accept WebSocket connections with subprotocol selection
-    #[cfg(feature = "ws")]
-    async fn accept_async_with_subprotocol<F>(
-        stream: SipWsStream,
-        _callback: F,
-    ) -> std::result::Result<(WebSocketStream<SipWsStream>, String), tungstenite::Error>
-    where
-        F: FnOnce(
-            &Request,
-            Response,
-        ) -> std::result::Result<(Response, String), tungstenite::Error>,
-    {
-        // This is a simplified implementation that doesn't actually use the callback yet
-        // In a full implementation, we'd modify tokio-tungstenite to support returning additional data
-
-        let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-
-        // For now, we'll just return an empty string for the subprotocol
-        // In a real implementation, we'd extract this from the handshake
-        Ok((ws_stream, String::new()))
     }
 
     /// Returns whether this is a secure WebSocket listener
@@ -376,5 +334,133 @@ mod tests {
         // 1. The unit tests for individual components
         // 2. The integration tests for the transport as a whole
         // 3. Manual testing with real clients
+    }
+
+    /// RFC 7118 §4.1 — server MUST echo "sip" in Sec-WebSocket-Protocol
+    /// when the client offers it. This test fails if accept_hdr_async is
+    /// replaced by plain accept_async (which omits the response header).
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn test_ws_handshake_includes_sip_subprotocol() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let listener = WebSocketListener::bind(addr, false, None, None)
+            .await
+            .unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        // Server: accept one connection in a background task
+        let server_task = tokio::spawn(async move {
+            let (conn, _reader) = listener.accept().await.expect("accept failed");
+            conn.subprotocol().to_string()
+        });
+
+        // Client: connect with Sec-WebSocket-Protocol: sip
+        let url = format!("ws://{}/", server_addr);
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            http::HeaderValue::from_static("sip"),
+        );
+        let tcp = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let (ws, response) = tokio_tungstenite::client_async(request, tcp)
+            .await
+            .expect("WS handshake failed");
+
+        // RFC 7118 §4.1: response MUST contain Sec-WebSocket-Protocol: sip
+        let echoed = response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            echoed, "sip",
+            "HTTP 101 must echo Sec-WebSocket-Protocol: sip (RFC 7118 §4.1)"
+        );
+
+        drop(ws);
+        let server_subprotocol = server_task.await.unwrap();
+        assert_eq!(server_subprotocol, "sip");
+    }
+
+    /// RFC 7118 §4.1 applies equally to WSS — the subprotocol is "sip",
+    /// not "sips". Verifies the corrected SIP_WSS_SUBPROTOCOL constant.
+    #[cfg(all(feature = "ws", feature = "wss"))]
+    #[tokio::test]
+    async fn test_wss_handshake_includes_sip_subprotocol_not_sips() {
+        use std::io::Write;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cert_path = tmp.path().join("server.crt");
+        let key_path = tmp.path().join("server.key");
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::File::create(&cert_path)
+            .and_then(|mut f| f.write_all(cert.cert.pem().as_bytes()))
+            .unwrap();
+        std::fs::File::create(&key_path)
+            .and_then(|mut f| f.write_all(cert.signing_key.serialize_pem().as_bytes()))
+            .unwrap();
+
+        let addr = SocketAddr::from(([127, 0, 0, 1], 0));
+        let listener = WebSocketListener::bind(
+            addr,
+            true,
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let cert_der = cert.cert.der().to_vec();
+
+        let server_task = tokio::spawn(async move {
+            let (conn, _reader) = listener.accept().await.expect("WSS accept failed");
+            conn.subprotocol().to_string()
+        });
+
+        // Build a rustls client that trusts the self-signed cert
+        let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
+        root_store
+            .add(tokio_rustls::rustls::pki_types::CertificateDer::from(
+                cert_der,
+            ))
+            .unwrap();
+        let client_config = tokio_rustls::rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+        let tcp = tokio::net::TcpStream::connect(server_addr).await.unwrap();
+        let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from("localhost")
+            .unwrap()
+            .to_owned();
+        let tls_stream = connector.connect(server_name, tcp).await.unwrap();
+        let stream = crate::transport::ws::SipWsStream::ClientTls(tls_stream);
+
+        let url = format!("wss://{}/", server_addr);
+        let mut request = url.into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            http::HeaderValue::from_static("sip"),
+        );
+        let (ws, response) = tokio_tungstenite::client_async(request, stream)
+            .await
+            .expect("WSS WS handshake failed");
+
+        let echoed = response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            echoed, "sip",
+            "WSS HTTP 101 must echo Sec-WebSocket-Protocol: sip (not 'sips') per RFC 7118 §4.1"
+        );
+
+        drop(ws);
+        let server_subprotocol = server_task.await.unwrap();
+        assert_eq!(server_subprotocol, "sip");
     }
 }
