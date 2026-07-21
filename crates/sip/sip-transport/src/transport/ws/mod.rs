@@ -10,12 +10,12 @@ use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
 use futures_util::StreamExt;
 use rvoip_sip_core::Message;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::sync::{mpsc, Mutex};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite;
@@ -26,9 +26,11 @@ pub use crate::transport::tls::TlsClientConfig;
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsConnector;
 
-// SIP WebSocket subprotocol names as per RFC 7118
+// SIP WebSocket subprotocol per RFC 7118 §4.1.
+// Both WS and WSS use "sip" — the subprotocol name identifies the
+// application-layer protocol (SIP), not the transport security.
 pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
-pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sips";
+pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sip";
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
@@ -42,7 +44,22 @@ pub struct WebSocketTransport {
 struct WebSocketTransportInner {
     listener: Arc<WebSocketListener>,
     secure: bool,
+    /// Full connection pool: async mutex, holds the write half of each socket.
+    /// Used by the send/close paths that already run inside async tasks.
     connections: Mutex<HashMap<SocketAddr, Arc<WebSocketConnection>>>,
+    /// Sync mirror of which peers are currently connected.
+    ///
+    /// `has_connection_to()` is a synchronous trait method called from the
+    /// multiplexer's dispatch path. Reading from the async `connections`
+    /// mutex there would require either `block_on` (forbidden) or
+    /// `try_lock` (returns false on contention, causing an incorrect UDP
+    /// fallback on that exact send). Instead, we maintain this
+    /// `std::sync::RwLock`-backed set that is always writable in O(1)
+    /// inside the async tasks that already hold `connections` and readable
+    /// in O(1) from any synchronous context without ever blocking for more
+    /// than a few nanoseconds (writes only hold the lock for a
+    /// `HashSet::insert` / `HashSet::remove`).
+    active_peers: RwLock<HashSet<SocketAddr>>,
     closed: AtomicBool,
     events_tx: mpsc::Sender<TransportEvent>,
     /// `TlsConnector` used by outbound `wss://` dials. `None` when
@@ -147,6 +164,7 @@ impl WebSocketTransport {
                 listener: Arc::new(listener),
                 secure,
                 connections: Mutex::new(HashMap::new()),
+                active_peers: RwLock::new(HashSet::new()),
                 closed: AtomicBool::new(false),
                 events_tx: events_tx.clone(),
                 tls_connector,
@@ -186,6 +204,7 @@ impl WebSocketTransport {
                 listener: Arc::new(listener),
                 secure,
                 connections: Mutex::new(HashMap::new()),
+                active_peers: RwLock::new(HashSet::new()),
                 closed: AtomicBool::new(false),
                 events_tx: events_tx.clone(),
             }),
@@ -213,11 +232,14 @@ impl WebSocketTransport {
                         let peer_addr = connection.peer_addr();
                         debug!("Accepted WebSocket connection from {}", peer_addr);
 
-                        // Store the connection
+                        // Store the connection in both the async pool and the
+                        // sync peer index so `has_connection_to()` can answer
+                        // without acquiring the async mutex.
                         let connection_arc = Arc::new(connection);
                         {
                             let mut connections = inner.connections.lock().await;
                             connections.insert(peer_addr, connection_arc.clone());
+                            inner.active_peers.write().unwrap().insert(peer_addr);
                         }
 
                         // Handle the connection
@@ -378,10 +400,13 @@ impl WebSocketTransport {
                 }
             }
 
-            // Connection closed, remove it from the map
+            // Connection closed — remove from both the async pool and the
+            // sync peer index so `has_connection_to()` immediately returns
+            // false for this address.
             {
                 let mut connections = inner.connections.lock().await;
                 connections.remove(&peer_addr);
+                inner.active_peers.write().unwrap().remove(&peer_addr);
             }
 
             // Ensure the connection is closed
@@ -546,11 +571,11 @@ impl WebSocketTransport {
         );
         let connection_arc = Arc::new(connection);
 
-        // Register in the pool so subsequent send_message calls
-        // reuse the same connection.
+        // Register in both the async pool and the sync peer index.
         {
             let mut connections = self.inner.connections.lock().await;
             connections.insert(addr, connection_arc.clone());
+            self.inner.active_peers.write().unwrap().insert(addr);
         }
 
         // Spawn the reader so server-pushed responses (typical SIP
@@ -649,22 +674,60 @@ impl Transport for WebSocketTransport {
     }
 
     async fn close(&self) -> Result<()> {
-        // Set the closed flag to prevent new operations
+        // Set the closed flag to prevent new operations.
         self.inner.closed.store(true, Ordering::Relaxed);
 
-        // Close all connections
+        // Close all connections and clear both indexes.
         let mut connections = self.inner.connections.lock().await;
         for (addr, conn) in connections.drain() {
             if let Err(e) = conn.close().await {
                 error!("Error closing WebSocket connection to {}: {}", addr, e);
             }
         }
+        self.inner.active_peers.write().unwrap().clear();
 
         Ok(())
     }
 
     fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Relaxed)
+    }
+
+    fn supports_ws(&self) -> bool {
+        !self.inner.secure
+    }
+
+    fn supports_wss(&self) -> bool {
+        self.inner.secure
+    }
+
+    fn default_transport_type(&self) -> TransportType {
+        if self.inner.secure {
+            TransportType::Wss
+        } else {
+            TransportType::Ws
+        }
+    }
+
+    /// Returns `true` when there is a live WebSocket connection to
+    /// `remote_addr`.
+    ///
+    /// Reads from the `active_peers` `std::sync::RwLock` rather than the
+    /// async `connections` mutex. This guarantees a correct answer on every
+    /// call — including under lock contention — without `block_on`, without
+    /// holding the async mutex across an await, and without ever returning a
+    /// false-negative that would cause the multiplexer to fall back to UDP
+    /// on that same send.
+    ///
+    /// The write side of `active_peers` is updated immediately whenever a
+    /// connection is inserted or removed from the async pool, so reads here
+    /// are always consistent with the pool state (no stale entries).
+    fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
+        self.inner
+            .active_peers
+            .read()
+            .unwrap()
+            .contains(&remote_addr)
     }
 }
 

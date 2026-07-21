@@ -455,6 +455,40 @@ pub struct Config {
     /// by peers.
     pub tls_advertised_addr: Option<SocketAddr>,
 
+    /// Whether to enable WebSocket (WS/WSS) SIP transport.
+    ///
+    /// When `true`, a plain WebSocket listener is started on
+    /// [`Config::ws_bind_addr`] (default `0.0.0.0:5080`). If TLS is also
+    /// configured ([`Config::tls_cert_path`] + [`Config::tls_key_path`]), a
+    /// secure WebSocket (WSS) listener is additionally started on
+    /// [`Config::wss_bind_addr`] (default `0.0.0.0:5081`).
+    ///
+    /// Default: `false`.
+    pub enable_ws: bool,
+
+    /// Optional local bind address for the plain WebSocket (WS) SIP listener.
+    ///
+    /// Must use a port that does not conflict with [`Config::bind_addr`] (used
+    /// for UDP/TCP) or [`Config::tls_bind_addr`] (used for TLS).
+    /// When `None` and [`Config::enable_ws`] is `true`, defaults to
+    /// `0.0.0.0:5080`.
+    pub ws_bind_addr: Option<SocketAddr>,
+
+    /// Optional advertised address for the WS listener — used in Via
+    /// sent-by and fallback Contact generation. Bind can be `0.0.0.0`,
+    /// while this must be routable by peers.
+    pub ws_advertised_addr: Option<SocketAddr>,
+
+    /// Optional local bind address for the secure WebSocket (WSS) SIP
+    /// listener. Requires [`Config::tls_cert_path`] and
+    /// [`Config::tls_key_path`] to be set. When `None` and WSS is active,
+    /// defaults to `0.0.0.0:5081`.
+    pub wss_bind_addr: Option<SocketAddr>,
+
+    /// Optional advertised address for the WSS listener — used in Via
+    /// sent-by and fallback Contact generation.
+    pub wss_advertised_addr: Option<SocketAddr>,
+
     /// Optional Contact URI override used by rvoip-sip-dialog for
     /// dialog-creating and target-refresh requests. Registrations can
     /// still override Contact per REGISTER via [`Registration`].
@@ -1041,6 +1075,11 @@ impl Config {
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             tls_advertised_addr: None,
+            enable_ws: false,
+            ws_bind_addr: None,
+            ws_advertised_addr: None,
+            wss_bind_addr: None,
+            wss_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -1149,6 +1188,11 @@ impl Config {
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             tls_advertised_addr: None,
+            enable_ws: false,
+            ws_bind_addr: None,
+            ws_advertised_addr: None,
+            wss_bind_addr: None,
+            wss_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -5705,11 +5749,13 @@ impl UnifiedCoordinator {
         let transport_config = TransportManagerConfig {
             enable_udp: true,
             enable_tcp: true,
-            enable_ws: false,
+            enable_ws: config.enable_ws,
             enable_tls,
             tls_role,
             bind_addresses: vec![config.bind_addr],
             tls_bind_addresses: config.tls_bind_addr.into_iter().collect(),
+            ws_bind_addresses: config.ws_bind_addr.into_iter().collect(),
+            wss_bind_addresses: config.wss_bind_addr.into_iter().collect(),
             tls_cert_path: config
                 .tls_cert_path
                 .as_ref()
@@ -5842,6 +5888,8 @@ impl UnifiedCoordinator {
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
+                dialog.ws_advertised_local_address = config.ws_advertised_addr;
+                dialog.wss_advertised_local_address = config.wss_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
                 dialog.event_dispatch_workers = config.sip_dialog_dispatch_workers;
                 dialog.event_dispatch_queue_capacity = config.sip_dialog_dispatch_queue_capacity;

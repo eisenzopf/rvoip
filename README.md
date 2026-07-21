@@ -173,7 +173,8 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | UDP | ✅ Beta | Primary transport |
 | TCP | ✅ Beta | Connection management, reliability |
 | TLS | ✅ Beta | rustls; tested at PBX edge |
-| WebSocket (RFC 7118) | 🚧 Partial | Plain WS round-trip works; WSS / browser interop post-beta |
+| WS (RFC 7118) | 🚧 Alpha | RFC 7118 handshake (`Sec-WebSocket-Protocol: sip`), configurable bind/advertised addresses, inbound calls receive responses on the originating WS connection; browser interop not yet validated |
+| WSS (RFC 7118) | 🚧 Alpha | Same as WS over TLS; `bind_with_client_tls` for outbound; browser interop not yet validated |
 | QUIC (UCTP) | 🚧 Alpha | `rvoip-quic` workspace crate |
 | WebTransport | 🚧 Alpha | `rvoip-webtransport` workspace crate |
 | WebRTC | 🚧 Alpha | `rvoip-webrtc` pinned to upstream alpha |

@@ -214,6 +214,18 @@ pub struct DialogConfig {
     #[serde(default)]
     pub tls_advertised_local_address: Option<SocketAddr>,
 
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for plain WebSocket (WS) requests. When unset, falls back to
+    /// `advertised_local_address` and then `local_address`.
+    #[serde(default)]
+    pub ws_advertised_local_address: Option<SocketAddr>,
+
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for secure WebSocket (WSS) requests. When unset, falls back to
+    /// `tls_advertised_local_address` and then `local_address`.
+    #[serde(default)]
+    pub wss_advertised_local_address: Option<SocketAddr>,
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
@@ -299,6 +311,8 @@ impl Default for DialogConfig {
             local_contact_uri: None,
             tls_local_address: None,
             tls_advertised_local_address: None,
+            ws_advertised_local_address: None,
+            wss_advertised_local_address: None,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),
