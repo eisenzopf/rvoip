@@ -162,7 +162,8 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | Blind transfer | ✅ Beta | REFER-based, B2BUA-bridged |
 | Conference mixing | 🚧 Alpha | N-way mixing primitives in `rvoip-media-core` |
 | G.729A / G.729AB | ✅ Beta optional | Annex A speech path with optional Annex B VAD/DTX/CNG |
-| Opus / G.722 | 🔮 Post-beta | Codec hooks exist; full-media path is post-beta |
+| G.722 wideband | 🚧 Alpha optional | Real ITU-T G.722 (64 kbit/s) codec in `rvoip-codec-core` via the `g722` feature; not yet wired into media-core SDP negotiation |
+| Opus | 🔮 Post-beta | Codec hooks exist; full-media path is post-beta |
 | DTLS-SRTP | 🔮 Post-beta | Design in place, feature-flagged |
 | Echo cancel / AGC / VAD / NS | 🔮 Post-beta | Planned; not yet implemented |
 
@@ -228,7 +229,7 @@ documents are the authoritative source — this table is a summary.
 │  rvoip-core-traits  (✅ beta)  cycle-breaker trait surface    │
 │  rvoip-media-core   (✅ beta)  codec / mixing / MediaStream   │
 │  rvoip-rtp-core     (✅ beta)  RTP / SRTP                     │
-│  rvoip-codec-core   (✅ beta)  G.711 + optional G.729A/AB      │
+│  rvoip-codec-core   (✅ beta)  G.711 + opt. G.729A/AB + G.722 │
 │  rvoip-auth-core    (✅ beta)  OAuth2 / Bearer / SIP Digest   │
 └──────────────────────────────────────────────────────────────┘
                               ▲
@@ -268,7 +269,7 @@ without the substrates knowing about each other.
 | [rvoip-infra-common](crates/foundation/infra-common) | Event bus, executors, shared infra |
 | [rvoip-media-core](crates/media/media-core) | Codec negotiation, mixing, MediaStream trait |
 | [rvoip-rtp-core](crates/media/rtp-core) | RTP / SRTP framing and transport |
-| [rvoip-codec-core](crates/media/codec-core) | G.711 plus optional G.729A/G.729AB codec implementation |
+| [rvoip-codec-core](crates/media/codec-core) | G.711 plus optional G.729A/G.729AB and G.722 codec implementations |
 | [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
 ### 🚧 Alpha — published to crates.io at `0.1.0`
