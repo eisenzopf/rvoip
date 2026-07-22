@@ -30,6 +30,10 @@ tracing.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
+# G.722 ADPCM codec (behind the `g722` feature). Only the `libg722`
+# submodule is used; `ezk`/`ezk-audio`/`ezk-rtp` come along as
+# transitive deps of the ezk-g722 crate itself but aren't referenced.
+ezk-g722 = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -45,6 +49,7 @@ default = ["g711"]
 
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
+g722 = ["dep:ezk-g722"]      # G.722 wideband ADPCM codec
 g729 = []                    # G.729A/G.729AB codec
 opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
 opus-sim = []                # Opus codec simulator variant
