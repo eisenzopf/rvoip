@@ -111,8 +111,8 @@ pub use packet::extension::{
 pub use packet::header::RtpHeader;
 pub use packet::rtcp::{
     NtpTimestamp, RtcpApplicationDefined, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye,
-    RtcpPacket, RtcpReceiverReport, RtcpReportBlock, RtcpSenderReport, RtcpSourceDescription,
-    RtcpXrBlock, VoipMetricsBlock,
+    RtcpPacket, RtcpPacketItem, RtcpPacketIter, RtcpReceiverReport, RtcpReportBlock,
+    RtcpSenderReport, RtcpSourceDescription, RtcpXrBlock, VoipMetricsBlock,
 };
 pub use packet::rtp::RtpPacket;
 

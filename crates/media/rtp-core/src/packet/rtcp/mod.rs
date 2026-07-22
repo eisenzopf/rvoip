@@ -58,6 +58,7 @@ impl TryFrom<u8> for RtcpPacketType {
 mod app;
 mod bye;
 mod compound;
+mod iter;
 mod ntp;
 mod receiver_report;
 mod report_block;
@@ -69,6 +70,7 @@ mod xr;
 pub use app::RtcpApplicationDefined;
 pub use bye::RtcpGoodbye;
 pub use compound::RtcpCompoundPacket;
+pub use iter::{RtcpPacketItem, RtcpPacketIter};
 pub use ntp::NtpTimestamp;
 pub use receiver_report::RtcpReceiverReport;
 pub use report_block::RtcpReportBlock;
