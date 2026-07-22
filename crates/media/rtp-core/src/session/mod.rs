@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::Error;
+use crate::packet::sequencer::build_packet;
 use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{
     RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, UdpRtpTransport,
@@ -222,9 +223,7 @@ impl RtpSendHandle {
         payload_type: u8,
     ) -> Result<()> {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
-        header.marker = marker;
-        let packet = RtpPacket::new(header, payload);
+        let packet = build_packet(payload_type, sequence, timestamp, self.ssrc, marker, payload);
         self.sender
             .send(packet)
             .await
@@ -1043,9 +1042,7 @@ impl RtpSession {
             .as_ref()
             .map(|s| s.next_sequence())
             .unwrap_or(0);
-        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
-        header.marker = marker;
-        let packet = RtpPacket::new(header, payload);
+        let packet = build_packet(payload_type, sequence, timestamp, self.ssrc, marker, payload);
 
         self.sender
             .send(packet)
