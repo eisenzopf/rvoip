@@ -15,6 +15,13 @@
 //! responsible for putting the local fingerprint into an outgoing
 //! `a=fingerprint` line and checking the remote fingerprint against an
 //! incoming one, exactly as it already builds `a=crypto` for the SDES path.
+//!
+//! Certificate generation is a separate step from running the handshake
+//! ([`generate_identity`], then [`handshake_client`]/[`handshake_server`]
+//! taking the result), not bundled into one call: a real SDP integration
+//! needs its own `a=fingerprint` value to put in the offer/answer it sends
+//! *before* it knows which role (`a=setup:active`/`passive`) it ends up
+//! playing, let alone before the handshake itself can start.
 
 use std::sync::Arc;
 
@@ -44,6 +51,30 @@ pub fn default_srtp_profiles() -> Vec<SrtpProtectionProfile> {
         SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_80,
         SrtpProtectionProfile::Srtp_Aes128_Cm_Hmac_Sha1_32,
     ]
+}
+
+/// A self-signed certificate plus its SHA-256 fingerprint, generated ahead
+/// of the handshake so the fingerprint is available for an outgoing SDP
+/// `a=fingerprint` line before the handshake (or even the DTLS role) is
+/// decided. Typically one `DtlsIdentity` is generated per Connection/call
+/// and reused if the handshake needs to restart (e.g. an ICE restart or a
+/// retried connection), so the fingerprint you already sent stays valid.
+pub struct DtlsIdentity {
+    certificate: DtlsCertificate,
+    /// SHA-256 fingerprint of `certificate`, for the outgoing SDP
+    /// `a=fingerprint` line.
+    pub fingerprint_sha256: [u8; 32],
+}
+
+/// Generate a fresh self-signed certificate and its fingerprint.
+pub fn generate_identity() -> Result<DtlsIdentity> {
+    let certificate =
+        DtlsCertificate::generate_self_signed(vec!["rvoip".to_string()]).map_err(to_dtls_error)?;
+    let fingerprint_sha256 = sha256_fingerprint(certificate.certificate[0].as_ref());
+    Ok(DtlsIdentity {
+        certificate,
+        fingerprint_sha256,
+    })
 }
 
 /// Result of a completed DTLS-SRTP handshake.
@@ -93,13 +124,9 @@ fn convert_profile(profile: SrtpProtectionProfile) -> Result<SrtpCryptoSuite> {
     }
 }
 
-fn build_config(srtp_profiles: Vec<SrtpProtectionProfile>) -> Result<(Config, [u8; 32])> {
-    let cert =
-        DtlsCertificate::generate_self_signed(vec!["rvoip".to_string()]).map_err(to_dtls_error)?;
-    let local_fingerprint = sha256_fingerprint(cert.certificate[0].as_ref());
-
-    let config = Config {
-        certificates: vec![cert],
+fn build_config(identity: DtlsIdentity, srtp_profiles: Vec<SrtpProtectionProfile>) -> Config {
+    Config {
+        certificates: vec![identity.certificate],
         srtp_protection_profiles: srtp_profiles,
         extended_master_secret: ExtendedMasterSecretType::Require,
         // WebRTC/SDP's trust model is the `a=fingerprint` line, not a CA
@@ -115,9 +142,7 @@ fn build_config(srtp_profiles: Vec<SrtpProtectionProfile>) -> Result<(Config, [u
         // ordinary TLS but wrong here.
         client_auth: ClientAuthType::RequireAnyClientCert,
         ..Default::default()
-    };
-
-    Ok((config, local_fingerprint))
+    }
 }
 
 async fn finish_handshake(
@@ -169,9 +194,11 @@ async fn finish_handshake(
 /// remote peer this Connection talks to.
 pub async fn handshake_client(
     socket: Arc<UdpSocket>,
+    identity: DtlsIdentity,
     srtp_profiles: Vec<SrtpProtectionProfile>,
 ) -> Result<DtlsSrtpHandshakeResult> {
-    let (config, local_fingerprint) = build_config(srtp_profiles)?;
+    let local_fingerprint = identity.fingerprint_sha256;
+    let config = build_config(identity, srtp_profiles);
     let conn: Arc<dyn UtilConn + Send + Sync> = socket;
     let dtls_conn = DTLSConn::new(conn, config, true, None)
         .await
@@ -183,9 +210,11 @@ pub async fn handshake_client(
 /// over an already-connected UDP socket.
 pub async fn handshake_server(
     socket: Arc<UdpSocket>,
+    identity: DtlsIdentity,
     srtp_profiles: Vec<SrtpProtectionProfile>,
 ) -> Result<DtlsSrtpHandshakeResult> {
-    let (config, local_fingerprint) = build_config(srtp_profiles)?;
+    let local_fingerprint = identity.fingerprint_sha256;
+    let config = build_config(identity, srtp_profiles);
     let conn: Arc<dyn UtilConn + Send + Sync> = socket;
     let dtls_conn = DTLSConn::new(conn, config, false, None)
         .await
