@@ -1783,7 +1783,10 @@ impl SessionCrossCrateEventHandler {
                 );
             }
         }
-        let session_remote_sdp = session.remote_sdp.clone();
+        // The session was just created above, so `session.remote_sdp` is
+        // necessarily still empty. Capture the offer we already parsed
+        // from this INVITE before it's moved into `event_type` below.
+        let incoming_sdp = sdp.clone();
 
         self.state_machine
             .store
@@ -1925,7 +1928,7 @@ impl SessionCrossCrateEventHandler {
                     call_id: session_id.clone(),
                     from: from.clone(),
                     to: to.clone(),
-                    sdp: session_remote_sdp,
+                    sdp: incoming_sdp,
                 },
             );
 
@@ -2280,7 +2283,7 @@ impl SessionCrossCrateEventHandler {
         }
 
         // Store session data for SimplePeer event
-        let session_remote_sdp = session.remote_sdp.clone();
+        let incoming_sdp = sdp.clone();
 
         self.state_machine
             .store
@@ -2394,7 +2397,7 @@ impl SessionCrossCrateEventHandler {
                     call_id: session_id.clone(),
                     from: from.clone(),
                     to: to.clone(),
-                    sdp: session_remote_sdp,
+                    sdp: incoming_sdp,
                 });
 
             // Legacy incoming call notification (keep for compatibility)
