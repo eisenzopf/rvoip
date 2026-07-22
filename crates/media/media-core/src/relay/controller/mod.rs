@@ -48,6 +48,19 @@ use rvoip_rtp_core::{
 
 mod codec_runtime;
 
+/// Which side of the DTLS handshake a dialog plays, per RFC 4145/5763's
+/// `a=setup` active/passive mapping (the caller resolves the SDP
+/// `a=setup` role to this before calling
+/// [`MediaSessionController::run_dtls_handshake_and_install`]).
+#[cfg(feature = "dtls-srtp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtlsRole {
+    /// Initiates the handshake (`a=setup:active`).
+    Client,
+    /// Accepts the handshake (`a=setup:passive`).
+    Server,
+}
+
 /// Releases a media-controller port reservation if `start_media` is cancelled
 /// before ownership is committed to the controller maps.
 struct MediaPortReservationGuard {
@@ -1098,6 +1111,91 @@ impl MediaSessionController {
             .rollback_srtp_contexts(rollback)
             .await
             .map_err(|error| Error::config(format!("failed to restore SRTP contexts: {error}")))
+    }
+
+    /// Run a real DTLS-SRTP handshake (RFC 5764) for a dialog's RTP session
+    /// and install the resulting keys the same way [`Self::install_srtp_contexts`]
+    /// installs SDES ones — this is the DTLS-SRTP equivalent of that call,
+    /// sharing the same underlying `UdpRtpTransport::set_srtp_contexts`.
+    ///
+    /// Must be called after [`Self::start_media`], with `remote_addr` set to
+    /// the peer's RTP address from its SDP answer/offer (the handshake runs
+    /// over the same socket RTP/RTCP already use, demultiplexed by the
+    /// first byte of each datagram — see `rvoip_rtp_core::transport::dtls_bridge`).
+    /// The caller is responsible for checking the returned
+    /// `remote_fingerprint_sha256` against the SDP `a=fingerprint` the peer
+    /// advertised; this function only runs the handshake, it has no notion
+    /// of SDP or which fingerprint was promised.
+    #[cfg(feature = "dtls-srtp")]
+    pub async fn run_dtls_handshake_and_install(
+        &self,
+        dialog_id: &DialogId,
+        identity: rtp_core::dtls_srtp::DtlsIdentity,
+        role: DtlsRole,
+        remote_addr: std::net::SocketAddr,
+        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
+        timeout: std::time::Duration,
+    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let conn = {
+            let session_guard = session_arc.lock().await;
+            let transport = session_guard.transport();
+            let udp_transport = transport
+                .as_any()
+                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+                .ok_or_else(|| {
+                    Error::config(
+                        "run_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
+                            .to_string(),
+                    )
+                })?;
+            udp_transport.set_remote_rtp_addr(remote_addr).await;
+            udp_transport
+                .dtls_conn_adapter()
+                .map_err(|e| Error::config(format!("dtls_conn_adapter: {e}")))?
+        };
+
+        let handshake = async {
+            match role {
+                DtlsRole::Client => {
+                    rtp_core::dtls_srtp::handshake_client(conn, identity, srtp_profiles).await
+                }
+                DtlsRole::Server => {
+                    rtp_core::dtls_srtp::handshake_server(conn, identity, srtp_profiles).await
+                }
+            }
+        };
+
+        let result = tokio::time::timeout(timeout, handshake)
+            .await
+            .map_err(|_| Error::config("DTLS-SRTP handshake timed out".to_string()))?
+            .map_err(|e| Error::config(format!("DTLS-SRTP handshake failed: {e}")))?;
+
+        let (send_key, recv_key) = match role {
+            DtlsRole::Client => (
+                result.client_write_key.clone(),
+                result.server_write_key.clone(),
+            ),
+            DtlsRole::Server => (
+                result.server_write_key.clone(),
+                result.client_write_key.clone(),
+            ),
+        };
+        let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
+        let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
+
+        self.install_srtp_contexts(dialog_id, send_ctx, recv_ctx)
+            .await?;
+        info!("Installed DTLS-SRTP contexts on dialog {}", dialog_id);
+
+        Ok(result)
     }
 
     fn cleanup_per_dialog_side_state(&self, dialog_id: &DialogId) {
