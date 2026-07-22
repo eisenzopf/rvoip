@@ -62,6 +62,9 @@ uuid = { version = "1.6.1", features = ["v4"] }
 libc = "0.2"
 winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
 time = { version = "0.3.47", features = ["std"] }
+# Wipe SRTP key material from memory on drop instead of leaving it in
+# freed heap pages.
+zeroize = { version = "1", features = ["derive"] }
 # Real DTLS 1.2 handshake for DTLS-SRTP (behind the `dtls-webrtc` feature).
 # The in-house handshake in `src/dtls/` never completes a real handshake
 # (see that module's docs); this crate is the same lineage backing the

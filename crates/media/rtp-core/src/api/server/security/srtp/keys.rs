@@ -11,9 +11,7 @@ use crate::api::common::config::SrtpProfile;
 use crate::api::common::error::SecurityError;
 use crate::dtls::DtlsConnection;
 use crate::srtp::{SrtpContext, SrtpCryptoSuite};
-use crate::srtp::{
-    SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
-};
+use crate::srtp::{SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 
 /// Extract SRTP keys from a DTLS connection
 pub async fn extract_srtp_keys(
@@ -54,29 +52,35 @@ pub async fn extract_srtp_keys(
     }
 }
 
-/// Convert SrtpProfile to SrtpCryptoSuite
-pub fn convert_profile(profile: SrtpProfile) -> SrtpCryptoSuite {
+/// Convert SrtpProfile to SrtpCryptoSuite. Returns `None` for the AES-GCM
+/// profiles, which this crate doesn't actually implement (RFC 7714) — see
+/// the module docs on `crate::srtp` for why those consts don't exist.
+pub fn convert_profile(profile: SrtpProfile) -> Option<SrtpCryptoSuite> {
     match profile {
-        SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
-        SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
-        SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
-        SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
+        SrtpProfile::AesGcm128 | SrtpProfile::AesGcm256 => None,
+        SrtpProfile::AesCm128HmacSha1_80 => Some(SRTP_AES128_CM_SHA1_80),
+        SrtpProfile::AesCm128HmacSha1_32 => Some(SRTP_AES128_CM_SHA1_32),
     }
 }
 
-/// Convert a list of SrtpProfiles to SrtpCryptoSuites
+/// Convert a list of SrtpProfiles to SrtpCryptoSuites, silently dropping
+/// any (currently just AES-GCM) profile this crate can't actually back —
+/// never negotiating an unsupported suite is the point, see
+/// [`convert_profile`].
 pub fn convert_profiles(profiles: &[SrtpProfile]) -> Vec<SrtpCryptoSuite> {
-    profiles.iter().map(|p| convert_profile(*p)).collect()
+    profiles
+        .iter()
+        .filter_map(|p| convert_profile(*p))
+        .collect()
 }
 
-/// Convert u16 profile ID to SrtpCryptoSuite
-pub fn profile_id_to_suite(profile_id: u16) -> SrtpCryptoSuite {
+/// Convert u16 profile ID to SrtpCryptoSuite. Returns `None` for AES-GCM
+/// IDs and any unrecognized ID — see [`convert_profile`].
+pub fn profile_id_to_suite(profile_id: u16) -> Option<SrtpCryptoSuite> {
     match profile_id {
-        0x0001 => SRTP_AES128_CM_SHA1_80,
-        0x0002 => SRTP_AES128_CM_SHA1_32,
-        0x0007 => SRTP_AEAD_AES_128_GCM,
-        0x0008 => SRTP_AEAD_AES_256_GCM,
-        _ => SRTP_AES128_CM_SHA1_80, // Default to AES128_CM_SHA1_80
+        0x0001 => Some(SRTP_AES128_CM_SHA1_80),
+        0x0002 => Some(SRTP_AES128_CM_SHA1_32),
+        _ => None,
     }
 }
 
