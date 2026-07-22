@@ -13,6 +13,8 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
+#[cfg(feature = "dtls-webrtc")]
+use tokio::sync::mpsc;
 use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
@@ -303,6 +305,13 @@ pub struct UdpRtpTransport {
     /// peers must each fire independently.
     dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
 
+    /// Sender half of the channel a DTLS-SRTP handshake reads from, when
+    /// one is in progress. `None` means datagrams classified as DTLS by
+    /// [`classify_rtp_mux_packet`] are just dropped (the pre-DTLS-SRTP
+    /// behavior). Set by [`Self::dtls_conn_adapter`].
+    #[cfg(feature = "dtls-webrtc")]
+    dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -436,6 +445,8 @@ impl UdpRtpTransport {
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
+            #[cfg(feature = "dtls-webrtc")]
+            dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -473,6 +484,8 @@ impl UdpRtpTransport {
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
         let dtmf_seen = self.dtmf_seen.clone();
+        #[cfg(feature = "dtls-webrtc")]
+        let dtls_tx = self.dtls_tx.clone();
         let srtp_diagnostics = srtp_diagnostics_enabled();
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
@@ -501,6 +514,34 @@ impl UdpRtpTransport {
                             info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
+
+                            #[cfg(feature = "dtls-webrtc")]
+                            if packet_class == RtpMuxPacketClass::Dtls {
+                                let forwarded = dtls_tx
+                                    .lock()
+                                    .as_ref()
+                                    .map(|tx| {
+                                        tx.try_send(Bytes::copy_from_slice(&buffer[..size])).is_ok()
+                                    })
+                                    .unwrap_or(false);
+                                if !forwarded {
+                                    // No handshake in flight (or its
+                                    // receiver is backed up) to hand this
+                                    // to; nothing else can use it either.
+                                    non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
+                                    log_dropped_non_rtp_packet(
+                                        rtp_diagnostics,
+                                        non_rtp_drop_count,
+                                        local_rtp_addr,
+                                        addr,
+                                        size,
+                                        packet_class,
+                                        &buffer[..size],
+                                    );
+                                }
+                                continue;
+                            }
+
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -809,6 +850,42 @@ impl UdpRtpTransport {
     /// Get the remote RTP address
     pub async fn remote_rtp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtp_addr.load().as_deref().copied()
+    }
+
+    /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for running a
+    /// DTLS-SRTP handshake over this transport's RTP socket, sharing the
+    /// port with RTP/RTCP. [`Self::set_remote_rtp_addr`] must be called
+    /// first — the adapter needs a fixed peer to send handshake bytes to.
+    ///
+    /// From this point on, incoming datagrams the receive loop classifies
+    /// as DTLS (RFC 7983) are routed to the returned adapter instead of
+    /// being dropped. Only one handshake can be in flight at a time per
+    /// transport; calling this again replaces the previous channel.
+    #[cfg(feature = "dtls-webrtc")]
+    pub fn dtls_conn_adapter(
+        &self,
+    ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
+        let remote = self
+            .remote_rtp_addr
+            .load()
+            .as_deref()
+            .copied()
+            .ok_or_else(|| {
+                crate::error::Error::Transport(
+                    "remote RTP address must be set before starting a DTLS handshake".to_string(),
+                )
+            })?;
+
+        let (tx, rx) = mpsc::channel(64);
+        *self.dtls_tx.lock() = Some(tx);
+
+        Ok(Arc::new(
+            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
+                self.rtp_socket.clone(),
+                remote,
+                rx,
+            ),
+        ))
     }
 
     /// Get the remote RTCP address

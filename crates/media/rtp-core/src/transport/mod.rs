@@ -127,6 +127,8 @@ pub enum PortPairingStrategy {
 
 // Re-export submodules
 mod allocator;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_bridge;
 pub mod security_transport;
 mod tcp;
 mod udp;

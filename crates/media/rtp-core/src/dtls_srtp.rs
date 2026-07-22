@@ -26,7 +26,6 @@
 use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
-use tokio::net::UdpSocket;
 
 use dtls_ext::config::{ClientAuthType, Config, ExtendedMasterSecretType};
 use dtls_ext::conn::DTLSConn;
@@ -189,17 +188,17 @@ async fn finish_handshake(
 /// Perform a DTLS-SRTP handshake as the client (the offerer side that sends
 /// `a=setup:active`, or the answerer when it sends `a=setup:passive` and
 /// therefore acts as the DTLS server; see RFC 4145/5763 for the
-/// active/passive-to-client/server mapping), over an already-connected UDP
-/// socket, i.e. one where `connect()` has already targeted the single
-/// remote peer this Connection talks to.
+/// active/passive-to-client/server mapping), over any transport that
+/// behaves like a connected point-to-point socket (a real connected
+/// `UdpSocket`, or a demux bridge over a shared socket — see
+/// `transport::dtls_bridge` for the latter).
 pub async fn handshake_client(
-    socket: Arc<UdpSocket>,
+    conn: Arc<dyn UtilConn + Send + Sync>,
     identity: DtlsIdentity,
     srtp_profiles: Vec<SrtpProtectionProfile>,
 ) -> Result<DtlsSrtpHandshakeResult> {
     let local_fingerprint = identity.fingerprint_sha256;
     let config = build_config(identity, srtp_profiles);
-    let conn: Arc<dyn UtilConn + Send + Sync> = socket;
     let dtls_conn = DTLSConn::new(conn, config, true, None)
         .await
         .map_err(to_dtls_error)?;
@@ -207,15 +206,15 @@ pub async fn handshake_client(
 }
 
 /// Perform a DTLS-SRTP handshake as the server (the passive/"listen") side,
-/// over an already-connected UDP socket.
+/// over any transport that behaves like a connected point-to-point socket
+/// — see [`handshake_client`].
 pub async fn handshake_server(
-    socket: Arc<UdpSocket>,
+    conn: Arc<dyn UtilConn + Send + Sync>,
     identity: DtlsIdentity,
     srtp_profiles: Vec<SrtpProtectionProfile>,
 ) -> Result<DtlsSrtpHandshakeResult> {
     let local_fingerprint = identity.fingerprint_sha256;
     let config = build_config(identity, srtp_profiles);
-    let conn: Arc<dyn UtilConn + Send + Sync> = socket;
     let dtls_conn = DTLSConn::new(conn, config, false, None)
         .await
         .map_err(to_dtls_error)?;
