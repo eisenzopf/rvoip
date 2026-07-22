@@ -1,0 +1,43 @@
+[package]
+name = "rvoip-nat-core"
+# Alpha-tier crate: version pinned independently of the workspace's beta
+# (0.2.x) crates, per the workspace's own maturity-tier convention.
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Crate-specific description
+description = "ICE (RFC 8445) NAT traversal for the RVOIP media plane"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1.5.0"
+thiserror = "1.0.56"
+tokio = { version = "1.35.1", features = ["rt", "sync", "net", "time", "macros"] }
+tracing = "0.1.40"
+async-trait = "0.1"
+
+# Real ICE 1.2 agent (RFC 8445), same webrtc-rs "production" 0.17.x
+# lineage already used elsewhere in this workspace for DTLS (`dtls`) and
+# SRTP interop testing (`webrtc-srtp`) — not the unrelated, pre-production
+# `rtc` crate that `rvoip-webrtc` depends on.
+webrtc-ice = { version = "0.17", optional = true }
+# Only the shared `Conn` trait is used from this — same role it plays for
+# the DTLS bridge in `rvoip-rtp-core`.
+webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
+
+[features]
+default = []
+ice = ["dep:webrtc-ice", "dep:webrtc-util"]
+
+[dev-dependencies]
+tracing-subscriber = "0.3"

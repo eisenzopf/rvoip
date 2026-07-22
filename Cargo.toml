@@ -19,6 +19,7 @@ members = [
     "crates/media/media-core",
     "crates/media/codec-core",
     "crates/media/rtp-core",
+    "crates/media/nat-core",
     # Optional OS audio-device bridge — top-of-stack helper that depends UP on
     # rvoip-sip (so it sits with the SIP product, not below it).
     "crates/media/rvoip-audio-device",
