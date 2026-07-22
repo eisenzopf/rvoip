@@ -1,451 +1,323 @@
-//! SDES (Security DEScriptions) implementation
+//! SDES (Security Descriptions, RFC 4568) SDP key exchange.
 //!
-//! This module implements the Security Descriptions for SDP as defined in RFC 4568.
-//! SDES allows keys and related information to be transported over SDP.
+//! This is the canonical SDES implementation for the whole workspace —
+//! extracted and generalized from `rvoip-sip`'s adapter (which had
+//! already gotten this right and is proven by its own end-to-end call
+//! test) to live here instead, so every consumer shares one correct
+//! engine instead of each maintaining its own.
 //!
-//! Reference: <https://tools.ietf.org/html/rfc4568>
+//! # What the previous version of this module got wrong
+//!
+//! The old `Sdes`/`SdesConfig`/`SdesRole` byte-oriented state machine
+//! (removed by this rewrite) had a real bug: the answerer never
+//! generated its own master key. `create_answer` decoded the *offerer's*
+//! key from the offer and stored it as `self.srtp_key`, then echoed the
+//! offerer's own crypto attribute straight back in the answer. RFC 4568
+//! §6.1 requires each side to use its own independently generated master
+//! key; this module's tests only ever exercised a single shared key
+//! encrypting and decrypting with itself, which trivially round-trips
+//! regardless of directionality — it never actually proved two
+//! independent keyed contexts worked, which is exactly why the bug went
+//! unnoticed.
+//!
+//! # RFC compliance
+//!
+//! - RFC 4568 §6.1 — each side generates its own master key; the offerer
+//!   keeps its locally-generated key per offered tag until the answer
+//!   arrives, the answerer generates a fresh key of its own for the
+//!   answer.
+//! - RFC 4568 §6.1 — master key + salt length is exactly
+//!   `suite.key_length + 14` bytes (112-bit salt for every suite here);
+//!   anything short or long is rejected, not truncated or zero-padded.
+//! - RFC 4568 §6.1 — `|lifetime` and `|MKI:length` key-parameter
+//!   extensions, and any session parameters (`UNENCRYPTED_SRTP`, `KDR=N`,
+//!   etc.), are explicitly rejected rather than silently ignored: silently
+//!   dropping a parameter a peer considers load-bearing is a silent
+//!   security downgrade, not a compatibility shim.
+//! - RFC 4568 §7.5 — the answerer's chosen tag must reference a tag the
+//!   offerer actually offered, with the same suite; otherwise reject.
 
-use crate::security::SecurityKeyExchange;
-use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
-use crate::Error;
+use std::collections::HashMap;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use rand::{rngs::OsRng, RngCore};
+use zeroize::Zeroize;
 
-/// SDES crypto attribute representation
+use crate::error::Error;
+use crate::srtp::{SrtpContext, SrtpCryptoKey, SrtpCryptoSuite};
+use crate::Result;
+
+/// Standard SRTP master salt length in bytes (RFC 3711 §8.2 / RFC 4568
+/// §6.1) — independent of the suite's key length.
+const SDES_SALT_LEN: usize = 14;
+
+/// A single RFC 4568 `a=crypto:` attribute's negotiation-relevant fields.
+/// Deliberately independent of any SDP text representation or of
+/// sip-core's `CryptoSuite` wire-name enum — encoding/decoding the actual
+/// `a=crypto:` line and mapping to a wire-format suite name is the
+/// caller's job (e.g. `rvoip-sip`'s adapter, which already owns SDP
+/// generation/parsing).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SdesCryptoAttribute {
-    /// Tag (unique for each crypto attribute)
+    /// Tag: small positive integer, unique per `m=` section.
     pub tag: u32,
-    /// Crypto-suite (e.g., "AES_CM_128_HMAC_SHA1_80")
-    pub crypto_suite: String,
-    /// Key method (always "inline" for SDES)
-    pub key_method: String,
-    /// Key information
-    pub key_info: String,
-    /// Optional session parameters
+    /// The SRTP crypto suite this attribute proposes/selects.
+    pub suite: SrtpCryptoSuite,
+    /// Base64-encoded `key || salt` (RFC 4568 §6.1), with no `|lifetime`
+    /// or `|MKI:length` suffix — those aren't supported, see
+    /// [`SdesCryptoAttribute::key_lifetime`]/[`SdesCryptoAttribute::key_mki`].
+    pub key_inline: String,
+    /// Optional `|lifetime` key parameter. Always rejected if present —
+    /// carried as a field (rather than just erroring at parse time) so a
+    /// caller that already parsed the full attribute (e.g. from typed SDP
+    /// types) can hand it over for this module to reject explicitly.
+    pub key_lifetime: Option<String>,
+    /// Optional `|MKI:length` key parameter. Always rejected if present.
+    pub key_mki: Option<(u32, u32)>,
+    /// Optional session parameters (`UNENCRYPTED_SRTP`, `KDR=N`, etc.).
+    /// Always rejected if non-empty.
     pub session_params: Vec<String>,
 }
 
 impl SdesCryptoAttribute {
-    /// Create a new SDES crypto attribute
-    pub fn new(tag: u32, crypto_suite: &str, key_info: &str) -> Self {
+    /// Construct a minimal attribute with no lifetime/MKI/session
+    /// parameters — the common case.
+    pub fn new(tag: u32, suite: SrtpCryptoSuite, key_inline: impl Into<String>) -> Self {
         Self {
             tag,
-            crypto_suite: crypto_suite.to_string(),
-            key_method: "inline".to_string(),
-            key_info: key_info.to_string(),
+            suite,
+            key_inline: key_inline.into(),
+            key_lifetime: None,
+            key_mki: None,
             session_params: Vec::new(),
         }
     }
 
-    /// Add a session parameter
-    pub fn add_session_param(&mut self, param: &str) {
-        self.session_params.push(param.to_string());
-    }
-
-    /// Format the crypto attribute as a string for SDP
-    pub fn to_string(&self) -> String {
-        let mut result = format!(
-            "{} {} {}:{}",
-            self.tag, self.crypto_suite, self.key_method, self.key_info
-        );
-
-        // Add session parameters
+    /// `Err` if this attribute uses a key-parameter extension or session
+    /// parameter this module doesn't support (RFC 4568 §6.1 lifetime/MKI,
+    /// or any session param) — reject explicitly rather than silently
+    /// ignoring something a peer may consider load-bearing.
+    fn reject_unsupported_extensions(&self) -> Result<()> {
+        if self.key_lifetime.is_some() {
+            return Err(Error::UnsupportedFeature(format!(
+                "a=crypto tag {} uses a key lifetime parameter, which is not supported",
+                self.tag
+            )));
+        }
+        if self.key_mki.is_some() {
+            return Err(Error::UnsupportedFeature(format!(
+                "a=crypto tag {} uses an MKI parameter, which is not supported",
+                self.tag
+            )));
+        }
         if !self.session_params.is_empty() {
-            result.push_str(" ");
-            result.push_str(&self.session_params.join(";"));
+            return Err(Error::UnsupportedFeature(format!(
+                "a=crypto tag {} uses session parameters ({}), which are not supported",
+                self.tag,
+                self.session_params.join(",")
+            )));
         }
-
-        result
-    }
-
-    /// Parse a crypto attribute from a string
-    pub fn parse(s: &str) -> Result<Self, Error> {
-        let parts: Vec<&str> = s.split_whitespace().collect();
-
-        if parts.len() < 3 {
-            return Err(Error::ParseError(
-                "Invalid SDES crypto attribute format".into(),
-            ));
-        }
-
-        // Parse tag
-        let tag = parts[0]
-            .parse::<u32>()
-            .map_err(|_| Error::ParseError("Invalid tag in SDES crypto attribute".into()))?;
-
-        // Parse crypto suite
-        let crypto_suite = parts[1].to_string();
-
-        // Parse key method and key info
-        let key_parts: Vec<&str> = parts[2].split(':').collect();
-        if key_parts.len() != 2 {
-            return Err(Error::ParseError(
-                "Invalid key format in SDES crypto attribute".into(),
-            ));
-        }
-
-        let key_method = key_parts[0].to_string();
-        let key_info = key_parts[1].to_string();
-
-        if key_method != "inline" {
-            return Err(Error::ParseError(
-                "Only 'inline' key method is supported".into(),
-            ));
-        }
-
-        // Parse session parameters
-        let mut session_params = Vec::new();
-        if parts.len() > 3 {
-            let params_str = parts[3..].join(" ");
-            for param in params_str.split(';') {
-                session_params.push(param.trim().to_string());
-            }
-        }
-
-        Ok(Self {
-            tag,
-            crypto_suite,
-            key_method,
-            key_info,
-            session_params,
-        })
+        Ok(())
     }
 }
 
-/// SDES role in key exchange
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SdesRole {
-    /// Offerer (creates initial crypto attributes)
-    Offerer,
-    /// Answerer (responds to crypto attributes)
+/// Output of a successful SDES exchange — the per-direction
+/// [`SrtpContext`] pair the RTP transport uses to protect outbound
+/// packets and unprotect inbound packets. RFC 4568 §6.1 mandates each
+/// side use its own independently generated master key, so this is never
+/// built from a single shared key.
+pub struct SdesSrtpPair {
+    /// Outbound (us → peer); keyed with our own locally-generated master.
+    pub send_ctx: SrtpContext,
+    /// Inbound (peer → us); keyed with the peer's master.
+    pub recv_ctx: SrtpContext,
+    /// The negotiated suite.
+    pub suite: SrtpCryptoSuite,
+}
+
+/// Local key material generated for one offered tag, held until the
+/// answer arrives. Zeroized on drop like any other raw SRTP key.
+#[derive(Zeroize)]
+#[zeroize(drop)]
+pub struct OfferedSlot {
+    #[zeroize(skip)]
+    suite: SrtpCryptoSuite,
+    key: Vec<u8>,
+    salt: Vec<u8>,
+}
+
+/// RFC 4568 SDES key-exchange engine. Constructed in one of two roles
+/// (offerer / answerer) corresponding to the SDP offerer/answerer.
+pub enum SdesNegotiator {
+    /// Offerer, awaiting an answer to its offered crypto attributes.
+    Offerer { offered: HashMap<u32, OfferedSlot> },
+    /// Answerer, ready to receive an offer.
     Answerer,
 }
 
-/// SDES state
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SdesState {
-    /// Initial state
-    Initial,
-    /// Offer sent
-    OfferSent,
-    /// Answer received
-    AnswerReceived,
-    /// Completed
-    Completed,
+/// Generate a fresh random master key + salt for the given suite.
+/// Returns `(key, salt, base64_inline)`.
+fn generate_keysalt(suite: &SrtpCryptoSuite) -> (Vec<u8>, Vec<u8>, String) {
+    let mut key = vec![0u8; suite.key_length];
+    let mut salt = vec![0u8; SDES_SALT_LEN];
+    OsRng.fill_bytes(&mut key);
+    OsRng.fill_bytes(&mut salt);
+    let mut combined = Vec::with_capacity(key.len() + salt.len());
+    combined.extend_from_slice(&key);
+    combined.extend_from_slice(&salt);
+    let inline = BASE64.encode(&combined);
+    (key, salt, inline)
 }
 
-/// SDES configuration
-#[derive(Debug, Clone)]
-pub struct SdesConfig {
-    /// List of supported SRTP crypto suites in order of preference
-    pub crypto_suites: Vec<SrtpCryptoSuite>,
-    /// Number of crypto attributes to include in offer
-    pub offer_count: usize,
-}
-
-impl Default for SdesConfig {
-    fn default() -> Self {
-        Self {
-            crypto_suites: vec![SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32],
-            offer_count: 2,
-        }
+/// Decode an `a=crypto:` inline base64 blob into `(key, salt)`, validated
+/// to be exactly `suite.key_length + 14` bytes — not truncated, not
+/// zero-padded, not silently accepted if short or long.
+fn decode_keysalt(inline_b64: &str, suite: &SrtpCryptoSuite) -> Result<(Vec<u8>, Vec<u8>)> {
+    let mut combined = BASE64
+        .decode(inline_b64)
+        .map_err(|e| Error::InvalidParameter(format!("invalid base64 in a=crypto inline: {e}")))?;
+    let expected = suite.key_length + SDES_SALT_LEN;
+    if combined.len() != expected {
+        let got = combined.len();
+        combined.zeroize();
+        return Err(Error::InvalidParameter(format!(
+            "a=crypto inline is {got} bytes, expected exactly {expected} ({} key + {SDES_SALT_LEN} salt) for this suite",
+            suite.key_length
+        )));
     }
+    let key = combined[..suite.key_length].to_vec();
+    let salt = combined[suite.key_length..].to_vec();
+    combined.zeroize();
+    Ok((key, salt))
 }
 
-/// SDES implementation
-pub struct Sdes {
-    /// Configuration
-    config: SdesConfig,
-    /// Role (offerer or answerer)
-    role: SdesRole,
-    /// Current state
-    state: SdesState,
-    /// Local crypto attributes
-    local_attrs: Vec<SdesCryptoAttribute>,
-    /// Remote crypto attributes
-    remote_attrs: Vec<SdesCryptoAttribute>,
-    /// Selected crypto attribute
-    selected_attr: Option<SdesCryptoAttribute>,
-    /// Negotiated SRTP crypto key
-    srtp_key: Option<SrtpCryptoKey>,
-    /// Negotiated SRTP crypto suite
-    srtp_suite: Option<SrtpCryptoSuite>,
+fn build_pair(
+    suite: SrtpCryptoSuite,
+    our_key: &[u8],
+    our_salt: &[u8],
+    peer_key: &[u8],
+    peer_salt: &[u8],
+) -> Result<SdesSrtpPair> {
+    let send_ctx = SrtpContext::new(
+        suite.clone(),
+        SrtpCryptoKey::new(our_key.to_vec(), our_salt.to_vec()),
+    )
+    .map_err(|e| Error::InvalidParameter(format!("failed to build outbound SrtpContext: {e}")))?;
+    let recv_ctx = SrtpContext::new(
+        suite.clone(),
+        SrtpCryptoKey::new(peer_key.to_vec(), peer_salt.to_vec()),
+    )
+    .map_err(|e| Error::InvalidParameter(format!("failed to build inbound SrtpContext: {e}")))?;
+    Ok(SdesSrtpPair {
+        send_ctx,
+        recv_ctx,
+        suite,
+    })
 }
 
-impl Sdes {
-    /// Create a new SDES instance
-    pub fn new(config: SdesConfig, role: SdesRole) -> Self {
-        Self {
-            config,
-            role,
-            state: SdesState::Initial,
-            local_attrs: Vec::new(),
-            remote_attrs: Vec::new(),
-            selected_attr: None,
-            srtp_key: None,
-            srtp_suite: None,
+impl SdesNegotiator {
+    /// Offerer side. Generate a fresh master key for each requested
+    /// suite and return the attributes to attach to the SDP offer, one
+    /// per suite, with sequential tags (1, 2, ...) in the order supplied.
+    pub fn new_offerer(suites: &[SrtpCryptoSuite]) -> Result<(Self, Vec<SdesCryptoAttribute>)> {
+        if suites.is_empty() {
+            return Err(Error::InvalidParameter(
+                "SdesNegotiator::new_offerer requires at least one suite".into(),
+            ));
         }
+        let mut offered = HashMap::with_capacity(suites.len());
+        let mut attrs = Vec::with_capacity(suites.len());
+        for (i, suite) in suites.iter().enumerate() {
+            let tag = (i + 1) as u32;
+            let (key, salt, inline) = generate_keysalt(suite);
+            attrs.push(SdesCryptoAttribute::new(tag, suite.clone(), inline));
+            offered.insert(
+                tag,
+                OfferedSlot {
+                    suite: suite.clone(),
+                    key,
+                    salt,
+                },
+            );
+        }
+        Ok((SdesNegotiator::Offerer { offered }, attrs))
     }
 
-    /// Create a crypto attribute for a specific crypto suite
-    fn create_crypto_attribute(
-        &self,
-        tag: u32,
-        suite: &SrtpCryptoSuite,
-    ) -> Result<(SdesCryptoAttribute, SrtpCryptoKey), Error> {
-        // Map SRTP crypto suite to SDES crypto suite string
-        let crypto_suite_str = match (suite.encryption, suite.authentication) {
-            (
-                crate::srtp::SrtpEncryptionAlgorithm::AesCm,
-                crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80,
-            ) => "AES_CM_128_HMAC_SHA1_80",
-            (
-                crate::srtp::SrtpEncryptionAlgorithm::AesCm,
-                crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_32,
-            ) => "AES_CM_128_HMAC_SHA1_32",
-            _ => {
-                return Err(Error::UnsupportedFeature(
-                    "Unsupported SRTP crypto suite for SDES".into(),
+    /// Answerer side. Construct a negotiator ready to receive an offer.
+    pub fn new_answerer() -> Self {
+        SdesNegotiator::Answerer
+    }
+
+    /// Offerer: the peer's answer arrived. Validate it references one of
+    /// our offered tags with the matching suite (RFC 4568 §7.5), decode
+    /// the peer's master key, and build the [`SdesSrtpPair`].
+    pub fn accept_answer(&self, attr: &SdesCryptoAttribute) -> Result<SdesSrtpPair> {
+        attr.reject_unsupported_extensions()?;
+        let offered = match self {
+            SdesNegotiator::Offerer { offered } => offered,
+            SdesNegotiator::Answerer => {
+                return Err(Error::InvalidParameter(
+                    "SdesNegotiator::accept_answer called on an answerer".into(),
                 ))
             }
         };
-
-        // Generate random key
-        let mut key = vec![0u8; 16]; // 128-bit AES key
-        OsRng.fill_bytes(&mut key);
-
-        // Generate random salt
-        let mut salt = vec![0u8; 14]; // 112-bit salt
-        OsRng.fill_bytes(&mut salt);
-
-        // Combine key and salt
-        let mut keysalt = Vec::with_capacity(key.len() + salt.len());
-        keysalt.extend_from_slice(&key);
-        keysalt.extend_from_slice(&salt);
-
-        // Base64 encode key+salt
-        let key_info = BASE64.encode(&keysalt);
-
-        // Create crypto attribute
-        let attr = SdesCryptoAttribute::new(tag, crypto_suite_str, &key_info);
-
-        // Create SRTP key for later use
-        let srtp_key = SrtpCryptoKey::new(key, salt);
-
-        Ok((attr, srtp_key))
-    }
-
-    /// Create offer crypto attributes
-    fn create_offer(&mut self) -> Result<Vec<String>, Error> {
-        if self.role != SdesRole::Offerer {
-            return Err(Error::InvalidState("Only offerer can create offer".into()));
-        }
-
-        let mut offer = Vec::new();
-
-        // Create crypto attributes for each supported crypto suite
-        for (i, suite) in self
-            .config
-            .crypto_suites
-            .iter()
-            .take(self.config.offer_count)
-            .enumerate()
-        {
-            let tag = (i + 1) as u32;
-            let (attr, srtp_key) = self.create_crypto_attribute(tag, suite)?;
-
-            // Store local attribute
-            self.local_attrs.push(attr.clone());
-
-            // Add to offer
-            offer.push(format!("a=crypto:{}", attr.to_string()));
-
-            // Save key if it's the first one (the default)
-            if i == 0 {
-                self.srtp_key = Some(srtp_key);
-                self.srtp_suite = Some(suite.clone());
-            }
-        }
-
-        // Update state
-        self.state = SdesState::OfferSent;
-
-        Ok(offer)
-    }
-
-    /// Parse offer and create answer
-    fn create_answer(&mut self, offer: &[String]) -> Result<Vec<String>, Error> {
-        if self.role != SdesRole::Answerer {
-            return Err(Error::InvalidState(
-                "Only answerer can create answer".into(),
-            ));
-        }
-
-        // Parse offer
-        for line in offer {
-            if line.starts_with("a=crypto:") {
-                let attr_str = line.trim_start_matches("a=crypto:");
-                let attr = SdesCryptoAttribute::parse(attr_str)?;
-
-                // Store remote attribute
-                self.remote_attrs.push(attr);
-            }
-        }
-
-        if self.remote_attrs.is_empty() {
-            return Err(Error::InvalidMessage(
-                "No crypto attributes in offer".into(),
-            ));
-        }
-
-        // Select the first supported crypto attribute
-        let selected = &self.remote_attrs[0];
-
-        // Map SDES crypto suite to SRTP crypto suite
-        let srtp_suite = match selected.crypto_suite.as_str() {
-            "AES_CM_128_HMAC_SHA1_80" => SRTP_AES128_CM_SHA1_80,
-            "AES_CM_128_HMAC_SHA1_32" => SRTP_AES128_CM_SHA1_32,
-            _ => {
-                return Err(Error::UnsupportedFeature(format!(
-                    "Unsupported crypto suite: {}",
-                    selected.crypto_suite
-                )))
-            }
-        };
-
-        // Parse key info
-        let key_info = selected.key_info.as_str();
-
-        // Base64 decode key+salt
-        let keysalt = BASE64
-            .decode(key_info)
-            .map_err(|_| Error::ParseError("Invalid Base64 encoding in key info".into()))?;
-
-        if keysalt.len() < 30 {
-            return Err(Error::ParseError("Key info too short".into()));
-        }
-
-        // Split key and salt
-        let key = keysalt[0..16].to_vec();
-        let salt = keysalt[16..30].to_vec();
-
-        // Store key for later use
-        self.srtp_key = Some(SrtpCryptoKey::new(key, salt));
-        self.srtp_suite = Some(srtp_suite);
-        self.selected_attr = Some(selected.clone());
-
-        // Create answer
-        let mut answer = Vec::new();
-        answer.push(format!("a=crypto:{}", selected.to_string()));
-
-        // Update state
-        self.state = SdesState::Completed;
-
-        Ok(answer)
-    }
-
-    /// Process answer
-    fn process_answer(&mut self, answer: &[String]) -> Result<(), Error> {
-        if self.role != SdesRole::Offerer {
-            return Err(Error::InvalidState(
-                "Only offerer can process answer".into(),
-            ));
-        }
-
-        // Parse answer
-        let mut selected_attr = None;
-
-        for line in answer {
-            if line.starts_with("a=crypto:") {
-                let attr_str = line.trim_start_matches("a=crypto:");
-                let attr = SdesCryptoAttribute::parse(attr_str)?;
-
-                // Store remote attribute
-                self.remote_attrs.push(attr.clone());
-
-                // This is the selected attribute
-                selected_attr = Some(attr);
-                break;
-            }
-        }
-
-        if selected_attr.is_none() {
-            return Err(Error::InvalidMessage(
-                "No crypto attributes in answer".into(),
-            ));
-        }
-
-        let selected = selected_attr.unwrap();
-
-        // Find matching local attribute by tag
-        let local_attr = self.local_attrs.iter().find(|a| a.tag == selected.tag);
-
-        if local_attr.is_none() {
-            return Err(Error::InvalidMessage(format!(
-                "No matching local attribute for tag {}",
-                selected.tag
+        let slot = offered.get(&attr.tag).ok_or_else(|| {
+            Error::InvalidParameter(format!(
+                "answer's a=crypto tag {} was not offered",
+                attr.tag
+            ))
+        })?;
+        if slot.suite != attr.suite {
+            return Err(Error::InvalidParameter(format!(
+                "answer's a=crypto suite {:?} does not match offered tag {} suite {:?}",
+                attr.suite, attr.tag, slot.suite
             )));
         }
-
-        // Store selected attribute
-        self.selected_attr = Some(selected);
-
-        // Update state
-        self.state = SdesState::Completed;
-
-        Ok(())
-    }
-}
-
-impl SecurityKeyExchange for Sdes {
-    fn init(&mut self) -> Result<(), Error> {
-        // No initialization needed for SDES
-        Ok(())
+        let (peer_key, peer_salt) = decode_keysalt(&attr.key_inline, &slot.suite)?;
+        build_pair(
+            slot.suite.clone(),
+            &slot.key,
+            &slot.salt,
+            &peer_key,
+            &peer_salt,
+        )
     }
 
-    fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        // SDES messages are SDP lines
-        let message_str = std::str::from_utf8(message)
-            .map_err(|_| Error::ParseError("Invalid UTF-8 in SDES message".into()))?;
-
-        let lines: Vec<String> = message_str.lines().map(|s| s.trim().to_string()).collect();
-
-        match (self.role, &self.state) {
-            (SdesRole::Offerer, SdesState::Initial) => {
-                // Create offer
-                let offer = self.create_offer()?;
-                let offer_str = offer.join("\r\n");
-                Ok(Some(offer_str.into_bytes()))
-            }
-            (SdesRole::Offerer, SdesState::OfferSent) => {
-                // Process answer
-                self.process_answer(&lines)?;
-                Ok(None)
-            }
-            (SdesRole::Answerer, SdesState::Initial) => {
-                // Create answer
-                let answer = self.create_answer(&lines)?;
-                let answer_str = answer.join("\r\n");
-                Ok(Some(answer_str.into_bytes()))
-            }
-            _ => Err(Error::InvalidState(
-                "Invalid state for message processing".into(),
-            )),
+    /// Answerer: process an inbound offer's attributes. Picks the first
+    /// suite we support (honouring the offerer's preference order),
+    /// preserves its tag, and generates a fresh local master key for the
+    /// answer — never the offerer's own key. Returns
+    /// `(attribute_to_emit_in_the_answer, pair)`.
+    pub fn process_offer(
+        &self,
+        attrs: &[SdesCryptoAttribute],
+    ) -> Result<(SdesCryptoAttribute, SdesSrtpPair)> {
+        if !matches!(self, SdesNegotiator::Answerer) {
+            return Err(Error::InvalidParameter(
+                "SdesNegotiator::process_offer called on an offerer".into(),
+            ));
         }
-    }
+        let chosen = attrs.first().ok_or_else(|| {
+            Error::InvalidParameter(
+                "no offered a=crypto attribute is supported by this responder".into(),
+            )
+        })?;
+        chosen.reject_unsupported_extensions()?;
 
-    fn get_srtp_key(&self) -> Option<SrtpCryptoKey> {
-        self.srtp_key.clone()
-    }
+        let (peer_key, peer_salt) = decode_keysalt(&chosen.key_inline, &chosen.suite)?;
+        let (our_key, our_salt, our_inline) = generate_keysalt(&chosen.suite);
 
-    fn get_srtp_suite(&self) -> Option<SrtpCryptoSuite> {
-        self.srtp_suite.clone()
-    }
-
-    fn is_complete(&self) -> bool {
-        self.state == SdesState::Completed
+        let pair = build_pair(
+            chosen.suite.clone(),
+            &our_key,
+            &our_salt,
+            &peer_key,
+            &peer_salt,
+        )?;
+        Ok((
+            SdesCryptoAttribute::new(chosen.tag, chosen.suite.clone(), our_inline),
+            pair,
+        ))
     }
 }
 

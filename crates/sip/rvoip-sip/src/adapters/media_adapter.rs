@@ -1222,7 +1222,7 @@ impl MediaAdapter {
         )
         .await;
         tracing::info!(
-            "🔒 DTLS-SRTP handshake completed and contexts installed for session {} \
+            "DTLS-SRTP handshake completed and contexts installed for session {} \
              (role {:?}, suite {:?})",
             session_id.0,
             our_role,

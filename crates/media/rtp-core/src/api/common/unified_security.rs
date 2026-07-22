@@ -213,25 +213,19 @@ impl UnifiedSecurityContext {
                 ));
             }
             KeyExchangeMethod::Sdes => {
-                if let KeyExchangeConfig::Sdes {
-                    crypto_suites,
-                    offer_count,
-                } = &self.method_config
-                {
-                    let sdes_config = crate::security::sdes::SdesConfig {
-                        crypto_suites: crypto_suites.clone(),
-                        offer_count: *offer_count,
-                    };
-                    let sdes = crate::security::sdes::Sdes::new(
-                        sdes_config,
-                        crate::security::sdes::SdesRole::Offerer,
-                    );
-                    Box::new(sdes)
-                } else {
-                    return Err(SecurityError::Configuration(
-                        "Invalid SDES configuration".to_string(),
-                    ));
-                }
+                // SDES now lives behind the typed `SdesNegotiator` API in
+                // `crate::security::sdes` (offerer/answerer roles producing
+                // directional SrtpContext pairs), which doesn't fit this
+                // generic byte-oriented `SecurityKeyExchange` interface —
+                // that shape is what caused the old Sdes implementation's
+                // answerer-never-generates-its-own-key bug in the first
+                // place. Use `SdesNegotiator` directly instead of this
+                // generic multiplexed path.
+                return Err(SecurityError::Configuration(
+                    "SDES key exchange is handled via crate::security::sdes::SdesNegotiator \
+                     directly, not through this generic byte-oriented interface"
+                        .to_string(),
+                ));
             }
             KeyExchangeMethod::Mikey => {
                 if let KeyExchangeConfig::Mikey {
@@ -619,14 +613,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sdes_initialization_placeholder() {
-        // Test SDES initialization (should work once SDES is fully implemented)
+    async fn test_sdes_initialization_via_generic_interface_is_rejected() {
+        // SDES now lives behind the typed `SdesNegotiator` API (offerer/
+        // answerer roles producing directional SrtpContext pairs), which
+        // doesn't fit this generic byte-oriented `SecurityKeyExchange`
+        // interface. `initialize()` on this generic path should reject
+        // SDES explicitly rather than force it through a shape that
+        // caused the old implementation's directional-key bug.
         let context = SecurityContextFactory::create_sdes_context().unwrap();
 
-        // Currently SDES initialization should work since we have the core implementation
         let result = context.initialize().await;
-        assert!(result.is_ok());
-        assert_eq!(context.get_state().await, SecurityState::Negotiating);
+        assert!(result.is_err());
     }
 
     #[tokio::test]
