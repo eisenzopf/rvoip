@@ -17,6 +17,8 @@ use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
+use crate::dtmf::TelephoneEvent;
+
 /// RFC 4733 §2.5.1.3 — the sender emits up to three identical
 /// end-of-event frames for loss resilience. Each shares
 /// `(peer_addr, ssrc, rtp_timestamp)` with the first. A `DashMap`
@@ -593,65 +595,67 @@ impl UdpRtpTransport {
 
                                         // RFC 4733: PT 101 (by default) is `telephone-event` —
                                         // DTMF tones carried as RTP events rather than audio
-                                        // samples. Decode the 4-byte body inline and emit a
+                                        // samples. Decode via the shared codec and emit a
                                         // typed `DtmfEvent` instead of a generic
                                         // `MediaReceived`, so the media layer doesn't have
                                         // to re-parse and doesn't try to feed the bytes to
-                                        // a PCMU/PCMA/Opus decoder. Oversized payloads are
-                                        // tolerated per RFC 4733's forward-compat clause
-                                        // (read only first 4 bytes).
-                                        if packet.header.payload_type == 101
-                                            && packet.payload.len() >= 4
-                                        {
-                                            let p = &packet.payload[..4];
-                                            let event = p[0];
-                                            let byte1 = p[1];
-                                            let end_of_event = (byte1 & 0b1000_0000) != 0;
-                                            let volume = byte1 & 0b0011_1111;
-                                            let duration = u16::from_be_bytes([p[2], p[3]]);
+                                        // a PCMU/PCMA/Opus decoder. `TelephoneEvent::decode`
+                                        // returns `None` for a too-short payload, in which
+                                        // case this falls through to the generic handling
+                                        // below, same as before.
+                                        if packet.header.payload_type == 101 {
+                                            if let Some(tele) =
+                                                TelephoneEvent::decode(&packet.payload)
+                                            {
+                                                let event = tele.event;
+                                                let end_of_event = tele.end_of_event;
+                                                let volume = tele.volume;
+                                                let duration = tele.duration;
 
-                                            // RFC 4733 §2.5.1.3 retransmit dedup. The
-                                            // sender emits up to three identical E=1
-                                            // frames sharing `(ssrc, rtp_timestamp)`.
-                                            // Keyed by `(peer_addr, ssrc, ts)` so two
-                                            // simultaneous DTMF streams from
-                                            // different peers fire independently.
-                                            // Inline retain prunes stale entries on
-                                            // every fire — at one PT 101 frame per
-                                            // ~20 ms per active tone, this stays
-                                            // bounded.
-                                            if end_of_event {
-                                                let key = (
-                                                    addr,
-                                                    packet.header.ssrc,
-                                                    packet.header.timestamp,
-                                                );
-                                                let now = Instant::now();
-                                                dtmf_seen.retain(|_, seen_at| {
-                                                    now.duration_since(*seen_at) < DTMF_DEDUP_TTL
-                                                });
-                                                if dtmf_seen.insert(key, now).is_some() {
-                                                    continue; // retransmit — suppress
+                                                // RFC 4733 §2.5.1.3 retransmit dedup. The
+                                                // sender emits up to three identical E=1
+                                                // frames sharing `(ssrc, rtp_timestamp)`.
+                                                // Keyed by `(peer_addr, ssrc, ts)` so two
+                                                // simultaneous DTMF streams from
+                                                // different peers fire independently.
+                                                // Inline retain prunes stale entries on
+                                                // every fire — at one PT 101 frame per
+                                                // ~20 ms per active tone, this stays
+                                                // bounded.
+                                                if end_of_event {
+                                                    let key = (
+                                                        addr,
+                                                        packet.header.ssrc,
+                                                        packet.header.timestamp,
+                                                    );
+                                                    let now = Instant::now();
+                                                    dtmf_seen.retain(|_, seen_at| {
+                                                        now.duration_since(*seen_at)
+                                                            < DTMF_DEDUP_TTL
+                                                    });
+                                                    if dtmf_seen.insert(key, now).is_some() {
+                                                        continue; // retransmit — suppress
+                                                    }
                                                 }
-                                            }
 
-                                            let dtmf = RtpEvent::DtmfEvent {
-                                                event,
-                                                end_of_event,
-                                                volume,
-                                                duration,
-                                                timestamp: packet.header.timestamp,
-                                                source: addr,
-                                                ssrc: packet.header.ssrc,
-                                            };
-                                            if event_tx.receiver_count() > 0 {
-                                                if let Err(e) = event_tx.send(dtmf) {
-                                                    warn!("Failed to send DTMF event: {}", e);
+                                                let dtmf = RtpEvent::DtmfEvent {
+                                                    event,
+                                                    end_of_event,
+                                                    volume,
+                                                    duration,
+                                                    timestamp: packet.header.timestamp,
+                                                    source: addr,
+                                                    ssrc: packet.header.ssrc,
+                                                };
+                                                if event_tx.receiver_count() > 0 {
+                                                    if let Err(e) = event_tx.send(dtmf) {
+                                                        warn!("Failed to send DTMF event: {}", e);
+                                                    }
+                                                } else {
+                                                    let _ = event_tx.send(dtmf);
                                                 }
-                                            } else {
-                                                let _ = event_tx.send(dtmf);
+                                                continue;
                                             }
-                                            continue;
                                         }
 
                                         // Create RTP event

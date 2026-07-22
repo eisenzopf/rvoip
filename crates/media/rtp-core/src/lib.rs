@@ -62,6 +62,7 @@
 mod error;
 
 // Main modules
+pub mod dtmf;
 pub mod packet;
 pub mod session;
 pub mod srtp;
@@ -101,6 +102,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 // Re-export core types
 pub use error::Error;
+
+// Re-export the RFC 4733 telephone-event codec
+pub use dtmf::{DtmfEvent, TelephoneEvent};
 
 // Re-export common types from packet module
 pub use packet::extension::{
@@ -168,8 +172,8 @@ pub use api::server::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpSequenceNumber, RtpSession,
-        RtpSessionConfig, RtpSsrc, RtpTimestamp,
+        DtmfEvent, Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpSequenceNumber, RtpSession,
+        RtpSessionConfig, RtpSsrc, RtpTimestamp, TelephoneEvent,
     };
 
     pub use crate::packet::rtcp::{
