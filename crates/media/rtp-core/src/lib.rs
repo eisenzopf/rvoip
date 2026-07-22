@@ -115,6 +115,7 @@ pub use packet::rtcp::{
     RtcpXrBlock, VoipMetricsBlock,
 };
 pub use packet::rtp::RtpPacket;
+pub use packet::sequencer::RtpPacketSequencer;
 
 // Re-export session types
 pub use session::{
@@ -168,8 +169,8 @@ pub use api::server::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpSequenceNumber, RtpSession,
-        RtpSessionConfig, RtpSsrc, RtpTimestamp,
+        Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpPacketSequencer, RtpSequenceNumber,
+        RtpSession, RtpSessionConfig, RtpSsrc, RtpTimestamp,
     };
 
     pub use crate::packet::rtcp::{

@@ -7,10 +7,12 @@ pub mod extension;
 pub mod header;
 pub mod rtcp;
 pub mod rtp;
+pub mod sequencer;
 
 pub use extension::*;
 pub use header::*;
 pub use rtp::*;
+pub use sequencer::RtpPacketSequencer;
 
 #[cfg(test)]
 mod tests {
