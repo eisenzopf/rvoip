@@ -83,6 +83,8 @@ pub mod api;
 pub mod buffer;
 pub mod csrc;
 pub mod dtls;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_srtp;
 pub mod events;
 pub mod feedback;
 pub mod network;

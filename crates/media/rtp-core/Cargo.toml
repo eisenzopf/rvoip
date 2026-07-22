@@ -61,10 +61,24 @@ uuid = { version = "1.6.1", features = ["v4"] }
 libc = "0.2"
 winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
 time = { version = "0.3.47", features = ["std"] }
+# Real DTLS 1.2 handshake for DTLS-SRTP (behind the `dtls-webrtc` feature).
+# The in-house handshake in `src/dtls/` never completes a real handshake
+# (see that module's docs); this crate is the same lineage backing the
+# webrtc-rs project's own "production" 0.17.x line (its 0.20.x rewrite,
+# published as the separate `rtc` crate, is explicitly not recommended
+# for production by that project's own README, and is unrelated to this).
+# Renamed to `dtls_ext` to avoid any confusion with this crate's own
+# `crate::dtls` module.
+dtls_ext = { package = "dtls", version = "0.17", optional = true }
+# Only the `Conn` transport trait and the `KeyingMaterialExporter` trait
+# (RFC 5705 keying-material export, used for RFC 5764 SRTP key derivation)
+# are used from this.
+webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
 
 [features]
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
+dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util"]
 
 [dev-dependencies]
 criterion = { workspace = true }
