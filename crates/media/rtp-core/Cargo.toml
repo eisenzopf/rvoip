@@ -86,6 +86,10 @@ dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util"]
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Independent SRTP implementation (same webrtc-rs 0.17.x lineage already
+# used for `dtls`/`webrtc-util` this session), used purely to prove real
+# RFC 3711 interoperability instead of just self-consistent round-tripping.
+webrtc-srtp = "0.17"
 
 [[example]]
 name = "dtls_test"
