@@ -88,6 +88,8 @@ memory-diagnostics = [
     "rvoip-infra-common/memory-diagnostics",
 ]
 rtp-memory-diagnostics = ["rvoip-rtp-core/memory-diagnostics"]
+# Real DTLS-SRTP handshake support, forwarded from rvoip-rtp-core.
+dtls-srtp = ["rvoip-rtp-core/dtls-webrtc"]
 perf-diagnostics = []
 g729 = ["rvoip-codec-core/g729"]
 opus = ["dep:opus"]
