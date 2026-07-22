@@ -3,11 +3,21 @@
 //! This module implements the Opus codec, a modern audio codec standardized
 //! by the Internet Engineering Task Force (IETF) in RFC 6716. Opus combines
 //! the best features of both speech and music codecs with very low latency.
+//!
+//! Two mutually-exclusive-in-intent backends live behind separate features:
+//!
+//! - `opus`: real encode/decode via [`opus-rs`](https://docs.rs/opus-rs), a
+//!   pure-Rust Opus implementation (no C toolchain needed at build time).
+//!   This is what you want for actual audio.
+//! - `opus-sim`: a deterministic stub that produces plausible-shaped output
+//!   (right size, varies with bitrate) without doing any real DSP. Useful
+//!   for fast, deterministic pipeline tests that don't care about audio
+//!   fidelity. If both features are enabled, `opus` (real) takes priority.
 
 use crate::error::{CodecError, Result};
 use crate::types::{AudioCodec, AudioCodecExt, CodecConfig, CodecInfo, SampleRate};
 use crate::utils::validate_opus_frame;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 // Re-export OpusApplication from types to avoid duplication
 pub use crate::types::OpusApplication;
@@ -18,10 +28,31 @@ pub struct OpusCodec {
     sample_rate: u32,
     /// Number of channels (1 or 2)
     channels: u8,
-    /// Frame size in samples
+    /// Frame size in samples *per channel* (matches opus-rs's own
+    /// `frame_size` convention). `AudioCodec::encode`/`decode`'s `samples`
+    /// buffers are the interleaved total, `frame_size * channels` long.
     frame_size: usize,
     /// Codec configuration
     config: OpusConfig,
+    #[cfg(feature = "opus")]
+    real: RealBackend,
+}
+
+/// The actual opus-rs encoder/decoder pair, kept behind the `opus` feature
+/// so building without it doesn't need opus-rs at all.
+#[cfg(feature = "opus")]
+struct RealBackend {
+    encoder: opus_rs::OpusEncoder,
+    decoder: opus_rs::OpusDecoder,
+}
+
+#[cfg(feature = "opus")]
+fn to_opus_rs_application(application: OpusApplication) -> opus_rs::Application {
+    match application {
+        OpusApplication::Voip => opus_rs::Application::Voip,
+        OpusApplication::Audio => opus_rs::Application::Audio,
+        OpusApplication::RestrictedLowDelay => opus_rs::Application::RestrictedLowDelay,
+    }
 }
 
 /// Opus codec configuration
@@ -112,11 +143,39 @@ impl OpusCodec {
             sample_rate, config.channels, opus_config.bitrate, opus_config.application
         );
 
+        #[cfg(feature = "opus")]
+        let real = {
+            let mut encoder = opus_rs::OpusEncoder::new(
+                sample_rate as i32,
+                config.channels as usize,
+                to_opus_rs_application(opus_config.application),
+            )
+            .map_err(|e| CodecError::ExternalLibraryError {
+                library: "opus-rs".to_string(),
+                error: format!("encoder init: {e}"),
+            })?;
+            encoder.bitrate_bps = opus_config.bitrate as i32;
+            encoder.use_cbr = !opus_config.vbr;
+            encoder.complexity = i32::from(opus_config.complexity);
+            encoder.use_inband_fec = opus_config.inband_fec;
+            encoder.packet_loss_perc = i32::from(opus_config.packet_loss_perc);
+
+            let decoder = opus_rs::OpusDecoder::new(sample_rate as i32, config.channels as usize)
+                .map_err(|e| CodecError::ExternalLibraryError {
+                library: "opus-rs".to_string(),
+                error: format!("decoder init: {e}"),
+            })?;
+
+            RealBackend { encoder, decoder }
+        };
+
         Ok(Self {
             sample_rate,
             channels: config.channels,
             frame_size,
             config: opus_config,
+            #[cfg(feature = "opus")]
+            real,
         })
     }
 
@@ -139,6 +198,10 @@ impl OpusCodec {
         }
 
         self.config.bitrate = bitrate;
+        #[cfg(feature = "opus")]
+        {
+            self.real.encoder.bitrate_bps = bitrate as i32;
+        }
         debug!("Opus bitrate set to {} bps", bitrate);
         Ok(())
     }
@@ -150,11 +213,60 @@ impl OpusCodec {
         }
 
         self.config.complexity = complexity;
+        #[cfg(feature = "opus")]
+        {
+            self.real.encoder.complexity = i32::from(complexity);
+        }
         debug!("Opus complexity set to {}", complexity);
         Ok(())
     }
 
-    /// Simulate Opus encoding
+    /// Real Opus encoding via opus-rs.
+    #[cfg(feature = "opus")]
+    fn real_encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        // i16 -> f32 in [-1.0, 1.0), the standard PCM float convention
+        // opus-rs (and libopus) expect.
+        let input: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
+
+        // 1275 bytes is the largest a single Opus packet can ever be
+        // (RFC 6716 §3.2.1).
+        let mut output = vec![0u8; 1275];
+        let written = self
+            .real
+            .encoder
+            .encode(&input, self.frame_size, &mut output)
+            .map_err(|e| CodecError::EncodingFailed {
+                reason: e.to_string(),
+            })?;
+        output.truncate(written);
+        Ok(output)
+    }
+
+    /// Real Opus decoding via opus-rs.
+    #[cfg(feature = "opus")]
+    fn real_decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+        let mut output = vec![0.0f32; self.frame_size * self.channels as usize];
+        let per_channel_written = self
+            .real
+            .decoder
+            .decode(data, self.frame_size, &mut output)
+            .map_err(|e| CodecError::DecodingFailed {
+                reason: e.to_string(),
+            })?;
+        output.truncate(per_channel_written * self.channels as usize);
+
+        // f32 [-1.0, 1.0) -> i16, clamped so an over-range decode (e.g. a
+        // slightly hot input) saturates instead of wrapping.
+        Ok(output
+            .iter()
+            .map(|&f| (f * 32768.0).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16)
+            .collect())
+    }
+
+    /// Deterministic Opus stub (see the module docs for when this runs
+    /// instead of [`Self::real_encode`]). Ignores the actual audio content;
+    /// output size just tracks the configured bitrate.
+    #[cfg(not(feature = "opus"))]
     fn simulate_encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
         // Calculate target size based on bitrate
         let frame_duration_ms =
@@ -172,7 +284,8 @@ impl OpusCodec {
         Ok(encoded)
     }
 
-    /// Simulate Opus decoding
+    /// Deterministic Opus stub decode; see [`Self::simulate_encode`].
+    #[cfg(not(feature = "opus"))]
     fn simulate_decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
         let mut samples = vec![0i16; self.frame_size * self.channels as usize];
 
@@ -184,6 +297,32 @@ impl OpusCodec {
 
         Ok(samples)
     }
+
+    /// Encode via whichever backend is compiled in: real opus-rs when the
+    /// `opus` feature is enabled, the deterministic stub otherwise.
+    fn backend_encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
+        #[cfg(feature = "opus")]
+        {
+            self.real_encode(samples)
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            self.simulate_encode(samples)
+        }
+    }
+
+    /// Decode via whichever backend is compiled in; see
+    /// [`Self::backend_encode`].
+    fn backend_decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
+        #[cfg(feature = "opus")]
+        {
+            self.real_decode(data)
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            self.simulate_decode(data)
+        }
+    }
 }
 
 impl AudioCodec for OpusCodec {
@@ -191,8 +330,7 @@ impl AudioCodec for OpusCodec {
         // Validate input
         validate_opus_frame(samples, SampleRate::from_hz(self.sample_rate))?;
 
-        // Simulate Opus encoding
-        let encoded = self.simulate_encode(samples)?;
+        let encoded = self.backend_encode(samples)?;
 
         trace!(
             "Opus encoded {} samples to {} bytes",
@@ -210,8 +348,7 @@ impl AudioCodec for OpusCodec {
             });
         }
 
-        // Simulate Opus decoding
-        let decoded = self.simulate_decode(data)?;
+        let decoded = self.backend_decode(data)?;
 
         trace!(
             "Opus decoded {} bytes to {} samples",
@@ -234,6 +371,34 @@ impl AudioCodec for OpusCodec {
     }
 
     fn reset(&mut self) -> Result<()> {
+        // The encoder/decoder carry ADPCM-like prediction state (SILK/CELT
+        // history, VBR smoothing) across frames; a fresh instance is the
+        // only way to actually clear it. Re-applying the tunable fields
+        // mirrors what `new()` does from `self.config`.
+        #[cfg(feature = "opus")]
+        {
+            let mut encoder = opus_rs::OpusEncoder::new(
+                self.sample_rate as i32,
+                self.channels as usize,
+                to_opus_rs_application(self.config.application),
+            )
+            .map_err(|e| CodecError::ResetFailed {
+                reason: format!("encoder re-init: {e}"),
+            })?;
+            encoder.bitrate_bps = self.config.bitrate as i32;
+            encoder.use_cbr = !self.config.vbr;
+            encoder.complexity = i32::from(self.config.complexity);
+            encoder.use_inband_fec = self.config.inband_fec;
+            encoder.packet_loss_perc = i32::from(self.config.packet_loss_perc);
+
+            let decoder =
+                opus_rs::OpusDecoder::new(self.sample_rate as i32, self.channels as usize)
+                    .map_err(|e| CodecError::ResetFailed {
+                        reason: format!("decoder re-init: {e}"),
+                    })?;
+
+            self.real = RealBackend { encoder, decoder };
+        }
         debug!("Opus codec reset");
         Ok(())
     }
@@ -252,8 +417,7 @@ impl AudioCodecExt for OpusCodec {
         // Validate input
         validate_opus_frame(samples, SampleRate::from_hz(self.sample_rate))?;
 
-        // Simulate Opus encoding
-        let encoded = self.simulate_encode(samples)?;
+        let encoded = self.backend_encode(samples)?;
 
         if output.len() < encoded.len() {
             return Err(CodecError::BufferTooSmall {
@@ -280,8 +444,7 @@ impl AudioCodecExt for OpusCodec {
             });
         }
 
-        // Simulate Opus decoding
-        let decoded = self.simulate_decode(data)?;
+        let decoded = self.backend_decode(data)?;
 
         if output.len() < decoded.len() {
             return Err(CodecError::BufferTooSmall {
@@ -390,5 +553,130 @@ mod tests {
 
         // Test invalid complexity
         assert!(codec.set_complexity(11).is_err());
+    }
+
+    // These specifically exercise the real opus-rs backend. Opus's SILK
+    // layer is adaptive/predictive, not a fixed-delay linear filter like
+    // G.722's QMF, so a naive "find the best constant sample lag, then
+    // measure SNR" approach (which worked well for G.722) doesn't converge
+    // to a stable answer here. Energy/RMS-based checks are lag-independent
+    // and, as a bonus, are exactly the kind of check that would have
+    // caught the old simulate_encode/simulate_decode stub: its output
+    // depended only on configured bitrate, not actual sample content, so
+    // loud and near-silent input produced equally noisy "decoded" output.
+    #[cfg(feature = "opus")]
+    mod real_backend {
+        use super::*;
+
+        fn tone_at(
+            len: usize,
+            sample_rate: u32,
+            frequency: f32,
+            amplitude: f32,
+            start: usize,
+        ) -> Vec<i16> {
+            (0..len)
+                .map(|i| {
+                    let t = (start + i) as f32 / sample_rate as f32;
+                    (amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin()) as i16
+                })
+                .collect()
+        }
+
+        fn tone(len: usize, sample_rate: u32, frequency: f32, amplitude: f32) -> Vec<i16> {
+            tone_at(len, sample_rate, frequency, amplitude, 0)
+        }
+
+        fn rms(samples: &[i16]) -> f64 {
+            let sum_sq: f64 = samples.iter().map(|&s| f64::from(s).powi(2)).sum();
+            (sum_sq / samples.len() as f64).sqrt()
+        }
+
+        #[test]
+        fn silence_roundtrips_to_near_silence() {
+            let mut codec = OpusCodec::new(create_test_config()).unwrap();
+            let silence = vec![0i16; 960];
+
+            let encoded = codec.encode(&silence).unwrap();
+            let decoded = codec.decode(&encoded).unwrap();
+
+            assert_eq!(decoded.len(), silence.len());
+            let level = rms(&decoded);
+            assert!(
+                level < 500.0,
+                "silence should decode to near-silence, got RMS {level:.1} (i16 range is ±32768)"
+            );
+        }
+
+        #[test]
+        fn decoded_energy_tracks_input_energy() {
+            let loud = tone(960, 48000, 440.0, 12000.0);
+            let quiet = tone(960, 48000, 440.0, 300.0);
+
+            let mut loud_codec = OpusCodec::new(create_test_config()).unwrap();
+            let loud_encoded = loud_codec.encode(&loud).unwrap();
+            let loud_decoded = loud_codec.decode(&loud_encoded).unwrap();
+
+            let mut quiet_codec = OpusCodec::new(create_test_config()).unwrap();
+            let quiet_encoded = quiet_codec.encode(&quiet).unwrap();
+            let quiet_decoded = quiet_codec.decode(&quiet_encoded).unwrap();
+
+            let (loud_rms, quiet_rms) = (rms(&loud_decoded), rms(&quiet_decoded));
+            assert!(
+                loud_rms > quiet_rms * 3.0,
+                "a ~40x louder input should decode noticeably louder: loud_rms={loud_rms:.1} quiet_rms={quiet_rms:.1}"
+            );
+        }
+
+        #[test]
+        fn encode_produces_a_valid_opus_packet_size() {
+            let mut codec = OpusCodec::new(create_test_config()).unwrap();
+            let samples = tone(960, 48000, 440.0, 8000.0);
+
+            let encoded = codec.encode(&samples).unwrap();
+
+            assert!(!encoded.is_empty());
+            assert!(
+                encoded.len() <= 1275,
+                "RFC 6716 §3.2.1: an Opus packet is never larger than 1275 bytes, got {}",
+                encoded.len()
+            );
+        }
+
+        #[test]
+        fn streaming_many_frames_round_trips_without_error() {
+            let mut encoder = OpusCodec::new(create_test_config()).unwrap();
+            let mut decoder = OpusCodec::new(create_test_config()).unwrap();
+
+            for frame_idx in 0..50usize {
+                let samples = tone_at(960, 48000, 440.0, 8000.0, frame_idx * 960);
+                let encoded = encoder.encode(&samples).unwrap();
+                let decoded = decoder.decode(&encoded).unwrap();
+                assert_eq!(decoded.len(), samples.len());
+            }
+        }
+
+        #[test]
+        fn reset_succeeds_and_codec_keeps_working_afterward() {
+            let mut codec = OpusCodec::new(create_test_config()).unwrap();
+            let samples = tone(960, 48000, 440.0, 8000.0);
+            let _ = codec.encode(&samples).unwrap();
+
+            codec.reset().unwrap();
+
+            let encoded = codec.encode(&samples).unwrap();
+            let decoded = codec.decode(&encoded).unwrap();
+            assert_eq!(decoded.len(), samples.len());
+        }
+
+        #[test]
+        fn set_bitrate_and_complexity_propagate_to_the_real_encoder() {
+            let mut codec = OpusCodec::new(create_test_config()).unwrap();
+            codec.set_bitrate(96_000).unwrap();
+            codec.set_complexity(3).unwrap();
+
+            assert_eq!(codec.real.encoder.bitrate_bps, 96_000);
+            assert_eq!(codec.real.encoder.complexity, 3);
+        }
     }
 }
