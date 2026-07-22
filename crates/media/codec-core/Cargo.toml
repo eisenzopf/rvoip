@@ -30,6 +30,9 @@ tracing.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
+# Opus codec (behind the `opus` feature). Pure Rust, no C toolchain
+# needed at build time.
+opus-rs = { version = "0.1.23", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -46,5 +49,5 @@ default = ["g711"]
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
 g729 = []                    # G.729A/G.729AB codec
-opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
-opus-sim = []                # Opus codec simulator variant
+opus = ["dep:opus-rs"]       # Opus codec, real encode/decode via opus-rs
+opus-sim = []                # Deterministic Opus stub for fast tests, no real DSP
