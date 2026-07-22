@@ -124,13 +124,20 @@ fn timestamp_delta(ts1: RtpTimestamp, ts2: RtpTimestamp, clock_rate: u32) -> f64
         return 0.0;
     }
 
-    // Handle RTP timestamp wraparound
-    let delta = if ts2 >= ts1 {
-        ts2 - ts1
-    } else {
-        // Wraparound occurred
-        (u32::MAX - ts1) + ts2 + 1
-    };
+    // RFC 3550's jitter formula (section 6.4.1) is defined over *signed*
+    // differences of RTP timestamps ("the delay may be negative for
+    // isochronous sources"). Treating `ts2 < ts1` as always meaning a full
+    // 32-bit wraparound is wrong: a reordered or delayed packet can also
+    // have a smaller timestamp than the previous one without any wrap
+    // having occurred, and that used to produce a delta of billions of
+    // samples (multiple days of "jitter") instead of a small negative one.
+    //
+    // Computing the delta as a wrapping 32-bit subtraction reinterpreted
+    // as i32 handles both cases with the same arithmetic: a genuine wrap
+    // (ts1 near u32::MAX, ts2 small) still comes out as a small positive
+    // delta, and a reordered packet (ts2 slightly less than ts1) comes out
+    // as a small negative delta instead of wrapping around the other way.
+    let delta = ts2.wrapping_sub(ts1) as i32;
 
     // Convert to seconds
     (delta as f64) / (clock_rate as f64)
@@ -153,6 +160,30 @@ mod tests {
 
         // Zero clock rate
         assert_eq!(timestamp_delta(1000, 2000, 0), 0.0);
+    }
+
+    #[test]
+    fn test_timestamp_delta_reordered_packet_is_a_small_negative_delta() {
+        // A packet arriving with an earlier timestamp than the previous one,
+        // without any wraparound, must produce a small negative delta, not
+        // be mistaken for a ~u32::MAX wraparound.
+        let delta = timestamp_delta(640, 320, 8000);
+        assert!(
+            (delta - (-0.04)).abs() < 0.000001,
+            "expected -40ms for a 320-sample reorder, got {delta}"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_delta_distinguishes_wrap_from_reorder_at_the_same_gap() {
+        // Both cases have the same 320-sample distance between timestamps,
+        // one via a genuine wrap and one via reordering; they must resolve
+        // to deltas of the same magnitude but opposite sign, not both be
+        // read as (near-)full wraparounds.
+        let wrap = timestamp_delta(u32::MAX - 159, 160, 8000);
+        let reorder = timestamp_delta(480, 160, 8000);
+        assert!((wrap - 0.04).abs() < 0.000001, "wrap delta: {wrap}");
+        assert!((reorder - (-0.04)).abs() < 0.000001, "reorder delta: {reorder}");
     }
 
     #[test]
@@ -195,5 +226,31 @@ mod tests {
         // Check stats
         assert!(estimator.get_max_jitter_ms() >= estimator.get_jitter_ms());
         assert!(estimator.get_min_jitter_ms() <= estimator.get_jitter_ms());
+    }
+
+    #[test]
+    fn reordered_timestamp_does_not_spike_jitter_to_days() {
+        let mut estimator = JitterEstimator::new(8000);
+
+        let t0 = Instant::now();
+        estimator.update(480, t0);
+
+        sleep(Duration::from_millis(20));
+        let t1 = Instant::now();
+        estimator.update(640, t1);
+
+        // A delayed packet from one frame earlier: timestamp 320 arrives
+        // after timestamp 640. Before the fix, any ts2 < ts1 was treated
+        // as a full u32 wraparound, producing a jitter estimate on the
+        // order of `u32::MAX / clock_rate` seconds (multiple days).
+        sleep(Duration::from_millis(20));
+        let t2 = Instant::now();
+        let jitter = estimator.update(320, t2);
+
+        assert!(
+            jitter < 1.0,
+            "reordered packet must not spike jitter to a near-wraparound \
+             magnitude, got {jitter} seconds"
+        );
     }
 }
