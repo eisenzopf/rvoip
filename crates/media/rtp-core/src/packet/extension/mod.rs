@@ -359,18 +359,26 @@ impl RtpHeaderExtensions {
             let header_byte = data[i];
             i += 1;
 
-            // End of extensions is marked by a 0 byte
-            if header_byte == 0 {
-                break;
-            }
+            // Extract the ID (top 4 bits)
+            let id = header_byte >> 4;
 
-            // If the 0xF0 bits are all set, this is padding
-            if (header_byte & 0xF0) == 0xF0 {
+            // RFC 8285 §4.2: a valid padding octet is exactly 0x00 (ID 0,
+            // length 0). It carries no length field and just gets skipped,
+            // and parsing continues looking for more elements after it.
+            if header_byte == 0 {
                 continue;
             }
 
-            // Extract the ID (top 4 bits)
-            let id = (header_byte >> 4) & 0x0F;
+            // ID 0 with a nonzero low nibble (e.g. 0x09) is not valid
+            // padding: RFC 8285 only defines 0x00 for that. ID 15 is
+            // separately reserved. Both are invalid/reserved encodings a
+            // sender must not produce, but a receiver must not reject the
+            // whole RTP packet for either: the length field (if any) is
+            // ignored and extension parsing ends at this point, keeping
+            // only the elements found before it.
+            if id == 0 || id == 15 {
+                break;
+            }
 
             // Length is stored as L-1, so need to add 1 (bottom 4 bits)
             let length = ((header_byte & 0x0F) + 1) as usize;
@@ -591,6 +599,55 @@ mod tests {
             parsed.get_extension(3).unwrap().data,
             Bytes::from_static(&[7])
         );
+    }
+
+    #[test]
+    fn one_byte_extension_exact_zero_byte_is_padding_and_parsing_continues() {
+        // 0x00 (ID 0, length 0) is the only valid padding octet: it's
+        // skipped with no length field, and elements after it still parse.
+        let data = [0x10, 0xAA, 0x00, 0x10, 0xBB];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(ONE_BYTE_EXTENSION_ID, &data).unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed.elements[0].data, Bytes::from_static(&[0xAA]));
+        assert_eq!(parsed.elements[1].data, Bytes::from_static(&[0xBB]));
+    }
+
+    #[test]
+    fn one_byte_extension_id_zero_with_nonzero_length_stops_parsing() {
+        // 0x09 is ID 0 with a nonzero low nibble, not the exact 0x00
+        // padding octet RFC 8285 defines. A sender must not produce this,
+        // but a receiver must not reject the whole RTP packet for it
+        // either: extension parsing just ends at this point.
+        let parsed = RtpHeaderExtensions::from_extension_data(
+            ONE_BYTE_EXTENSION_ID,
+            &[0x09, 0x00, 0x00, 0x00],
+        )
+        .unwrap();
+
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn one_byte_extension_id_zero_with_nonzero_length_keeps_elements_found_before_it() {
+        let data = [0x10, 0xAA, 0x09, 0x00, 0x00];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(ONE_BYTE_EXTENSION_ID, &data).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed.elements[0].data, Bytes::from_static(&[0xAA]));
+    }
+
+    #[test]
+    fn one_byte_extension_stops_at_reserved_id_fifteen() {
+        let parsed = RtpHeaderExtensions::from_extension_data(
+            ONE_BYTE_EXTENSION_ID,
+            &[0xF1, 0xAA, 0xBB, 0xCC],
+        )
+        .unwrap();
+
+        assert!(parsed.is_empty());
     }
 
     #[test]
