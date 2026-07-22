@@ -119,7 +119,7 @@ pub use packet::rtcp::{
     RtcpSenderReport, RtcpSourceDescription, RtcpXrBlock, VoipMetricsBlock,
 };
 pub use packet::rtp::RtpPacket;
-pub use packet::sequencer::RtpPacketSequencer;
+pub use packet::sequencer::{RtpPacketSequencer, SharedRtpPacketSequencer};
 
 // Re-export session types
 pub use session::{
@@ -174,7 +174,8 @@ pub use api::server::{
 pub mod prelude {
     pub use crate::{
         DtmfEvent, Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpPacketSequencer,
-        RtpSequenceNumber, RtpSession, RtpSessionConfig, RtpSsrc, RtpTimestamp, TelephoneEvent,
+        RtpSequenceNumber, RtpSession, RtpSessionConfig, RtpSsrc, RtpTimestamp,
+        SharedRtpPacketSequencer, TelephoneEvent,
     };
 
     pub use crate::packet::rtcp::{

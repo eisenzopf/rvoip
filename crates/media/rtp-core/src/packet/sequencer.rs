@@ -6,6 +6,9 @@
 //! own I/O (e.g. a `mio` reactor) can use it to get correct SSRC/sequence-number
 //! bookkeeping without adopting the library's transport.
 
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
+
 use bytes::Bytes;
 
 use super::header::RtpHeader;
@@ -61,7 +64,83 @@ impl RtpPacketSequencer {
     ) -> RtpPacket {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
-        build_packet(payload_type, sequence, timestamp, self.ssrc, marker, payload)
+        build_packet(
+            payload_type,
+            sequence,
+            timestamp,
+            self.ssrc,
+            marker,
+            payload,
+        )
+    }
+}
+
+/// A cheaply-clonable, thread-safe variant of [`RtpPacketSequencer`].
+///
+/// [`RtpPacketSequencer::packetize`] takes `&mut self`, which is fine when
+/// a single task owns the stream, but doesn't fit a caller where two
+/// concurrent producers (for example an audio sender and a DTMF sender)
+/// need to packetize into the *same* SSRC and sequence-number space.
+/// `SharedRtpPacketSequencer` reserves each sequence number with a single
+/// atomic fetch-add, the same lock-free mechanism
+/// [`RtpSendHandle`](crate::session::RtpSendHandle) already uses
+/// internally, so packetizing never blocks on a mutex.
+///
+/// Reserving a sequence number atomically only guarantees the number
+/// itself is handed out exactly once, in increasing order of reservation.
+/// It does not guarantee that packets reach the wire in that same order if
+/// multiple callers race to send right after packetizing; a caller that
+/// needs strict wire ordering across concurrent producers still needs to
+/// serialize the actual send (e.g. funnel through one channel), same as
+/// callers of `RtpSendHandle` already have to.
+#[derive(Debug, Clone)]
+pub struct SharedRtpPacketSequencer {
+    ssrc: RtpSsrc,
+    next_sequence: Arc<AtomicU16>,
+}
+
+impl SharedRtpPacketSequencer {
+    /// Create a sequencer for `ssrc`, starting at `initial_sequence`.
+    pub fn new(ssrc: RtpSsrc, initial_sequence: RtpSequenceNumber) -> Self {
+        Self {
+            ssrc,
+            next_sequence: Arc::new(AtomicU16::new(initial_sequence)),
+        }
+    }
+
+    /// SSRC this sequencer stamps on every packet it builds.
+    pub fn ssrc(&self) -> RtpSsrc {
+        self.ssrc
+    }
+
+    /// Sequence number the next call to [`packetize`](Self::packetize) will
+    /// reserve. Racy the instant it's read if other clones are packetizing
+    /// concurrently; useful for diagnostics, not for predicting the next
+    /// value.
+    pub fn next_sequence(&self) -> RtpSequenceNumber {
+        self.next_sequence.load(Ordering::Relaxed)
+    }
+
+    /// Atomically reserve the next sequence number and build the packet.
+    /// Safe to call concurrently from clones of the same sequencer; see
+    /// the type-level docs for what concurrent calls do and don't
+    /// guarantee about wire order.
+    pub fn packetize(
+        &self,
+        payload_type: u8,
+        timestamp: RtpTimestamp,
+        marker: bool,
+        payload: Bytes,
+    ) -> RtpPacket {
+        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+        build_packet(
+            payload_type,
+            sequence,
+            timestamp,
+            self.ssrc,
+            marker,
+            payload,
+        )
     }
 }
 
@@ -175,5 +254,90 @@ mod tests {
 
         seq.packetize(0, 0, false, Bytes::new());
         assert_eq!(seq.next_sequence(), 501);
+    }
+
+    #[test]
+    fn shared_first_packet_uses_given_ssrc_and_sequence() {
+        let seq = SharedRtpPacketSequencer::new(0xabcdef01, 1000);
+        let packet = seq.packetize(96, 12345, false, Bytes::from_static(b"payload"));
+
+        assert_eq!(packet.header.ssrc, 0xabcdef01);
+        assert_eq!(packet.header.sequence_number, 1000);
+        assert_eq!(packet.header.payload_type, 96);
+        assert_eq!(packet.header.timestamp, 12345);
+        assert!(!packet.header.marker);
+    }
+
+    #[test]
+    fn shared_sequence_wraps_from_max_to_zero() {
+        let seq = SharedRtpPacketSequencer::new(1, u16::MAX);
+
+        let last = seq.packetize(0, 0, false, Bytes::new());
+        let wrapped = seq.packetize(0, 0, false, Bytes::new());
+
+        assert_eq!(last.header.sequence_number, u16::MAX);
+        assert_eq!(wrapped.header.sequence_number, 0);
+    }
+
+    #[test]
+    fn shared_clones_advance_the_same_sequence_space() {
+        // Simulates the audio-sender-plus-DTMF-sender case: two independent
+        // clones packetizing into what must behave as one shared SSRC and
+        // sequence-number space.
+        let audio = SharedRtpPacketSequencer::new(1, 0);
+        let dtmf = audio.clone();
+
+        let a1 = audio.packetize(0, 0, false, Bytes::new());
+        let d1 = dtmf.packetize(101, 0, false, Bytes::new());
+        let a2 = audio.packetize(0, 160, false, Bytes::new());
+
+        assert_eq!(a1.header.ssrc, d1.header.ssrc);
+        let mut sequences = [
+            a1.header.sequence_number,
+            d1.header.sequence_number,
+            a2.header.sequence_number,
+        ];
+        sequences.sort_unstable();
+        assert_eq!(
+            sequences,
+            [0, 1, 2],
+            "no duplicate or skipped sequence numbers across clones"
+        );
+    }
+
+    #[test]
+    fn shared_concurrent_packetize_never_reserves_a_duplicate_sequence_number() {
+        use std::thread;
+
+        let seq = SharedRtpPacketSequencer::new(1, 0);
+        const PACKETS_PER_THREAD: usize = 200;
+        const THREADS: usize = 8;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let seq = seq.clone();
+                thread::spawn(move || {
+                    (0..PACKETS_PER_THREAD)
+                        .map(|_| {
+                            seq.packetize(0, 0, false, Bytes::new())
+                                .header
+                                .sequence_number
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let mut all_sequences: Vec<u16> = handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("thread panicked"))
+            .collect();
+        all_sequences.sort_unstable();
+
+        let expected: Vec<u16> = (0..(THREADS * PACKETS_PER_THREAD) as u16).collect();
+        assert_eq!(
+            all_sequences, expected,
+            "every sequence number in range must be reserved exactly once, wire order is a separate concern"
+        );
     }
 }

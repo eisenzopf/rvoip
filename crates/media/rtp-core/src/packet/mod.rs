@@ -12,7 +12,7 @@ pub mod sequencer;
 pub use extension::*;
 pub use header::*;
 pub use rtp::*;
-pub use sequencer::RtpPacketSequencer;
+pub use sequencer::{RtpPacketSequencer, SharedRtpPacketSequencer};
 
 #[cfg(test)]
 mod tests {
