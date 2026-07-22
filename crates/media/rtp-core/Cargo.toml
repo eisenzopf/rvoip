@@ -92,6 +92,11 @@ path = "examples/dtls_test.rs"
 name = "media_api_usage"
 path = "examples/media_api_usage.rs"
 
+[[example]]
+name = "dtls_srtp_standalone"
+path = "examples/dtls_srtp_standalone.rs"
+required-features = ["dtls-webrtc"]
+
 # Performance benchmarks. Run with `cargo bench -p rvoip-rtp-core`. See
 # `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
 [[bench]]

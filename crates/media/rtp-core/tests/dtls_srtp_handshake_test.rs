@@ -17,7 +17,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_rtp_core::dtls_srtp::{default_srtp_profiles, handshake_client, handshake_server};
+use rvoip_rtp_core::dtls_srtp::{
+    default_srtp_profiles, generate_identity, handshake_client, handshake_server,
+};
 use tokio::net::UdpSocket;
 
 async fn connected_socket_pair() -> (Arc<UdpSocket>, Arc<UdpSocket>) {
@@ -33,9 +35,19 @@ async fn connected_socket_pair() -> (Arc<UdpSocket>, Arc<UdpSocket>) {
 #[tokio::test]
 async fn independent_client_and_server_complete_a_real_handshake_with_matching_keys() {
     let (client_socket, server_socket) = connected_socket_pair().await;
+    let client_identity = generate_identity().unwrap();
+    let server_identity = generate_identity().unwrap();
 
-    let client_task = tokio::spawn(handshake_client(client_socket, default_srtp_profiles()));
-    let server_task = tokio::spawn(handshake_server(server_socket, default_srtp_profiles()));
+    let client_task = tokio::spawn(handshake_client(
+        client_socket,
+        client_identity,
+        default_srtp_profiles(),
+    ));
+    let server_task = tokio::spawn(handshake_server(
+        server_socket,
+        server_identity,
+        default_srtp_profiles(),
+    ));
 
     let (client_result, server_result) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(client_task, server_task)
@@ -112,8 +124,18 @@ async fn each_handshake_uses_a_fresh_certificate() {
     let (client_socket_2, server_socket_2) = connected_socket_pair().await;
 
     let run = |client_socket: Arc<UdpSocket>, server_socket: Arc<UdpSocket>| async move {
-        let client_task = tokio::spawn(handshake_client(client_socket, default_srtp_profiles()));
-        let server_task = tokio::spawn(handshake_server(server_socket, default_srtp_profiles()));
+        let client_identity = generate_identity().unwrap();
+        let server_identity = generate_identity().unwrap();
+        let client_task = tokio::spawn(handshake_client(
+            client_socket,
+            client_identity,
+            default_srtp_profiles(),
+        ));
+        let server_task = tokio::spawn(handshake_server(
+            server_socket,
+            server_identity,
+            default_srtp_profiles(),
+        ));
         let (c, s) = tokio::join!(client_task, server_task);
         (c.unwrap().unwrap(), s.unwrap().unwrap())
     };
