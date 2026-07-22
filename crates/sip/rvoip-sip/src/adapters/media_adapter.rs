@@ -3,6 +3,9 @@
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
 
+#[cfg(feature = "dtls-srtp")]
+use crate::adapters::dtls_negotiator::detect_dtls_offer;
+use crate::adapters::dtls_negotiator::SetupRole;
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
@@ -212,6 +215,52 @@ fn audio_transport(session: &SdpSession) -> Option<&str> {
         .iter()
         .find(|m| m.media == "audio")
         .map(|m| m.protocol.as_str())
+}
+
+/// RFC 4572 §5 wire form for a certificate fingerprint: colon-separated,
+/// uppercase hex.
+#[cfg(feature = "dtls-srtp")]
+fn fingerprint_hex(fp: &[u8; 32]) -> String {
+    fp.iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// Case-insensitive fingerprint comparison — RFC 4572 hex digits are
+/// conventionally uppercase but the comparison itself isn't case-sensitive.
+#[cfg(feature = "dtls-srtp")]
+fn fingerprint_hex_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Map a resolved SDP `a=setup` role to which side of the DTLS handshake
+/// we play. `Actpass` never appears as a resolved (post-`complementary()`)
+/// role; `Holdconn` (keep an existing association, no new handshake) isn't
+/// supported by this initial-INVITE-only integration.
+#[cfg(feature = "dtls-srtp")]
+fn setup_role_to_dtls_role(role: SetupRole) -> Result<rvoip_media_core::DtlsRole> {
+    match role {
+        SetupRole::Active => Ok(rvoip_media_core::DtlsRole::Client),
+        SetupRole::Passive => Ok(rvoip_media_core::DtlsRole::Server),
+        SetupRole::Actpass | SetupRole::Holdconn => Err(SessionError::SDPNegotiationFailed(
+            format!("cannot start a DTLS handshake with unresolved setup role {role:?}"),
+        )),
+    }
+}
+
+/// Map a negotiated DTLS-SRTP crypto suite back to the SDES-era
+/// `CryptoSuite` enum used for display/bookkeeping in `MediaSecurityState`
+/// — the actual keys came from the DTLS handshake, not SDES, but the
+/// AES-CM+HMAC combination in use is the same concept either way.
+#[cfg(feature = "dtls-srtp")]
+fn dtls_profile_to_crypto_suite(profile: &rvoip_rtp_core::srtp::SrtpCryptoSuite) -> CryptoSuite {
+    match (profile.key_length, profile.tag_length) {
+        (16, 4) => CryptoSuite::AesCm128HmacSha1_32,
+        (32, 10) => CryptoSuite::AesCm256HmacSha1_80,
+        (32, 4) => CryptoSuite::AesCm256HmacSha1_32,
+        _ => CryptoSuite::AesCm128HmacSha1_80,
+    }
 }
 
 /// NEXT_STEPS C2 — lookup helper from RTP payload type to the
@@ -478,6 +527,20 @@ pub struct MediaAdapter {
     /// `start_secure_media`.
     pub(crate) negotiated_srtp: Arc<DashMap<SessionId, SrtpPair>>,
 
+    // ==== RFC 5763/5764 DTLS-SRTP state ====
+    /// Whether to advertise `a=fingerprint`/`a=setup` (DTLS-SRTP) instead
+    /// of SDES on outgoing offers. Mutually exclusive with `offer_srtp` —
+    /// when both are set, DTLS-SRTP wins. Requires the `dtls-srtp`
+    /// feature; with it off this is inert (offers stay SDES/plaintext).
+    offer_dtls_srtp: bool,
+
+    /// Certificate identity generated for an outgoing offer, held until
+    /// the answer resolves our concrete role and the handshake can run.
+    /// Keyed by session so a fresh identity doesn't need generating on
+    /// every retransmission.
+    #[cfg(feature = "dtls-srtp")]
+    pending_dtls_identities: Arc<DashMap<SessionId, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
+
     /// Global event coordinator for publishing RFC 4733 DTMF events
     /// onto the rvoip-sip API event bus. Populated at boot via
     /// [`Self::set_global_coordinator`]; `None` in tests that bypass
@@ -571,6 +634,9 @@ impl MediaAdapter {
             ],
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
+            offer_dtls_srtp: false,
+            #[cfg(feature = "dtls-srtp")]
+            pending_dtls_identities: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
             public_rtp_addr: std::sync::RwLock::new(None),
@@ -798,6 +864,49 @@ impl MediaAdapter {
         }
     }
 
+    /// Configure the DTLS-SRTP offer policy. Called by `UnifiedCoordinator`
+    /// when constructing the adapter from a [`Config`](crate::api::unified::Config)
+    /// with `srtp_keying = SrtpKeyingMode::DtlsSrtp`. Mutually exclusive
+    /// with SDES in practice: when `offer_dtls_srtp` is set, offers
+    /// advertise `a=fingerprint`/`a=setup` instead of `a=crypto`
+    /// regardless of `offer_srtp`.
+    pub fn set_dtls_srtp_policy(&mut self, offer_dtls_srtp: bool) {
+        self.offer_dtls_srtp = offer_dtls_srtp;
+    }
+
+    /// If DTLS-SRTP is our policy, generate a fresh certificate identity
+    /// for this session (stashed for later, once the answer resolves our
+    /// concrete role) and return `(hash_function, fingerprint_hex)` for
+    /// the outgoing `a=fingerprint` line. `None` when DTLS-SRTP isn't our
+    /// policy, or when the `dtls-srtp` feature isn't compiled in.
+    #[cfg(feature = "dtls-srtp")]
+    fn dtls_offer_identity(&self, session_id: &SessionId) -> Option<(String, String)> {
+        if !self.offer_dtls_srtp {
+            return None;
+        }
+        match rvoip_rtp_core::dtls_srtp::generate_identity() {
+            Ok(identity) => {
+                let fp_hex = fingerprint_hex(&identity.fingerprint_sha256);
+                self.pending_dtls_identities
+                    .insert(session_id.clone(), identity);
+                Some(("sha-256".to_string(), fp_hex))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to generate DTLS-SRTP identity for session {}: {}",
+                    session_id.0,
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    fn dtls_offer_identity(&self, _session_id: &SessionId) -> Option<(String, String)> {
+        None
+    }
+
     // ===== Outbound Actions (from state machine) =====
 
     /// Start a media session
@@ -967,6 +1076,12 @@ impl MediaAdapter {
                 }
             }
 
+            // RFC 5764 DTLS-SRTP: run the handshake (if we offered it)
+            // and install its keys the same way, before any wire packet
+            // flows. No-op if we didn't offer DTLS-SRTP for this session.
+            self.maybe_complete_dtls_as_uac(session_id, &dialog_id, remote_sdp, remote_addr)
+                .await?;
+
             // Establish media flow (this starts audio transmission)
             self.controller
                 .establish_media_flow(&dialog_id, remote_addr)
@@ -985,6 +1100,7 @@ impl MediaAdapter {
                 self.record_media_security_negotiated(session_id, pair.suite, false)
                     .await;
             }
+            self.drop_pending_dtls_identity(session_id);
         }
 
         let local_port = match signaling_only_port {
@@ -1005,6 +1121,255 @@ impl MediaAdapter {
         // Event publishing will be handled by SessionCrossCrateEventHandler
 
         Ok(config)
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    fn drop_pending_dtls_identity(&self, session_id: &SessionId) {
+        self.pending_dtls_identities.remove(session_id);
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    fn drop_pending_dtls_identity(&self, _session_id: &SessionId) {}
+
+    /// Run a DTLS-SRTP handshake in the background and record the result.
+    ///
+    /// This must NOT be awaited inline from `negotiate_sdp_as_uac`/`_uas`:
+    /// the two peers' handshakes are mutually dependent (the DTLS client
+    /// side needs the server side already listening, and vice versa), but
+    /// the server side of a fresh call only starts listening once *its
+    /// own* SDP negotiation function returns and the resulting SDP
+    /// (answer or ACK-triggered offer) has actually gone out. Blocking
+    /// either negotiate function on the handshake completing would
+    /// deadlock: the UAS would never send its 200 OK (with the fingerprint
+    /// the UAC needs) until the handshake succeeds, and the handshake
+    /// can't succeed until the UAC has that 200 OK and starts its own
+    /// side. Spawning decouples "signaling completed" from "media is
+    /// encrypted yet" — exactly how real DTLS-SRTP stacks behave (RTP
+    /// flow starts once signaling completes; encryption arms once the
+    /// independently-running handshake finishes).
+    #[cfg(feature = "dtls-srtp")]
+    fn spawn_dtls_handshake(
+        &self,
+        session_id: SessionId,
+        dialog_id: DialogId,
+        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+        our_role: SetupRole,
+        remote_addr: SocketAddr,
+        peer_fingerprint: String,
+    ) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = this
+                .run_dtls_handshake_and_record(
+                    &session_id,
+                    &dialog_id,
+                    identity,
+                    our_role,
+                    remote_addr,
+                    &peer_fingerprint,
+                )
+                .await
+            {
+                tracing::error!(
+                    "DTLS-SRTP handshake failed for session {}: {}",
+                    session_id.0,
+                    e
+                );
+            }
+        });
+    }
+
+    #[cfg(feature = "dtls-srtp")]
+    async fn run_dtls_handshake_and_record(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
+        our_role: SetupRole,
+        remote_addr: SocketAddr,
+        peer_fingerprint: &str,
+    ) -> Result<()> {
+        let dtls_role = setup_role_to_dtls_role(our_role)?;
+        let result = self
+            .controller
+            .run_dtls_handshake_and_install(
+                dialog_id,
+                identity,
+                dtls_role,
+                remote_addr,
+                rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            .map_err(|e| SessionError::MediaError(format!("DTLS-SRTP handshake failed: {}", e)))?;
+
+        let remote_fp_hex = fingerprint_hex(&result.remote_fingerprint_sha256);
+        if !fingerprint_hex_eq(&remote_fp_hex, peer_fingerprint) {
+            return Err(SessionError::SDPNegotiationFailed(format!(
+                "DTLS-SRTP remote certificate fingerprint {} does not match \
+                 SDP a=fingerprint {}",
+                remote_fp_hex, peer_fingerprint
+            )));
+        }
+
+        let suite = dtls_profile_to_crypto_suite(&result.profile);
+        self.record_media_security_negotiated_with_keying(
+            session_id,
+            MediaSecurityKeying::DtlsSrtp,
+            suite,
+            MediaSecurityProfile::UdpTlsRtpSavp,
+            true,
+        )
+        .await;
+        tracing::info!(
+            "🔒 DTLS-SRTP handshake completed and contexts installed for session {} \
+             (role {:?}, suite {:?})",
+            session_id.0,
+            our_role,
+            suite
+        );
+        Ok(())
+    }
+
+    /// RFC 5764 DTLS-SRTP: if we offered it for this session (a pending
+    /// identity is stashed), detect the peer's answer and resolve our
+    /// concrete role, then spawn the handshake in the background — see
+    /// [`Self::spawn_dtls_handshake`] for why it can't run inline here.
+    /// No-op (not an error) if we didn't offer DTLS-SRTP, or if the peer's
+    /// answer doesn't carry a DTLS-SRTP fingerprint/setup — that just
+    /// means the call proceeds without SRTP, same as the SDES fallback.
+    #[cfg(feature = "dtls-srtp")]
+    async fn maybe_complete_dtls_as_uac(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+        remote_sdp: &str,
+        remote_addr: SocketAddr,
+    ) -> Result<()> {
+        let Some((_, identity)) = self.pending_dtls_identities.remove(session_id) else {
+            return Ok(());
+        };
+
+        let parsed = SdpSession::from_str(remote_sdp).map_err(|e| {
+            SessionError::SDPNegotiationFailed(format!(
+                "Failed to parse remote SDP for DTLS-SRTP answer extraction: {}",
+                e
+            ))
+        })?;
+        let Some(answer) = detect_dtls_offer(&parsed) else {
+            tracing::warn!(
+                "Session {} offered DTLS-SRTP but the answer carries no \
+                 a=fingerprint/a=setup; proceeding without SRTP",
+                session_id.0
+            );
+            return Ok(());
+        };
+
+        let our_role = answer.setup_role.complementary();
+        self.spawn_dtls_handshake(
+            session_id.clone(),
+            dialog_id.clone(),
+            identity,
+            our_role,
+            remote_addr,
+            answer.fingerprint,
+        );
+        Ok(())
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    async fn maybe_complete_dtls_as_uac(
+        &self,
+        _session_id: &SessionId,
+        _dialog_id: &DialogId,
+        _remote_sdp: &str,
+        _remote_addr: SocketAddr,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// If our policy offers DTLS-SRTP and the offer carries
+    /// `a=fingerprint`/`a=setup`, generate our answering identity now (its
+    /// fingerprint has to go in the answer, before we even run the
+    /// handshake) and resolve our concrete role. Returns
+    /// `(our_fingerprint_hex, our_role, peer_promised_fingerprint)`, or
+    /// `None` when DTLS-SRTP isn't in play for this offer/policy.
+    #[cfg(feature = "dtls-srtp")]
+    fn dtls_answer_role(
+        &self,
+        session_id: &SessionId,
+        parsed_offer: &SdpSession,
+    ) -> Option<(String, SetupRole, String)> {
+        if !self.offer_dtls_srtp {
+            return None;
+        }
+        let offer = detect_dtls_offer(parsed_offer)?;
+        let our_role = offer.setup_role.complementary();
+        match rvoip_rtp_core::dtls_srtp::generate_identity() {
+            Ok(identity) => {
+                let fp_hex = fingerprint_hex(&identity.fingerprint_sha256);
+                self.pending_dtls_identities
+                    .insert(session_id.clone(), identity);
+                Some((fp_hex, our_role, offer.fingerprint))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to generate DTLS-SRTP identity for session {} (UAS): {}",
+                    session_id.0,
+                    e
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    fn dtls_answer_role(
+        &self,
+        _session_id: &SessionId,
+        _parsed_offer: &SdpSession,
+    ) -> Option<(String, SetupRole, String)> {
+        None
+    }
+
+    /// RFC 5764 DTLS-SRTP, UAS side: spawn the handshake in our resolved
+    /// role — see [`Self::spawn_dtls_handshake`] for why this can't run
+    /// inline (it would deadlock the 200 OK against the UAC's own side of
+    /// the same handshake). See [`Self::maybe_complete_dtls_as_uac`] for
+    /// the UAC-side equivalent.
+    #[cfg(feature = "dtls-srtp")]
+    async fn maybe_complete_dtls_as_uas(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+        remote_addr: SocketAddr,
+        our_role: SetupRole,
+        peer_fingerprint: &str,
+    ) -> Result<()> {
+        let Some((_, identity)) = self.pending_dtls_identities.remove(session_id) else {
+            return Ok(());
+        };
+        self.spawn_dtls_handshake(
+            session_id.clone(),
+            dialog_id.clone(),
+            identity,
+            our_role,
+            remote_addr,
+            peer_fingerprint.to_string(),
+        );
+        Ok(())
+    }
+
+    #[cfg(not(feature = "dtls-srtp"))]
+    async fn maybe_complete_dtls_as_uas(
+        &self,
+        _session_id: &SessionId,
+        _dialog_id: &DialogId,
+        _remote_addr: SocketAddr,
+        _our_role: SetupRole,
+        _peer_fingerprint: &str,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Generate SDP answer and negotiate (for UAS)
@@ -1040,49 +1405,60 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, srtp_pair, reject_with_port_zero) =
-            if !offered_crypto.is_empty() && self.offer_srtp {
-                // Both sides want SRTP — negotiate.
-                let answerer = SrtpNegotiator::new_answerer();
-                let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
-                self.negotiated_srtp.insert(session_id.clone(), pair);
-                tracing::info!(
-                    "SDES offer accepted for session {}: tag {} suite {:?}",
-                    session_id.0,
-                    chosen.tag,
-                    chosen.suite
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "sdes_offer_accepted session={} suite={:?}",
-                        session_id.0, chosen.suite
-                    ));
-                }
-                (Some(chosen), true, false)
-            } else if offered_crypto.is_empty() && self.srtp_required {
-                return Err(SessionError::SDPNegotiationFailed(
-                    "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+
+        // RFC 5764 DTLS-SRTP: detect an `a=fingerprint`/`a=setup` offer
+        // and, if our policy offers DTLS-SRTP, generate our answering
+        // identity now (so its fingerprint can go in the answer built
+        // below) and remember our resolved role + the peer's promised
+        // fingerprint for the handshake once `remote_addr` is known.
+        // Mutually exclusive with SDES — a DTLS-SRTP offer skips the
+        // `a=crypto` branch below entirely.
+        let dtls_answer = self.dtls_answer_role(session_id, &parsed_offer);
+
+        let (answer_attr, srtp_pair, reject_with_port_zero) = if dtls_answer.is_some() {
+            (None, false, false)
+        } else if !offered_crypto.is_empty() && self.offer_srtp {
+            // Both sides want SRTP — negotiate.
+            let answerer = SrtpNegotiator::new_answerer();
+            let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
+            self.negotiated_srtp.insert(session_id.clone(), pair);
+            tracing::info!(
+                "SDES offer accepted for session {}: tag {} suite {:?}",
+                session_id.0,
+                chosen.tag,
+                chosen.suite
+            );
+            if srtp_diagnostics {
+                emit_srtp_diag(format!(
+                    "sdes_offer_accepted session={} suite={:?}",
+                    session_id.0, chosen.suite
                 ));
-            } else if !offered_crypto.is_empty() && !self.offer_srtp {
-                // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
-                // policy is plaintext. Reject the m-line by setting port=0
-                // in the answer, preserving the offered proto so the peer
-                // can distinguish a rejection from a parse error.
-                tracing::info!(
-                    "Session {} received SRTP offer but local policy is offer_srtp=false; \
+            }
+            (Some(chosen), true, false)
+        } else if offered_crypto.is_empty() && self.srtp_required {
+            return Err(SessionError::SDPNegotiationFailed(
+                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+            ));
+        } else if !offered_crypto.is_empty() && !self.offer_srtp {
+            // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
+            // policy is plaintext. Reject the m-line by setting port=0
+            // in the answer, preserving the offered proto so the peer
+            // can distinguish a rejection from a parse error.
+            tracing::info!(
+                "Session {} received SRTP offer but local policy is offer_srtp=false; \
                  rejecting m-line with port=0 per RFC 3264 §6",
+                session_id.0
+            );
+            if srtp_diagnostics {
+                emit_srtp_diag(format!(
+                    "sdes_offer_rejected session={} reason=local_policy",
                     session_id.0
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "sdes_offer_rejected session={} reason=local_policy",
-                        session_id.0
-                    ));
-                }
-                (None, false, true)
-            } else {
-                (None, false, false)
-            };
+                ));
+            }
+            (None, false, true)
+        } else {
+            (None, false, false)
+        };
         let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
 
         // Port-zero rejection short-circuit: build a minimal RFC 3264
@@ -1178,6 +1554,17 @@ impl MediaAdapter {
                 }
             }
 
+            if let Some((_, our_role, peer_fingerprint)) = &dtls_answer {
+                self.maybe_complete_dtls_as_uas(
+                    session_id,
+                    &dialog_id,
+                    remote_addr,
+                    *our_role,
+                    peer_fingerprint,
+                )
+                .await?;
+            }
+
             self.controller
                 .establish_media_flow(&dialog_id, remote_addr)
                 .await
@@ -1195,6 +1582,7 @@ impl MediaAdapter {
                 self.record_media_security_negotiated(session_id, pair.suite, false)
                     .await;
             }
+            self.drop_pending_dtls_identity(session_id);
         }
 
         // Generate the SDP answer.
@@ -1219,7 +1607,9 @@ impl MediaAdapter {
             .filter(|sa| sa.port() != 0)
             .map(|sa| sa.port())
             .unwrap_or(local_port);
-        let answer_transport = if answer_attr.is_some() {
+        let answer_transport = if dtls_answer.is_some() {
+            "UDP/TLS/RTP/SAVP"
+        } else if answer_attr.is_some() {
             "RTP/SAVP"
         } else {
             "RTP/AVP"
@@ -1238,7 +1628,7 @@ impl MediaAdapter {
         }
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
-        let mut media_builder = SdpBuilder::new("Session")
+        let mut session_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
                 &origin_session_id,
@@ -1248,9 +1638,16 @@ impl MediaAdapter {
                 &local_ip_str,
             )
             .connection("IN", "IP4", &local_ip_str)
-            .time("0", "0")
+            .time("0", "0");
+        if let Some((fp_hex, _, _)) = &dtls_answer {
+            session_builder = session_builder.fingerprint("sha-256", fp_hex.as_str());
+        }
+        let mut media_builder = session_builder
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
+        if let Some((_, our_role, _)) = &dtls_answer {
+            media_builder = media_builder.setup(our_role.as_str());
+        }
         // Emit rtpmap/fmtp ONLY for the formats we kept. In the
         // permissive branch this is the full set; in the strict
         // branch the matcher's intersection has already filtered.
@@ -1306,10 +1703,28 @@ impl MediaAdapter {
         suite: CryptoSuite,
         contexts_installed: bool,
     ) {
-        let state = MediaSecurityState {
-            keying: MediaSecurityKeying::Sdes,
+        self.record_media_security_negotiated_with_keying(
+            session_id,
+            MediaSecurityKeying::Sdes,
             suite,
-            profile: MediaSecurityProfile::RtpSavp,
+            MediaSecurityProfile::RtpSavp,
+            contexts_installed,
+        )
+        .await
+    }
+
+    async fn record_media_security_negotiated_with_keying(
+        &self,
+        session_id: &SessionId,
+        keying: MediaSecurityKeying,
+        suite: CryptoSuite,
+        profile: MediaSecurityProfile,
+        contexts_installed: bool,
+    ) {
+        let state = MediaSecurityState {
+            keying,
+            suite,
+            profile,
             contexts_installed,
         };
 
@@ -1806,15 +2221,24 @@ impl MediaAdapter {
         let local_ip_str = advertised_ip.to_string();
 
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
-        // when offering SDES.
-        let (transport, crypto_attrs) = if self.offer_srtp {
-            let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
-            self.pending_srtp_offerers
-                .insert(session_id.clone(), negotiator);
-            ("RTP/SAVP", attrs)
-        } else {
-            ("RTP/AVP", Vec::new())
-        };
+        // when offering SDES; RFC 5764 §8 — `UDP/TLS/RTP/SAVP` for
+        // DTLS-SRTP. DTLS-SRTP takes priority when both policies are
+        // somehow set — see `Config::srtp_keying`.
+        let (transport, crypto_attrs, dtls_offer_attrs) =
+            if let Some((hash, fp_hex)) = self.dtls_offer_identity(session_id) {
+                (
+                    "UDP/TLS/RTP/SAVP".to_string(),
+                    Vec::new(),
+                    Some((hash, fp_hex)),
+                )
+            } else if self.offer_srtp {
+                let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+                self.pending_srtp_offerers
+                    .insert(session_id.clone(), negotiator);
+                ("RTP/SAVP".to_string(), attrs, None)
+            } else {
+                ("RTP/AVP".to_string(), Vec::new(), None)
+            };
         let crypto_attr_count = crypto_attrs.len();
         if sdp_diagnostics_enabled() {
             emit_sdp_diag(format!(
@@ -1839,7 +2263,7 @@ impl MediaAdapter {
         let format_pts = self.effective_offered_formats();
         let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
         let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
-        let mut media_builder = SdpBuilder::new("Session")
+        let mut session_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
                 &origin_session_id,
@@ -1849,9 +2273,18 @@ impl MediaAdapter {
                 &local_ip_str,
             )
             .connection("IN", "IP4", &local_ip_str)
-            .time("0", "0")
-            .media_audio(port, transport)
+            .time("0", "0");
+        if let Some((hash, fp_hex)) = &dtls_offer_attrs {
+            session_builder = session_builder.fingerprint(hash.as_str(), fp_hex.as_str());
+        }
+        let mut media_builder = session_builder
+            .media_audio(port, transport.as_str())
             .formats(&formats_ref);
+        if dtls_offer_attrs.is_some() {
+            // RFC 5763 §5 — the offerer proposes actpass, letting the
+            // answerer pick a concrete active/passive role.
+            media_builder = media_builder.setup(SetupRole::Actpass.as_str());
+        }
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
                 media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
@@ -2711,6 +3144,9 @@ impl Clone for MediaAdapter {
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
+            offer_dtls_srtp: self.offer_dtls_srtp,
+            #[cfg(feature = "dtls-srtp")]
+            pending_dtls_identities: self.pending_dtls_identities.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),

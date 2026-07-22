@@ -18,6 +18,8 @@ pub use controller::{
     DtmfNotification, MediaConfig, MediaSessionController, MediaSessionControllerConfig,
     MediaSessionEvent, MediaSessionInfo, MediaSessionStatus,
 };
+#[cfg(feature = "dtls-srtp")]
+pub use controller::DtlsRole;
 
 /// Simple G.711 PCMU codec implementation
 #[derive(Debug, Clone)]

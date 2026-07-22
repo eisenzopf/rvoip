@@ -131,6 +131,24 @@ impl Default for SipContactMode {
     }
 }
 
+/// Which SRTP keying mechanism to offer when [`Config::offer_srtp`] is set.
+///
+/// The two are mutually exclusive on the wire: SDES carries the raw
+/// master key in the SDP itself (`a=crypto:`); DTLS-SRTP carries only a
+/// certificate fingerprint (`a=fingerprint`/`a=setup`) and derives keys
+/// from a real DTLS 1.2 handshake run over the media port. Requires the
+/// `dtls-srtp` feature to actually run the handshake — with it off,
+/// `DtlsSrtp` silently behaves like `Sdes` is unset (offers stay
+/// SDES/plaintext) rather than failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SrtpKeyingMode {
+    /// RFC 4568 Security Descriptions — the long-standing default.
+    #[default]
+    Sdes,
+    /// RFC 5763/5764 DTLS-SRTP.
+    DtlsSrtp,
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -594,6 +612,13 @@ pub struct Config {
     /// Modify when a specific carrier requires a non-default
     /// preference.
     pub srtp_offered_suites: Vec<CryptoSuite>,
+
+    /// Which SRTP keying mechanism to offer, when `offer_srtp` is set.
+    /// Default: [`SrtpKeyingMode::Sdes`], the long-standing behavior.
+    /// Set to [`SrtpKeyingMode::DtlsSrtp`] for a real DTLS 1.2 handshake
+    /// instead of carrying the master key in the SDP — requires the
+    /// `dtls-srtp` feature to actually run the handshake.
+    pub srtp_keying: SrtpKeyingMode,
 
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
@@ -1091,6 +1116,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -1204,6 +1230,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -3806,6 +3833,11 @@ impl UnifiedCoordinator {
             config.offer_srtp,
             config.srtp_required,
             config.srtp_offered_suites.clone(),
+        );
+        // RFC 5763/5764 DTLS-SRTP: offer it instead of SDES when
+        // configured. No-op without the `dtls-srtp` feature.
+        media_adapter_inner.set_dtls_srtp_policy(
+            config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);

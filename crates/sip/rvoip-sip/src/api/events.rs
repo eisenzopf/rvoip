@@ -163,6 +163,9 @@ impl SubscriptionState {
 pub enum MediaSecurityKeying {
     /// SDP Security Descriptions (RFC 4568).
     Sdes,
+    /// DTLS-SRTP (RFC 5763/5764): keys are derived from a real DTLS 1.2
+    /// handshake run over the media port, not carried in the SDP itself.
+    DtlsSrtp,
 }
 
 /// RTP profile negotiated for protected media.
@@ -170,6 +173,8 @@ pub enum MediaSecurityKeying {
 pub enum MediaSecurityProfile {
     /// Secure RTP Audio/Video Profile (`RTP/SAVP`).
     RtpSavp,
+    /// DTLS-SRTP transport profile (`UDP/TLS/RTP/SAVP`, RFC 5764 §8).
+    UdpTlsRtpSavp,
 }
 
 /// Current negotiated media-security state for a call.
