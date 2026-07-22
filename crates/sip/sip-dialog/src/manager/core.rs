@@ -2062,18 +2062,44 @@ impl DialogManager {
             .and_then(|g| g.as_ref().and_then(|c| c.tls_advertised_local_address()))
     }
 
+    /// Configured WS advertised sent-by address, if supplied.
+    pub fn ws_advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.ws_advertised_local_address()))
+    }
+
+    /// Configured WSS advertised sent-by address, if supplied.
+    pub fn wss_advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.wss_advertised_local_address()))
+    }
+
     /// Local sent-by address for an outbound request targeting `uri`.
     /// TLS requests prefer the configured TLS advertised address, then the
     /// TLS bind address, then the base bind address. Other transports prefer
     /// the configured SIP advertised address, then the base bind address.
     pub fn local_address_for_uri(&self, uri: &Uri) -> SocketAddr {
-        if select_transport_for_uri(uri) == TransportType::Tls {
-            self.tls_advertised_local_address()
+        match select_transport_for_uri(uri) {
+            TransportType::Tls => self
+                .tls_advertised_local_address()
                 .or_else(|| self.tls_local_address())
-                .unwrap_or(self.local_address)
-        } else {
-            self.advertised_local_address()
-                .unwrap_or(self.local_address)
+                .unwrap_or(self.local_address),
+            TransportType::Ws => self
+                .ws_advertised_local_address()
+                .or_else(|| self.advertised_local_address())
+                .unwrap_or(self.local_address),
+            TransportType::Wss => self
+                .wss_advertised_local_address()
+                .or_else(|| self.tls_advertised_local_address())
+                .or_else(|| self.tls_local_address())
+                .unwrap_or(self.local_address),
+            _ => self
+                .advertised_local_address()
+                .unwrap_or(self.local_address),
         }
     }
 
