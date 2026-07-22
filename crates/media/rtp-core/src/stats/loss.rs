@@ -87,8 +87,35 @@ impl PacketLossTracker {
             self.cycles += 1;
         }
 
-        // Calculate extended sequence number (with cycle count)
-        let extended_seq = (self.cycles as u32) << 16 | (seq as u32);
+        // Calculate extended sequence number (with cycle count).
+        //
+        // `seq` alone is ambiguous about which wrap cycle it belongs to:
+        // `self.cycles` is the cycle of the most recently advanced
+        // `highest_seq`, but a packet delayed across the wrap boundary
+        // (e.g. seq=65534 arriving after highest_seq has already moved
+        // into the new cycle) has the same low 16 bits as a fresh packet
+        // in the current cycle. Blindly placing every packet in
+        // `self.cycles` puts that stale packet about 65536 sequence
+        // numbers ahead of where it actually is, which reads as a huge
+        // gap instead of the small reorder it really is.
+        //
+        // Disambiguate by computing both candidate placements (current
+        // cycle and the one before it) and picking whichever lands closer
+        // to `highest_seq`: a genuine gap or in-order packet is always
+        // close to `highest_seq`, a stale pre-wrap packet is not.
+        let current_epoch_ext = (self.cycles as u32) << 16 | (seq as u32);
+        let extended_seq = if self.cycles > 0 {
+            let prev_epoch_ext = ((self.cycles - 1) as u32) << 16 | (seq as u32);
+            if current_epoch_ext.abs_diff(self.highest_seq)
+                <= prev_epoch_ext.abs_diff(self.highest_seq)
+            {
+                current_epoch_ext
+            } else {
+                prev_epoch_ext
+            }
+        } else {
+            current_epoch_ext
+        };
 
         // Check for duplicate packets - a duplicate is a previously seen sequence number
         // This applies to all sequence numbers we've previously processed, not just the last one
@@ -531,5 +558,103 @@ mod tests {
         assert_eq!(stats.burst_count, 1);
         // The max burst length is from the first gap (4 packets)
         assert_eq!(stats.max_burst_length, 4);
+    }
+
+    // Regression tests for the wrap-then-delayed-packet bug: a packet from
+    // before the wrap boundary, arriving after `cycles` has already
+    // advanced, used to be placed ~65536 sequence numbers ahead of
+    // `highest_seq` and counted as a massive gap instead of a reorder.
+
+    #[test]
+    fn wraparound_with_no_delayed_packets_reports_no_loss() {
+        let mut tracker = PacketLossTracker::new();
+
+        assert_eq!(
+            tracker.process(65534),
+            PacketLossResult::FirstPacket { seq: 65534 }
+        );
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Sequential { seq: 65535 }
+        );
+        assert_eq!(tracker.process(0), PacketLossResult::Sequential { seq: 0 });
+        assert_eq!(tracker.process(1), PacketLossResult::Sequential { seq: 1 });
+
+        let stats = tracker.get_stats();
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(tracker.cycles, 1);
+    }
+
+    #[test]
+    fn delayed_packet_from_before_wrap_is_reordered_not_a_gap() {
+        let mut tracker = PacketLossTracker::new();
+
+        tracker.process(65534);
+        tracker.process(65535);
+        tracker.process(0);
+        tracker.process(1);
+
+        // 65535 again, but delayed until after the wrap has already
+        // advanced past it. Must be classified as a small reorder, not a
+        // ~65536-packet gap.
+        let result = tracker.process(65535);
+        assert_eq!(
+            result,
+            PacketLossResult::Reordered {
+                seq: 65535,
+                expected: 1
+            },
+            "delayed pre-wrap packet must not be read as a gap: {:?}",
+            result
+        );
+
+        let stats = tracker.get_stats();
+        assert_eq!(
+            stats.packets_lost, 0,
+            "no packets were actually lost, only reordered"
+        );
+    }
+
+    #[test]
+    fn duplicate_packet_after_wrap_is_still_a_duplicate() {
+        let mut tracker = PacketLossTracker::new();
+
+        tracker.process(65534);
+        tracker.process(65535);
+        tracker.process(0);
+
+        // Immediate repeat of the most recent post-wrap sequence number.
+        assert_eq!(
+            tracker.process(0),
+            PacketLossResult::Duplicate { seq: 0 }
+        );
+
+        let stats = tracker.get_stats();
+        assert_eq!(stats.duplicates, 1);
+        assert_eq!(stats.packets_lost, 0);
+    }
+
+    #[test]
+    fn genuine_gap_spanning_the_wrap_boundary_is_still_counted_as_loss() {
+        let mut tracker = PacketLossTracker::new();
+
+        tracker.process(65530);
+        // Skips 65531..=65535, 0, 1, 2 (8 packets) across the wrap boundary.
+        let result = tracker.process(3);
+
+        assert_eq!(
+            result,
+            PacketLossResult::Gap {
+                seq: 3,
+                expected: 65531,
+                lost: 8
+            },
+            "a real gap crossing the wrap boundary must still be counted: {:?}",
+            result
+        );
+
+        let stats = tracker.get_stats();
+        assert_eq!(stats.packets_lost, 8);
+        assert_eq!(tracker.cycles, 1);
     }
 }
