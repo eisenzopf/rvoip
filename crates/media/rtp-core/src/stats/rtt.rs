@@ -79,12 +79,15 @@ impl RttEstimator {
         }
 
         // Find the corresponding SR record
-        // We need to match the NTP timestamp from our sent SRs with the one in the receiver report
-        // The last_sr in the receiver report contains the middle 16 bits of the NTP timestamp seconds
+        // We need to match the NTP timestamp from our sent SRs with the one in the receiver report.
+        // Per RFC 3550 section 6.4.1, `last_sr` (LSR) is the middle 32 bits of the 64-bit NTP
+        // timestamp: the low 16 bits of the seconds field followed by the high 16 bits of the
+        // fraction field. `NtpTimestamp::to_u32()` already implements exactly this conversion, so
+        // reuse it here instead of re-deriving (and getting wrong) the same bit slicing.
         let sr_record = self
             .sr_timestamps
             .iter()
-            .find(|(s, ntp, _)| *s == ssrc && ((ntp.seconds >> 16) as u32) == last_sr);
+            .find(|(s, ntp, _)| *s == ssrc && ntp.to_u32() == last_sr);
 
         if let Some((_, _, sent_time)) = sr_record {
             // Calculate RTT
@@ -221,9 +224,7 @@ mod tests {
     fn test_rtt_calculation() {
         let mut estimator = RttEstimator::new();
 
-        // Record an SR sent with NTP timestamp
-        // The NTP timestamp has seconds in the upper 32 bits, which we'll set to 0xabcd0000
-        // In the receiver report, last_sr would be the middle 16 bits, which is 0xabcd
+        // Record an SR sent with an arbitrary NTP timestamp.
         let ssrc = 0x12345678;
         let ntp = NtpTimestamp {
             seconds: 0xabcd0000,
@@ -234,9 +235,10 @@ mod tests {
         // Wait a bit to simulate network delay
         std::thread::sleep(Duration::from_millis(50));
 
-        // Process a receiver report
-        // The last_sr field in a receiver report is the middle 16 bits of NTP timestamp seconds
-        let last_sr = 0xabcd;
+        // Process a receiver report. Per RFC 3550 section 6.4.1, `last_sr` is the
+        // middle 32 bits of the NTP timestamp: low 16 bits of `seconds` followed by
+        // high 16 bits of `fraction`, exactly what `NtpTimestamp::to_u32()` computes.
+        let last_sr = ntp.to_u32();
         let delay = (0.01 * 65536.0) as u32; // 10ms delay, in Q16 format
 
         let rtt = estimator.process_receiver_report(ssrc, last_sr, delay);
@@ -263,10 +265,12 @@ mod tests {
         // Simulate several measurements
         for i in 0..5 {
             let ssrc = 0x12345678;
-            // Create an NTP timestamp where the middle 16 bits of the seconds will be 0xabcd + i
+            // Vary the low 16 bits of `seconds` per iteration so each SR maps to a
+            // distinct `to_u32()` value (the middle 32 bits of the NTP timestamp),
+            // the same way a real sender's NTP clock advances between SRs.
             let ntp = NtpTimestamp {
-                seconds: ((0xabcd + i) << 16),
-                fraction: 0x12345678,
+                seconds: 0xabcd + i,
+                fraction: 0x1234_0000,
             };
             estimator.record_sr_sent(ssrc, ntp);
 
@@ -274,8 +278,7 @@ mod tests {
             let delay_ms = 50 + (i * 10); // 50, 60, 70, 80, 90 ms
             std::thread::sleep(Duration::from_millis(delay_ms.into()));
 
-            // The last_sr field in a receiver report is the middle 16 bits of NTP timestamp seconds
-            let last_sr = (0xabcd + i) as u32;
+            let last_sr = ntp.to_u32();
             let delay = (0.01 * 65536.0) as u32; // 10ms delay
 
             let rtt = estimator.process_receiver_report(ssrc, last_sr, delay);
@@ -288,5 +291,35 @@ mod tests {
         // Check stats
         let stats = estimator.get_stats();
         assert!(stats.max_rtt_ms > stats.min_rtt_ms);
+    }
+
+    /// Regression test for the last_sr comparison bug: `process_receiver_report`
+    /// used to compare `last_sr` against `ntp.seconds >> 16`, which drops the NTP
+    /// fraction entirely and does not match RFC 3550's definition of LSR (the
+    /// middle 32 bits of the 64-bit NTP timestamp). These exact seconds/fraction
+    /// values were the reproduction case that exposed it: the buggy comparison
+    /// produces 0x00000000 here, which never matches `last_sr = 0x12345678`, so
+    /// the SR record was never found and RTT was never calculated.
+    #[test]
+    fn last_sr_matches_ntp_middle_32_bits_not_seconds_shifted_by_16() {
+        let mut estimator = RttEstimator::new();
+
+        let ssrc = 0xdead_beef;
+        let ntp = NtpTimestamp {
+            seconds: 0x0000_1234,
+            fraction: 0x5678_0000,
+        };
+        assert_eq!(ntp.to_u32(), 0x1234_5678);
+
+        estimator.record_sr_sent(ssrc, ntp);
+        std::thread::sleep(Duration::from_millis(10));
+
+        let last_sr = 0x1234_5678;
+        let rtt = estimator.process_receiver_report(ssrc, last_sr, 0);
+
+        assert!(
+            rtt.is_some(),
+            "SR record must be found via ntp.to_u32(), not ntp.seconds >> 16"
+        );
     }
 }
