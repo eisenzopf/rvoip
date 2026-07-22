@@ -8,20 +8,33 @@ use super::header::RtpHeader;
 use crate::error::Error;
 use crate::{Result, RtpSequenceNumber, RtpSsrc, RtpTimestamp};
 
-/// Given the bytes available after the RTP header and, if `header.padding`
-/// is set, the last of those bytes (RFC 3550 section 5.1's padding octet
-/// count), returns how many of those bytes are actual payload.
+/// Given the full packet bytes and the size of the RTP header already
+/// parsed out of them, returns how many of the remaining bytes are actual
+/// payload, accounting for RTP padding (RFC 3550 section 5.1).
 ///
-/// When `header.padding` is false this is just `raw_len`. When it's true,
-/// the last octet gives the padding length (itself included in that
-/// count), which must be nonzero and must not exceed the bytes available,
-/// or the packet is malformed.
-fn payload_len_without_padding(header: &RtpHeader, raw_len: usize, last_byte: u8) -> Result<usize> {
+/// When `header.padding` is false, this is just every byte after the
+/// header. When it's true, at least one byte must follow the header: the
+/// padding octet count, which is itself included in that count, must be
+/// nonzero, and must not exceed the bytes available. A packet with P=1 and
+/// nothing after the header, or a header.padding value that doesn't
+/// satisfy those constraints, is malformed.
+fn payload_len_without_padding(
+    header: &RtpHeader,
+    data: &[u8],
+    header_size: usize,
+) -> Result<usize> {
+    let raw_len = data.len().saturating_sub(header_size);
     if !header.padding {
         return Ok(raw_len);
     }
 
-    let padding_len = last_byte as usize;
+    if raw_len == 0 {
+        return Err(Error::InvalidPacket(
+            "RTP padding bit set but no bytes follow the header".to_string(),
+        ));
+    }
+
+    let padding_len = data[data.len() - 1] as usize;
     if padding_len == 0 {
         return Err(Error::InvalidPacket(
             "RTP padding bit set but padding octet count is zero".to_string(),
@@ -83,17 +96,9 @@ impl RtpPacket {
         debug!("Parsed header of size {}", header_size);
 
         // Extract the payload
-        let payload = if data.len() > header_size {
-            let payload_len = payload_len_without_padding(
-                &header,
-                data.len() - header_size,
-                data[data.len() - 1],
-            )?;
-            header.padding = false; // payload below has padding stripped, so the header should say so
-            Bytes::copy_from_slice(&data[header_size..header_size + payload_len])
-        } else {
-            Bytes::new()
-        };
+        let payload_len = payload_len_without_padding(&header, data, header_size)?;
+        header.padding = false; // payload below has any padding stripped, so the header should say so
+        let payload = Bytes::copy_from_slice(&data[header_size..header_size + payload_len]);
         debug!("Extracted payload of size {}", payload.len());
 
         Ok(Self { header, payload })
@@ -109,17 +114,9 @@ impl RtpPacket {
 
         // Zero-copy slice: `Bytes::slice` only bumps the underlying
         // refcount, no allocation.
-        let payload = if data.len() > header_size {
-            let payload_len = payload_len_without_padding(
-                &header,
-                data.len() - header_size,
-                data[data.len() - 1],
-            )?;
-            header.padding = false; // payload below has padding stripped, so the header should say so
-            data.slice(header_size..header_size + payload_len)
-        } else {
-            Bytes::new()
-        };
+        let payload_len = payload_len_without_padding(&header, &data, header_size)?;
+        header.padding = false; // payload below has any padding stripped, so the header should say so
+        let payload = data.slice(header_size..header_size + payload_len);
         debug!("Sliced payload of size {}", payload.len());
 
         Ok(Self { header, payload })
@@ -355,6 +352,21 @@ mod tests {
 
         assert!(RtpPacket::parse(&raw).is_err());
         assert!(RtpPacket::parse_from_bytes(raw).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_padding_bit_without_padding_count_octet() {
+        // P=1 requires at least one byte after the header (the padding
+        // count, itself included). A packet that ends exactly at the
+        // header boundary with P=1 is malformed, not a valid empty payload.
+        let mut header = plain_header();
+        header.padding = true;
+
+        let mut raw = BytesMut::new();
+        header.serialize(&mut raw).unwrap();
+
+        assert!(RtpPacket::parse(&raw).is_err());
+        assert!(RtpPacket::parse_from_bytes(raw.freeze()).is_err());
     }
 
     #[test]
