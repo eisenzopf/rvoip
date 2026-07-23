@@ -86,12 +86,6 @@ required-features = ["ice"]
 name = "stream_peer_ice_bob"
 path = "examples/stream_peer/07_ice/bob.rs"
 required-features = ["ice"]
-[[example]]
-name = "stream_peer_sdes_srtp_alice"
-path = "examples/stream_peer/08_sdes_srtp/alice.rs"
-[[example]]
-name = "stream_peer_sdes_srtp_bob"
-path = "examples/stream_peer/08_sdes_srtp/bob.rs"
 
 # CallbackPeer examples (reactive server API)
 [[example]]
