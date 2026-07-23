@@ -43,6 +43,8 @@ use crate::relay::controller::codec_fallback::CodecFallbackManager;
 use crate::types::conference::{ConferenceMixingConfig, ConferenceMixingEvent};
 use crate::types::{AudioFrame, DialogId, MediaDirection, MediaSessionId};
 
+#[cfg(feature = "ice")]
+use rvoip_nat_core as nat_core;
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::transport::{
     AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
@@ -1090,6 +1092,121 @@ impl MediaSessionController {
         info!("Installed DTLS-SRTP contexts on dialog {}", dialog_id);
 
         Ok(result)
+    }
+
+    /// Create a real ICE (RFC 8445) agent bound to a dialog's shared RTP
+    /// socket and start pumping the socket's demuxed STUN datagrams into
+    /// it — the ICE equivalent of [`Self::run_dtls_handshake_and_install`]'s
+    /// scope: this is the one step that needs the live transport, so it
+    /// lives here rather than in `rvoip-sip` directly.
+    ///
+    /// `ip_filter`, when set, restricts host candidate gathering to IP
+    /// addresses it accepts — the caller passes one derived from
+    /// `Config::local_ip` when that's a concrete (non-unspecified)
+    /// address, so an operator who explicitly bound to one interface
+    /// doesn't have unrelated interfaces' addresses advertised to peers.
+    ///
+    /// The returned agent is otherwise driven entirely by its own public
+    /// API (`gather_candidates`, `add_remote_candidate`, `connect`) —
+    /// none of those need the transport, so the caller (`rvoip-sip`'s
+    /// `MediaAdapter`) calls them directly rather than routing back
+    /// through this controller, mirroring how DTLS identity generation
+    /// (`rtp_core::dtls_srtp::generate_identity`) is also called directly
+    /// by `rvoip-sip` rather than through a controller method.
+    #[cfg(feature = "ice")]
+    pub async fn create_ice_agent(
+        &self,
+        dialog_id: &DialogId,
+        role: nat_core::IceRole,
+        stun_servers: Vec<String>,
+        ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    ) -> Result<Arc<nat_core::IceAgent>> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let (socket_adapter, mut stun_rx) = {
+            let session_guard = session_arc.lock().await;
+            let transport = session_guard.transport();
+            let udp_transport = transport
+                .as_any()
+                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+                .ok_or_else(|| {
+                    Error::config(
+                        "create_ice_agent: RTP session is not a UdpRtpTransport".to_string(),
+                    )
+                })?;
+            (
+                udp_transport.ice_conn_adapter(),
+                udp_transport.subscribe_stun_datagrams(),
+            )
+        };
+
+        let agent = Arc::new(
+            nat_core::IceAgent::new_with_shared_socket_and_ip_filter(
+                role,
+                &stun_servers,
+                socket_adapter,
+                ip_filter,
+            )
+            .await
+            .map_err(|e| Error::config(format!("create_ice_agent: {e}")))?,
+        );
+
+        // Feed inbound STUN datagrams the transport's own demux loop
+        // has already classified into the agent for the life of the
+        // dialog's socket — same "pump a channel into the agent"
+        // pattern `ice_transport_bridge_test.rs` proves works, just
+        // driven from inside the controller instead of a test body.
+        let pump_agent = agent.clone();
+        tokio::spawn(async move {
+            while let Some((buf, addr)) = stun_rx.recv().await {
+                pump_agent.handle_incoming_stun(&buf, addr).await;
+            }
+        });
+
+        info!(
+            "Created ICE agent (role {:?}) for dialog {}",
+            role, dialog_id
+        );
+        Ok(agent)
+    }
+
+    /// Override a dialog's RTP remote address with an ICE-selected
+    /// candidate pair, once [`nat_core::IceAgent::connect`] resolves.
+    /// Safe to call after [`Self::establish_media_flow`] has already set
+    /// the SDP-derived address — same idempotent re-call pattern
+    /// [`Self::run_dtls_handshake_and_install`] already relies on.
+    #[cfg(feature = "ice")]
+    pub async fn update_ice_selected_addr(
+        &self,
+        dialog_id: &DialogId,
+        addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "update_ice_selected_addr: RTP session is not a UdpRtpTransport".to_string(),
+                )
+            })?;
+        udp_transport.set_remote_rtp_addr(addr).await;
+        info!(
+            "ICE selected address {} applied to dialog {}",
+            addr, dialog_id
+        );
+        Ok(())
     }
 
     fn cleanup_per_dialog_side_state(&self, dialog_id: &DialogId) {
