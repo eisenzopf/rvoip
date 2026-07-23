@@ -2375,6 +2375,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
+                | Event::IceConnected { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. }
                 // SIP_API_DESIGN_2 Phase A: detailed-response events are
@@ -2873,6 +2874,10 @@ mod tests {
                 profile: MediaSecurityProfile::RtpSavp,
                 contexts_installed: true,
             },
+            Event::IceConnected {
+                call_id: call_id.clone(),
+                selected_addr: "127.0.0.1:5000".parse().unwrap(),
+            },
             Event::ReferReceived {
                 call_id: call_id.clone(),
                 refer_to: "sip:c@example.test".into(),
@@ -2974,7 +2979,7 @@ mod tests {
             seen.iter()
                 .filter(|value| value.as_str() == "event")
                 .count(),
-            25
+            26
         );
         assert_eq!(
             seen.iter()

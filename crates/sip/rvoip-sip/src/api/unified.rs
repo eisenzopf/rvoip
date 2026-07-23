@@ -668,14 +668,36 @@ pub struct Config {
     /// [`Config::local_ip`]. This is best-effort address discovery: it is
     /// useful for simple cone-NAT labs, but it does not guarantee the exact
     /// mapping of a later per-call RTP socket. Symmetric NATs and production
-    /// Internet edges should use a static [`Config::media_public_addr`] today
-    /// or ICE in a future WebRTC/edge layer. Failure mode: probe timeout /
+    /// Internet edges should use a static [`Config::media_public_addr`] or
+    /// [`Config::enable_ice`]. Failure mode: probe timeout /
     /// unreachable / unparseable response → log a warning and fall back to
     /// the local interface address. STUN is intentionally soft-fail — the
     /// call path is never blocked on it.
     ///
+    /// Also used as the STUN server list for [`Config::enable_ice`]'s
+    /// per-call `IceAgent`s, when set — server-reflexive candidate
+    /// gathering needs a STUN server the same way the boot-time probe
+    /// does.
+    ///
     /// Default: `None` — no probe runs (today's behaviour).
     pub stun_server: Option<String>,
+
+    /// Enable real ICE (RFC 8445) connectivity checks per call: gather
+    /// host/server-reflexive candidates, advertise `a=ice-ufrag`/
+    /// `a=ice-pwd`/`a=candidate` in SDP, run connectivity checks against
+    /// the peer's candidates (requires the `ice` feature; a no-op
+    /// without it), and override the RTP remote address with the
+    /// winning pair once found. Orthogonal to [`Config::srtp_keying`] —
+    /// combine with SDES or DTLS-SRTP freely. Call setup and audio flow
+    /// are never gated on ICE completing; see
+    /// [`crate::api::events::Event::IceConnected`].
+    ///
+    /// Requires [`Config::media_mode`] to be [`MediaMode::Enabled`] —
+    /// ICE needs a live RTP socket to bind to. `Config::validate`
+    /// rejects `enable_ice = true` with `MediaMode::SignalingOnly`.
+    ///
+    /// Default: `false`.
+    pub enable_ice: bool,
 
     /// RFC 3389 Comfort Noise (PT 13) advertisement.
     ///
@@ -1124,6 +1146,7 @@ impl Config {
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
+            enable_ice: false,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
@@ -1238,6 +1261,7 @@ impl Config {
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
+            enable_ice: false,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
@@ -2553,6 +2577,13 @@ impl Config {
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
             ));
         }
+        if self.enable_ice && matches!(self.media_mode, MediaMode::SignalingOnly { .. }) {
+            return Err(SessionError::ConfigError(
+                "enable_ice=true requires MediaMode::Enabled — ICE needs a live RTP socket \
+                 to bind to, which MediaMode::SignalingOnly doesn't allocate"
+                    .to_string(),
+            ));
+        }
         if matches!(
             effective_tls_mode,
             SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
@@ -3839,6 +3870,10 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_dtls_srtp_policy(
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
+        // RFC 8445 ICE: gather candidates and run connectivity checks
+        // when configured. No-op without the `ice` feature. Reuses
+        // `Config::stun_server` for server-reflexive candidates.
+        media_adapter_inner.set_ice_policy(config.enable_ice, config.stun_server.clone());
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
