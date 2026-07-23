@@ -8,13 +8,11 @@ a standalone Cargo project with its own README and (for multi-process demos) a
 ## Beta scope
 
 Examples 01-10 target **`rvoip-sip`, the beta-candidate crate** — the only crate
-in the workspace under the beta contract. Examples 11-15 are explicitly
+in the workspace under the beta contract. Examples 11-14 are explicitly
 experimental: 11 demonstrates the in-process AI harness path, 12 proves a
-cross-transport customer escalation workflow using WebRTC plus SIP, 14
+cross-transport customer escalation workflow using WebRTC plus SIP, and 14
 exercises real ICE (RFC 8445) behind rvoip-sip's off-by-default `ice`
-feature and the alpha-tier `rvoip-nat-core` crate, and 15 exercises real
-DTLS-SRTP (RFC 5763/5764) behind the off-by-default `dtls-srtp` feature —
-contrast with 07's beta SDES-SRTP.
+feature and the alpha-tier `rvoip-nat-core` crate.
 
 Beta media defaults to **PCMU/PCMA**; **G.729A/G.729AB** is optional and not
 exercised by these examples. Transports are **UDP** (interop-tested) and
@@ -47,7 +45,6 @@ truth is
 | 11 | [ai-harness-demo](11-ai-harness-demo/) | Fake ASR/TTS/dialog + vCon evidence | `rvoip-harness` | `cargo run` |
 | 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
 | 14 | [ice-nat-traversal](14-ice-nat-traversal/) | Real RFC 8445 ICE connectivity check | `Config::enable_ice` (`ice` feature) | `./run_demo.sh` |
-| 15 | [secure-call-dtls-srtp](15-secure-call-dtls-srtp/) | DTLS-SRTP handshake, keys derived off the wire | `Config` SRTP (`dtls-srtp` feature) | `./run_demo.sh` |
 
 ## Conventions
 
