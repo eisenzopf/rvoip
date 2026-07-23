@@ -83,26 +83,6 @@ fn to_ice_candidate(c: &Arc<dyn Candidate + Send + Sync>) -> Result<IceCandidate
     })
 }
 
-/// RFC 8839 §5.1 wire text for one candidate, without the leading
-/// `a=candidate:` attribute prefix — the same shape `unmarshal_candidate`
-/// (below) expects to parse back.
-fn to_wire_string(c: &IceCandidate) -> String {
-    let mut s = format!(
-        "{} {} {} {} {} {} typ {}",
-        c.foundation,
-        c.component,
-        c.transport,
-        c.priority,
-        c.address,
-        c.port,
-        c.kind.as_str()
-    );
-    if let (Some(addr), Some(port)) = (c.related_address, c.related_port) {
-        s.push_str(&format!(" raddr {addr} rport {port}"));
-    }
-    s
-}
-
 fn parse_stun_servers(stun_servers: &[String]) -> Result<(Vec<Url>, Vec<CandidateType>)> {
     let urls = stun_servers
         .iter()
@@ -272,7 +252,7 @@ impl IceAgent {
     /// Feed in one of the peer's candidates (parsed from its SDP
     /// `a=candidate:` line).
     pub fn add_remote_candidate(&self, candidate: &IceCandidate) -> Result<()> {
-        let parsed = unmarshal_candidate(&to_wire_string(candidate))
+        let parsed = unmarshal_candidate(&candidate.to_sdp_line())
             .map_err(|e| Error::InvalidCandidate(e.to_string()))?;
         let arc: Arc<dyn Candidate + Send + Sync> = Arc::new(parsed);
         self.inner.add_remote_candidate(&arc)?;
