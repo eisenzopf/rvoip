@@ -8,14 +8,18 @@ a standalone Cargo project with its own README and (for multi-process demos) a
 ## Beta scope
 
 Examples 01-10 target **`rvoip-sip`, the beta-candidate crate** — the only crate
-in the workspace under the beta contract. Examples 11-12 are explicitly
-experimental: 11 demonstrates the in-process AI harness path, and 12 proves a
-cross-transport customer escalation workflow using WebRTC plus SIP.
+in the workspace under the beta contract. Examples 11-14 are explicitly
+experimental: 11 demonstrates the in-process AI harness path, 12 proves a
+cross-transport customer escalation workflow using WebRTC plus SIP, and 14
+exercises real ICE (RFC 8445) behind rvoip-sip's off-by-default `ice`
+feature and the alpha-tier `rvoip-nat-core` crate.
 
 Beta media defaults to **PCMU/PCMA**; **G.729A/G.729AB** is optional and not
 exercised by these examples. Transports are **UDP** (interop-tested) and
 **TCP/TLS** (supported); **SDES-SRTP** has limited-suite support. **Opus/G.722,
-DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
+DTLS-SRTP, and WebRTC are post-beta**; **ICE (RFC 8445, host + server-reflexive
+only, no TURN)** is real but experimental — see example 14. The source of
+truth is
 [`crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`](../crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md).
 
 ## Recommended path
@@ -40,6 +44,7 @@ DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 | 10 | [call-center-b2bua](10-call-center-b2bua/) | B2BUA bridge + routing | `UnifiedCoordinator` + `server::b2bua` | `./run_demo.sh` |
 | 11 | [ai-harness-demo](11-ai-harness-demo/) | Fake ASR/TTS/dialog + vCon evidence | `rvoip-harness` | `cargo run` |
 | 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
+| 14 | [ice-nat-traversal](14-ice-nat-traversal/) | Real RFC 8445 ICE connectivity check | `Config::enable_ice` (`ice` feature) | `./run_demo.sh` |
 
 ## Conventions
 
