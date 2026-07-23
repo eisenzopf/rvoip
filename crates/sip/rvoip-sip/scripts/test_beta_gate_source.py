@@ -209,7 +209,7 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
 
     def test_one_retention_wait_is_exported_to_every_monolithic_target(self) -> None:
         self.assertIn(
-            'RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-120}"',
+            'RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}"',
             BETA_GATE,
         )
         self.assertIn("export RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS", BETA_GATE)

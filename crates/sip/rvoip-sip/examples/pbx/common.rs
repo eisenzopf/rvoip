@@ -61,6 +61,12 @@ pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
+// The caller controls call teardown from its local receive count, while the
+// peer's recorder can trail it by several codec frames during PBX transcoding
+// and TLS/SRTP scheduling. Capture another half-second before BYE so both
+// independently recorded directions satisfy the unchanged evidence floor.
+pub const G729_CALLER_CAPTURE_TARGET_SAMPLES: usize =
+    MIN_RECEIVED_SAMPLES + SAMPLE_RATE as usize / 2;
 pub const TONE_ANALYSIS_WINDOW_SAMPLES: usize = FRAME_SIZE * 10;
 pub const HOLD_RESUME_PRE_HOLD_FRAMES: usize = 100;
 pub const HOLD_RESUME_HELD_FRAMES: usize = 50;
@@ -2091,7 +2097,7 @@ async fn run_g729_caller(
         start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), G729_FRAME_SIZE)
             .await?;
     if let Err(error) = recorder
-        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(15))
+        .wait_for_received_samples(G729_CALLER_CAPTURE_TARGET_SAMPLES, Duration::from_secs(15))
         .await
     {
         handle
@@ -4537,6 +4543,13 @@ mod tests {
                 (nominal + rejected).round() as i16
             })
             .collect()
+    }
+
+    #[test]
+    fn g729_caller_capture_target_preserves_analyzer_floor_with_frame_margin() {
+        assert!(G729_CALLER_CAPTURE_TARGET_SAMPLES > MIN_RECEIVED_SAMPLES);
+        assert_eq!(G729_CALLER_CAPTURE_TARGET_SAMPLES % G729_FRAME_SIZE, 0);
+        assert!(G729_CALLER_CAPTURE_TARGET_SAMPLES - MIN_RECEIVED_SAMPLES >= G729_FRAME_SIZE * 4);
     }
 
     #[test]
