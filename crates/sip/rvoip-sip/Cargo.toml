@@ -366,6 +366,12 @@ rvoip-media-core.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-core-traits.workspace = true
+# Real ICE (RFC 8445) agent, behind the `ice` feature — used directly by
+# `adapters::media_adapter` for the steps that don't need the live
+# transport (gathering candidates, feeding remote candidates, running
+# connectivity checks), same as `rvoip_rtp_core::dtls_srtp` is used
+# directly for DTLS identity generation.
+rvoip-nat-core = { workspace = true, optional = true, features = ["ice"] }
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.22"
 rvoip-auth-core.workspace = true
@@ -467,6 +473,10 @@ g729 = ["rvoip-media-core/g729"]
 # Forwards to rvoip-media-core's and rvoip-rtp-core's matching features.
 # Off by default.
 dtls-srtp = ["rvoip-media-core/dtls-srtp", "rvoip-rtp-core/dtls-webrtc"]
+# Real ICE (RFC 8445) connectivity checks: a=ice-ufrag/a=ice-pwd/a=candidate
+# SDP handling and a live webrtc-ice agent bridged over the shared RTP
+# socket. Orthogonal to `dtls-srtp` — combine freely. Off by default.
+ice = ["rvoip-media-core/ice", "rvoip-rtp-core/ice", "dep:rvoip-nat-core"]
 # Heap profiling for `examples/profiling/dhat_*.rs`. Pulls in the dhat
 # global allocator and turns the gated examples into compilable
 # binaries. Off by default so `cargo build` / `cargo test` never see

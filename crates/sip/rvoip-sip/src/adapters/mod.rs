@@ -1,6 +1,8 @@
 // Adapters for dialog and media integration
 pub mod dialog_adapter;
 pub mod dtls_negotiator;
+#[cfg(feature = "ice")]
+pub mod ice_negotiator;
 pub mod media_adapter;
 pub mod registration_adapter;
 pub mod session_api_event;

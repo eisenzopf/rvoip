@@ -615,6 +615,17 @@ pub enum Event {
         contexts_installed: bool,
     },
 
+    /// RFC 8445 ICE connectivity check completed and the dialog's RTP
+    /// remote address has been overridden with the selected candidate
+    /// pair. Fired independently of call setup — media flow is never
+    /// gated on ICE completing.
+    IceConnected {
+        /// Session identifier for the connected media stream.
+        call_id: CallId,
+        /// The winning candidate pair's remote address.
+        selected_addr: std::net::SocketAddr,
+    },
+
     // ===== Registration Events =====
     /// Registration successful.
     ///
@@ -710,6 +721,7 @@ impl Event {
             | Event::DtmfReceived { call_id, .. }
             | Event::MediaQualityChanged { call_id, .. }
             | Event::MediaSecurityNegotiated { call_id, .. }
+            | Event::IceConnected { call_id, .. }
             | Event::NotifyReceived { call_id, .. }
             | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferTargetAnswered {
@@ -801,6 +813,7 @@ impl Event {
             Event::DtmfReceived { .. }
                 | Event::MediaQualityChanged { .. }
                 | Event::MediaSecurityNegotiated { .. }
+                | Event::IceConnected { .. }
         )
     }
 

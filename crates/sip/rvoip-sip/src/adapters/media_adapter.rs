@@ -6,6 +6,8 @@
 #[cfg(feature = "dtls-srtp")]
 use crate::adapters::dtls_negotiator::detect_dtls_offer;
 use crate::adapters::dtls_negotiator::SetupRole;
+#[cfg(feature = "ice")]
+use crate::adapters::ice_negotiator::detect_ice_offer;
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
@@ -541,6 +543,30 @@ pub struct MediaAdapter {
     #[cfg(feature = "dtls-srtp")]
     pending_dtls_identities: Arc<DashMap<SessionId, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
 
+    // ==== RFC 8445 ICE state ====
+    /// Whether to gather candidates and advertise `a=ice-ufrag`/
+    /// `a=ice-pwd`/`a=candidate` on outgoing offers and answers.
+    /// Orthogonal to SDES/DTLS-SRTP keying — combine freely. Requires
+    /// the `ice` feature; with it off this is inert.
+    enable_ice: bool,
+
+    /// STUN server(s) (`stun:host:port` URLs) passed to every `IceAgent`
+    /// this session creates, for server-reflexive candidate gathering.
+    /// Populated from [`crate::api::unified::Config::stun_server`] —
+    /// the same single knob already used for the boot-time public-addr
+    /// probe.
+    ice_stun_servers: Vec<String>,
+
+    /// The `IceAgent` created for this session's offer (UAC) or answer
+    /// (UAS), held for the life of the call so `connect()` can be
+    /// spawned once the peer's credentials/candidates are known and so
+    /// the agent isn't dropped (which would tear down its STUN pump)
+    /// while connectivity checks are still running. Unlike
+    /// `pending_dtls_identities`, this is not removed once handed off —
+    /// only on `cleanup_session`.
+    #[cfg(feature = "ice")]
+    pending_ice_agents: Arc<DashMap<SessionId, Arc<rvoip_nat_core::IceAgent>>>,
+
     /// Global event coordinator for publishing RFC 4733 DTMF events
     /// onto the rvoip-sip API event bus. Populated at boot via
     /// [`Self::set_global_coordinator`]; `None` in tests that bypass
@@ -637,6 +663,10 @@ impl MediaAdapter {
             offer_dtls_srtp: false,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
+            enable_ice: false,
+            ice_stun_servers: Vec::new(),
+            #[cfg(feature = "ice")]
+            pending_ice_agents: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
             public_rtp_addr: std::sync::RwLock::new(None),
@@ -907,6 +937,289 @@ impl MediaAdapter {
         None
     }
 
+    /// Configure the ICE (RFC 8445) policy. Called by `UnifiedCoordinator`
+    /// from [`Config`](crate::api::unified::Config)'s `enable_ice` /
+    /// `stun_server`. Orthogonal to SDES/DTLS-SRTP keying.
+    pub fn set_ice_policy(&mut self, enable_ice: bool, stun_server: Option<String>) {
+        self.enable_ice = enable_ice;
+        self.ice_stun_servers = stun_server.into_iter().collect();
+    }
+
+    /// Host-candidate IP filter derived from `local_ip`: when it's a
+    /// concrete (non-unspecified) address, ICE only gathers candidates
+    /// matching it, so an operator who explicitly bound to one
+    /// interface (e.g. `Config::local_ip`) doesn't have unrelated
+    /// interfaces' addresses advertised to peers. `None` (gather every
+    /// interface) when `local_ip` is `0.0.0.0`/`::`.
+    #[cfg(feature = "ice")]
+    fn ice_ip_filter(&self) -> Option<Arc<dyn Fn(IpAddr) -> bool + Send + Sync>> {
+        if self.local_ip.is_unspecified() {
+            None
+        } else {
+            let local_ip = self.local_ip;
+            Some(Arc::new(move |ip: IpAddr| ip == local_ip)
+                as Arc<dyn Fn(IpAddr) -> bool + Send + Sync>)
+        }
+    }
+
+    /// UAC offer side: if ICE is our policy, create a `Controlling`-role
+    /// `IceAgent` bound to this session's shared RTP socket, gather our
+    /// host/server-reflexive candidates, and stash the agent (consumed
+    /// later by [`Self::maybe_complete_ice_as_uac`] once the answer's
+    /// credentials/candidates are known). Returns `(ufrag, pwd,
+    /// candidates)` for the outgoing offer's `a=ice-ufrag`/`a=ice-pwd`/
+    /// `a=candidate` lines. `None` when ICE isn't our policy or agent
+    /// creation/gathering fails — logged, not fatal, same tolerance
+    /// `dtls_offer_identity` gives a failed identity generation.
+    #[cfg(feature = "ice")]
+    async fn ice_offer_agent(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+    ) -> Option<(String, String, Vec<rvoip_nat_core::IceCandidate>)> {
+        if !self.enable_ice {
+            return None;
+        }
+        let agent = match self
+            .controller
+            .create_ice_agent(
+                dialog_id,
+                rvoip_nat_core::IceRole::Controlling,
+                self.ice_stun_servers.clone(),
+                self.ice_ip_filter(),
+            )
+            .await
+        {
+            Ok(agent) => agent,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create ICE agent for session {} (UAC): {}",
+                    session_id.0,
+                    e
+                );
+                return None;
+            }
+        };
+        let candidates = match agent.gather_candidates().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to gather ICE candidates for session {} (UAC): {}",
+                    session_id.0,
+                    e
+                );
+                return None;
+            }
+        };
+        let (ufrag, pwd) = agent.local_credentials().await;
+        self.pending_ice_agents.insert(session_id.clone(), agent);
+        Some((ufrag, pwd, candidates))
+    }
+
+    /// UAS answer side: given the offer's already-detected ICE
+    /// credentials/candidates ([`ice_negotiator::detect_ice_offer`]),
+    /// create a `Controlled`-role `IceAgent` bound to this session's
+    /// shared RTP socket, gather our own candidates, feed in the peer's,
+    /// spawn the connectivity check in the background (see
+    /// [`Self::spawn_ice_connect`] for why it can't run inline), and
+    /// return our own `(ufrag, pwd, candidates)` for the answer's
+    /// `a=ice-ufrag`/`a=ice-pwd`/`a=candidate` lines.
+    #[cfg(feature = "ice")]
+    async fn ice_answer_agent(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+        peer_offer: &crate::adapters::ice_negotiator::IceOffer,
+    ) -> Option<(String, String, Vec<rvoip_nat_core::IceCandidate>)> {
+        let agent = match self
+            .controller
+            .create_ice_agent(
+                dialog_id,
+                rvoip_nat_core::IceRole::Controlled,
+                self.ice_stun_servers.clone(),
+                self.ice_ip_filter(),
+            )
+            .await
+        {
+            Ok(agent) => agent,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create ICE agent for session {} (UAS): {}",
+                    session_id.0,
+                    e
+                );
+                return None;
+            }
+        };
+        let candidates = match agent.gather_candidates().await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to gather ICE candidates for session {} (UAS): {}",
+                    session_id.0,
+                    e
+                );
+                return None;
+            }
+        };
+        for c in &peer_offer.candidates {
+            if let Err(e) = agent.add_remote_candidate(c) {
+                tracing::warn!(
+                    "Failed to add remote ICE candidate for session {} (UAS): {}",
+                    session_id.0,
+                    e
+                );
+            }
+        }
+        let (ufrag, pwd) = agent.local_credentials().await;
+        self.spawn_ice_connect(
+            session_id.clone(),
+            dialog_id.clone(),
+            agent.clone(),
+            peer_offer.ufrag.clone(),
+            peer_offer.pwd.clone(),
+        );
+        self.pending_ice_agents.insert(session_id.clone(), agent);
+        Some((ufrag, pwd, candidates))
+    }
+
+    /// Run an ICE connectivity check in the background and, once it
+    /// resolves, override the dialog's RTP remote address with the
+    /// selected pair and publish [`Event::IceConnected`].
+    ///
+    /// Must NOT be awaited inline: exactly the same deadlock DTLS-SRTP's
+    /// handshake has (see [`Self::spawn_dtls_handshake`]) — the
+    /// controlled side's checks can't succeed until the controlling side
+    /// has started its own, which only happens once both sides have
+    /// sent and received SDP. `IceAgent::connect`'s own doc comment
+    /// states this identically.
+    #[cfg(feature = "ice")]
+    fn spawn_ice_connect(
+        &self,
+        session_id: SessionId,
+        dialog_id: DialogId,
+        agent: Arc<rvoip_nat_core::IceAgent>,
+        remote_ufrag: String,
+        remote_pwd: String,
+    ) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            match agent.connect(remote_ufrag, remote_pwd).await {
+                Ok(selected_addr) => {
+                    if let Err(e) = this
+                        .controller
+                        .update_ice_selected_addr(&dialog_id, selected_addr)
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to apply ICE selected address for session {}: {}",
+                            session_id.0,
+                            e
+                        );
+                        return;
+                    }
+                    tracing::info!(
+                        "ICE connected for session {}: selected address {}",
+                        session_id.0,
+                        selected_addr
+                    );
+                    this.publish_ice_connected(&session_id, selected_addr).await;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "ICE connectivity check failed for session {}: {}",
+                        session_id.0,
+                        e
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "ice")]
+    async fn publish_ice_connected(&self, session_id: &SessionId, selected_addr: SocketAddr) {
+        let event = Event::IceConnected {
+            call_id: session_id.clone(),
+            selected_addr,
+        };
+        if let Some(publisher) = self.app_event_publisher.read().await.clone() {
+            publisher.publish(event);
+        } else if let Some(coordinator) = self.global_coordinator.read().await.clone() {
+            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(event);
+            spawn_memory_tracked("sip.media_adapter.ice_connected_publish_task", async move {
+                if let Err(e) = coordinator.publish(wrapped).await {
+                    tracing::warn!("Failed to publish IceConnected event: {}", e);
+                }
+            });
+        }
+    }
+
+    /// UAC answer side: if we offered ICE and have a pending agent for
+    /// this session, detect the answer's ICE credentials/candidates,
+    /// feed the candidates in, and spawn the connectivity check. No-op
+    /// (not an error) if we didn't offer ICE, or the answer carries no
+    /// `a=ice-ufrag`/`a=ice-pwd` — the call proceeds without ICE, same
+    /// tolerance [`Self::maybe_complete_dtls_as_uac`] gives a non-DTLS
+    /// answer.
+    #[cfg(feature = "ice")]
+    async fn maybe_complete_ice_as_uac(
+        &self,
+        session_id: &SessionId,
+        dialog_id: &DialogId,
+        remote_sdp: &str,
+    ) -> Result<()> {
+        let Some(agent) = self
+            .pending_ice_agents
+            .get(session_id)
+            .map(|e| e.value().clone())
+        else {
+            return Ok(());
+        };
+
+        let parsed = SdpSession::from_str(remote_sdp).map_err(|e| {
+            SessionError::SDPNegotiationFailed(format!(
+                "Failed to parse remote SDP for ICE answer extraction: {}",
+                e
+            ))
+        })?;
+        let Some(answer) = detect_ice_offer(&parsed) else {
+            tracing::warn!(
+                "Session {} offered ICE but the answer carries no \
+                 a=ice-ufrag/a=ice-pwd; proceeding without ICE",
+                session_id.0
+            );
+            return Ok(());
+        };
+
+        for c in &answer.candidates {
+            if let Err(e) = agent.add_remote_candidate(c) {
+                tracing::warn!(
+                    "Failed to add remote ICE candidate for session {} (UAC): {}",
+                    session_id.0,
+                    e
+                );
+            }
+        }
+        self.spawn_ice_connect(
+            session_id.clone(),
+            dialog_id.clone(),
+            agent,
+            answer.ufrag,
+            answer.pwd,
+        );
+        Ok(())
+    }
+
+    #[cfg(not(feature = "ice"))]
+    async fn maybe_complete_ice_as_uac(
+        &self,
+        _session_id: &SessionId,
+        _dialog_id: &DialogId,
+        _remote_sdp: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     // ===== Outbound Actions (from state machine) =====
 
     /// Start a media session
@@ -1080,6 +1393,13 @@ impl MediaAdapter {
             // and install its keys the same way, before any wire packet
             // flows. No-op if we didn't offer DTLS-SRTP for this session.
             self.maybe_complete_dtls_as_uac(session_id, &dialog_id, remote_sdp, remote_addr)
+                .await?;
+
+            // RFC 8445 ICE: feed the answer's candidates in and spawn
+            // the connectivity check (if we offered ICE for this
+            // session). No-op if we didn't, or the answer carries no
+            // ICE attributes.
+            self.maybe_complete_ice_as_uac(session_id, &dialog_id, remote_sdp)
                 .await?;
 
             // Establish media flow (this starts audio transmission)
@@ -1415,6 +1735,20 @@ impl MediaAdapter {
         // `a=crypto` branch below entirely.
         let dtls_answer = self.dtls_answer_role(session_id, &parsed_offer);
 
+        // RFC 8445 ICE: detect the offer's ICE credentials/candidates
+        // now (no live transport needed for this part — same reasoning
+        // `dtls_answer_role` documents for identity generation);
+        // creating our own agent needs `dialog_id`, resolved further
+        // down, so that part is deferred to `ice_answer_agent`.
+        #[cfg(feature = "ice")]
+        let ice_peer_offer = if self.enable_ice {
+            detect_ice_offer(&parsed_offer)
+        } else {
+            None
+        };
+        #[cfg(feature = "ice")]
+        let mut ice_answer: Option<(String, String, Vec<rvoip_nat_core::IceCandidate>)> = None;
+
         let (answer_attr, srtp_pair, reject_with_port_zero) = if dtls_answer.is_some() {
             (None, false, false)
         } else if !offered_crypto.is_empty() && self.offer_srtp {
@@ -1565,6 +1899,17 @@ impl MediaAdapter {
                 .await?;
             }
 
+            // RFC 8445 ICE: create our answering agent now that
+            // `dialog_id` (and thus the live transport) is known, feed
+            // in the offer's candidates, and spawn the connectivity
+            // check. No-op if we didn't detect an ICE offer above.
+            #[cfg(feature = "ice")]
+            if let Some(peer_offer) = &ice_peer_offer {
+                ice_answer = self
+                    .ice_answer_agent(session_id, &dialog_id, peer_offer)
+                    .await;
+            }
+
             self.controller
                 .establish_media_flow(&dialog_id, remote_addr)
                 .await
@@ -1647,6 +1992,13 @@ impl MediaAdapter {
             .formats(&formats_str);
         if let Some((_, our_role, _)) = &dtls_answer {
             media_builder = media_builder.setup(our_role.as_str());
+        }
+        #[cfg(feature = "ice")]
+        if let Some((ufrag, pwd, candidates)) = &ice_answer {
+            media_builder = media_builder.ice_ufrag(ufrag.clone()).ice_pwd(pwd.clone());
+            for c in candidates {
+                media_builder = media_builder.ice_candidate(c.to_sdp_line());
+            }
         }
         // Emit rtpmap/fmtp ONLY for the formats we kept. In the
         // permissive branch this is the full set; in the strict
@@ -2240,6 +2592,13 @@ impl MediaAdapter {
                 ("RTP/AVP".to_string(), Vec::new(), None)
             };
         let crypto_attr_count = crypto_attrs.len();
+
+        // RFC 8445 ICE: independent of the SDES/DTLS-SRTP branch above —
+        // ICE attributes are additive, they don't change the `m=` proto
+        // token. `None` when `enable_ice` is unset or gathering fails.
+        #[cfg(feature = "ice")]
+        let ice_offer = self.ice_offer_agent(session_id, &dialog_id).await;
+
         if sdp_diagnostics_enabled() {
             emit_sdp_diag(format!(
                 "local_sdp_offer session={} media={}:{} transport={} {} direction={}",
@@ -2284,6 +2643,13 @@ impl MediaAdapter {
             // RFC 5763 §5 — the offerer proposes actpass, letting the
             // answerer pick a concrete active/passive role.
             media_builder = media_builder.setup(SetupRole::Actpass.as_str());
+        }
+        #[cfg(feature = "ice")]
+        if let Some((ufrag, pwd, candidates)) = &ice_offer {
+            media_builder = media_builder.ice_ufrag(ufrag.clone()).ice_pwd(pwd.clone());
+            for c in candidates {
+                media_builder = media_builder.ice_candidate(c.to_sdp_line());
+            }
         }
         for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
             if let Some(rtpmap) = rtpmap_for_pt(*pt) {
@@ -2764,6 +3130,8 @@ impl MediaAdapter {
             self.cleanup_audio_receiver_removed_total
                 .fetch_add(1, Ordering::Relaxed);
         }
+        #[cfg(feature = "ice")]
+        self.pending_ice_agents.remove(session_id);
 
         // NEXT_STEPS B diag — bump a process-global counter so the
         // perf_listener example can poll cleanup throughput without
@@ -3147,6 +3515,10 @@ impl Clone for MediaAdapter {
             offer_dtls_srtp: self.offer_dtls_srtp,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
+            enable_ice: self.enable_ice,
+            ice_stun_servers: self.ice_stun_servers.clone(),
+            #[cfg(feature = "ice")]
+            pending_ice_agents: self.pending_ice_agents.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
