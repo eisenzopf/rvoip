@@ -232,6 +232,7 @@ documents are the authoritative source — this table is a summary.
 │  rvoip-core-traits  (✅ beta)  cycle-breaker trait surface    │
 │  rvoip-media-core   (✅ beta)  codec / mixing / MediaStream   │
 │  rvoip-rtp-core     (✅ beta)  RTP / SRTP                     │
+│  rvoip-nat-core     (🚧 alpha) ICE (RFC 8445), optional       │
 │  rvoip-codec-core   (✅ beta)  G.711+G.729A/AB+G.722+Opus opt │
 │  rvoip-auth-core    (✅ beta)  OAuth2 / Bearer / SIP Digest   │
 └──────────────────────────────────────────────────────────────┘
