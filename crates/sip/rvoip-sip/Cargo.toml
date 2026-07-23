@@ -78,6 +78,14 @@ path = "examples/stream_peer/06_concurrent_calls/server.rs"
 [[example]]
 name = "stream_peer_concurrent_calls_client"
 path = "examples/stream_peer/06_concurrent_calls/client.rs"
+[[example]]
+name = "stream_peer_ice_alice"
+path = "examples/stream_peer/07_ice/alice.rs"
+required-features = ["ice"]
+[[example]]
+name = "stream_peer_ice_bob"
+path = "examples/stream_peer/07_ice/bob.rs"
+required-features = ["ice"]
 
 # CallbackPeer examples (reactive server API)
 [[example]]

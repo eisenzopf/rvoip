@@ -48,6 +48,7 @@ and `SIP_TARGET`.
 | `./crates/sip/rvoip-sip/examples/stream_peer/04_registration/run.sh` | Register and unregister through `StreamPeer` |
 | `./crates/sip/rvoip-sip/examples/stream_peer/05_blind_transfer/run.sh` | Three-party blind transfer |
 | `./crates/sip/rvoip-sip/examples/stream_peer/06_concurrent_calls/run.sh` | Multiple concurrent callers |
+| `./crates/sip/rvoip-sip/examples/stream_peer/07_ice/run.sh` | Real RFC 8445 ICE connectivity check (`Config::enable_ice`, requires the `ice` feature) |
 
 ## CallbackPeer
 
