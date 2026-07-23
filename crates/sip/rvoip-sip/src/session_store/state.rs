@@ -40,14 +40,29 @@ impl fmt::Debug for NegotiatedConfig {
 }
 
 /// Kind of mid-dialog re-INVITE that was in flight when a 491 Request
-/// Pending arrived — captured so `ScheduleReinviteRetry` can re-issue the
-/// correct operation after the RFC 3261 §14.1 random backoff.
+/// Pending arrived — captured so the exact-lifecycle-owned
+/// `ScheduleReinviteRetry` effect can re-issue the correct operation after the
+/// RFC 3261 §14.1 random backoff.
 #[derive(Clone, PartialEq, Eq)]
 pub enum PendingReinvite {
     Hold,
     Resume,
     /// Generic SDP update with a specific offer (codec change, etc.).
     SdpUpdate(String),
+}
+
+/// Private RFC 4028 refresh ownership for one exact session lifetime.
+///
+/// This is deliberately separate from [`PendingReinvite`]. That public
+/// compatibility field describes the SIP re-INVITE shape, while this marker
+/// fences the internal UPDATE -> re-INVITE -> BYE refresh sequence so an
+/// ordinary application re-INVITE can never be mistaken for timer work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum SessionRefreshPhase {
+    #[default]
+    Idle,
+    UpdateInFlight,
+    ReinviteInFlight,
 }
 
 impl fmt::Debug for PendingReinvite {
@@ -121,7 +136,15 @@ pub struct SessionStateCold {
     pub dtmf_digits: Option<String>,
     pub reject_status: Option<u16>,
     pub reject_reason: Option<String>,
+    /// Application-authored headers pending consumption by the next
+    /// state-machine-owned SIP response action. The legacy field name remains
+    /// public for compatibility; accept, provisional, redirect, and reject
+    /// builders all use this one lane-owned response envelope internally.
     pub reject_response_extras: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+    /// Per-dispatch override for a YAML `SendSIPResponse` status. This is used
+    /// by `ProvisionalBuilder`, whose public API accepts any 1xx while the
+    /// retained YAML early-media rows intentionally default to 183.
+    pub(crate) pending_response_status_override: Option<u16>,
     pub redirect_response_status: Option<u16>,
     pub redirect_response_contacts: Vec<String>,
     pub early_media_sdp: Option<String>,
@@ -145,6 +168,15 @@ pub struct SessionStateCold {
     pub reinvite_retry_attempts: u8,
     pub session_timer_min_se: Option<u32>,
     pub session_timer_retry_count: u8,
+    /// Monotonic owner of the retained RFC 4028 deadline task. A superseded
+    /// task may wake, but it must match this generation before dispatching.
+    pub(crate) session_refresh_timer_generation: u64,
+    /// Negotiated Session-Expires value for the exact dialog lifetime.
+    pub(crate) session_refresh_interval_secs: Option<u32>,
+    /// Whether this endpoint is the negotiated refresher.
+    pub(crate) session_refresh_local_refresher: bool,
+    /// Exact refresh request currently awaiting a final response.
+    pub(crate) session_refresh_phase: SessionRefreshPhase,
     pub transfer_state: TransferState,
     pub transfer_notify_dialog: Option<DialogId>,
     pub replaces_header: Option<String>,
@@ -152,6 +184,12 @@ pub struct SessionStateCold {
     pub refer_transaction_id: Option<String>,
     pub is_transfer_call: bool,
     pub transferor_session_id: Option<SessionId>,
+    /// Generation-qualified owner of `transferor_session_id`.
+    ///
+    /// The public raw identifier is retained for compatibility and event
+    /// projection only. Signaling must use this exact handle so delayed target
+    /// leg progress cannot address a later lifetime that reused the same ID.
+    pub(crate) transferor_lifecycle_handle: Option<SessionRegistryHandle>,
     pub transfer_target_progress_seen: bool,
     pub transfer_target_last_progress: Option<(u16, String)>,
     pub pending_bye_reason: Option<(String, u16, Option<String>)>,
@@ -419,6 +457,10 @@ impl fmt::Debug for SessionState {
             .field(
                 "reject_response_extra_count",
                 &self.reject_response_extras.as_ref().map_or(0, Vec::len),
+            )
+            .field(
+                "pending_response_status_override",
+                &self.pending_response_status_override,
             )
             .field("redirect_response_status", &self.redirect_response_status)
             .field(
@@ -829,6 +871,7 @@ impl SessionState {
                 reject_status: None,
                 reject_reason: None,
                 reject_response_extras: None,
+                pending_response_status_override: None,
                 redirect_response_status: None,
                 redirect_response_contacts: Vec::new(),
                 early_media_sdp: None,
@@ -846,6 +889,10 @@ impl SessionState {
                 reinvite_retry_attempts: 0,
                 session_timer_min_se: None,
                 session_timer_retry_count: 0,
+                session_refresh_timer_generation: 0,
+                session_refresh_interval_secs: None,
+                session_refresh_local_refresher: false,
+                session_refresh_phase: SessionRefreshPhase::Idle,
                 transfer_state: TransferState::None,
                 transfer_notify_dialog: None,
                 replaces_header: None,
@@ -853,6 +900,7 @@ impl SessionState {
                 refer_transaction_id: None,
                 is_transfer_call: false,
                 transferor_session_id: None,
+                transferor_lifecycle_handle: None,
                 transfer_target_progress_seen: false,
                 transfer_target_last_progress: None,
                 pending_bye_reason: None,
@@ -928,7 +976,10 @@ impl SessionState {
             || cold.pending_info_options.is_some()
             || cold.pending_update_options.is_some()
             || cold.pending_message_options.is_some()
-            || cold.pending_options_options.is_some();
+            || cold.pending_options_options.is_some()
+            || cold.session_refresh_interval_secs.is_some()
+            || cold.session_refresh_local_refresher
+            || cold.session_refresh_phase != SessionRefreshPhase::Idle;
         if !needs_clear {
             return;
         }
@@ -959,6 +1010,50 @@ impl SessionState {
         cold.pending_update_options = None;
         cold.pending_message_options = None;
         cold.pending_options_options = None;
+        let next_refresh_generation = cold.session_refresh_timer_generation.wrapping_add(1);
+        cold.session_refresh_timer_generation = if next_refresh_generation == 0 {
+            1
+        } else {
+            next_refresh_generation
+        };
+        cold.session_refresh_interval_secs = None;
+        cold.session_refresh_local_refresher = false;
+        cold.session_refresh_phase = SessionRefreshPhase::Idle;
+    }
+
+    /// Clear authentication coordination only when the completing transaction
+    /// still owns it.
+    ///
+    /// The transaction comparison is intentionally part of the lane-owned
+    /// mutation. A late final response must not clear a newer retry (or a
+    /// request belonging to a recycled session lifetime) merely because it
+    /// uses the same SIP method.
+    pub(crate) fn clear_tracked_auth_if_transaction(&mut self, transaction_id: &str) -> bool {
+        if self.pending_auth_transaction_id.as_deref() != Some(transaction_id) {
+            return false;
+        }
+
+        let cold = Arc::make_mut(&mut self.cold);
+        cold.pending_auth = None;
+        cold.pending_auth_method = None;
+        cold.pending_auth_transport = None;
+        cold.pending_auth_transaction_id = None;
+        cold.pending_auth_request_uri = None;
+        cold.auth_challenge = None;
+        cold.auth_challenge_raw = None;
+        cold.auth_challenge_stale = false;
+        cold.auth_challenge_replaces_nonce = None;
+        true
+    }
+
+    /// Drop any application response envelope that was admitted with the
+    /// current event but not consumed by a response action. This prevents a
+    /// custom YAML row or an earlier action failure from leaking headers or a
+    /// provisional status into a later, unrelated response.
+    pub(crate) fn clear_pending_response_input(&mut self) {
+        let cold = Arc::make_mut(&mut self.cold);
+        cold.reject_response_extras = None;
+        cold.pending_response_status_override = None;
     }
 
     /// Create with history tracking enabled
@@ -968,9 +1063,18 @@ impl SessionState {
         state
     }
 
+    /// Return true only when this session has a history that will retain a
+    /// record. A configured-but-paused history must remain observational: it
+    /// cannot cause an otherwise rejected event to publish a session revision.
+    pub(crate) fn history_recording_enabled(&self) -> bool {
+        self.history
+            .as_ref()
+            .is_some_and(SessionHistory::is_enabled)
+    }
+
     /// Record a transition in history
     pub fn record_transition(&mut self, record: TransitionRecord) {
-        if self.history.is_none() {
+        if !self.history_recording_enabled() {
             return;
         }
         Arc::make_mut(&mut self.cold)

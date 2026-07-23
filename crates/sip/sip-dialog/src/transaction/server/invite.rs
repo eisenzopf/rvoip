@@ -109,10 +109,7 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ServerInviteTransaction {
     data: Arc<ServerTransactionData>,
-    /// Logic instance held so the spawned transaction loop keeps the
-    /// same state machine.
-    #[allow(dead_code)]
-    logic: Arc<ServerInviteLogic>,
+    dialog_setup_lock: Arc<Mutex<()>>,
 }
 
 /// Holds cancellation handles and dynamic state for Server INVITE timers.
@@ -877,6 +874,13 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
 }
 
 impl ServerInviteTransaction {
+    /// Serialize transaction-user dialog setup for this exact INVITE wire
+    /// generation. Transport retransmissions and concurrent direct API
+    /// delivery must observe one transaction-to-dialog owner.
+    pub(crate) fn dialog_setup_lock(&self) -> Arc<Mutex<()>> {
+        self.dialog_setup_lock.clone()
+    }
+
     /// Creates a new server INVITE transaction.
     ///
     /// This method creates a new INVITE server transaction with the specified parameters.
@@ -1013,14 +1017,12 @@ impl ServerInviteTransaction {
         });
 
         let data_for_runner = data.clone();
-        let logic_for_runner = logic.clone();
-
         // The receiver has exactly one owner: the transaction runner. Keeping
         // it out of `ServerTransactionData` avoids a second mutex/Arc and the
         // dummy replacement receiver that used to be allocated per server
         // transaction.
         let event_loop_handle = tokio::spawn(async move {
-            run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
+            run_transaction_loop(data_for_runner, logic, local_cmd_rx).await;
         });
 
         // Store the handle for cleanup
@@ -1028,7 +1030,10 @@ impl ServerInviteTransaction {
             *handle_guard = Some(event_loop_handle);
         }
 
-        Ok(Self { data, logic })
+        Ok(Self {
+            data,
+            dialog_setup_lock: Arc::new(Mutex::new(())),
+        })
     }
 }
 

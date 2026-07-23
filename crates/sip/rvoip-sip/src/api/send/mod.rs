@@ -28,6 +28,44 @@
 //! the shared `BuilderHeaderState` so header-policy enforcement
 //! behaves identically across builders.
 
+use crate::api::handle::CallId;
+use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
+
+/// Private authority carried by in-dialog builders. Coordinator-created
+/// builders preserve the public capture-current facade; SessionHandle-created
+/// builders must retain the handle's exact generation or fail closed.
+#[derive(Clone)]
+pub(crate) enum InDialogRequestAuthority {
+    CaptureCurrent,
+    Captured(Option<SessionRegistryHandle>),
+}
+
+impl InDialogRequestAuthority {
+    pub(crate) fn captured(handle: Option<SessionRegistryHandle>) -> Self {
+        Self::Captured(handle)
+    }
+
+    pub(crate) fn exact_handle(
+        &self,
+        session_id: &CallId,
+    ) -> Result<Option<SessionRegistryHandle>> {
+        match self {
+            Self::CaptureCurrent => Ok(None),
+            Self::Captured(Some(handle)) if handle.session_id() == session_id => {
+                Ok(Some(handle.clone()))
+            }
+            Self::Captured(Some(_)) => Err(SessionError::InvalidTransition(
+                "captured builder authority does not match its session".to_string(),
+            )),
+            Self::Captured(None) => Err(SessionError::SessionNotFound(format!(
+                "Session {} has no exact builder authority",
+                session_id
+            ))),
+        }
+    }
+}
+
 pub mod bye;
 pub mod cancel;
 pub mod info;

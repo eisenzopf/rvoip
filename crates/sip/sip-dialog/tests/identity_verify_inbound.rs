@@ -10,7 +10,7 @@
 //!    `VerificationPolicy` per RFC 8224 §6.2.2 semantics.
 //! 3. The typed `Identity` header round-trips through
 //!    `rvoip-sip-core` parsing so the verifier hook in
-//!    `events/adapter.rs` can extract it from inbound requests.
+//!    the authoritative event hub can extract it from inbound requests.
 //!
 //! Full end-to-end coverage (driving a real INVITE through the
 //! transaction layer with a canned upstream) is intentionally out of
@@ -245,7 +245,7 @@ fn identity_header_round_trips_through_request() {
     )
     .with_header(TypedHeader::Identity(identity.clone()));
 
-    // The verifier hook in events/adapter.rs reaches into
+    // The verifier hook in the event hub reaches into
     // `request.headers` to pull the typed Identity; mirror that
     // extraction here.
     let extracted = request.headers.iter().find_map(|h| match h {

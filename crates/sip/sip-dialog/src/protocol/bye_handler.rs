@@ -1555,20 +1555,10 @@ mod tests {
                 .expect("dialog manager"),
         );
 
-        let mut dialog = dialog_with_state(DialogState::Confirmed, 1);
+        let dialog = dialog_with_state(DialogState::Confirmed, 1);
         let dialog_id = dialog.id.clone();
-        dialog.session_expires_secs = Some(120);
-        dialog.is_session_refresher = true;
         manager.store_dialog(dialog).await.expect("store dialog");
-        crate::manager::session_timer::spawn_refresh_task(
-            (*manager).clone(),
-            dialog_id.clone(),
-            120,
-            true,
-        )
-        .await
-        .expect("refresh producer");
-        assert_eq!(manager.session_refresh_tasks.len(), 1);
+        assert_eq!(manager.session_refresh_tasks.len(), 0);
 
         let (session_tx, mut session_rx) = mpsc::channel(1);
         session_tx

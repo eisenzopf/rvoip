@@ -5162,35 +5162,15 @@ impl ConnectionAdapter for WebRtcAdapter {
         conn: ConnectionId,
         capabilities: CapabilityDescriptor,
     ) -> RvoipResult<NegotiatedCodecs> {
-        let route = self
-            .route(&conn)
-            .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-
         let negotiated = negotiate_audio(&capabilities, &self.config.capabilities)
             .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
 
-        let offer = tokio::time::timeout(
-            Duration::from_secs(2),
-            route.peer.peer_connection().create_offer(None),
-        )
-        .await
-        .map_err(|_| RvoipError::Adapter("create_offer timed out".into()))?
-        .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            route.peer.peer_connection().set_local_description(offer),
-        )
-        .await
-        .map_err(|_| RvoipError::Adapter("set_local_description timed out".into()))?
-        .map_err(|e| RvoipError::Adapter(format!("{e}")))?;
-
-        if let Some(desc) = route.peer.peer_connection().local_description().await {
-            if let Ok(sdp) = sdp_to_string(&desc) {
-                if let Some(mut route_mut) = self.routes.get_mut(&conn) {
-                    route_mut.local_sdp = Some(sdp);
-                }
-            }
-        }
+        // All re-offers go through the peer-session authority so DTMF/MID
+        // negotiation state, role handling, gathering, and route storage are
+        // committed as one operation.
+        self.renegotiate_after_direction_change(&conn)
+            .await
+            .map_err(|error| RvoipError::Adapter(format!("{error}")))?;
 
         Ok(negotiated)
     }

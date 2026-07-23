@@ -20,7 +20,7 @@
 > [!NOTE]
 > **Release status.** Maturity is encoded in the version number (no `-alpha`/`-beta`
 > suffixes): **`0.1.x` = alpha, `0.2.x` = beta, `1.0` = stable**. The SIP product
-> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.2`** for bounded SIP client,
+> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.5`** for bounded SIP client,
 > server, PBX, gateway, and B2BUA scenarios. The rest of the workspace — WebRTC, QUIC,
 > WebTransport, WebSocket, UCTP, vCon, identity, AI harness — is **alpha, published at
 > `0.1.0`** (API-unstable; expect breaking changes before `1.0`).
@@ -69,7 +69,7 @@ switching stacks.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.2.2"
+rvoip-sip = "0.2.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -132,7 +132,7 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 <a id="feature-support"></a>
 ## 📊 Feature support
 
-> ✅ **Beta** (`0.2.2`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
+> ✅ **Beta** (`0.2.5`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
 > API-unstable · 🔮 **Roadmap** = planned, not yet implemented
 
 ### 📞 SIP methods (RFC 3261 + extensions)
@@ -253,7 +253,7 @@ without the substrates knowing about each other.
 
 ## 📦 Crate matrix
 
-### ✅ Beta — published to crates.io as `0.2.2`
+### ✅ Beta — `0.2.5` release candidate in this checkout
 
 | Crate | Purpose |
 | --- | --- |

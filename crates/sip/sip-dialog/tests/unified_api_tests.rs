@@ -686,7 +686,7 @@ async fn test_concurrent_mode_operations() -> Result<(), Box<dyn std::error::Err
     let api_clone = api.clone();
     let outgoing_task = tokio::spawn(async move {
         api_clone
-            .make_call("sip:pbx@example.com", "sip:external@provider.com", None)
+            .make_call("sip:pbx@example.com", "sip:external@127.0.0.1:5061", None)
             .await
     });
 
@@ -700,9 +700,14 @@ async fn test_concurrent_mode_operations() -> Result<(), Box<dyn std::error::Err
     // Wait for both operations
     let (outgoing_result, dialog_result) = tokio::join!(outgoing_task, dialog_task);
 
-    // Both should succeed
-    assert!(outgoing_result.is_ok());
-    assert!(dialog_result.is_ok());
+    // Both operations, not merely their task joins, must succeed. Keep this
+    // concurrency test independent of external DNS and network state.
+    outgoing_result
+        .expect("outgoing task join")
+        .expect("outgoing call");
+    dialog_result
+        .expect("dialog task join")
+        .expect("dialog creation");
 
     api.stop().await?;
     Ok(())

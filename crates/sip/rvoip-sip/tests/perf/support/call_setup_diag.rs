@@ -8,6 +8,7 @@ pub const CALL_SETUP_DIAGNOSTICS_ENV: &str = "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS"
 const CALL_SETUP_DIAGNOSTICS_SLOW_MS_ENV: &str = "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS_SLOW_MS";
 const CALL_SETUP_DIAGNOSTICS_MAX_SAMPLES_ENV: &str =
     "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS_MAX_SAMPLES";
+const MEDIA_SETUP_DIAGNOSTICS_ENV: &str = "RVOIP_PERF_MEDIA_DIAGNOSTICS";
 
 #[derive(Clone)]
 pub struct CallSetupDiagnostics {
@@ -53,10 +54,15 @@ impl CallSetupDiagnostics {
         if !self.enabled {
             return config;
         }
-        config
+        let config = config
             .with_sip_udp_diagnostics(true)
             .with_sip_transaction_timing_diagnostics(true)
-            .with_sip_dialog_timing_diagnostics(true)
+            .with_sip_dialog_timing_diagnostics(true);
+        if read_bool_env(MEDIA_SETUP_DIAGNOSTICS_ENV) {
+            config.with_media_setup_diagnostics(true)
+        } else {
+            config
+        }
     }
 
     pub fn record_setup(

@@ -4,7 +4,7 @@
 //! implementing RFC 3261 compliant dialog management with proper state transitions.
 
 use dashmap::mapref::one::RefMut;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use super::core::DialogManager;
@@ -12,7 +12,6 @@ use super::utils::DialogUtils;
 use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::SessionCoordinationEvent;
 use rvoip_sip_core::types::uri::Scheme;
 use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::HeaderName;
@@ -202,21 +201,10 @@ impl DialogStore for DialogManager {
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
 
-        // Publish DialogCreated event for session-core to track
-        if let Some(hub) = self.event_hub.read().await.as_ref() {
-            let event =
-                rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                    rvoip_infra_common::events::cross_crate::DialogToSessionEvent::DialogCreated {
-                        dialog_id: dialog_id.to_string(),
-                        call_id: call_id.clone(),
-                    },
-                );
-            if let Err(_error) = hub.publish_cross_crate_event(event).await {
-                warn!("Failed to publish DialogCreated event");
-            } else {
-                info!("Published DialogCreated event for dialog {}", dialog_id);
-            }
-        }
+        // The creator already owns the returned exact DialogId and commits its
+        // session mapping directly. The retired creation bus projection
+        // was a no-op in session-core and put observer availability on dialog
+        // creation's hot path.
 
         debug!("Created UAC dialog {} for outgoing request", dialog_id);
         Ok(dialog_id)
@@ -298,19 +286,6 @@ impl DialogStore for DialogManager {
             if dialog.state != DialogState::Terminated {
                 let previous_state = dialog.state.clone();
                 dialog.terminate();
-
-                // Send session coordination event for dialog state change
-                if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-                    let event = SessionCoordinationEvent::DialogStateChanged {
-                        dialog_id: dialog_id.clone(),
-                        new_state: "Terminated".to_string(),
-                        previous_state: format!("{:?}", previous_state),
-                    };
-
-                    if let Err(_error) = coordinator.send(event).await {
-                        warn!("Failed to send dialog termination event");
-                    }
-                }
 
                 debug!(
                     "Dialog {} terminated (was: {:?})",
@@ -433,19 +408,6 @@ impl DialogStore for DialogManager {
             dialog.state = new_state.clone();
             prev
         };
-
-        // Send session coordination event for state change
-        if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-            let event = SessionCoordinationEvent::DialogStateChanged {
-                dialog_id: dialog_id.clone(),
-                new_state: format!("{:?}", new_state),
-                previous_state: format!("{:?}", previous_state),
-            };
-
-            if let Err(_error) = coordinator.send(event).await {
-                warn!("Failed to send dialog state change event");
-            }
-        }
 
         debug!(
             "Updated dialog {} state from {:?} to {:?}",
@@ -618,6 +580,19 @@ mod tests {
     fn test_dialog_lookup_key_creation() {
         let key = DialogUtils::create_lookup_key("call-123", "tag-local", "tag-remote");
         assert_eq!(key, "call-123:tag-local:tag-remote");
+    }
+
+    #[test]
+    fn outgoing_dialog_creation_has_no_event_bus_dependency() {
+        let source = include_str!("dialog_operations.rs");
+        let body = source
+            .split("async fn create_outgoing_dialog(")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn store_dialog(").next())
+            .expect("outgoing dialog implementation");
+        assert!(!body.contains("event_hub"));
+        assert!(!body.contains("publish_cross_crate_event"));
+        assert!(!body.contains("DialogCreated"));
     }
 
     #[test]

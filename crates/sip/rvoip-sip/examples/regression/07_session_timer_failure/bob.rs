@@ -2,9 +2,9 @@
 //!
 //! Bob accepts an incoming call then, before Alice's first refresh fires,
 //! exits the process. This simulates the "remote peer crashed" scenario:
-//! Alice's UPDATE lands on a dead UDP port, the transaction times out,
-//! and dialog-core's session_timer path tears the dialog down with a
-//! `Reason: SIP ;cause=408` BYE.
+//! Alice's UPDATE lands on a dead UDP port, the transaction times out, and
+//! rvoip-sip's exact-lifecycle state-machine path tears the dialog down with a
+//! `Reason: SIP ;cause=408` BYE after its fallback also fails.
 
 use rvoip_sip::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

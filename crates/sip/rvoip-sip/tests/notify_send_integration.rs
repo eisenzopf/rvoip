@@ -14,10 +14,12 @@
 //! 4. session-core's event handler dispatches that to a public
 //!    `Event::NotifyReceived` on the session event stream.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35091;
 const BOB_PORT: u16 = 35092;
@@ -28,27 +30,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
@@ -65,26 +46,9 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e))
 }
 
-fn build_examples() {
-    let status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_notify_send_alice",
-            "--example",
-            "regression_notify_send_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(status.success(), "cargo build failed");
-}
-
 #[test]
 fn send_notify_surfaces_as_notify_received_on_peer() {
-    build_examples();
+    build_examples(&["regression_notify_send_alice", "regression_notify_send_bob"]);
 
     let envs: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

@@ -210,7 +210,7 @@ use crate::transaction::server::{
     ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
 };
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::timer::{TimerFactory, TimerManager, TimerSettings};
+use crate::transaction::timer::{TimerManager, TimerSettings};
 use crate::transaction::transport::multiplexed::{
     next_hop_uri_for_request, select_transport_for_request, top_route_uri,
 };
@@ -225,12 +225,34 @@ use crate::transaction::{
     DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
-// Type aliases without Sync requirement. `BoxedTransaction` and
-// `BoxedServerTransaction` below are retained for downstream APIs
-// that still construct boxed handles directly; the manager itself
-// stores `Arc<dyn ClientTransaction>` / `Arc<dyn ServerTransaction>`.
-#[allow(dead_code)]
-type BoxedTransaction = Box<dyn Transaction + Send>;
+/// Internal first-write classification for one exact CANCEL generation.
+/// Composition and route-preparation failures are safe to retry; once the
+/// transport write boundary is crossed, the caller must retain teardown
+/// ownership and must not manufacture a second CANCEL.
+#[derive(Debug)]
+pub(crate) enum CancelInviteTransactionFailure {
+    ZeroWire(Error),
+    WireUnknown {
+        error: Error,
+        transaction_id: TransactionKey,
+    },
+}
+
+impl CancelInviteTransactionFailure {
+    pub(crate) fn into_error(self) -> Error {
+        match self {
+            Self::ZeroWire(error) | Self::WireUnknown { error, .. } => error,
+        }
+    }
+
+    pub(crate) fn wire_unknown_transaction(&self) -> Option<&TransactionKey> {
+        match self {
+            Self::ZeroWire(_) => None,
+            Self::WireUnknown { transaction_id, .. } => Some(transaction_id),
+        }
+    }
+}
+
 /// Type alias for a boxed client transaction
 /// Per-transaction handle stored in `client_transactions`.
 ///
@@ -240,11 +262,6 @@ type BoxedTransaction = Box<dyn Transaction + Send>;
 /// whole map while one transaction was doing transport I/O. Cheap to
 /// clone (atomic refcount bump).
 pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
-/// Type alias for an Arc wrapped server transaction. See
-/// `BoxedTransaction` above for retention rationale.
-#[allow(dead_code)]
-type BoxedServerTransaction = Arc<dyn ServerTransaction>;
-
 /// Retained transaction-manager state counts used by release-gate leak checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TransactionManagerRetentionCounts {
@@ -1515,11 +1532,6 @@ pub struct TransactionManager {
     timer_settings: TimerSettings,
     /// Centralized timer manager
     timer_manager: Arc<TimerManager>,
-    /// Timer factory. Held by the manager so future per-transaction
-    /// timer creation calls land on the same factory instance; today
-    /// the timer dispatch routes through `timer_manager` directly.
-    #[allow(dead_code)]
-    timer_factory: TimerFactory,
     /// Optional forwarder for transport-side events that dialog-core's
     /// RFC 5626 outbound-flow monitor needs to observe
     /// (`KeepAlivePongReceived`, `ConnectionClosed`). Installed by
@@ -3141,9 +3153,6 @@ impl TransactionManager {
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
 
-        // Create timer factory with the timer manager
-        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-
         let manager = Self {
             transport,
             client_transactions,
@@ -3195,7 +3204,6 @@ impl TransactionManager {
             running,
             timer_settings,
             timer_manager,
-            timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
@@ -3340,8 +3348,6 @@ impl TransactionManager {
 
         // Create the timer manager with custom config
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
-        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-
         let manager = Self {
             transport,
             client_transactions,
@@ -3393,7 +3399,6 @@ impl TransactionManager {
             running,
             timer_settings,
             timer_manager,
-            timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
@@ -3791,9 +3796,6 @@ impl TransactionManager {
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
 
-        // Create timer factory with the timer manager
-        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-
         let manager = Self {
             transport: default_transport,
             client_transactions,
@@ -3845,7 +3847,6 @@ impl TransactionManager {
             running,
             timer_settings,
             timer_manager,
-            timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
@@ -3970,8 +3971,6 @@ impl TransactionManager {
 
         // Create the timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
-        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-
         let manager = Self {
             transport,
             client_transactions,
@@ -4023,7 +4022,6 @@ impl TransactionManager {
             running,
             timer_settings,
             timer_manager,
-            timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(
@@ -4088,8 +4086,6 @@ impl TransactionManager {
         // Setup timer manager
         let timer_settings = build_timer_settings();
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
-        let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-
         // Initialize running state
         let running = Arc::new(AtomicBool::new(false));
 
@@ -4144,7 +4140,6 @@ impl TransactionManager {
             terminated_cleanup_shutdown: None,
             lifecycle_scheduler: None,
             compact_non_invite_tombstones: Arc::new(DashMap::new()),
-            timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
             timer_settings,
@@ -4287,17 +4282,6 @@ impl TransactionManager {
             if let Err(e) = result {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "TransactionManager::send_request - initiate failed immediately");
                 return Err(e);
-            }
-
-            // The transport returns the selected opaque flow as part of the
-            // successful send. Persist it before draining any queued response
-            // events so an immediate peer close cannot erase the identity we
-            // need to authenticate that response.
-            let bound_route = client_tx.data().request_route.lock().await.clone();
-            if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
-                if let ClientResponseRouteState::Active { route, .. } = state.value_mut() {
-                    *route = bound_route;
-                }
             }
 
             Ok(())
@@ -5185,6 +5169,22 @@ impl TransactionManager {
                             if Arc::ptr_eq(active, completion)
                     )
                 });
+        } else if !transaction.data().initial_send_attempted() {
+            // A transaction that failed during route preparation never owned
+            // a wire generation or a response race. Retaining its completion
+            // (and admission owner) for Timer K would prevent the exact same
+            // legal request from being retried despite zero bytes attempted.
+            let completion = &transaction.data().completion;
+            self.client_completions
+                .remove_if(transaction_id, |_, current| {
+                    matches!(
+                        current,
+                        ClientTransactionCompletionEntry::Active(active)
+                            if Arc::ptr_eq(active, completion)
+                    )
+                });
+            self.transaction_destinations
+                .remove_if(transaction_id, |_, state| state.is_active());
         } else {
             let (completion_expires_at, keep_live_until_expiry) = self
                 .client_completion_retention(transaction_id, &transaction)
@@ -6454,6 +6454,28 @@ impl TransactionManager {
         let shared_retention_key = Arc::new(key.clone());
         self.install_client_completion(Arc::clone(&shared_retention_key), &transaction);
         let response_route_owner = Arc::as_ptr(transaction.data()) as usize;
+        let response_routes = Arc::downgrade(&self.transaction_destinations);
+        let response_route_key = Arc::clone(&shared_retention_key);
+        transaction
+            .data()
+            .install_request_route_publisher(Arc::new(move |prepared_route| {
+                let Some(response_routes) = response_routes.upgrade() else {
+                    return false;
+                };
+                let Some(mut state) = response_routes.get_mut(response_route_key.as_ref()) else {
+                    return false;
+                };
+                match state.value_mut() {
+                    ClientResponseRouteState::Active { route, owner }
+                        if *owner == response_route_owner =>
+                    {
+                        *route = prepared_route.clone();
+                        true
+                    }
+                    ClientResponseRouteState::Active { .. }
+                    | ClientResponseRouteState::Retired(_) => false,
+                }
+            }));
         self.client_transactions.insert(key.clone(), transaction);
         if let Some(previous) = self.transaction_destinations.insert(
             shared_retention_key,
@@ -6670,6 +6692,22 @@ impl TransactionManager {
         ))
     }
 
+    /// Return the exact INVITE transaction's dialog-setup lane. Both
+    /// transport ingress and manually supplied API delivery use this one lock
+    /// before publishing any transaction-to-dialog ownership.
+    pub(crate) fn server_invite_dialog_setup_lock(
+        &self,
+        tx_id: &TransactionKey,
+    ) -> Option<Arc<Mutex<()>>> {
+        self.server_transactions.get(tx_id).and_then(|transaction| {
+            transaction
+                .value()
+                .as_any()
+                .downcast_ref::<ServerInviteTransaction>()
+                .map(ServerInviteTransaction::dialog_setup_lock)
+        })
+    }
+
     /// Creates an ACK request for a 2xx response to an INVITE.
     pub async fn create_ack_for_2xx(
         &self,
@@ -6763,7 +6801,6 @@ impl TransactionManager {
     /// Transaction-ingress variant used while listener authorization is still
     /// pending. CANCEL publication is deferred until the authorization gate
     /// succeeds, preventing rejected requests from reaching the TU.
-    #[allow(dead_code)]
     pub(crate) async fn create_server_transaction_deferred_events(
         &self,
         request: Request,
@@ -6922,8 +6959,7 @@ impl TransactionManager {
                 }
 
                 let invite_tx_id = key.with_method(Method::Invite);
-                cancel_target_invite_tx_id = if self.client_transactions.contains_key(&invite_tx_id)
-                    || self.server_transactions.contains_key(&invite_tx_id)
+                cancel_target_invite_tx_id = if self.server_transactions.contains_key(&invite_tx_id)
                 {
                     Some(invite_tx_id)
                 } else {
@@ -7894,35 +7930,50 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<TransactionKey> {
-        let _operation = self
-            .admission_lifecycle
-            .try_enter_existing()
-            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
-        tokio::select! {
-            biased;
-            _ = self.operation_cancellation.cancelled() => {
-                Err(Error::Other("transaction manager stopped CANCEL composition".into()))
-            }
-            result = self.cancel_invite_transaction_with_extras_within_operation(
-                invite_tx_id,
-                extra_headers,
-            ) => result,
-        }
+        self.cancel_invite_transaction_with_extras_classified(invite_tx_id, extra_headers)
+            .await
+            .map_err(CancelInviteTransactionFailure::into_error)
     }
 
-    async fn cancel_invite_transaction_with_extras_within_operation(
+    /// Internal CANCEL dispatch preserving the exact conservative first-write
+    /// receipt. This method deliberately does not race an already-admitted
+    /// send against the manager-wide cancellation token: dialog-core retains
+    /// the operation through its bounded completion and owns shutdown order.
+    pub(crate) async fn cancel_invite_transaction_with_extras_classified(
         &self,
         invite_tx_id: &TransactionKey,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<TransactionKey> {
+    ) -> std::result::Result<TransactionKey, CancelInviteTransactionFailure> {
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| {
+                CancelInviteTransactionFailure::ZeroWire(Error::Other(
+                    "transaction manager is stopping".into(),
+                ))
+            })?;
+        self.cancel_invite_transaction_with_extras_within_operation_classified(
+            invite_tx_id,
+            extra_headers,
+        )
+        .await
+    }
+
+    async fn cancel_invite_transaction_with_extras_within_operation_classified(
+        &self,
+        invite_tx_id: &TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> std::result::Result<TransactionKey, CancelInviteTransactionFailure> {
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Canceling invite transaction");
+
+        let zero_wire = CancelInviteTransactionFailure::ZeroWire;
 
         // Check that this is an INVITE client transaction
         if invite_tx_id.method() != &Method::Invite || invite_tx_id.is_server() {
-            return Err(Error::Other(format!(
+            return Err(zero_wire(Error::Other(format!(
                 "Transaction {} is not an INVITE client transaction",
                 invite_tx_id
-            )));
+            ))));
         }
 
         // Get the original INVITE request
@@ -7930,12 +7981,16 @@ impl TransactionManager {
         // retired INVITE after an ambiguous transport error. The compatibility
         // accessor parses its immutable wire image lazily, preserving exact
         // CANCEL construction without retaining the heavy transaction.
-        let invite_request = self.original_request(invite_tx_id).await?.ok_or_else(|| {
-            Error::transaction_not_found(
-                invite_tx_id.clone(),
-                "CANCEL request template is unavailable",
-            )
-        })?;
+        let invite_request = self
+            .original_request(invite_tx_id)
+            .await
+            .map_err(zero_wire)?
+            .ok_or_else(|| {
+                zero_wire(Error::transaction_not_found(
+                    invite_tx_id.clone(),
+                    "CANCEL request template is unavailable",
+                ))
+            })?;
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Got INVITE request for cancellation");
 
@@ -7943,10 +7998,11 @@ impl TransactionManager {
         let local_addr = self
             .transport
             .local_addr()
-            .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
+            .map_err(|e| zero_wire(Error::transport_error(e, "Failed to get local address")))?;
 
         // Use the method utility to create the CANCEL request
-        let mut cancel_request = cancel::create_cancel_request(&invite_request, &local_addr)?;
+        let mut cancel_request =
+            cancel::create_cancel_request(&invite_request, &local_addr).map_err(zero_wire)?;
 
         // SIP_API_DESIGN_2 §5.2 — append application extras after the
         // stack-managed slice (Via/From/To/CSeq/Call-ID/Max-Forwards).
@@ -7962,21 +8018,55 @@ impl TransactionManager {
         // CANCEL uses the complete INVITE route, including resolver-selected
         // transport/authority and the established opaque flow.
         let request_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
-            Error::Other(format!(
+            zero_wire(Error::Other(format!(
                 "No transport route found for transaction {}",
                 invite_tx_id
-            ))
+            )))
         })?;
 
         // Create a transaction for the CANCEL request
         let cancel_tx_id = self
             .create_client_transaction_on_route(cancel_request, request_route)
-            .await?;
+            .await
+            .map_err(zero_wire)?;
+
+        // Capture the exact generation before initiation. The active map may
+        // retire it immediately after a failed first write, but this Arc keeps
+        // the monotonic send-state receipt available for classification.
+        let cancel_data = self
+            .client_transactions
+            .get(&cancel_tx_id)
+            .and_then(|transaction| {
+                use crate::transaction::client::TransactionExt;
+                transaction
+                    .value()
+                    .as_client_transaction()
+                    .map(|transaction| transaction.data().clone())
+            })
+            .ok_or_else(|| {
+                zero_wire(Error::transaction_not_found(
+                    cancel_tx_id.clone(),
+                    "new CANCEL transaction generation is unavailable",
+                ))
+            })?;
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_tx_id), original_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Created CANCEL transaction");
 
         // Send the CANCEL request immediately
-        self.send_request(&cancel_tx_id).await?;
+        if let Err(error) = self.send_request_within_operation(&cancel_tx_id).await {
+            if cancel_data.initial_send_attempted() {
+                return Err(CancelInviteTransactionFailure::WireUnknown {
+                    error,
+                    transaction_id: cancel_tx_id,
+                });
+            }
+
+            // Route preparation failed before the conservative write
+            // boundary. Force exact transaction retirement before returning
+            // so an immediate retry can claim the same RFC CANCEL key.
+            let _ = self.terminate_transaction(&cancel_tx_id).await;
+            return Err(zero_wire(error));
+        }
 
         Ok(cancel_tx_id)
     }
@@ -8170,7 +8260,6 @@ impl fmt::Debug for TransactionManager {
             .field("running", &self.running)
             .field("timer_settings", &self.timer_settings)
             .field("timer_manager", &"Arc<TimerManager>")
-            .field("timer_factory", &"TimerFactory")
             .finish()
     }
 }

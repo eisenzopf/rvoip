@@ -116,6 +116,47 @@ pub struct RegistrarService {
     credential_provider: Option<Arc<dyn CredentialProvider>>,
 }
 
+/// A validated, serialized AOR update that has not yet changed registrar
+/// state. This is used by SIP response owners that must make the binding
+/// visible only after a terminal successful response write.
+#[must_use = "dropping a prepared AOR registration leaves registrar state unchanged"]
+#[doc(hidden)]
+pub struct PreparedAorRegistration {
+    mutation: crate::registrar::PreparedRegistrationMutation,
+    event_bus: Option<Arc<rvoip_infra_common::events::system::EventSystem>>,
+    user: String,
+    contact: ContactInfo,
+}
+
+impl PreparedAorRegistration {
+    /// Apply the already-validated mutation and publish its observation.
+    /// Registry application itself is infallible while the per-AOR mutation
+    /// lease is held.
+    pub async fn commit(self) {
+        let Self {
+            mutation,
+            event_bus,
+            user,
+            contact,
+        } = self;
+        mutation.commit();
+        if let Some(bus) = event_bus {
+            let publisher = bus.create_publisher::<RegistrarEvent>();
+            if publisher
+                .publish(RegistrarEvent::UserRegistered { user, contact })
+                .await
+                .is_err()
+            {
+                warn!(
+                    stage = "event-publish",
+                    event_type = std::any::type_name::<RegistrarEvent>(),
+                    "Registrar event publication failed"
+                );
+            }
+        }
+    }
+}
+
 /// Service operation mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceMode {
@@ -565,17 +606,36 @@ impl RegistrarService {
         contact: ContactInfo,
         expires: Option<u32>,
     ) -> Result<()> {
+        self.prepare_register_aor(aor, contact, expires)
+            .await?
+            .commit()
+            .await;
+        Ok(())
+    }
+
+    /// Validate and serialize an AOR mutation without publishing it to the
+    /// authoritative registry. Dropping the returned value is a no-op. The
+    /// returned lease must be committed or dropped before preparing another
+    /// update for the same AOR.
+    #[doc(hidden)]
+    pub async fn prepare_register_aor(
+        &self,
+        aor: &AddressOfRecord,
+        contact: ContactInfo,
+        expires: Option<u32>,
+    ) -> Result<PreparedAorRegistration> {
         self.validate_identity_for_registration(aor).await?;
         let expires = expires.unwrap_or(self.config.default_expires);
-        self.registrar
-            .register_aor(aor, contact.clone(), expires)
+        let mutation = self
+            .registrar
+            .prepare_register_aor(aor, contact.clone(), expires)
             .await?;
-        self.publish_event(RegistrarEvent::UserRegistered {
+        Ok(PreparedAorRegistration {
+            mutation,
+            event_bus: self.event_bus.clone(),
             user: aor.to_string(),
             contact,
         })
-        .await;
-        Ok(())
     }
 
     pub async fn register_contacts(

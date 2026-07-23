@@ -98,8 +98,7 @@ dialog-core/
     ├── manager/
     │   ├── mod.rs
     │   ├── dialog_manager.rs
-    │   ├── event_processing.rs
-    │   └── transaction_coordination.rs
+    │   └── transaction_integration.rs
     ├── protocol/
     │   ├── mod.rs
     │   ├── invite_handler.rs
@@ -107,21 +106,9 @@ dialog-core/
     │   ├── register_handler.rs
     │   ├── update_handler.rs
     │   └── response_handler.rs
-    ├── routing/
-    │   ├── mod.rs
-    │   ├── request_router.rs
-    │   ├── response_router.rs
-    │   └── dialog_matcher.rs
     ├── sdp/
     │   ├── mod.rs
-    │   ├── negotiation.rs
-    │   ├── offer_answer.rs
-    │   └── media_tracking.rs
-    ├── recovery/
-    │   ├── mod.rs
-    │   ├── recovery_manager.rs
-    │   ├── failure_detection.rs
-    │   └── recovery_strategies.rs
+    │   └── negotiation.rs
     └── events/
         ├── mod.rs
         ├── dialog_events.rs
@@ -655,4 +642,4 @@ pub struct DialogServer(DialogManager);
 - Complete client integration fix
 - Simplified architecture across both crates
 
---- 
+---

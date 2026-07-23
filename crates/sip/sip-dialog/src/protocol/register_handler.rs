@@ -19,7 +19,6 @@
 //! - Supports both registration and de-registration
 //! - Maintains proper SIP transaction handling
 
-use crate::diagnostics::safe_log::method_class;
 use std::net::SocketAddr;
 use tracing::{debug, warn};
 
@@ -73,15 +72,24 @@ impl RegisterHandler for DialogManager {
 
         let transaction_id = server_transaction.id().clone();
 
-        // **NEW**: Check unified configuration for auto-response behavior
-        // If the manager is configured for auto-REGISTER response, send immediate response
-        // Otherwise, forward to session layer for application handling via global event bus
+        // A REGISTER 200 response is a registrar commitment: it must represent
+        // a binding owned by the session/registrar layer. Dialog-core has no
+        // location-service store and therefore cannot fabricate that success.
         if self.should_auto_respond_to_register() {
-            debug!("Auto-responding to REGISTER request (configured for auto-response)");
-            self.send_basic_register_response(&transaction_id, &request, expires)
-                .await?;
+            warn!(
+                "Legacy auto-REGISTER mode has no registrar owner; rejecting instead of fabricating a binding"
+            );
+            self.send_register_response_classified_terminal(
+                &transaction_id,
+                501,
+                "Not Implemented",
+                None,
+                None,
+                None,
+            )
+            .await?;
         } else {
-            debug!("Forwarding REGISTER request to session layer via global event bus");
+            debug!("Delivering REGISTER request to the authoritative registrar handler");
 
             // Extract Authorization header if present
             use rvoip_sip_core::types::headers::HeaderAccess;
@@ -120,20 +128,44 @@ impl RegisterHandler for DialogManager {
                     transport,
                 });
 
-            // Publish via event hub (global event bus)
-            if let Some(hub) = self.event_hub.read().await.as_ref() {
-                if let Err(_error) = hub.publish_cross_crate_event(event).await {
-                    warn!("Failed to publish IncomingRegister event");
-                    // Fallback to basic response
-                    self.send_basic_register_response(&transaction_id, &request, expires)
-                        .await?;
-                } else {
-                    debug!("✅ Published IncomingRegister event to global bus");
+            // Deliver through the acknowledged causal handler. Observational
+            // subscribers are never a registrar and cannot authorize success.
+            let registrar_accepted = if let Some(hub) = self.event_hub.read().await.as_ref() {
+                match hub.try_publish_cross_crate_event(event).await {
+                    Ok(true) => {
+                        debug!("Delivered IncomingRegister to the authoritative registrar");
+                        true
+                    }
+                    Ok(false) => {
+                        warn!("No authoritative registrar handler accepted IncomingRegister");
+                        false
+                    }
+                    Err(error) => {
+                        warn!(
+                            error = %crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error),
+                            "Authoritative registrar handler failed before accepting REGISTER"
+                        );
+                        false
+                    }
                 }
             } else {
-                debug!("No event hub - falling back to basic 200 OK");
-                self.send_basic_register_response(&transaction_id, &request, expires)
-                    .await?;
+                warn!("No authoritative registrar route is installed");
+                false
+            };
+
+            // Once a server transaction exists, every REGISTER routing failure
+            // needs an exact final response. Returning only an internal routing
+            // error would strand the peer until its transaction timed out.
+            if !registrar_accepted {
+                self.send_register_response_classified_terminal(
+                    &transaction_id,
+                    503,
+                    "Service Unavailable",
+                    None,
+                    None,
+                    None,
+                )
+                .await?;
             }
         }
 
@@ -165,36 +197,24 @@ impl DialogManager {
             .unwrap_or(3600) // Default to 1 hour
     }
 
-    /// Send basic REGISTER response (for auto-response mode)
+    /// Compatibility facade for the retired auto-registrar mode.
+    ///
+    /// Dialog-core does not own a location-service binding, so this method
+    /// preserves its signature but sends an honest 501 response rather than a
+    /// fabricated 200 registration success.
     pub async fn send_basic_register_response(
         &self,
         transaction_id: &crate::transaction::TransactionKey,
-        request: &Request,
-        expires: u32,
+        _request: &Request,
+        _expires: u32,
     ) -> DialogResult<()> {
-        use rvoip_sip_core::StatusCode;
-
-        // Create basic 200 OK response for REGISTER
-        let response =
-            crate::transaction::utils::response_builders::create_response(request, StatusCode::Ok);
-
-        // TODO: Could add Contact header with the registered URI and expires
-        // For basic auto-response, just send 200 OK
-
-        self.transaction_manager
-            .send_response(transaction_id, response)
+        self.send_register_response(transaction_id, 501, "Not Implemented", None, None, None)
             .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send REGISTER response".to_string(),
-            })?;
-
-        debug!("Sent basic REGISTER response with expires {}", expires);
-        Ok(())
     }
 
     /// Send REGISTER response based on event from session-core
     ///
-    /// This is called when session-core publishes a SendRegisterResponse event
+    /// This is called directly by the registrar/dialog response owner.
     /// after processing authentication
     pub async fn send_register_response(
         &self,
@@ -205,100 +225,68 @@ impl DialogManager {
         contact: Option<&str>,
         expires: Option<u32>,
     ) -> DialogResult<()> {
-        use rvoip_sip_core::types::header::HeaderName;
-        use rvoip_sip_core::types::headers::header_value::HeaderValue;
-        use rvoip_sip_core::{StatusCode, TypedHeader};
-
-        debug!(
-            "Sending REGISTER response: {} reason_present={}",
+        self.send_register_response_with_extras(
+            transaction_id,
             status_code,
-            !reason.is_empty()
-        );
+            reason,
+            www_authenticate,
+            contact,
+            expires,
+            None,
+            &[],
+            false,
+            &[],
+            &[],
+        )
+        .await
+    }
 
-        // Get the original request from the transaction
-        // The transaction manager stores the original request
-        let request = self
-            .transaction_manager
-            .original_request(transaction_id)
+    /// Author one exact fallback response and preserve transaction-core's
+    /// first-write classification. A wire-unknown error is terminal because a
+    /// second final response could duplicate bytes already accepted by the
+    /// transport; only a proven zero-wire result returns an error.
+    async fn send_register_response_classified_terminal(
+        &self,
+        transaction_id: &crate::transaction::TransactionKey,
+        status_code: u16,
+        reason: &str,
+        www_authenticate: Option<&str>,
+        contact: Option<&str>,
+        expires: Option<u32>,
+    ) -> DialogResult<crate::transaction::server::FinalResponseCompletionDisposition> {
+        use crate::transaction::server::FinalResponseCompletionDisposition as Disposition;
+
+        match self
+            .send_register_response(
+                transaction_id,
+                status_code,
+                reason,
+                www_authenticate,
+                contact,
+                expires,
+            )
             .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to get request for transaction".to_string(),
-            })?
-            .ok_or_else(|| DialogError::TransactionError {
-                message: "No request found for transaction".into(),
-            })?;
-
-        // Verify the request has CSeq header
-        if let Some(cseq) = request.typed_header::<rvoip_sip_core::types::cseq::CSeq>() {
-            debug!(
-                "Original request has CSeq: {} {}",
-                cseq.sequence(),
-                method_class(cseq.method())
-            );
-        } else {
-            warn!("⚠️ Original request is missing CSeq header!");
-        }
-
-        // Parse status code
-        let status = StatusCode::from_u16(status_code).map_err(|_error| {
-            DialogError::protocol_error(&format!("Invalid status code {}", status_code))
-        })?;
-
-        // Build response using response builder
-        let response = if status_code == 401 {
-            // Build 401 Unauthorized with WWW-Authenticate header
-            let mut resp =
-                crate::transaction::utils::response_builders::create_response(&request, status);
-
-            if let Some(www_auth) = www_authenticate {
-                // Add WWW-Authenticate header as raw header
-                resp.headers.push(TypedHeader::Other(
-                    HeaderName::WwwAuthenticate,
-                    HeaderValue::Raw(www_auth.as_bytes().to_vec()),
-                ));
-            }
-
-            resp
-        } else if status_code == 200 {
-            // Build 200 OK with Contact and Expires headers
-            let mut resp =
-                crate::transaction::utils::response_builders::create_response(&request, status);
-
-            // Add Contact header if provided
-            if let Some(_contact_uri) = contact {
-                // Copy Contact header from request or use provided value
-                if let Some(contact_header) = request.header(&HeaderName::Contact) {
-                    resp.headers.push(contact_header.clone());
+        {
+            Ok(()) => Ok(Disposition::WrittenSuccessTerminal),
+            Err(error) => {
+                match self
+                    .transaction_manager
+                    .classify_final_response_completion(transaction_id)
+                    .await
+                {
+                    Disposition::ZeroWireRetryable => Err(error),
+                    disposition @ (Disposition::WrittenSuccessTerminal
+                    | Disposition::WireUnknownErrorTerminal) => {
+                        warn!(
+                            status_code,
+                            ?disposition,
+                            "REGISTER fallback became terminal at the transport boundary; suppressing duplicate response"
+                        );
+                        Ok(disposition)
+                    }
                 }
             }
-
-            // Add Expires header if provided
-            if let Some(exp) = expires {
-                resp.headers.push(TypedHeader::Expires(
-                    rvoip_sip_core::types::expires::Expires::new(exp),
-                ));
-            }
-
-            resp
-        } else {
-            // Build generic response
-            crate::transaction::utils::response_builders::create_response(&request, status)
-        };
-
-        // Send response via transaction manager
-        self.transaction_manager
-            .send_response(transaction_id, response)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send REGISTER response".to_string(),
-            })?;
-
-        debug!(
-            "Sent REGISTER response: {} reason_present={}",
-            status_code,
-            !reason.is_empty()
-        );
-        Ok(())
+        }
     }
 
     /// SIP_API_DESIGN_2 Phase D — registrar response with full
@@ -319,9 +307,85 @@ impl DialogManager {
         associated_uri: &[String],
         extra_headers: &[(String, String)],
     ) -> DialogResult<()> {
+        let response = self
+            .build_register_response_with_extras(
+                transaction_id,
+                status_code,
+                reason,
+                www_authenticate,
+                contact,
+                expires,
+                min_expires,
+                service_route,
+                path_echo,
+                associated_uri,
+                extra_headers,
+            )
+            .await?;
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to send REGISTER response".to_string(),
+            })?;
+
+        debug!(
+            "Sent REGISTER response (extras): {} reason_present={}",
+            status_code,
+            !reason.is_empty()
+        );
+        Ok(())
+    }
+
+    /// Materialize the one RFC-compliant REGISTER response snapshot without
+    /// selecting a response-completion policy. Both compatibility sends and
+    /// the classified exact primitive use this builder.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn build_register_response_with_extras(
+        &self,
+        transaction_id: &crate::transaction::TransactionKey,
+        status_code: u16,
+        reason: &str,
+        www_authenticate: Option<&str>,
+        contact: Option<&str>,
+        expires: Option<u32>,
+        min_expires: Option<u32>,
+        service_route: &[String],
+        path_echo: bool,
+        associated_uri: &[String],
+        extra_headers: &[(String, String)],
+    ) -> DialogResult<rvoip_sip_core::Response> {
         use rvoip_sip_core::types::header::HeaderName;
         use rvoip_sip_core::types::headers::header_value::HeaderValue;
         use rvoip_sip_core::{StatusCode, TypedHeader};
+
+        if status_code == 423 && min_expires.is_none() {
+            return Err(DialogError::protocol_error(
+                "423 REGISTER response requires Min-Expires",
+            ));
+        }
+        if min_expires.is_some() && status_code != 423 {
+            return Err(DialogError::protocol_error(
+                "Min-Expires is only valid on a 423 REGISTER response",
+            ));
+        }
+        if matches!(status_code, 401 | 407) && www_authenticate.is_none() {
+            return Err(DialogError::protocol_error(
+                "401/407 REGISTER response requires an authentication challenge",
+            ));
+        }
+        let success = (200..300).contains(&status_code);
+        if !success
+            && (contact.is_some()
+                || expires.is_some()
+                || !service_route.is_empty()
+                || path_echo
+                || !associated_uri.is_empty())
+        {
+            return Err(DialogError::protocol_error(
+                "REGISTER binding headers are only valid on a successful response",
+            ));
+        }
 
         debug!(
             "Sending REGISTER response (extras): {} reason_present={} (service_route={}, path_echo={}, associated_uri={}, extras={})",
@@ -359,10 +423,16 @@ impl DialogManager {
             ));
         }
 
-        // Echo the inbound Contact when requested (matches the legacy
-        // send_register_response 200 OK path), then stamp Expires.
-        if let Some(_contact_uri) = contact {
-            if let Some(contact_header) = request.header(&HeaderName::Contact) {
+        // RFC 3261 §10.3: a successful registrar response lists the current
+        // binding. Use the registrar-supplied binding when present; otherwise
+        // preserve the inbound Contact for the common single-binding case.
+        if success {
+            if let Some(contact_uri) = contact {
+                response.headers.push(TypedHeader::Other(
+                    HeaderName::Contact,
+                    HeaderValue::Raw(contact_uri.as_bytes().to_vec()),
+                ));
+            } else if let Some(contact_header) = request.header(&HeaderName::Contact) {
                 response.headers.push(contact_header.clone());
             }
         }
@@ -372,11 +442,16 @@ impl DialogManager {
             ));
         }
 
-        // 401 WWW-Authenticate (raw header, mirrors legacy path).
-        if status_code == 401 {
+        // RFC 3261 §22: 401 is end-to-end WWW authentication; 407 is
+        // hop-by-hop proxy authentication.
+        if status_code == 401 || status_code == 407 {
             if let Some(www_auth) = www_authenticate {
                 response.headers.push(TypedHeader::Other(
-                    HeaderName::WwwAuthenticate,
+                    if status_code == 407 {
+                        HeaderName::ProxyAuthenticate
+                    } else {
+                        HeaderName::WwwAuthenticate
+                    },
                     HeaderValue::Raw(www_auth.as_bytes().to_vec()),
                 ));
             }
@@ -440,18 +515,40 @@ impl DialogManager {
             ));
         }
 
-        self.transaction_manager
-            .send_response(transaction_id, response)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send REGISTER response".to_string(),
-            })?;
+        Ok(response)
+    }
+}
 
-        debug!(
-            "Sent REGISTER response (extras): {} reason_present={}",
-            status_code,
-            !reason.is_empty()
+#[cfg(test)]
+mod single_register_authority_tests {
+    #[test]
+    fn register_has_one_response_materializer_and_no_false_success_fallback() {
+        let source = include_str!("register_handler.rs");
+        let wire_send = [".send_response(transaction_id,", " response)"].concat();
+        assert_eq!(
+            source.matches(&wire_send).count(),
+            1,
+            "REGISTER responses must have one transaction wire materializer"
         );
-        Ok(())
+
+        let basic = source
+            .split("pub async fn send_basic_register_response(")
+            .nth(1)
+            .and_then(|tail| tail.split("pub async fn send_register_response(").next())
+            .expect("legacy auto-REGISTER facade");
+        assert!(basic.contains("501"));
+        assert!(basic.contains("send_register_response("));
+        assert!(!basic.contains("create_response("));
+
+        let false_success = ["falling back to basic ", "200 OK"].concat();
+        assert!(!source.contains(&false_success));
+        assert!(source.contains("try_publish_cross_crate_event(event)"));
+        assert!(source.contains("if !registrar_accepted"));
+        assert!(source.contains("send_register_response_classified_terminal"));
+        assert!(source.contains("Disposition::ZeroWireRetryable => Err(error)"));
+        assert!(source.contains("Disposition::WireUnknownErrorTerminal"));
+        assert!(source.contains("Authoritative registrar handler failed before accepting REGISTER"));
+        assert!(source.contains("HeaderName::ProxyAuthenticate"));
+        assert!(source.contains("HeaderName::Contact"));
     }
 }

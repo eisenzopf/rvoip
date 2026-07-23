@@ -2,9 +2,10 @@
 
 Date: 2026-06-16
 
-This checklist is evidence-backed. Checked rows are covered by the latest beta
-report selected by `crates/sip/rvoip-sip/beta-report/latest.txt` or by current
-repository files.
+This checklist is evidence-backed. Checked rows are covered by the pinned beta
+report below or by current repository files. `beta-report/latest.txt` is only
+the most recently packaged run; release selection uses the verified
+mode-specific pointers, including `beta-report/latest-full-clean.txt`.
 
 Current reference report:
 
@@ -13,7 +14,7 @@ Current reference report:
 - Git revision: `2bd8c570`
 - Git status at run time: `dirty`
 - Rust/Cargo: `1.95.0`
-- Current release train and runtime crate version: `0.2.2`
+- Current release train and runtime crate version: `0.2.5`
 
 ## Documentation
 
@@ -111,16 +112,72 @@ Final external release-gate command:
 crates/sip/rvoip-sip/scripts/perf_call_setup_2k_profile.sh clean
 
 RVOIP_STRICT_UA_HOST_IP=<local-host-ip> \
+RVOIP_REQUIRE_API_TOOLS=1 \
 BETA_REPORT_PACKAGE=1 \
 BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1 \
 BETA_CANONICAL_2K_RUN_DIRS="<oldest-run>:<middle-run>:<newest-run>" \
 BETA_RUN_LOCAL_PBX=1 \
+BETA_RESTORE_LOCAL_PBX=1 \
 BETA_PBX_PROVIDER=both \
 BETA_PBX_API=all \
 BETA_PBX_SCENARIO=all \
 BETA_PBX_G729_PROFILES="g729a g729ab" \
+BETA_RUN_SIPP=1 \
+BETA_SIPP_CPS="30 100 300 1000 2000" \
+BETA_SIPP_DIAGNOSTICS=0 \
+BETA_RUN_STRICT_UA=1 \
+BETA_RUN_FUZZ_SMOKE=1 \
+BETA_RUN_PERF_ALL=1 \
+BETA_PERF_REGRESSION_FAIL=1 \
+BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z \
+BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json \
+BETA_RUN_BURST_SMOKE=1 \
+BETA_RUN_BURST_MATRIX=1 \
+BETA_BURST_MATRIX=all \
+BETA_RUN_LONG_SOAK=1 \
+BETA_PERF_MEDIA_CHURN_DURATION_SECS=120 \
+BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS=1800 \
+RVOIP_PERF_SOAK_DURATION_SECS=3600 \
+RVOIP_PERF_SOAK_ACTIVE_CALLS=500 \
+RVOIP_PERF_SOAK_MIN_HOLD_SECS=10 \
+RVOIP_PERF_SOAK_MAX_HOLD_SECS=360 \
+RVOIP_PERF_SOAK_CPS=0 \
+RVOIP_PERF_SOAK_DRAIN_CPS=10 \
+RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=120 \
+RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=10 \
 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
+
+The gate automatically attests the effective PBX Cargo feature set when PBX
+testing is enabled; the default includes `g729`. Before performance work, it
+moves any existing `target/perf-results` directory to the recoverable
+`target/perf-results-archive/<run>-before-<mode>` boundary and creates a fresh
+directory. Only files produced after that boundary are copied into the report.
+Prior results are never deleted by this process.
+
+The relative performance audit never selects a mutable “latest” report. It
+verifies the tracked reviewed-baseline manifest, packages every hash-pinned
+comparison input under `perf-regression-baseline/`, and runs the audit against
+that packaged copy. The historical baseline is a threshold input only and is
+not promoted to release evidence.
+
+A clean full-mode pointer is deliberately stricter than an integrity-valid
+report. `latest-full-clean.txt` updates only when the run used
+`--require-external`, required the pinned public-API/semver tools, enabled the
+literal-all and hard-regression performance gates, packaged the reviewed
+regression baseline, ran the complete burst matrix, split and monolithic soaks
+at the release durations/load, exercised the
+full PBX provider/API/scenario and G.729A/G.729AB matrix, imported three
+canonical 2K runs, and captured the expected PBX, SIPp, strict-UA, performance,
+and soak artifacts. Every required file is covered by the attestation artifact
+inventory and SHA-256. A dirty run, a skipped gate, or a nominally passing run
+with incomplete evidence remains independently verifiable but is labeled
+`NON-RC` and can update only the informational `latest.txt` pointer.
+Formal signoff uses the copied verifier with
+`--require-clean --require-unchanged-source --require-no-skips --require-pass
+--require-mode-eligible`; the plain verifier command checks package integrity
+and reproducibility without upgrading diagnostic evidence into a release
+claim.
 
 For a literal-all performance qualification rather than the standard beta
 performance subset, add the following switches. This runs every registered
@@ -154,14 +211,24 @@ Required release evidence from each interop/perf/security run:
 - `summary.md` at the beta-gate artifact root.
 - `canonical-2k/index.json` and its three read-only `run-N/` copies.
 - `environment/environment.md` and Docker snapshots under
-  `environment/docker-<phase>/`.
+  `environment/docker-<phase>/`. Docker peer identity is captured in
+  allowlisted `rvoip-*-peer.json` files; raw `docker inspect` output and its
+  secret-bearing environment, labels, commands, mounts, and health logs are
+  excluded.
 - `pbx/summary.md` and `pbx/matrix.tsv` for PBX runs.
 - SIPp `run_summary.md`, `runs.tsv`, `analysis.md`, stat CSVs, screen logs,
   and error logs for load runs.
 - `security/cargo-audit.txt` and `security/cargo-audit.json`.
 - `security/fuzz/sip_message.log`, `security/fuzz/uri.log`,
   `security/fuzz/header.log`, and `security/fuzz/sdp.log`.
+- `perf-regression-baseline/manifest.json` and every listed file under
+  `perf-regression-baseline/perf-results/`, plus `perf-audit.md`.
 - Raw failure logs or packet captures for any beta-blocking failure.
+
+An individual gate failure does not stop the remaining independent gates.
+The runner records all failures and still attempts the terminal source
+fingerprint, summary, machine attestation, and report package before returning
+nonzero.
 
 ## Completed Release Evidence
 

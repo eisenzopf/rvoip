@@ -53,8 +53,7 @@ pub fn vp8_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::Pack
 
 /// Send fixture-encoded RTP bursts on local audio/video tracks.
 pub async fn send_fixture_media_burst(peer: &Arc<RvoipPeerConnection>, include_video: bool) {
-    let audio_local = peer.local_audio_track();
-    let audio_ssrc = peer.local_audio_ssrc();
+    let audio_writer = peer.outbound_audio_writer();
     let video_local = if include_video {
         peer.local_video_track()
     } else {
@@ -63,9 +62,14 @@ pub async fn send_fixture_media_burst(peer: &Arc<RvoipPeerConnection>, include_v
     let video_ssrc = peer.local_video_ssrc();
 
     for seq in 1..=25u16 {
-        if let (Some(track), Some(ssrc)) = (&audio_local, audio_ssrc) {
-            let pkt = opus_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
-            let _ = track.write_rtp(pkt).await;
+        if let Some(writer) = &audio_writer {
+            let _ = writer
+                .write_audio(
+                    crate::peer::builder::OPUS_PAYLOAD_TYPE,
+                    seq as u32 * 960,
+                    bytes::Bytes::from_static(OPUS_FIXTURE_PAYLOAD),
+                )
+                .await;
         }
         if let (Some(track), Some(ssrc)) = (&video_local, video_ssrc) {
             let pkt = vp8_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 3000);

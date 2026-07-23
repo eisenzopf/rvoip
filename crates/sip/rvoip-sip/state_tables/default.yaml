@@ -56,20 +56,6 @@ states:
   - name: "Unregistering"
     description: "Unregistration in progress"
 
-  # Subscription/Presence states
-  - name: "Subscribing"
-    description: "Subscription request in progress"
-  - name: "Subscribed"
-    description: "Active subscription"
-  - name: "Publishing"
-    description: "Publishing presence information"
-
-  # Additional states
-  - name: "Authenticating"
-    description: "Processing authentication challenge"
-  - name: "Messaging"
-    description: "Handling SIP MESSAGE requests"
-
 # Define conditions
 conditions:
   - name: "DialogEstablished"
@@ -81,19 +67,6 @@ conditions:
   - name: "SDPNegotiated"
     description: "SDP has been negotiated"
     default: false
-  - name: "HasRemoteSDP"
-    description: "Remote SDP is available"
-    default: false
-  - name: "HasLocalSDP"
-    description: "Local SDP is available"
-    default: false
-  - name: "IsRegistered"
-    description: "Client is registered with SIP server"
-    default: false
-  - name: "IsAuthenticated"
-    description: "Client has been authenticated"
-    default: false
-
 # Basic transitions for UAC (outgoing calls)
 transitions:
   # UAC initiates a call
@@ -120,8 +93,8 @@ transitions:
     actions:
       # RFC 3515 §2.4.5: if this UAC is a transfer leg
       # (session.transferor_session_id.is_some()) fire a 180 progress
-      # NOTIFY back on the transferor's REFER subscription. No-op for
-      # non-transfer calls.
+      # NOTIFY back on the transferor's REFER subscription. Ordinary calls
+      # request no transfer projection; partial/stale transfer links fail.
       - type: "SendTransferNotifyRinging"
     publish:
       - "CallRinging"
@@ -224,7 +197,7 @@ transitions:
       - type: "SendACK"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
-      # RFC 3515 §2.4.5 — fires only for transfer legs; no-op otherwise.
+      # RFC 3515 §2.4.5 — conditional projection for exact transfer legs.
       # Ordered after media commit so a NOTIFY-send failure can't roll
       # back call establishment.
       - type: "SendTransferNotifySuccess"
@@ -232,6 +205,7 @@ transitions:
       # INVITE; release the stash so a subsequent re-INVITE / new call
       # is not rejected by the conflict guard.
       - type: "ClearPendingINVITEOptions"
+      - type: "ArmSessionRefreshTimer"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -251,13 +225,14 @@ transitions:
       - type: "SendACK"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
-      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. No-op for
-      # non-transfer calls. Placed after media commit for the same reason
+      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. Ordinary calls
+      # request no transfer projection. Placed after media commit for the same reason
       # as the Initiating→Active path above.
       - type: "SendTransferNotifySuccess"
       # SIP_API_DESIGN_2 §7.3 invariant #2 — final response on the
       # INVITE; release the stash.
       - type: "ClearPendingINVITEOptions"
+      - type: "ArmSessionRefreshTimer"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -279,14 +254,15 @@ transitions:
       - type: "SendACK"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
-      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. No-op for
-      # normal calls; required when the transferred call receives 183 before
+      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. Ordinary calls
+      # request no transfer projection; required when a transfer leg receives 183 before
       # final answer.
       - type: "SendTransferNotifySuccess"
       # Final response for the initial INVITE. Release request options and
       # retained authentication material even when 183 established early
       # media before the 200 response.
       - type: "ClearPendingINVITEOptions"
+      - type: "ArmSessionRefreshTimer"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -399,6 +375,7 @@ transitions:
     actions:
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
+      - type: "ArmSessionRefreshTimer"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -458,9 +435,8 @@ transitions:
   # Terminated). It then publishes `SessionCoordinationEvent::Call-
   # ByeReceived`, which the `event_hub` bridges to the cross-crate
   # `DialogToSessionEvent::ByeReceived`. Session-core dispatches
-  # `EventType::DialogBYE` into the state machine. The older
-  # `DialogTerminated` rows remain as compatibility for generic dialog
-  # teardown and local-BYE completion.
+  # `EventType::DialogBYE` into the state machine. `DialogTerminated` remains
+  # the typed generic-dialog and exact outbound-BYE completion event.
   #
   # BYE cleanup actions MUST NOT include `SendSIPResponse(200)` because
   # dialog-core has already sent it; doing it twice corrupts the transaction.
@@ -551,12 +527,9 @@ transitions:
     event:
       type: "DialogTerminated"
     next_state: "Terminated"
-    actions:
-      - type: "CleanupDialog"
-      - type: "CleanupMedia"
     publish:
       - "CallTerminated"
-    description: "Remote hangup (BYE) from Active — cleanup and finalize"
+    description: "Generic or local-BYE terminal fact from Active; the retained exact release owns cleanup"
 
   - role: "Both"
     state: "OnHold"
@@ -632,8 +605,8 @@ transitions:
 
   # Method-specific inbound BYE path. Dialog-core has already sent the
   # 200 OK, so these rows only finalize local resources. The older
-  # DialogTerminated rows above remain as compatibility for generic dialog
-  # teardown events and local BYE completion.
+  # DialogTerminated rows above remain for generic dialog teardown events and
+  # exact outbound-BYE completion.
 
   - role: "Both"
     state: "Ringing"
@@ -758,22 +731,19 @@ transitions:
   # Complete the signaling phase after our own local hangup. This is a
   # deliberately two-phase path: HangupCall takes us Active → Terminating
   # and sends BYE,
-  # while the peer's 200 OK drives the dialog transaction to Completed and
-  # surfaces as DialogTerminated here. Keeping cleanup out of the initiating
-  # row prevents a fast 200 response from retiring the exact session while the
-  # original SendBYE action is still unwinding. The coordinator's retained
-  # exact terminal release owns the single media cleanup and also covers dialog
-  # stacks that do not surface this event.
+  # while the exact outbound transaction completion surfaces as
+  # DialogTerminated here. Keeping cleanup out of both transition rows prevents
+  # a fast final response from retiring the session while SendBYE is still
+  # unwinding; the retained exact terminal owner performs the single dialog,
+  # media, and registry release after this state commit.
   - role: "Both"
     state: "Terminating"
     event:
       type: "DialogTerminated"
     next_state: "Terminated"
-    actions:
-      - type: "CleanupDialog"
     publish:
       - "CallTerminated"
-    description: "Local hangup confirmed; retained exact release owns the single media cleanup"
+    description: "Local hangup wire completion committed; retained exact release owns all cleanup"
 
   # RFC 3261 §14.1 — Hold is a re-INVITE. Session parameters MUST NOT
   # change until a 2xx response arrives. We enter an intermediate
@@ -798,6 +768,7 @@ transitions:
       - type: "SendACK"
       - type: "SuspendMedia"
       - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
     publish:
       - "CallOnHold"
     description: "Hold confirmed by 2xx — commit OnHold and suspend media"
@@ -861,6 +832,7 @@ transitions:
       - type: "SendACK"
       - type: "ResumeMedia"
       - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
     publish:
       - "CallResumed"
     description: "Resume confirmed by 2xx — commit Active and resume media"
@@ -963,6 +935,7 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
+      - type: "ArmSessionRefreshTimer"
       - type: "SuspendMedia"
       - type: "ClearPendingReinvite"
     publish:
@@ -981,6 +954,7 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
+      - type: "ArmSessionRefreshTimer"
     description: "UAS answers incoming re-INVITE (hold/resume/renegotiation)"
 
   - role: "Both"
@@ -993,6 +967,7 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
+      - type: "ArmSessionRefreshTimer"
     description: "UAS answers re-INVITE while on hold (peer-initiated resume)"
 
   # RFC 3261 §14.1 — terminal response on a builder-API re-INVITE we
@@ -1012,6 +987,7 @@ transitions:
       - "HasPendingReinvite"
     actions:
       - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
     description: "Clear in-flight builder-API re-INVITE tracker on 2xx (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -1072,6 +1048,7 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
+      - type: "ArmSessionRefreshTimer"
     description: "UAS answers UPDATE (session-timer refresh) while Active"
 
   - role: "Both"
@@ -1083,10 +1060,227 @@ transitions:
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
+      - type: "ArmSessionRefreshTimer"
     description: "UAS answers UPDATE while on hold"
 
+  # RFC 4028 lifecycle authority. These reserved MediaEvent spellings are
+  # admitted only with a crate-private exact-session sidecar; a public caller
+  # supplying the same string is rejected before YAML lookup. The retained
+  # deadline owns when work becomes due, while these rows own every protocol
+  # decision and reuse the canonical options actions for wire dispatch.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshUpdateDue"
+    actions:
+      - type: "PrepareSessionRefreshUpdate"
+    description: "RFC 4028 exact deadline stages the canonical UPDATE attempt"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshUpdateDue"
+    actions:
+      - type: "PrepareSessionRefreshUpdate"
+    description: "RFC 4028 UPDATE refresh while the session is held"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshUpdateDue"
+    actions:
+      - type: "PrepareSessionRefreshUpdate"
+    description: "Defer RFC 4028 UPDATE until the hold re-INVITE finishes"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshUpdateDue"
+    actions:
+      - type: "PrepareSessionRefreshUpdate"
+    description: "Defer RFC 4028 UPDATE until the resume re-INVITE finishes"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshUpdateSucceeded"
+    actions:
+      - type: "ArmSessionRefreshTimer"
+    description: "Committed UPDATE 2xx rearms the exact RFC 4028 deadline"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshUpdateSucceeded"
+    actions:
+      - type: "ArmSessionRefreshTimer"
+    description: "Committed UPDATE 2xx rearms the held-session deadline"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshUpdateSucceeded"
+    actions:
+      - type: "ArmSessionRefreshTimer"
+    description: "UPDATE refresh completed while a hold re-INVITE was in flight"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshUpdateSucceeded"
+    actions:
+      - type: "ArmSessionRefreshTimer"
+    description: "UPDATE refresh completed while a resume re-INVITE was in flight"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshUpdateFailed"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "RFC 4028 section 9 falls back from UPDATE to re-INVITE"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshUpdateFailed"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Held-session UPDATE failure falls back to re-INVITE"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshUpdateFailed"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Queue refresh fallback behind the in-flight hold re-INVITE"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshUpdateFailed"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Queue refresh fallback behind the in-flight resume re-INVITE"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshReinviteDue"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Retry a fallback re-INVITE after a conflicting request drains"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshReinviteDue"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Retry a held-session fallback re-INVITE after conflict"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshReinviteDue"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Wait for hold glare ownership before fallback re-INVITE"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshReinviteDue"
+    actions:
+      - type: "PrepareSessionRefreshReinvite"
+    description: "Wait for resume glare ownership before fallback re-INVITE"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshReinviteSucceeded"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
+    description: "Fallback re-INVITE 2xx commits refresh and rearms deadline"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshReinviteSucceeded"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
+    description: "Held fallback re-INVITE 2xx rearms deadline"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshReinviteFailed"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "RFC 4028 section 10 expires session after both refresh methods fail"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshReinviteFailed"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "RFC 4028 expiration terminates a held session exactly once"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "InternalSessionRefreshPeerExpired"
+    next_state: "Terminating"
+    actions:
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Peer refresher missed Session-Expires; terminate with cause 408"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "InternalSessionRefreshPeerExpired"
+    next_state: "Terminating"
+    actions:
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Peer refresher expired while held; terminate once"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "InternalSessionRefreshPeerExpired"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Peer refresh expiry supersedes a pending hold re-INVITE"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "InternalSessionRefreshPeerExpired"
+    next_state: "Terminating"
+    actions:
+      - type: "ClearPendingReinvite"
+      - type: "PrepareSessionRefreshExpiry"
+      - type: "SendBYE"
+    description: "Peer refresh expiry supersedes a pending resume re-INVITE"
+
   # RFC 3261 §14.1 — 491 Request Pending on a re-INVITE (glare).
-  # Sleep a random interval and retry the pending hold/resume/SDP-update.
+  # Schedule a random off-lane interval and retry the pending
+  # hold/resume/SDP-update for the same exact session lifetime.
   # Transition stays in Active / OnHold so the dialog isn't torn down.
   - role: "Both"
     state: "Active"
@@ -1147,6 +1341,7 @@ transitions:
       type: "Dialog4xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       # SIP_API_DESIGN_2 §7.3 invariant #2 — final response on the
@@ -1162,6 +1357,7 @@ transitions:
       type: "Dialog5xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1175,6 +1371,7 @@ transitions:
       type: "Dialog6xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1188,6 +1385,7 @@ transitions:
       type: "Dialog4xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1201,6 +1399,7 @@ transitions:
       type: "Dialog5xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1214,6 +1413,7 @@ transitions:
       type: "Dialog6xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1227,6 +1427,7 @@ transitions:
       type: "DialogTimeout"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1240,6 +1441,7 @@ transitions:
       type: "Dialog4xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1253,6 +1455,7 @@ transitions:
       type: "Dialog5xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1266,6 +1469,7 @@ transitions:
       type: "Dialog6xxFailure"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1279,6 +1483,7 @@ transitions:
       type: "DialogTimeout"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1292,6 +1497,7 @@ transitions:
       type: "DialogTimeout"
     next_state: "Failed"
     actions:
+      - type: "SendTransferNotifyFailure"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "ClearPendingINVITEOptions"
@@ -1478,11 +1684,9 @@ transitions:
     event:
       type: "DialogTerminated"
     next_state: "Cancelled"
-    actions:
-      - type: "CleanupDialog"
     publish:
       - "CallCancelled"
-    description: "Late-answer BYE completed; the retained terminal release owns media cleanup"
+    description: "Late-answer BYE completed; the retained exact release owns all cleanup"
 
   - role: "UAC"
     state: "Cancelling"
@@ -1502,14 +1706,23 @@ transitions:
       type: "DialogCANCEL"
     next_state: "Cancelled"
     actions:
-      - type: "SendSIPResponse"
-        code: 487
-        reason: "Request Terminated"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
       - "CallCancelled"
-    description: "Incoming call cancelled"
+    description: "Matched inbound CANCEL already received 200 and ended INVITE with 487; commit lifecycle and cleanup once"
+
+  - role: "UAS"
+    state: "EarlyMedia"
+    event:
+      type: "DialogCANCEL"
+    next_state: "Cancelled"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallCancelled"
+    description: "Matched inbound CANCEL after provisional early media; commit lifecycle and cleanup once"
 
   # ========================================
   # Registration Flow (UAC)
@@ -1522,7 +1735,7 @@ transitions:
       type: "StartRegistration"
     next_state: "Registering"
     actions:
-      - type: "SendREGISTER"
+      - type: "SendREGISTERWithOptions"
     description: "Initiate SIP registration with server"
 
   # Registration successful (200 OK without challenge)
@@ -1538,9 +1751,8 @@ transitions:
   # REGISTER challenged with 401/407 (RFC 3261 §22.2). Shares the
   # `AuthRequired` event with INVITE auth — the `Registering` state
   # disambiguates this from the INVITE retry transition. Single self-loop:
-  # parse + retry in one step; dialog-core's event_hub converter emits
-  # `AuthRequired` directly, bypassing the old `Registration401` →
-  # `Authenticating` → `RetryRegistration` → `Registering` three-step path.
+  # parse + retry in one step through the same retained options snapshot used
+  # for initial, manual-refresh, automatic-refresh, and 423 attempts.
   - role: "UAC"
     state: "Registering"
     event:
@@ -1548,8 +1760,34 @@ transitions:
     next_state: "Registering"
     actions:
       - type: "StoreAuthChallenge"
-      - type: "SendREGISTERWithAuth"
+      - type: "SendREGISTERWithOptions"
     description: "REGISTER auth retry (RFC 3261 §22.2)"
+
+  # A builder-driven manual refresh remains in Registered while its wire
+  # attempt runs. Its 401/407 therefore replays the retained refresh snapshot
+  # here, preserving Call-ID, advancing CSeq, and retaining custom headers.
+  - role: "UAC"
+    state: "Registered"
+    event:
+      type: "AuthRequired"
+    next_state: "Registered"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendREGISTERWithOptions"
+    description: "REGISTER manual-refresh auth retry (RFC 3261 §10.2.4, §22.2)"
+
+  # Removing a binding is still a REGISTER transaction and may receive the
+  # same origin/proxy challenge sequence as an initial registration. Retain
+  # Expires: 0 while replaying the exact request snapshot.
+  - role: "UAC"
+    state: "Unregistering"
+    event:
+      type: "AuthRequired"
+    next_state: "Unregistering"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendREGISTERWithOptions"
+    description: "Unregistration auth retry retaining Expires: 0 (RFC 3261 §10.2.2, §22.2)"
 
   # SIP_API_DESIGN_2 R2 — auth retry for non-INVITE / non-REGISTER
   # methods (BYE, REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS,
@@ -1571,6 +1809,36 @@ transitions:
       - type: "StoreAuthChallenge"
       - type: "SendRequestWithAuth"
     description: "In-dialog request auth retry (BYE/REFER/NOTIFY/INFO/UPDATE)"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "AuthRequired"
+    next_state: "OnHold"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "Held-dialog request auth retry (UPDATE/re-INVITE included)"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "AuthRequired"
+    next_state: "HoldPending"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "Exact in-dialog auth retry while hold signaling is pending"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "AuthRequired"
+    next_state: "Resuming"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "Exact in-dialog auth retry while resume signaling is pending"
 
   # Legacy `hangup()` enters Terminating before its BYE is written. Keep the
   # state stable while a 401/407 challenge replays the retained exact BYE
@@ -1612,7 +1880,7 @@ transitions:
       type: "RefreshRegistration"
     next_state: "Registering"
     actions:
-      - type: "SendREGISTER"
+      - type: "SendREGISTERWithOptions"
     description: "Refresh registration before expiry"
 
   # Unregister (expires=0)
@@ -1622,7 +1890,7 @@ transitions:
       type: "StartUnregistration"
     next_state: "Unregistering"
     actions:
-      - type: "SendUnREGISTER"
+      - type: "SendREGISTERWithOptions"
     description: "Initiate unregistration (expires=0)"
 
   # Unregistration successful
@@ -1644,6 +1912,27 @@ transitions:
     publish:
       - "UnregistrationFailed"
     description: "Unregistration failed but cleared local state"
+
+  # Inbound NOTIFY wire validation and 200 OK remain dialog-owned. Session
+  # mutation for parsed RFC 3515 REFER progress is dispatched through these
+  # explicit role wildcards so any retained live call/transfer state uses the
+  # same lane-owned ProcessNOTIFY action. StateTable does not currently fall
+  # back from a UAC/UAS wildcard lookup to a Role::Both wildcard.
+  - role: "UAC"
+    state: "Any"
+    event:
+      type: "ReceiveNOTIFY"
+    actions:
+      - type: "ProcessNOTIFY"
+    description: "Process inbound NOTIFY on a retained UAC lifetime"
+
+  - role: "UAS"
+    state: "Any"
+    event:
+      type: "ReceiveNOTIFY"
+    actions:
+      - type: "ProcessNOTIFY"
+    description: "Process inbound NOTIFY on a retained UAS lifetime"
 
   # ─────────────────────────────────────────────────────────────────────
   # SIP_API_DESIGN_2 §7.1 — builder-staged outbound dispatch.

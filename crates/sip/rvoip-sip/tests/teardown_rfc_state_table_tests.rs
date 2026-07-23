@@ -147,7 +147,7 @@ fn uac_late_answer_bye_cleanup_publishes_cancelled_on_dialog_terminated() {
     );
 
     assert_eq!(t.next_state, Some(CallState::Cancelled));
-    assert!(t.actions.contains(&Action::CleanupDialog));
+    assert!(t.actions.is_empty());
     assert!(
         !t.actions.contains(&Action::CleanupMedia),
         "the retained terminal release owns cancellation media cleanup"
@@ -182,20 +182,42 @@ fn local_bye_initiators_defer_media_cleanup_to_terminal_phase() {
         CallState::Terminating,
         EventType::DialogTerminated,
     );
-    assert!(terminating.actions.contains(&Action::CleanupDialog));
+    assert!(terminating.actions.is_empty());
     assert!(
         !terminating.actions.contains(&Action::CleanupMedia),
         "the terminal handler retained release must remain the single media owner"
     );
 
-    for event in [EventType::DialogTerminated, EventType::DialogTimeout] {
-        let cancelling = transition(&table, Role::UAC, CallState::Cancelling, event);
-        assert!(cancelling.actions.contains(&Action::CleanupDialog));
-        assert!(
-            !cancelling.actions.contains(&Action::CleanupMedia),
-            "the terminal handler/watchdog exact release must remain the single media owner"
-        );
-    }
+    let builder_terminal = transition(
+        &table,
+        Role::UAC,
+        CallState::Active,
+        EventType::DialogTerminated,
+    );
+    assert!(
+        builder_terminal.actions.is_empty(),
+        "a fast builder BYE completion must not recursively clean dialog resources inside the executor lane"
+    );
+
+    let cancelling = transition(
+        &table,
+        Role::UAC,
+        CallState::Cancelling,
+        EventType::DialogTerminated,
+    );
+    assert!(cancelling.actions.is_empty());
+
+    let cancelling_timeout = transition(
+        &table,
+        Role::UAC,
+        CallState::Cancelling,
+        EventType::DialogTimeout,
+    );
+    assert!(cancelling_timeout.actions.contains(&Action::CleanupDialog));
+    assert!(
+        !cancelling_timeout.actions.contains(&Action::CleanupMedia),
+        "the watchdog exact release must remain the single media owner"
+    );
 }
 
 #[test]

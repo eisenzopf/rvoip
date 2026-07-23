@@ -62,6 +62,39 @@ impl RetainedTasks {
         true
     }
 
+    /// Retain ordinary work while admission is open, or a child of already
+    /// retained work while the registry is draining.
+    ///
+    /// A caller using the closed-registry path must itself remain retained
+    /// until this method returns. Its existing count prevents `wait_idle`
+    /// from observing zero before the child is registered. Unlike
+    /// [`Self::spawn_child`], a closed and already-idle registry is rejected
+    /// without panicking; this lets shutdown-bound callers fail closed.
+    pub(crate) fn spawn_or_child(
+        self: &Arc<Self>,
+        future: impl Future<Output = ()> + Send + 'static,
+    ) -> bool {
+        let mut current = self.state.load(Ordering::Acquire);
+        loop {
+            let count = current & COUNT_MASK;
+            if current & CLOSED_BIT != 0 && count == 0 {
+                return false;
+            }
+            assert_ne!(count, COUNT_MASK, "retained task count overflow");
+            match self.state.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+        self.spawn_counted(future);
+        true
+    }
+
     /// Retain cleanup spawned by an already-retained parent after close.
     ///
     /// The caller must itself be retained until this method returns. That
@@ -184,6 +217,50 @@ mod tests {
             .await
             .expect("parent and child drained");
         child_done_rx.await.expect("child ran before idle");
+        assert_eq!(tasks.count(), 0);
+        assert!(!tasks.panicked());
+    }
+
+    #[tokio::test]
+    async fn spawn_or_child_admits_from_retained_parent_during_close() {
+        let tasks = RetainedTasks::new();
+        let (parent_started_tx, parent_started_rx) = tokio::sync::oneshot::channel();
+        let (allow_child_tx, allow_child_rx) = tokio::sync::oneshot::channel();
+        let (child_done_tx, child_done_rx) = tokio::sync::oneshot::channel();
+        let parent_tasks = Arc::clone(&tasks);
+        assert!(tasks.spawn(async move {
+            let _ = parent_started_tx.send(());
+            let _ = allow_child_rx.await;
+            assert!(parent_tasks.spawn_or_child(async move {
+                tokio::task::yield_now().await;
+                let _ = child_done_tx.send(());
+            }));
+        }));
+
+        parent_started_rx.await.expect("retained parent started");
+        tasks.close();
+        let _ = allow_child_tx.send(());
+        tokio::time::timeout(Duration::from_secs(1), tasks.wait_idle())
+            .await
+            .expect("retained parent and child drained");
+        child_done_rx.await.expect("child ran before idle");
+        assert_eq!(tasks.count(), 0);
+        assert!(!tasks.panicked());
+    }
+
+    #[tokio::test]
+    async fn spawn_or_child_rejects_closed_idle_registry_without_panicking() {
+        let tasks = RetainedTasks::new();
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tasks.close();
+
+        let task_ran = Arc::clone(&ran);
+        assert!(!tasks.spawn_or_child(async move {
+            task_ran.store(true, std::sync::atomic::Ordering::Release);
+        }));
+        tokio::task::yield_now().await;
+
+        assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
         assert_eq!(tasks.count(), 0);
         assert!(!tasks.panicked());
     }

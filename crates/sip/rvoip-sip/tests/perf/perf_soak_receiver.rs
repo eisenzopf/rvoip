@@ -69,7 +69,7 @@ async fn perf_soak_receiver() {
     let retention_sampler = EndpointRetentionSampler::start(
         "receiver",
         receiver.coordinator.clone(),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler =
         MemoryDiagnosticSampler::start("receiver", &settings, memory_diagnostic_interval());

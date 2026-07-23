@@ -64,6 +64,17 @@ class CanonicalEvidenceTests(unittest.TestCase):
         self.binary.write_bytes(b"exact canonical executable")
         self.binary.chmod(0o755)
         self.binary_sha256 = hashlib.sha256(self.binary.read_bytes()).hexdigest()
+        self.reviewed_baseline_root = (
+            SCRIPT_DIR.parent / "perf-baselines" / evidence.REVIEWED_BASELINE_ID
+        )
+        self.reviewed_baseline = (
+            self.reviewed_baseline_root / evidence.REVIEWED_BASELINE_RELATIVE_PATH
+        )
+        self.assertTrue(self.reviewed_baseline.is_file())
+        self.assertEqual(
+            evidence.file_sha256(self.reviewed_baseline),
+            evidence.REVIEWED_BASELINE_SHA256,
+        )
         self.runs = [self.make_run(index) for index in range(1, 4)]
 
     def tearDown(self):
@@ -72,6 +83,10 @@ class CanonicalEvidenceTests(unittest.TestCase):
     def make_run(self, sequence):
         run_dir = self.root / f"run-{sequence}"
         run_dir.mkdir()
+        run_baseline_root = run_dir / "reviewed-baseline"
+        run_baseline = run_baseline_root / evidence.REVIEWED_BASELINE_RELATIVE_PATH
+        run_baseline.parent.mkdir(parents=True)
+        run_baseline.write_bytes(self.reviewed_baseline.read_bytes())
         report = acceptance_fixture.canonical_report()
         report.setdefault("environment", {}).update(
             {
@@ -115,6 +130,11 @@ class CanonicalEvidenceTests(unittest.TestCase):
             "source_fingerprint_unchanged_for_full_run": True,
             "executable": str(self.binary),
             "executable_sha256": self.binary_sha256,
+            "reviewed_baseline_path": str(run_baseline_root),
+            "reviewed_baseline_id": evidence.REVIEWED_BASELINE_ID,
+            "reviewed_baseline_relative_path": evidence.REVIEWED_BASELINE_RELATIVE_PATH,
+            "reviewed_baseline_origin": "tracked-default",
+            "reviewed_baseline_sha256": evidence.REVIEWED_BASELINE_SHA256,
         }
         (run_dir / "manifest.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
@@ -144,13 +164,38 @@ class CanonicalEvidenceTests(unittest.TestCase):
         self.assertEqual(index["run_count"], 3)
         self.assertEqual(index["common_source_fingerprint_sha256"], self.fingerprint)
         self.assertEqual(index["common_executable_sha256"], self.binary_sha256)
+        self.assertEqual(
+            index["reviewed_baseline"],
+            {
+                "id": evidence.REVIEWED_BASELINE_ID,
+                "relative_path": evidence.REVIEWED_BASELINE_RELATIVE_PATH,
+                "sha256": evidence.REVIEWED_BASELINE_SHA256,
+                "packaged_path": evidence.REVIEWED_BASELINE_PACKAGED_PATH,
+            },
+        )
         packaged_executable = destination / index["packaged_executable"]
         self.assertTrue(packaged_executable.is_file())
         self.assertEqual(evidence.file_sha256(packaged_executable), self.binary_sha256)
+        packaged_baseline = destination / index["reviewed_baseline"]["packaged_path"]
+        self.assertTrue(packaged_baseline.is_file())
+        self.assertEqual(
+            evidence.file_sha256(packaged_baseline),
+            evidence.REVIEWED_BASELINE_SHA256,
+        )
         for sequence in range(1, 4):
             copied = destination / f"run-{sequence}" / "manifest.json"
             self.assertTrue(copied.is_file())
             self.assertEqual(copied.stat().st_mode & 0o222, 0)
+
+    def test_source_provenance_includes_exact_git_tree(self):
+        expected = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.workspace,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True,
+        ).stdout.strip()
+        self.assertEqual(self.source["git_tree"], expected)
 
     def test_nonpass_manifest_is_rejected(self):
         self.rewrite_manifest(
@@ -215,15 +260,44 @@ class CanonicalEvidenceTests(unittest.TestCase):
                 self.workspace, self.beta_start, self.root / "artifacts", self.runs
             )
 
+    def test_missing_reviewed_baseline_identity_is_rejected(self):
+        self.rewrite_manifest(
+            self.runs[0], lambda manifest: manifest.pop("reviewed_baseline_sha256")
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "reviewed_baseline_sha256"):
+            evidence.import_evidence(
+                self.workspace, self.beta_start, self.root / "artifacts", self.runs
+            )
+
+    def test_mutated_reviewed_baseline_override_is_rejected(self):
+        override = (
+            self.runs[0]
+            / "reviewed-baseline"
+            / evidence.REVIEWED_BASELINE_RELATIVE_PATH
+        )
+        override.write_bytes(override.read_bytes() + b"mutated\n")
+        self.rewrite_manifest(
+            self.runs[0],
+            lambda manifest: manifest.update(
+                reviewed_baseline_origin="explicit-override",
+            ),
+        )
+        with self.assertRaisesRegex(evidence.EvidenceError, "content differs"):
+            evidence.import_evidence(
+                self.workspace, self.beta_start, self.root / "artifacts", self.runs
+            )
+
     def test_run_mutation_during_copy_is_rejected(self):
         real_copytree = evidence.shutil.copytree
         copy_count = 0
 
-        def mutating_copytree(source, destination):
+        def mutating_copytree(source, destination, *args, **kwargs):
             nonlocal copy_count
-            result = real_copytree(source, destination)
-            copy_count += 1
-            if copy_count == 1:
+            result = real_copytree(source, destination, *args, **kwargs)
+            is_run_root = (pathlib.Path(source) / "manifest.json").is_file()
+            if is_run_root:
+                copy_count += 1
+            if is_run_root and copy_count == 1:
                 (pathlib.Path(destination) / "report.json").write_text(
                     "mutated during copy\n", encoding="utf-8"
                 )

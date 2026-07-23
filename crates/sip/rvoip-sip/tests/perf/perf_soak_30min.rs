@@ -40,7 +40,10 @@
 #![allow(clippy::needless_return)]
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -386,7 +389,7 @@ async fn perf_soak_30min() {
     let retention_sampler = RetentionSampler::start(
         Arc::clone(&alice),
         Arc::clone(&bob.coordinator),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
 
     // Cycling active media pool. Replenishment stops early enough to avoid
@@ -753,9 +756,10 @@ async fn perf_soak_30min() {
     let rss_post_drain_start_secs = started.elapsed().as_secs_f64();
     let teardown_phase_elapsed_secs = (rss_post_drain_start_secs - duration_secs as f64).max(0.0);
     tokio::time::sleep(retention_drain_wait).await;
-    let retention_samples = retention_sampler.stop().await;
-    let final_retention = retention_samples
-        .last()
+    let retention_series = retention_sampler.stop().await;
+    let final_retention = retention_series
+        .final_sample
+        .as_ref()
         .cloned()
         .unwrap_or_else(|| json!({}));
     let retained_after_drain = retained_total(&final_retention);
@@ -967,17 +971,10 @@ async fn perf_soak_30min() {
             "lifecycle_terminal_entries_after_drain",
             lifecycle_terminal_entries_total(&final_retention),
         )
-        .result_block(
-            "retention",
-            retention_summary(&retention_samples, retained_after_drain),
-        )
+        .result_block("retention", retention_series.summary(retained_after_drain))
         .diagnostic_block(
             "retention_samples",
-            json!({
-                "sample_count": retention_samples.len(),
-                "samples": retention_samples,
-                "final_retained_objects": retained_after_drain,
-            }),
+            retention_series.diagnostic_summary(retained_after_drain),
         )
         .diagnostic_block(
             "rss_windows",
@@ -1408,6 +1405,8 @@ async fn perf_mass_teardown_stress() {
     let mut report = ScenarioReport::new("perf_mass_teardown_stress", load);
     report
         .result("calls_requested", requested_calls as u64)
+        .result("mass_teardown_setup_cps", setup_cps)
+        .result("retention_drain_wait_secs", retention_drain_wait.as_secs())
         .result(
             "calls_established",
             (teardown_succeeded + teardown_failed) as u64,
@@ -1548,7 +1547,16 @@ fn read_positive_usize_env(name: &str) -> Option<usize> {
 
 struct RetentionSampler {
     stop_tx: tokio::sync::watch::Sender<bool>,
-    task: JoinHandle<Vec<serde_json::Value>>,
+    task: JoinHandle<RetentionSeries>,
+}
+
+struct RetentionSeries {
+    samples_path: PathBuf,
+    sample_count: usize,
+    max_retained_objects: u64,
+    first: Option<serde_json::Value>,
+    last: Option<serde_json::Value>,
+    final_sample: Option<serde_json::Value>,
 }
 
 impl RetentionSampler {
@@ -1560,24 +1568,111 @@ impl RetentionSampler {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
             let started = std::time::Instant::now();
-            let mut samples = Vec::new();
+            let mut series = RetentionSeries::new(retention_samples_path());
+            let mut writer = series.open_writer();
             loop {
-                samples.push(capture_retention_sample("periodic", started, &alice, &bob).await);
+                let sample = capture_retention_sample("periodic", started, &alice, &bob).await;
+                series.record(sample, &mut writer);
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {}
                     _ = stop_rx.changed() => break,
                 }
             }
-            samples.push(capture_retention_sample("after_drain", started, &alice, &bob).await);
-            samples
+            let sample = capture_retention_sample("after_drain", started, &alice, &bob).await;
+            series.record(sample, &mut writer);
+            writer
+                .flush()
+                .expect("flush monolithic retention diagnostics JSONL");
+            series
         });
         Self { stop_tx, task }
     }
 
-    async fn stop(self) -> Vec<serde_json::Value> {
+    async fn stop(self) -> RetentionSeries {
         let _ = self.stop_tx.send(true);
-        self.task.await.unwrap_or_default()
+        self.task
+            .await
+            .unwrap_or_else(|_| RetentionSeries::new(retention_samples_path()))
     }
+}
+
+impl RetentionSeries {
+    fn new(samples_path: PathBuf) -> Self {
+        Self {
+            samples_path,
+            sample_count: 0,
+            max_retained_objects: 0,
+            first: None,
+            last: None,
+            final_sample: None,
+        }
+    }
+
+    fn open_writer(&self) -> BufWriter<File> {
+        if let Some(parent) = self.samples_path.parent() {
+            std::fs::create_dir_all(parent)
+                .expect("create monolithic retention diagnostics directory");
+        }
+        BufWriter::new(
+            File::create(&self.samples_path)
+                .expect("create monolithic retention diagnostics JSONL"),
+        )
+    }
+
+    fn record(&mut self, sample: serde_json::Value, writer: &mut BufWriter<File>) {
+        serde_json::to_writer(&mut *writer, &sample)
+            .expect("write monolithic retention diagnostics JSONL");
+        writer
+            .write_all(b"\n")
+            .expect("write monolithic retention diagnostics newline");
+        writer
+            .flush()
+            .expect("flush monolithic retention diagnostics JSONL");
+
+        self.sample_count += 1;
+        let retained = sample["retained_total"].as_u64().unwrap_or(0);
+        self.max_retained_objects = self.max_retained_objects.max(retained);
+        let summary = retention_sample_summary(&sample);
+        if self.first.is_none() {
+            self.first = Some(summary.clone());
+        }
+        self.last = Some(summary);
+        self.final_sample = Some(sample);
+    }
+
+    fn summary(&self, final_retained: u64) -> serde_json::Value {
+        json!({
+            "sample_count": self.sample_count,
+            "max_retained_objects": self.max_retained_objects,
+            "final_retained_objects": final_retained,
+            "first": self.first,
+            "last": self.last,
+            "samples_path": self.samples_path,
+        })
+    }
+
+    fn diagnostic_summary(&self, final_retained: u64) -> serde_json::Value {
+        json!({
+            "sample_count": self.sample_count,
+            "max_retained_objects": self.max_retained_objects,
+            "final_retained_objects": final_retained,
+            "first": self.first,
+            "last": self.last,
+            "samples_path": self.samples_path,
+            "format": "jsonl",
+            "storage": "streamed_lossless",
+        })
+    }
+}
+
+fn retention_samples_path() -> PathBuf {
+    if let Some(archive_dir) = std::env::var_os("RVOIP_PERF_ARCHIVE_DIR") {
+        return PathBuf::from(archive_dir).join(format!(
+            "perf_soak_30min_retention_samples_{}.jsonl",
+            std::process::id()
+        ));
+    }
+    support::soak::diagnostic_sample_path("monolithic", "retention")
 }
 
 async fn capture_retention_sample(
@@ -1654,21 +1749,6 @@ fn endpoint_metric(snapshot: &serde_json::Value, pointer: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn retention_summary(samples: &[serde_json::Value], final_retained: u64) -> serde_json::Value {
-    let max_retained_objects = samples
-        .iter()
-        .filter_map(|sample| sample["retained_total"].as_u64())
-        .max()
-        .unwrap_or(0);
-    json!({
-        "sample_count": samples.len(),
-        "max_retained_objects": max_retained_objects,
-        "final_retained_objects": final_retained,
-        "first": samples.first().map(retention_sample_summary),
-        "last": samples.last().map(retention_sample_summary),
-    })
-}
-
 fn retention_sample_summary(sample: &serde_json::Value) -> serde_json::Value {
     json!({
         "label": sample["label"].clone(),
@@ -1684,7 +1764,11 @@ fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
         "session_store": snapshot["session_store"].clone(),
         "session_registry": snapshot["session_registry"].clone(),
         "lifecycle": snapshot["lifecycle"].clone(),
+        "app_event_publisher": snapshot["app_event_publisher"].clone(),
+        "global_event_bus": snapshot["global_event_bus"].clone(),
         "state_machine_helpers": snapshot["state_machine_helpers"].clone(),
+        "exact_response_supervisor": snapshot["exact_response_supervisor"].clone(),
+        "retained_tasks": snapshot["retained_tasks"].clone(),
         "transaction_manager": snapshot["transaction_manager"].clone(),
         "dialog_manager": snapshot["dialog_manager"].clone(),
         "dialog_adapter": snapshot["dialog_adapter"].clone(),
@@ -1698,21 +1782,40 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
     const POINTERS: &[&str] = &[
         "/session_store/total",
         "/session_registry/sessions",
+        "/session_registry/dialog_mappings",
+        "/session_registry/media_mappings",
+        "/session_store/lifecycle/live_indexes/dialog",
+        "/session_store/lifecycle/live_indexes/call_id",
+        "/session_store/lifecycle/live_indexes/media",
         "/state_machine_helpers/active_sessions",
         "/state_machine_helpers/subscriber_sessions",
-        "/dialog_adapter/session_to_dialog",
-        "/dialog_adapter/dialog_to_session",
-        "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
         "/dialog_adapter/outgoing_bye_tx",
         "/dialog_adapter/outgoing_bye_generation_watch",
         "/dialog_adapter/outgoing_bye_wait_intents",
         "/dialog_adapter/outbound_initial_invites",
+        "/dialog_adapter/outbound_request_tracker/live_requests",
+        "/dialog_adapter/outbound_request_tracker/deferred_events",
         "/dialog_adapter/registration_refresh_tasks",
+        "/dialog_adapter/registration_refresh_retained_tasks",
+        "/exact_response_supervisor/pending_obligations",
+        "/exact_response_supervisor/retry_attempts",
+        "/exact_response_supervisor/pending_deadlines",
+        "/exact_response_supervisor/fire_in_flight",
+        "/cleanup/setup_teardown_watchdog/pending_deadlines",
+        "/cleanup/setup_teardown_watchdog/fire_in_flight",
         "/app_event_publisher/dispatcher/queued_current",
         "/app_event_publisher/dispatcher/in_flight_current",
         "/app_event_publisher/exact_terminal_claims/pending",
-        "/lifecycle/expired_terminal_entries",
+        "/app_event_publisher/exact_terminal_claims/slots",
+        "/app_event_publisher/exact_terminal_claims/deadlines",
+        "/global_event_bus/broadcast_retained_total",
+        "/global_event_bus/subscriber_queued_total",
+        "/global_event_bus/observational_handlers/queued_current",
+        "/global_event_bus/observational_handlers/in_flight_current",
+        "/lifecycle/entries",
+        "/lifecycle/waiters",
+        "/lifecycle/storage/terminal_deadline_records",
         "/transaction_manager/total",
         "/transaction_manager/terminated_transactions",
         "/transaction_manager/server_invite_dialog_index",
@@ -1722,6 +1825,7 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
+        "/transaction_manager/event_subscribers",
         "/transaction_manager/pending_inbound_bytes",
         "/transaction_manager/pending_inbound_timing",
         "/dialog_manager/dialogs",
@@ -1742,7 +1846,9 @@ fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_manager/outbound_flow_tasks",
         "/dialog_manager/flow_by_destination",
         "/dialog_manager/flow_by_aor",
-        "/media_adapter/session_to_dialog",
+        "/media_adapter/media_resources",
+        "/media_adapter/media_create_reservations",
+        "/media_adapter/registry_media_bindings",
         "/media_adapter/dialog_to_session",
         "/media_adapter/media_sessions",
         "/media_adapter/audio_receivers",
@@ -2140,6 +2246,45 @@ mod tests {
             None => std::env::remove_var(key),
         }
         out
+    }
+
+    #[test]
+    fn retention_series_streams_lossless_samples_and_keeps_bounded_summary() {
+        let dir = tempfile::tempdir().expect("retention diagnostics tempdir");
+        let path = dir.path().join("retention.jsonl");
+        let mut series = RetentionSeries::new(path.clone());
+        let mut writer = series.open_writer();
+        let first = json!({
+            "label": "periodic",
+            "t_secs": 1.0,
+            "retained_total": 7,
+            "alice": {},
+            "bob": {},
+        });
+        let last = json!({
+            "label": "after_drain",
+            "t_secs": 2.0,
+            "retained_total": 0,
+            "alice": {},
+            "bob": {},
+        });
+
+        series.record(first.clone(), &mut writer);
+        series.record(last.clone(), &mut writer);
+        drop(writer);
+
+        let persisted = std::fs::read_to_string(&path).expect("read retention JSONL");
+        let samples = persisted
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("valid JSONL"))
+            .collect::<Vec<_>>();
+        assert_eq!(samples, vec![first, last.clone()]);
+        assert_eq!(series.sample_count, 2);
+        assert_eq!(series.max_retained_objects, 7);
+        assert_eq!(series.final_sample, Some(last));
+        let diagnostic = series.diagnostic_summary(0);
+        assert_eq!(diagnostic["storage"], "streamed_lossless");
+        assert!(diagnostic.get("samples").is_none());
     }
 
     #[test]

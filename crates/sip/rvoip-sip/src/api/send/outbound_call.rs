@@ -410,12 +410,9 @@ impl OutboundCallBuilder {
             },
         )?;
 
-        // Create the session up front — Idle UAC. Then mirror
-        // `make_call_inner`'s pre-event field plumbing so a fast
-        // loopback 180 Ringing can't beat our state update: credentials,
-        // PAI, transfer leg, extra headers land on SessionState before
-        // the event enters the machine. The state-table `CreateDialog`
-        // action picks them up.
+        // Create the session up front — Idle UAC. Builder metadata and the
+        // immutable request snapshot enter together through the exact-session
+        // lane below, before the state-table `CreateDialog` action reads them.
         let session_id = self.session_id.unwrap_or_default();
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let create_session_started = std::time::Instant::now();
@@ -436,74 +433,16 @@ impl OutboundCallBuilder {
         );
 
         let setup_result: Result<()> = async {
-            if snapshot.credentials.is_some()
-                || snapshot.auth.is_some()
-                || pai_uri.is_some()
-                || snapshot.transfer_leg.is_some()
-                || !snapshot.extra_headers.is_empty()
-            {
-                #[cfg(feature = "perf-call-setup-diagnostics")]
-                let pre_event_state_update_started = std::time::Instant::now();
-                let mut session = self.coord.session_state(&session_id).await?;
-                if let Some(c) = snapshot.credentials.clone() {
-                    session.credentials = Some(c);
-                }
-                if let Some(auth) = snapshot.auth.clone() {
-                    session.auth = Some(auth);
-                }
-                if let Some(pai) = pai_uri {
-                    session.pai_uri = Some(pai);
-                }
-                if let Some(transferor) = snapshot.transfer_leg.clone() {
-                    session.transferor_session_id = Some(transferor);
-                    session.is_transfer_call = true;
-                }
-                if !snapshot.extra_headers.is_empty() {
-                    session.extra_headers = snapshot.extra_headers.clone();
-                }
-                self.coord
-                    .helpers
-                    .state_machine
-                    .store
-                    .update_session(session)
-                    .await?;
-                #[cfg(feature = "perf-call-setup-diagnostics")]
-                crate::call_setup_diag::record_stage(
-                    &session_id,
-                    "outbound_send.pre_event_state_update",
-                    pre_event_state_update_started.elapsed(),
-                );
-            }
-
             #[cfg(feature = "perf-call-setup-diagnostics")]
-            let stage_options_started = std::time::Instant::now();
+            let stage_and_dispatch_started = std::time::Instant::now();
             self.coord
-                .stage_outbound_options(
-                    &session_id,
-                    crate::state_machine::executor::PendingOptionsSlot::Invite(Arc::clone(
-                        &snapshot,
-                    )),
-                )
+                .dispatch_outbound_invite_with_options(&session_id, Arc::clone(&snapshot), pai_uri)
                 .await?;
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session_id,
-                "outbound_send.stage_options",
-                stage_options_started.elapsed(),
-            );
-            #[cfg(feature = "perf-call-setup-diagnostics")]
-            let dispatch_started = std::time::Instant::now();
-            self.coord
-                .dispatch_outbound(
-                    &session_id,
-                    crate::state_table::EventType::SendOutboundInvite,
-                )
-                .await?;
-            #[cfg(feature = "perf-call-setup-diagnostics")]
-            crate::call_setup_diag::record_stage(
-                &session_id,
-                "outbound_send.dispatch_outbound",
-                dispatch_started.elapsed(),
+                "outbound_send.stage_and_dispatch",
+                stage_and_dispatch_started.elapsed(),
             );
             Ok(())
         }

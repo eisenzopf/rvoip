@@ -1838,9 +1838,18 @@ impl DialogClient {
             event.len()
         );
 
-        let notify_body = body.map(|b| bytes::Bytes::from(b));
-        self.send_request_in_dialog(dialog_id, Method::Notify, notify_body)
+        self.dialog_manager
+            .send_notify_request_snapshot(
+                dialog_id,
+                crate::manager::transaction_integration::NotifyRequestSnapshot::legacy(
+                    Some(event),
+                    crate::manager::transaction_integration::NotifySubscriptionState::Tracked,
+                    body.map(bytes::Bytes::from),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// Send an UPDATE request for media modifications
@@ -1883,9 +1892,16 @@ impl DialogClient {
         info_body: String,
     ) -> ApiResult<TransactionKey> {
         info!("Sending INFO for dialog {}", dialog_id);
-
-        self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body)))
+        self.dialog_manager
+            .send_info_request_snapshot(
+                dialog_id,
+                crate::manager::transaction_integration::InfoRequestSnapshot::legacy(
+                    Some(bytes::Bytes::from(info_body)),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// Get client configuration

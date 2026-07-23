@@ -18,7 +18,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/../../../../../.." && pwd)"
 SCENARIO="$SCRIPT_DIR/uac_perf.xml"
 RESULTS_DIR="${RVOIP_PERF_RESULTS:-$SCRIPT_DIR/results}"
 mkdir -p "$RESULTS_DIR"

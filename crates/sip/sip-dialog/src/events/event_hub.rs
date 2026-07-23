@@ -6,13 +6,14 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, info, trace, warn};
 
+#[cfg(test)]
 use crate::transaction::TransactionKey;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
     CallState, CrossCrateEvent, DialogToSessionEvent, OutboundRequestOutcome, RvoipCrossCrateEvent,
-    SessionToDialogEvent, TerminationReason,
+    TerminationReason,
 };
 use rvoip_sip_core::Method;
 
@@ -50,12 +51,6 @@ fn session_coordination_event_kind(event: &SessionCoordinationEvent) -> &'static
     }
 }
 
-fn parse_event_transaction_key(value: &str) -> Result<TransactionKey> {
-    value
-        .parse::<TransactionKey>()
-        .map_err(|_error| anyhow::anyhow!("Invalid transaction identifier"))
-}
-
 impl DialogEventHub {
     /// Create a new dialog event hub
     pub async fn new(
@@ -73,11 +68,6 @@ impl DialogEventHub {
             dialog_manager: hub.dialog_manager.clone(),
         };
 
-        // Register as handler for session-to-dialog events
-        global_coordinator
-            .register_handler("session_to_dialog", handler.clone())
-            .await?;
-
         // Register as handler for transport-to-dialog events
         global_coordinator
             .register_handler("transport_to_dialog", handler)
@@ -94,9 +84,15 @@ impl DialogEventHub {
 
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_dialog_to_cross_crate(event) {
-            self.global_coordinator
-                .publish(Arc::new(cross_crate_event))
+            let delivered = self
+                .global_coordinator
+                .dispatch_authoritative_handler(Arc::new(cross_crate_event))
                 .await?;
+            if !delivered {
+                return Err(anyhow::anyhow!(
+                    "dialog event had no causal session handler"
+                ));
+            }
         }
 
         Ok(())
@@ -107,8 +103,10 @@ impl DialogEventHub {
         &self,
         event: SessionCoordinationEvent,
     ) -> Result<()> {
-        let _ = self.try_publish_session_coordination_event(event).await?;
-        Ok(())
+        self.try_publish_session_coordination_event(event)
+            .await?
+            .then_some(())
+            .ok_or_else(|| anyhow::anyhow!("session coordination event has no causal route"))
     }
 
     /// Publish a session coordination event and report whether it mapped to a
@@ -159,8 +157,9 @@ impl DialogEventHub {
             } else {
                 0
             };
-            self.global_coordinator
-                .publish(Arc::new(cross_crate_event))
+            let delivered = self
+                .global_coordinator
+                .dispatch_authoritative_handler(Arc::new(cross_crate_event))
                 .await?;
             if let Some(started) = publish_started {
                 crate::diagnostics::record_global_publish(
@@ -170,7 +169,7 @@ impl DialogEventHub {
                 );
             }
             trace!("Published cross-crate event successfully");
-            Ok(true)
+            Ok(delivered)
         } else {
             trace!("convert_coordination_to_cross_crate returned None");
             Ok(false)
@@ -198,15 +197,33 @@ impl DialogEventHub {
             return Ok(false);
         };
         self.global_coordinator
-            .publish_authoritative(Arc::new(cross_crate_event))
+            .dispatch_authoritative_handler(Arc::new(cross_crate_event))
             .await
     }
 
     /// Publish a cross-crate event directly
     pub async fn publish_cross_crate_event(&self, event: RvoipCrossCrateEvent) -> Result<()> {
-        debug!("Publishing cross-crate event directly");
-        self.global_coordinator.publish(Arc::new(event)).await?;
+        debug!("Dispatching cross-crate event to its authoritative handler");
+        let delivered = self.try_publish_cross_crate_event(event).await?;
+        if !delivered {
+            return Err(anyhow::anyhow!(
+                "cross-crate event had no authoritative handler"
+            ));
+        }
         Ok(())
+    }
+
+    /// Dispatch a causal cross-crate event while preserving the distinction
+    /// between an absent owner and a handler failure. Callers may safely send
+    /// a local unavailable response only for `Ok(false)`; an error may follow
+    /// partial authoritative work and must never trigger a competing fallback.
+    pub(crate) async fn try_publish_cross_crate_event(
+        &self,
+        event: RvoipCrossCrateEvent,
+    ) -> Result<bool> {
+        self.global_coordinator
+            .dispatch_authoritative_handler(Arc::new(event))
+            .await
     }
 
     /// Convert DialogEvent to cross-crate event
@@ -371,14 +388,11 @@ impl DialogEventHub {
                         source_addr: source.to_string(),
                         raw_request,
                         transport,
-                        // STIR/SHAKEN Phase 1: verification is performed in
-                        // `events/adapter.rs` (the legacy `convert_*` path
-                        // that owns the raw bytes lifecycle). This bridge
-                        // does not currently run the verifier; populated as
-                        // `None` until the call lands on the verifier-aware
-                        // publish path. Safe default — `Annotate` policy
-                        // treats `None` identically to "no verifier
-                        // installed."
+                        // STIR/SHAKEN verification runs once in
+                        // `try_publish_session_coordination_event`, after
+                        // this conversion has preserved the byte-exact
+                        // inbound request. `None` here is only the input to
+                        // that single policy owner.
                         identity_verification: None,
                     },
                 ))
@@ -479,6 +493,24 @@ impl DialogEventHub {
                 ))
             }
 
+            SessionCoordinationEvent::RequestFailed {
+                dialog_id: Some(dialog_id),
+                status_code,
+                reason_phrase,
+                method,
+                ..
+            } if method.eq_ignore_ascii_case("INVITE") => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallFailed {
+                        session_id,
+                        status_code,
+                        reason_phrase,
+                        raw_response: None,
+                    })
+                }),
+
             SessionCoordinationEvent::ResponseReceived {
                 dialog_id,
                 response,
@@ -554,13 +586,10 @@ impl DialogEventHub {
                         }
                         487 if is_invite_response => {
                             // RFC 3261 §15.1.2 — 487 Request Terminated follows a
-                            // CANCEL. Publish from the response path as well
-                            // as the explicit CallCancelled coordination path
-                            // so client-side cancellation release is not lost
-                            // if the final transaction event has already
-                            // dropped its dialog lookup. Session-core treats a
-                            // second cancellation as idempotent once the
-                            // session has been released.
+                            // locally initiated CANCEL. This exact response is
+                            // the sole UAC cancellation lifecycle source; UAS
+                            // inbound CANCEL uses its acknowledged, role-
+                            // specific coordination event instead.
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallCancelled { session_id },
                             ))
@@ -809,7 +838,9 @@ impl DialogEventHub {
                 method,
                 outcome,
             } => {
-                if !tracks_generic_outbound_request_completion(&method) {
+                if method != rvoip_sip_core::Method::Invite
+                    && !tracks_generic_outbound_request_completion(&method)
+                {
                     return None;
                 }
                 self.dialog_manager
@@ -883,23 +914,10 @@ impl DialogEventHub {
                 }
             }
 
-            // ACK events for state machine transitions
-            SessionCoordinationEvent::AckSent { dialog_id, .. } => {
-                // AckSent is primarily for UAC - session layer may need to know ACK was sent
-                // but typically this isn't needed for state transitions
-                // We'll pass it through in case session-core-v2 wants to track it
-                debug!(
-                    "AckSent event for dialog {}, converting to cross-crate format",
-                    dialog_id
-                );
-                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    crate::diagnostics::record_hub_ack_sent_session(true);
-                    crate::diagnostics::record_call_timing_hub_ack_sent(session_id.as_str());
-                } else {
-                    crate::diagnostics::record_hub_ack_sent_session(false);
-                }
-                None // For now, UAC doesn't need this event
-            }
+            // Public compatibility variant only. Automatic ACK diagnostics
+            // are recorded at the transaction write; the causal
+            // ResponseReceived delivery owns lifecycle progress.
+            SessionCoordinationEvent::AckSent { .. } => None,
 
             SessionCoordinationEvent::AckReceived {
                 dialog_id,
@@ -924,31 +942,6 @@ impl DialogEventHub {
                     crate::diagnostics::record_ack_unmatched_session();
                     warn!(
                         "No session ID found for dialog {:?} in AckReceived",
-                        dialog_id
-                    );
-                    None
-                }
-            }
-
-            SessionCoordinationEvent::CallTerminating {
-                dialog_id,
-                reason: _,
-            } => {
-                // When BYE completes, notify session-core that dialog is terminating
-                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    debug!(
-                        "Converting CallTerminating to CallTerminated for session {}",
-                        session_id
-                    );
-                    Some(RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::CallTerminated {
-                            session_id,
-                            reason: rvoip_infra_common::events::cross_crate::TerminationReason::RemoteHangup,
-                        }
-                    ))
-                } else {
-                    warn!(
-                        "No session ID found for dialog {:?} in CallTerminating",
                         dialog_id
                     );
                     None
@@ -1148,72 +1141,13 @@ impl CrossCrateEventHandler for DialogEventHub {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
 
-        // Use trait-based downcasting via as_any()
-        if let Some(concrete) = event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
-            match concrete {
-                RvoipCrossCrateEvent::SessionToDialog(session_event) => {
-                    match session_event {
-                        SessionToDialogEvent::SendRegisterResponse {
-                            transaction_id,
-                            status_code,
-                            reason,
-                            www_authenticate,
-                            contact,
-                            expires,
-                            min_expires,
-                            service_route,
-                            path_echo,
-                            associated_uri,
-                            extra_headers,
-                        } => {
-                            info!(
-                                "📩 Handling SendRegisterResponse via trait: {} reason_present={}",
-                                status_code,
-                                !reason.is_empty()
-                            );
-                            self.handle_register_response_with_extras(
-                                transaction_id,
-                                *status_code,
-                                reason,
-                                www_authenticate.as_deref(),
-                                contact.as_deref(),
-                                *expires,
-                                *min_expires,
-                                service_route,
-                                *path_echo,
-                                associated_uri,
-                                extra_headers,
-                            )
-                            .await?;
-                            return Ok(()); // Early return after handling
-                        }
-                        SessionToDialogEvent::StoreDialogMapping {
-                            session_id,
-                            dialog_id,
-                        } => {
-                            self.store_dialog_mapping(session_id, dialog_id);
-                            return Ok(());
-                        }
-                        SessionToDialogEvent::ReferResponse {
-                            transaction_id,
-                            accept,
-                            status_code,
-                            reason,
-                        } => {
-                            self.handle_refer_response_parts(
-                                transaction_id,
-                                *accept,
-                                *status_code,
-                                reason,
-                            )
-                            .await?;
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
+        if matches!(
+            event.as_any().downcast_ref::<RvoipCrossCrateEvent>(),
+            Some(RvoipCrossCrateEvent::SessionToDialog(_))
+        ) {
+            return Err(anyhow::anyhow!(
+                "session-to-dialog signaling bus is retired; use exact dialog APIs"
+            ));
         }
 
         match event.event_type() {
@@ -1225,223 +1159,6 @@ impl CrossCrateEventHandler for DialogEventHub {
             _ => {
                 debug!("Unhandled event type: {}", event.event_type());
             }
-        }
-
-        Ok(())
-    }
-}
-
-impl DialogEventHub {
-    fn store_dialog_mapping(&self, session_id: &str, dialog_id: &str) {
-        debug!(
-            session_bytes = session_id.len(),
-            dialog_bytes = dialog_id.len(),
-            "Storing typed dialog mapping"
-        );
-        if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
-            let parsed_dialog_id = DialogId(uuid);
-            self.dialog_manager
-                .session_to_dialog
-                .insert(session_id.to_string(), parsed_dialog_id.clone());
-            self.dialog_manager
-                .dialog_to_session
-                .insert(parsed_dialog_id, session_id.to_string());
-            info!("Stored typed dialog mapping");
-        } else {
-            warn!("Failed to parse dialog mapping identifier");
-        }
-    }
-
-    /// Handle SendRegisterResponse event from session-core
-    async fn handle_register_response(
-        &self,
-        transaction_id: &str,
-        status_code: u16,
-        reason: &str,
-        www_authenticate: Option<&str>,
-        contact: Option<&str>,
-        expires: Option<u32>,
-    ) -> Result<()> {
-        debug!(
-            "Handling SendRegisterResponse: status={} reason_present={}",
-            status_code,
-            !reason.is_empty()
-        );
-
-        // Parse transaction_id to TransactionKey
-        let tx_key = parse_event_transaction_key(transaction_id)?;
-
-        // Check if this transaction exists in our dialog manager
-        // This prevents multiple DialogEventHubs from trying to handle the same event
-        if self
-            .dialog_manager
-            .transaction_manager()
-            .original_request(&tx_key)
-            .await
-            .is_err()
-        {
-            debug!("Transaction not found in this DialogManager - skipping");
-            return Ok(()); // Not our transaction, skip silently
-        }
-
-        // Call the dialog manager's send_register_response method
-        self.dialog_manager
-            .send_register_response(
-                &tx_key,
-                status_code,
-                reason,
-                www_authenticate,
-                contact,
-                expires,
-            )
-            .await
-            .map_err(|_error| anyhow::anyhow!("REGISTER response send failed"))?;
-
-        info!(
-            "✅ Sent REGISTER response: {} reason_present={}",
-            status_code,
-            !reason.is_empty()
-        );
-        Ok(())
-    }
-
-    /// SIP_API_DESIGN_2 Phase D — registrar response with the full
-    /// set of additive fields (Min-Expires, Service-Route, Path echo,
-    /// P-Associated-URI, generic extras). Falls back to the legacy
-    /// path when no new fields are populated so existing callers see
-    /// no behaviour change.
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_register_response_with_extras(
-        &self,
-        transaction_id: &str,
-        status_code: u16,
-        reason: &str,
-        www_authenticate: Option<&str>,
-        contact: Option<&str>,
-        expires: Option<u32>,
-        min_expires: Option<u32>,
-        service_route: &[String],
-        path_echo: bool,
-        associated_uri: &[String],
-        extra_headers: &[(String, String)],
-    ) -> Result<()> {
-        let has_extras = min_expires.is_some()
-            || !service_route.is_empty()
-            || path_echo
-            || !associated_uri.is_empty()
-            || !extra_headers.is_empty();
-
-        if !has_extras {
-            return self
-                .handle_register_response(
-                    transaction_id,
-                    status_code,
-                    reason,
-                    www_authenticate,
-                    contact,
-                    expires,
-                )
-                .await;
-        }
-
-        let tx_key = parse_event_transaction_key(transaction_id)?;
-
-        if self
-            .dialog_manager
-            .transaction_manager()
-            .original_request(&tx_key)
-            .await
-            .is_err()
-        {
-            debug!("Transaction not found in this DialogManager - skipping");
-            return Ok(());
-        }
-
-        self.dialog_manager
-            .send_register_response_with_extras(
-                &tx_key,
-                status_code,
-                reason,
-                www_authenticate,
-                contact,
-                expires,
-                min_expires,
-                service_route,
-                path_echo,
-                associated_uri,
-                extra_headers,
-            )
-            .await
-            .map_err(|_error| anyhow::anyhow!("REGISTER response send failed"))?;
-
-        info!(
-            "✅ Sent REGISTER response (with {} extras): {} reason_present={}",
-            extra_headers.len(),
-            status_code,
-            !reason.is_empty()
-        );
-        Ok(())
-    }
-
-    /// Handle a typed ReferResponse event from session-core.
-    async fn handle_refer_response_parts(
-        &self,
-        transaction_id: &str,
-        accept: bool,
-        status_code: u16,
-        reason: &str,
-    ) -> Result<()> {
-        info!(
-            "Handling ReferResponse: accept={}, status={} reason_present={}",
-            accept,
-            status_code,
-            !reason.is_empty()
-        );
-
-        // Parse transaction_id and send response
-        if let Ok(tx_key) = transaction_id.parse::<crate::transaction::TransactionKey>() {
-            use rvoip_sip_core::StatusCode;
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::Accepted);
-
-            // Get original REFER request to build proper response
-            match self
-                .dialog_manager
-                .transaction_manager()
-                .original_request(&tx_key)
-                .await
-            {
-                Ok(Some(original_request)) => {
-                    // Build proper response using the original request
-                    let response = crate::transaction::utils::response_builders::create_response(
-                        &original_request,
-                        status,
-                    );
-
-                    if let Err(_error) = self.dialog_manager.send_response(&tx_key, response).await
-                    {
-                        error!("Failed to send REFER response");
-                    } else {
-                        info!(
-                            "Successfully sent REFER response: {} reason_present={}",
-                            status_code,
-                            !reason.is_empty()
-                        );
-                    }
-                }
-                Ok(None) => {
-                    // Demoted to debug — common during test teardown when
-                    // the REFER transaction completes before the
-                    // ReferResponse event is processed.
-                    debug!("No original request found for transaction");
-                }
-                Err(_error) => {
-                    // Same teardown race as above; surface as debug
-                    // rather than error so test logs stay readable.
-                    debug!("Failed to get original request for transaction");
-                }
-            }
-        } else {
-            error!("Failed to parse transaction identifier");
         }
 
         Ok(())
@@ -1555,28 +1272,25 @@ mod safe_diagnostic_tests {
     }
 
     #[test]
-    fn malformed_transaction_error_does_not_reflect_input() {
-        const SECRET: &str = "event-transaction-secret-canary\r\nX-Leak: yes";
-        let error = parse_event_transaction_key(SECRET).expect_err("malformed key");
-        let rendered = error.to_string();
-
-        assert_eq!(rendered, "Invalid transaction identifier");
-        assert!(!rendered.contains(SECRET));
-        assert!(!rendered.contains("X-Leak"));
-    }
-
-    #[test]
-    fn session_to_dialog_routing_never_parses_debug_text() {
+    fn session_to_dialog_bus_has_no_signaling_handlers() {
         let source = include_str!("event_hub.rs");
-        assert!(source.contains("SessionToDialogEvent::StoreDialogMapping"));
-        assert!(source.contains("SessionToDialogEvent::ReferResponse"));
-        assert!(source.contains("handle_refer_response_parts"));
+        let production = source
+            .split("impl CrossCrateEventHandler for DialogEventHub")
+            .nth(1)
+            .and_then(|tail| tail.split("#[cfg(test)]").next())
+            .expect("production event-hub handler");
+        assert!(production.contains("session-to-dialog signaling bus is retired"));
         for forbidden in [
-            ["let event_str = ", "format!(\"{:?}\", event)"].concat(),
-            ["async fn handle_refer_response(&self, ", "event_str"].concat(),
-            ["fn extract_field(&self, ", "event_str"].concat(),
+            "SessionToDialogEvent::SendRegisterResponse",
+            "SessionToDialogEvent::StoreDialogMapping",
+            "SessionToDialogEvent::ReferResponse",
+            "handle_register_response_with_extras",
+            "handle_refer_response_parts",
         ] {
-            assert!(!source.contains(&forbidden), "legacy fallback returned");
+            assert!(
+                !production.contains(forbidden),
+                "legacy bus handler returned"
+            );
         }
     }
 
@@ -1637,7 +1351,13 @@ mod safe_diagnostic_tests {
         let (hub, dialog_id) = test_hub().await;
         let transaction_id = transaction(Method::Info);
 
-        for method in [Method::Info, Method::Refer, Method::Notify, Method::Update] {
+        for method in [
+            Method::Bye,
+            Method::Info,
+            Method::Refer,
+            Method::Notify,
+            Method::Update,
+        ] {
             let tracked_transaction = transaction(method.clone());
             let mapped = hub
                 .convert_coordination_to_cross_crate(response_event(
@@ -1692,7 +1412,6 @@ mod safe_diagnostic_tests {
             .is_none());
 
         for method in [
-            Method::Bye,
             Method::Cancel,
             Method::Message,
             Method::Options,
@@ -1892,6 +1611,30 @@ mod safe_diagnostic_tests {
             ));
         }
 
+        let reinvite_transaction = transaction(Method::Invite);
+        let mapped_reinvite = hub
+            .convert_coordination_to_cross_crate(
+                SessionCoordinationEvent::OutboundRequestCompleted {
+                    dialog_id: dialog_id.clone(),
+                    transaction_id: reinvite_transaction.clone(),
+                    method: Method::Invite,
+                    outcome: OutboundRequestOutcome::Timeout,
+                },
+            )
+            .expect("an exact re-INVITE timeout must reach session authority");
+        assert!(matches!(
+            mapped_reinvite,
+            RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::OutboundRequestCompleted {
+                    transaction_id: ref mapped_transaction,
+                    ref method,
+                    outcome: OutboundRequestOutcome::Timeout,
+                    ..
+                }
+            ) if mapped_transaction == &reinvite_transaction.to_string()
+                && method == "INVITE"
+        ));
+
         let (coordination_tx, mut coordination_rx) = mpsc::channel(8);
         *hub.dialog_manager.session_coordinator.write().await = Some(coordination_tx);
 
@@ -1930,13 +1673,32 @@ mod safe_diagnostic_tests {
                 .is_err()
         );
 
-        let untracked_transaction = transaction(Method::Bye);
+        let bye_transaction = transaction(Method::Bye);
         hub.dialog_manager
             .process_transaction_event(
-                &untracked_transaction,
+                &bye_transaction,
                 &dialog_id,
                 crate::transaction::TransactionEvent::TransactionTimeout {
-                    transaction_id: untracked_transaction.clone(),
+                    transaction_id: bye_transaction.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            coordination_rx.recv().await,
+            Some(SessionCoordinationEvent::OutboundRequestCompleted {
+                transaction_id: ref emitted_transaction,
+                method: Method::Bye,
+                outcome: OutboundRequestOutcome::Timeout,
+                ..
+            }) if emitted_transaction == &bye_transaction
+        ));
+        hub.dialog_manager
+            .process_transaction_event(
+                &bye_transaction,
+                &dialog_id,
+                crate::transaction::TransactionEvent::TransactionTerminated {
+                    transaction_id: bye_transaction.clone(),
                 },
             )
             .await
@@ -1944,7 +1706,8 @@ mod safe_diagnostic_tests {
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(20), coordination_rx.recv(),)
                 .await
-                .is_err()
+                .is_err(),
+            "BYE timeout is the sole terminal completion; termination must not emit a fallback"
         );
 
         let transport_transaction = TransactionKey::new(
@@ -1994,6 +1757,26 @@ mod safe_diagnostic_tests {
                 outcome: OutboundRequestOutcome::TransportFailure,
                 ..
             }) if emitted_transaction == &generic_error_transaction
+        ));
+
+        hub.dialog_manager
+            .process_transaction_event(
+                &reinvite_transaction,
+                &dialog_id,
+                crate::transaction::TransactionEvent::TransactionTimeout {
+                    transaction_id: reinvite_transaction.clone(),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            coordination_rx.recv().await,
+            Some(SessionCoordinationEvent::OutboundRequestCompleted {
+                transaction_id: ref emitted_transaction,
+                method: Method::Invite,
+                outcome: OutboundRequestOutcome::Timeout,
+                ..
+            }) if emitted_transaction == &reinvite_transaction
         ));
     }
 }

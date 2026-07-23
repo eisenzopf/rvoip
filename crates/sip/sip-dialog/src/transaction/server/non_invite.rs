@@ -29,10 +29,6 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ServerNonInviteTransaction {
     data: Arc<ServerTransactionData>,
-    /// Logic instance held so the spawned transaction loop keeps the
-    /// same state machine.
-    #[allow(dead_code)]
-    logic: Arc<ServerNonInviteLogic>,
 }
 
 /// Holds JoinHandles and dynamic state for timers specific to Server Non-INVITE transactions.
@@ -427,14 +423,12 @@ impl ServerNonInviteTransaction {
         });
 
         let data_for_runner = data.clone();
-        let logic_for_runner = logic.clone();
-
         // The receiver has exactly one owner: the transaction runner. Keeping
         // it out of `ServerTransactionData` avoids a second mutex/Arc and the
         // dummy replacement receiver that used to be allocated per server
         // transaction.
         let event_loop_handle = tokio::spawn(async move {
-            run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
+            run_transaction_loop(data_for_runner, logic, local_cmd_rx).await;
         });
 
         // Store the handle for cleanup
@@ -442,7 +436,7 @@ impl ServerNonInviteTransaction {
             *handle_guard = Some(event_loop_handle);
         }
 
-        Ok(Self { data, logic })
+        Ok(Self { data })
     }
 }
 

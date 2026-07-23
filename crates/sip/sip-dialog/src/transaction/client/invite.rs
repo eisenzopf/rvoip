@@ -108,11 +108,6 @@ use crate::transaction::validators;
 #[derive(Debug, Clone)]
 pub struct ClientInviteTransaction {
     data: Arc<ClientTransactionData>,
-    /// Owned logic instance held so the spawned transaction loop's
-    /// clone keeps the same state machine; the transaction itself
-    /// does all the reads through the loop.
-    #[allow(dead_code)]
-    logic: Arc<ClientInviteLogic>,
 }
 
 /// Holds cancellation handles and dynamic state for Client INVITE timers.
@@ -474,6 +469,7 @@ impl ClientInviteLogic {
         // Get status information
         let (is_provisional, is_success, is_failure) =
             validators::categorize_response_status(&response);
+        let response_source = data.request_route.lock().await.destination;
 
         match current_state {
             TransactionState::Calling => {
@@ -493,7 +489,7 @@ impl ClientInviteLogic {
                         tx_id,
                         response,
                         &data.events_tx,
-                        data.remote_addr,
+                        response_source,
                     )
                     .await;
                     return Ok(Some(TransactionState::Terminated));
@@ -522,7 +518,7 @@ impl ClientInviteLogic {
                         tx_id,
                         response,
                         &data.events_tx,
-                        data.remote_addr,
+                        response_source,
                     )
                     .await;
                     return Ok(Some(TransactionState::Terminated));
@@ -551,7 +547,7 @@ impl ClientInviteLogic {
                         tx_id,
                         response,
                         &data.events_tx,
-                        data.remote_addr,
+                        response_source,
                     )
                     .await;
                 } else if is_failure {
@@ -836,6 +832,7 @@ impl ClientInviteTransaction {
             ),
             remote_addr,
             request_route: Arc::new(Mutex::new(request_route)),
+            request_route_publisher: std::sync::OnceLock::new(),
             transport,
             events_tx: events_tx.into(),
             cmd_tx: cmd_tx.clone(),
@@ -857,15 +854,13 @@ impl ClientInviteTransaction {
         });
 
         let data_for_runner = data.clone();
-        let logic_for_runner = logic.clone();
-
         // Create a clone for logging in the spawn function
         let id_for_logging = id.clone();
 
         // Spawn the generic event loop runner
         let event_loop_handle = tokio::spawn(async move {
             tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&id_for_logging), "Starting event loop for INVITE client transaction");
-            run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
+            run_transaction_loop(data_for_runner, logic, local_cmd_rx).await;
             tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&id_for_logging), "Event loop for INVITE client transaction ended");
         });
 
@@ -876,7 +871,7 @@ impl ClientInviteTransaction {
 
         tracing::trace!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&id), "Created ClientInviteTransaction");
 
-        Ok(Self { data, logic })
+        Ok(Self { data })
     }
 }
 

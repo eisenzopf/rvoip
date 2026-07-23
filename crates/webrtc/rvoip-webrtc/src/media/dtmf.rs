@@ -5,13 +5,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rtc::rtp;
-use rtc::rtp::extension::HeaderExtension;
-use rtc::shared::marshal::{Marshal, MarshalSize};
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 
 use crate::errors::{Result, WebRtcError};
-use crate::media::outbound::OutboundAudioRtpState;
-use crate::peer::builder::HDREXT_SDES_MID;
+use crate::media::outbound::sdes_mid_header_extension;
 pub use crate::peer::builder::TELEPHONE_EVENT_PAYLOAD_TYPE;
 use crate::peer::RvoipPeerConnection;
 
@@ -20,34 +17,6 @@ const END_OF_EVENT_RETRANSMITS: usize = 3;
 const DEFAULT_VOLUME: u8 = 10;
 const MIN_DURATION_MS: u32 = 40;
 const MAX_DURATION_MS: u32 = 6_000;
-
-/// RFC 8843/RFC 9335 SDES MID payload. The negotiated extension ID is applied
-/// by `TrackLocalStaticRTP::write_rtp_with_extensions`; this value is only the
-/// exact identification-tag bytes carried in the extension.
-struct SdesMidExtension(Vec<u8>);
-
-impl MarshalSize for SdesMidExtension {
-    fn marshal_size(&self) -> usize {
-        self.0.len()
-    }
-}
-
-impl Marshal for SdesMidExtension {
-    fn marshal_to(&self, buffer: &mut [u8]) -> rtc::shared::error::Result<usize> {
-        if buffer.len() < self.0.len() {
-            return Err(rtc::shared::error::Error::ErrBufferTooSmall);
-        }
-        buffer[..self.0.len()].copy_from_slice(&self.0);
-        Ok(self.0.len())
-    }
-}
-
-fn sdes_mid_header_extension(mid: &str) -> HeaderExtension {
-    HeaderExtension::Custom {
-        uri: HDREXT_SDES_MID.into(),
-        extension: Box::new(SdesMidExtension(mid.as_bytes().to_vec())),
-    }
-}
 
 /// Negotiated RFC 4733 payload mapping for one WebRTC audio m-section.
 ///
@@ -147,20 +116,6 @@ impl DtmfTimeline for DtmfSenderState {
 
     fn reserve_event_timestamp(&mut self, timing: DtmfTiming) -> u32 {
         DtmfSenderState::reserve_event_timestamp(self, timing)
-    }
-}
-
-impl DtmfTimeline for OutboundAudioRtpState {
-    fn next_sequence_number(&mut self) -> u16 {
-        OutboundAudioRtpState::next_sequence_number(self)
-    }
-
-    fn reserve_event_timestamp(&mut self, timing: DtmfTiming) -> u32 {
-        OutboundAudioRtpState::reserve_event_timestamp(
-            self,
-            timing.samples_per_tick,
-            timing.final_duration_samples,
-        )
     }
 }
 
@@ -515,22 +470,21 @@ async fn send_single_digit<S: DtmfTimeline>(
 /// Send one or more DTMF digits using the remote SDP's negotiated RFC 4733
 /// payload type and clock rate.
 ///
-/// Same-clock telephone events share the primary audio SSRC and its serialized
-/// sequence/timestamp writer, which is what Chromium and RFC 4733 expect.
-/// A differently-clocked event may use the hidden supplemental SSRC; changing
-/// the RTP clock on one SSRC is rejected. Pending or unsupported final SDP
-/// fails closed before any packet is written.
+/// Telephone events use the negotiated telephone-event encoding's dedicated
+/// SSRC and carry the exact negotiated audio MID. This avoids changing the RTP
+/// payload mapping of the primary audio SSRC (which the alpha WebRTC engine
+/// rewrites to the primary codec) and permits a separately negotiated event
+/// clock as clarified by the verified RFC 4733 erratum. Pending or unsupported
+/// final SDP fails closed before any packet is written.
 pub async fn send_dtmf(
     peer: &Arc<RvoipPeerConnection>,
     digits: &str,
     duration_ms: u32,
 ) -> Result<()> {
     let codec = outbound_codec_for_sender(peer.outbound_dtmf_negotiation())?;
-    // A differently-clocked event uses a supplemental DTMF SSRC that is
-    // intentionally not signalled in SDP, while a same-clock event shares the
-    // primary audio SSRC. Require the exact mutually negotiated audio MID for
-    // both paths so packet demux never falls back to payload-type or
-    // first-m-line heuristics.
+    // The supplemental DTMF SSRC is intentionally not signalled in SDP.
+    // Require the exact mutually negotiated audio MID so packet demux never
+    // falls back to payload-type or first-m-line heuristics.
     let mid = peer
         .negotiated_outbound_audio_mid()
         .ok_or(WebRtcError::IncompatibleCapabilities)?;
@@ -538,35 +492,6 @@ pub async fn send_dtmf(
         .chars()
         .filter(|digit| !digit.is_whitespace())
         .collect::<Vec<_>>();
-    if let Some(writer) = peer
-        .outbound_audio_writer()
-        .filter(|writer| writer.clock_rate_hz() == codec.clock_rate_hz)
-    {
-        let mut state = writer.lock_state().await;
-        for (index, digit) in digits.iter().copied().enumerate() {
-            send_single_digit(
-                writer.track(),
-                &mid,
-                codec,
-                &mut *state,
-                writer.ssrc(),
-                digit,
-                duration_ms,
-            )
-            .await?;
-            if index + 1 < digits.len() {
-                tokio::time::sleep(TICK).await;
-            }
-        }
-        // The final end packet is emitted one tick before the duration it
-        // represents. Keep primary audio serialized through that interval so
-        // the next packet is sent at the event end, not 20 ms early.
-        if !digits.is_empty() {
-            tokio::time::sleep(TICK).await;
-        }
-        return Ok(());
-    }
-
     let track = peer
         .local_dtmf_track()
         .ok_or(WebRtcError::IncompatibleCapabilities)?;
@@ -588,6 +513,8 @@ pub async fn send_dtmf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::peer::builder::HDREXT_SDES_MID;
+    use rtc::shared::marshal::Marshal;
 
     #[test]
     fn digit_mapping_matches_rfc4733() {

@@ -9,6 +9,9 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use crate::session_registry::SessionRegistryHandle;
+
+use super::InDialogRequestAuthority;
 
 /// In-dialog NOTIFY builder (RFC 6665). Reachable via
 /// [`UnifiedCoordinator::notify`](crate::api::unified::UnifiedCoordinator::notify).
@@ -22,6 +25,7 @@ pub struct NotifyBuilder {
     retry_after: Option<u32>,
     subscription_id: Option<String>,
     state: BuilderHeaderState,
+    authority: InDialogRequestAuthority,
 }
 
 impl NotifyBuilder {
@@ -40,7 +44,19 @@ impl NotifyBuilder {
             retry_after: None,
             subscription_id: None,
             state: BuilderHeaderState::default(),
+            authority: InDialogRequestAuthority::CaptureCurrent,
         }
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        session_id: CallId,
+        event_package: impl Into<String>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        let mut builder = Self::new(coord, session_id, event_package);
+        builder.authority = InDialogRequestAuthority::captured(lifecycle_handle);
+        builder
     }
 
     /// Attach the notification body.
@@ -85,21 +101,20 @@ impl NotifyBuilder {
         // options surface doesn't carry it; it would land on the wire
         // via with_raw_header in the meantime.
         let _ = self.retry_after;
-        let staging = self
-            .coord
-            .stage_outbound_options_guarded(
-                &self.session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Notify(opts),
-            )
-            .await?;
-        self.coord
-            .dispatch_outbound_guarded(
-                &self.session_id,
-                crate::state_table::EventType::SendOutboundNotify,
-                &staging,
-            )
-            .await?;
-        staging.confirm_consumed().await?;
+        let event = crate::state_table::EventType::SendOutboundNotify;
+        let slot = crate::state_machine::executor::PendingOptionsSlot::Notify(opts);
+        match self.authority.exact_handle(&self.session_id)? {
+            Some(handle) => {
+                self.coord
+                    .dispatch_outbound_with_options_exact(&handle, event, slot)
+                    .await?
+            }
+            None => {
+                self.coord
+                    .dispatch_outbound_with_options(&self.session_id, event, slot)
+                    .await?
+            }
+        };
         Ok(())
     }
 }

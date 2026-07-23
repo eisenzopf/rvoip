@@ -16,14 +16,14 @@ use crate::dialog::DialogId;
 /// Methods whose builder-option snapshot lifecycle is completed by the
 /// generic exact outbound-request event.
 ///
-/// BYE/CANCEL and out-of-dialog MESSAGE/OPTIONS/SUBSCRIBE retain their
-/// existing method-specific completion paths. Emitting the generic event for
-/// those methods would add protocol work to the call teardown hot path and
-/// could clear state owned by a different lifecycle.
+/// BYE is included because its exact transaction outcome is the causal input
+/// for session-core's local-hangup transition and release. CANCEL and
+/// out-of-dialog MESSAGE/OPTIONS/SUBSCRIBE retain their method-specific
+/// completion paths.
 pub(crate) fn tracks_generic_outbound_request_completion(method: &Method) -> bool {
     matches!(
         method,
-        Method::Info | Method::Refer | Method::Notify | Method::Update
+        Method::Bye | Method::Info | Method::Refer | Method::Notify | Method::Update
     )
 }
 
@@ -211,7 +211,10 @@ pub enum SessionCoordinationEvent {
         source: SocketAddr,
     },
 
-    /// ACK sent for 2xx response (UAC side - RFC compliant media start point)
+    /// Compatibility-only ACK observation retained for exhaustive downstream
+    /// matches. Automatic ACK no longer produces this coordination event;
+    /// the acknowledged `ResponseReceived` delivery is the sole UAC success
+    /// lifecycle input.
     AckSent {
         /// Dialog ID that sent the ACK
         dialog_id: DialogId,
@@ -616,6 +619,12 @@ mod tests {
 
     fn transaction_key(method: Method) -> TransactionKey {
         TransactionKey::new("z9hG4bK-debug-canary".into(), method, true)
+    }
+
+    #[test]
+    fn outbound_bye_completion_is_a_typed_session_lifecycle_input() {
+        assert!(tracks_generic_outbound_request_completion(&Method::Bye));
+        assert!(!tracks_generic_outbound_request_completion(&Method::Cancel));
     }
 
     #[test]

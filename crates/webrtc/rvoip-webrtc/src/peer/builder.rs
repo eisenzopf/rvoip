@@ -40,6 +40,7 @@ pub const MIME_TYPE_PCMA: &str = "audio/PCMA";
 pub const MIME_TYPE_VP8: &str = "video/VP8";
 pub const MIME_TYPE_VP9: &str = "video/VP9";
 pub const MIME_TYPE_H264: &str = "video/H264";
+pub const OPUS_PAYLOAD_TYPE: u8 = 111;
 pub const TELEPHONE_EVENT_PAYLOAD_TYPE: u8 = 101;
 pub const TELEPHONE_EVENT_48000_PAYLOAD_TYPE: u8 = 110;
 pub const TELEPHONE_EVENT_8000_PAYLOAD_TYPE: u8 = 126;
@@ -162,7 +163,7 @@ fn build_media_engine_with_capabilities(
                     sdp_fmtp_line: opus_settings.to_fmtp_line(),
                     rtcp_feedback: audio_feedback.clone(),
                 },
-                111,
+                OPUS_PAYLOAD_TYPE,
             ),
             "g.711-mu" => (
                 RTCRtpCodec {

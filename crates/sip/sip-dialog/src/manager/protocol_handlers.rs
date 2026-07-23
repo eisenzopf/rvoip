@@ -154,7 +154,7 @@ impl ProtocolHandlers for DialogManager {
         let source = SourceExtractor::extract_from_request(&request);
         let cancel_tx = self
             .transaction_manager
-            .create_server_transaction(request.clone(), source)
+            .create_server_transaction_deferred_events(request.clone(), source)
             .await
             .map_err(|_error| DialogError::TransactionError {
                 message: "Failed to create server transaction for CANCEL".to_string(),
@@ -170,67 +170,8 @@ impl ProtocolHandlers for DialogManager {
                 message: "Failed to find INVITE server transaction for CANCEL".to_string(),
             })?;
 
-        let Some(invite_tx_id) = invite_tx_id else {
-            // No matching INVITE — 481.
-            let response = crate::transaction::utils::response_builders::create_response(
-                &request,
-                StatusCode::CallOrTransactionDoesNotExist,
-            );
-            self.transaction_manager
-                .send_response(&cancel_tx_id, response)
-                .await
-                .map_err(|_error| DialogError::TransactionError {
-                    message: "Failed to send 481 response to CANCEL".to_string(),
-                })?;
-            let _ = self
-                .transaction_manager
-                .terminate_transaction(&cancel_tx_id)
-                .await;
-            debug!("CANCEL processed with 481 response (no matching INVITE)");
-            return Ok(());
-        };
-
-        // 200 OK to the CANCEL transaction.
-        let ok =
-            crate::transaction::utils::response_builders::create_response(&request, StatusCode::Ok);
-        self.transaction_manager
-            .send_response(&cancel_tx_id, ok)
+        self.handle_cancel_request_event(&cancel_tx_id, invite_tx_id.as_ref(), request)
             .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send 200 OK to CANCEL".to_string(),
-            })?;
-        let _ = self
-            .transaction_manager
-            .terminate_transaction(&cancel_tx_id)
-            .await;
-
-        // 487 Request Terminated to the pending INVITE server transaction.
-        // Fetch the original INVITE so `create_response` can copy its From,
-        // To, Call-ID, CSeq, and Via headers.
-        let original_invite = self
-            .transaction_manager
-            .get_server_transaction_request(&invite_tx_id)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to fetch pending INVITE for 487".to_string(),
-            })?;
-        let terminated = crate::transaction::utils::response_builders::create_response(
-            &original_invite,
-            StatusCode::RequestTerminated,
-        );
-        self.transaction_manager
-            .send_response(&invite_tx_id, terminated)
-            .await
-            .map_err(|_error| DialogError::TransactionError {
-                message: "Failed to send 487 Request Terminated".to_string(),
-            })?;
-
-        // Terminate the dialog and notify the session layer.
-        self.terminate_dialog_for_tx_and_emit_cancelled(&invite_tx_id, "CANCEL received")
-            .await;
-
-        debug!("CANCEL processed for INVITE server transaction (200 CANCEL, 487 INVITE sent)");
-        Ok(())
     }
 
     /// Handle ACK requests (related to INVITE processing)
@@ -268,27 +209,29 @@ impl ProtocolHandlers for DialogManager {
 
         let transaction_id = server_transaction.id().clone();
 
-        // **NEW**: Check unified configuration for auto-response behavior
-        // If the manager is configured for auto-OPTIONS response, send immediate response
-        // Otherwise, forward to session layer for application handling
+        // Auto mode sends the canonical response directly. In application
+        // observation mode the same response is still transaction-owned; the
+        // request is reported only after that wire outcome commits.
         if self.should_auto_respond_to_options() {
             debug!("Auto-responding to OPTIONS request (configured for auto-response)");
             self.send_basic_options_response(&transaction_id, &request)
                 .await?;
         } else {
-            debug!("Forwarding OPTIONS request to session layer (auto-response disabled)");
+            // Standalone OPTIONS is transaction-owned. Commit the canonical
+            // capability response before publishing the application copy so
+            // an absent, stalled, or failing observer cannot alter the wire
+            // outcome or become a second response authority.
+            self.send_basic_options_response(&transaction_id, &request)
+                .await?;
 
-            // Send session coordination event for capability query
+            debug!("Publishing post-response OPTIONS observation");
             let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
                 transaction_id: transaction_id.clone(),
                 request: request.clone(),
                 source,
             };
-
-            if !self.try_emit_session_coordination_event(event).await? {
-                debug!("No session layer OPTIONS consumer; sending fallback response");
-                self.send_basic_options_response(&transaction_id, &request)
-                    .await?;
+            if let Err(_error) = self.try_emit_session_coordination_event(event).await {
+                debug!("OPTIONS observation was not delivered");
             }
         }
 
@@ -372,12 +315,8 @@ impl MethodHandler for DialogManager {
                     &request,
                     StatusCode::ServiceUnavailable,
                 );
-                self.transaction_manager
-                    .send_response(&transaction_id, response)
-                    .await
-                    .map_err(|_| DialogError::TransactionError {
-                        message: "Failed to send INFO dispatch failure response".to_string(),
-                    })?;
+                self.send_unowned_final_response_classified(&transaction_id, response)
+                    .await?;
                 // No session owner accepted this request, so there will be no
                 // later session-authored response or dialog callback to retire
                 // these exact-correlation indexes. The transaction itself
@@ -407,12 +346,8 @@ impl MethodHandler for DialogManager {
                 StatusCode::CallOrTransactionDoesNotExist,
             );
 
-            self.transaction_manager
-                .send_response(&transaction_id, response)
-                .await
-                .map_err(|_error| DialogError::TransactionError {
-                    message: "Failed to send 481 response to INFO".to_string(),
-                })?;
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
 
             debug!("INFO processed with 481 response (no dialog found)");
             Ok(())
@@ -481,7 +416,16 @@ impl MethodHandler for DialogManager {
                 raw_request,
             };
 
-            self.notify_session_layer(event).await?;
+            if self.notify_session_layer(event).await.is_err() {
+                let response = crate::transaction::utils::response_builders::create_response(
+                    &request,
+                    StatusCode::ServiceUnavailable,
+                );
+                self.send_unowned_final_response_classified(&transaction_id, response)
+                    .await?;
+                self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+                return Ok(());
+            }
             debug!(
                 "REFER request forwarded to session layer as TransferRequest for dialog {}",
                 dialog_id
@@ -503,12 +447,8 @@ impl MethodHandler for DialogManager {
                 StatusCode::CallOrTransactionDoesNotExist,
             );
 
-            self.transaction_manager
-                .send_response(&transaction_id, response)
-                .await
-                .map_err(|_error| DialogError::TransactionError {
-                    message: "Failed to send 481 response to REFER".to_string(),
-                })?;
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
 
             debug!("REFER processed with 481 response (no dialog found)");
             Ok(())
@@ -562,7 +502,9 @@ impl MethodHandler for DialogManager {
             debug!("SUBSCRIBE request handled by SubscriptionManager");
             Ok(())
         } else {
-            // Fallback to forwarding to session layer
+            // RFC 6665 §8.3.2: without a subscription/event-package owner we
+            // cannot create a subscription. Do not misroute SUBSCRIBE as a
+            // generic capability query or leave response ownership ambiguous.
             let server_transaction = self
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
@@ -572,15 +514,17 @@ impl MethodHandler for DialogManager {
                 })?;
 
             let transaction_id = server_transaction.id().clone();
-
-            let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
-                transaction_id,
-                request: request.clone(),
-                source,
-            };
-
-            self.notify_session_layer(event).await?;
-            debug!("SUBSCRIBE request forwarded to session layer");
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                StatusCode::BadEvent,
+            );
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 489 response to SUBSCRIBE".to_string(),
+                })?;
+            debug!("SUBSCRIBE rejected with 489 because no subscription owner is installed");
             Ok(())
         }
     }
@@ -617,6 +561,14 @@ impl MethodHandler for DialogManager {
 
             let transaction_id = server_transaction.id().clone();
 
+            // When this dialog is attached to session-core, commit the typed
+            // lifecycle input before acknowledging it on the wire. The event
+            // hub is a direct causal handler here, not an observer bus.
+            if let Some(dialog_id) = dialog_id.as_ref() {
+                self.publish_notify_received(dialog_id, notify_fields)
+                    .await?;
+            }
+
             // Send the response (always 200 OK per RFC 6665)
             self.transaction_manager
                 .send_response(&transaction_id, response)
@@ -627,14 +579,9 @@ impl MethodHandler for DialogManager {
 
             debug!("NOTIFY request handled by SubscriptionManager");
 
-            if let Some(dialog_id) = dialog_id {
-                self.publish_notify_received(&dialog_id, notify_fields)
-                    .await;
-            }
-
             Ok(())
         } else if let Some(dialog_id) = dialog_id {
-            // Fallback: NOTIFY in an existing dialog without SubscriptionManager.
+            // Mapped NOTIFY in an existing dialog without SubscriptionManager.
             let server_transaction = self
                 .transaction_manager
                 .create_server_transaction(request.clone(), source)
@@ -644,6 +591,9 @@ impl MethodHandler for DialogManager {
                 })?;
 
             let transaction_id = server_transaction.id().clone();
+
+            self.publish_notify_received(&dialog_id, notify_fields)
+                .await?;
 
             // Reply 200 OK per RFC 6665 §4.1.3 — the session layer doesn't
             // need to approve acceptance of a NOTIFY in an established
@@ -659,9 +609,7 @@ impl MethodHandler for DialogManager {
                     message: "Failed to send 200 OK to NOTIFY".to_string(),
                 })?;
 
-            debug!("NOTIFY accepted (fallback path) for dialog {}", dialog_id);
-            self.publish_notify_received(&dialog_id, notify_fields)
-                .await;
+            debug!("Mapped NOTIFY accepted for dialog {}", dialog_id);
             Ok(())
         } else {
             // NOTIFY outside dialog - could be unsolicited, send 481
@@ -771,21 +719,21 @@ impl DialogManager {
         &self,
         dialog_id: &crate::dialog::dialog_id::DialogId,
         fields: NotifyFields,
-    ) {
-        let Some(hub) = self.event_hub.read().await.as_ref().cloned() else {
-            debug!(
-                "No event hub wired; dropping NOTIFY surface for dialog {}",
-                dialog_id
-            );
-            return;
-        };
+    ) -> DialogResult<()> {
         let Some(session_id) = self.get_session_id(dialog_id) else {
-            debug!(
-                "No session mapping for dialog {}; dropping NOTIFY surface",
-                dialog_id
-            );
-            return;
+            // A standalone sip-dialog SubscriptionManager is itself the owner;
+            // no rvoip-sip lifecycle is attached in this case.
+            return Ok(());
         };
+        let hub = self
+            .event_hub
+            .read()
+            .await
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                DialogError::routing_error("mapped NOTIFY has no authoritative session route")
+            })?;
 
         let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
             rvoip_infra_common::events::cross_crate::DialogToSessionEvent::NotifyReceived {
@@ -799,9 +747,129 @@ impl DialogManager {
             },
         );
 
-        if let Err(_error) = hub.publish_cross_crate_event(event).await {
-            tracing::warn!("Failed to publish NotifyReceived event");
+        match hub.try_publish_cross_crate_event(event).await {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(DialogError::routing_error(
+                "mapped NOTIFY had no authoritative session handler",
+            )),
+            Err(_error) => Err(DialogError::routing_error(
+                "authoritative NotifyReceived handler failed",
+            )),
         }
+    }
+}
+
+#[cfg(test)]
+mod exact_method_response_tests {
+    #[test]
+    fn info_and_refer_fallbacks_use_classified_exact_transactions() {
+        let source = include_str!("protocol_handlers.rs");
+        let info = source
+            .split("async fn handle_info_method(&self, request: Request, source: SocketAddr)")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Handle REFER requests").next())
+            .expect("INFO handler source");
+        let refer = source
+            .split("async fn handle_refer_method(&self, request: Request, source: SocketAddr)")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Handle SUBSCRIBE requests").next())
+            .expect("REFER handler source");
+
+        for (name, handler) in [("INFO", info), ("REFER", refer)] {
+            assert!(handler.contains("StatusCode::ServiceUnavailable"), "{name}");
+            assert!(
+                handler.contains("StatusCode::CallOrTransactionDoesNotExist"),
+                "{name}"
+            );
+            assert!(
+                handler
+                    .matches("send_unowned_final_response_classified")
+                    .count()
+                    >= 2,
+                "{name}"
+            );
+            assert!(!handler.contains("transaction_manager\n                .send_response"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancel_single_writer_tests {
+    #[test]
+    fn direct_cancel_facade_defers_publication_and_has_no_response_writer() {
+        let facade_source = include_str!("protocol_handlers.rs");
+        let facade = facade_source
+            .split("async fn handle_cancel_method(&self, request: Request) -> DialogResult<()> {")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Handle ACK requests").next())
+            .expect("direct CANCEL facade source");
+
+        assert!(facade.contains("create_server_transaction_deferred_events("));
+        assert!(facade.contains("handle_cancel_request_event("));
+        assert!(!facade.contains("create_response("));
+        assert!(!facade.contains(".send_response("));
+        assert!(!facade.contains("terminate_dialog_for_tx_and_emit_cancelled("));
+
+        let core_source = include_str!("core.rs");
+        let owner = core_source
+            .split("pub(crate) async fn handle_cancel_request_event(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Get the configured local address").next())
+            .expect("authoritative CANCEL mechanics source");
+        assert!(owner.contains("StatusCode::CallOrTransactionDoesNotExist"));
+        assert!(owner.contains("StatusCode::Ok"));
+        assert!(owner.contains("StatusCode::RequestTerminated"));
+        assert!(owner.contains("terminate_dialog_for_tx_and_emit_cancelled_authoritative("));
+    }
+}
+
+#[cfg(test)]
+mod notify_causal_authority_tests {
+    #[test]
+    fn subscribe_without_a_protocol_owner_returns_bad_event() {
+        let source = include_str!("protocol_handlers.rs");
+        let handler = source
+            .split("async fn handle_subscribe_method(")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn handle_notify_method(").next())
+            .expect("SUBSCRIBE handler source");
+        assert!(handler.contains("StatusCode::BadEvent"));
+        assert!(!handler.contains("SessionCoordinationEvent::CapabilityQuery"));
+        assert!(!handler.contains("forwarded to session layer"));
+    }
+
+    #[test]
+    fn mapped_notify_commits_before_its_single_wire_ack() {
+        let source = include_str!("protocol_handlers.rs");
+        let handler = source
+            .split("async fn handle_notify_method(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Raw NOTIFY fields").next())
+            .expect("NOTIFY handler source");
+        let publish = ["publish_", "notify_received"].concat();
+        let send = [".send_", "response(&transaction_id, response)"].concat();
+        let publishes = handler
+            .match_indices(&publish)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let sends = handler
+            .match_indices(&send)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+
+        assert_eq!(publishes.len(), 2, "both mapped NOTIFY paths must commit");
+        assert_eq!(sends.len(), 3, "two 200 paths plus the unmapped 481 path");
+        assert!(publishes[0] < sends[0]);
+        assert!(publishes[1] < sends[1]);
+
+        let delivery = source
+            .split("async fn publish_notify_received(")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Helper methods").next())
+            .expect("NOTIFY delivery source");
+        assert!(delivery.contains("DialogResult<()>"));
+        assert!(delivery.contains("try_publish_cross_crate_event(event)"));
+        assert!(!delivery.contains("Failed to publish NotifyReceived"));
     }
 }
 

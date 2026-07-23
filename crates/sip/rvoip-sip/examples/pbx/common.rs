@@ -2091,7 +2091,7 @@ async fn run_g729_caller(
         start_tone_recorder_with_frame_size(handle, tone_for_caller(transport), G729_FRAME_SIZE)
             .await?;
     if let Err(error) = recorder
-        .wait_for_received_samples(TONE_ANALYSIS_WINDOW_SAMPLES, Duration::from_secs(6))
+        .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(15))
         .await
     {
         handle
@@ -2104,7 +2104,6 @@ async fn run_g729_caller(
             .ok();
         return Err(error);
     }
-    sleep(Duration::from_secs(4)).await;
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await
@@ -2171,6 +2170,27 @@ async fn run_dtmf_caller(
         handle.send_dtmf(digit).await?;
     }
     sleep(Duration::from_secs(1)).await;
+    let media_ready = match recorder.as_ref() {
+        Some(tone_recorder) => {
+            tone_recorder
+                .wait_for_received_samples(MIN_RECEIVED_SAMPLES, Duration::from_secs(6))
+                .await
+        }
+        None => Ok(()),
+    };
+    if let Err(error) = media_ready {
+        handle
+            .hangup_and_wait(Some(Duration::from_secs(8)))
+            .await
+            .ok();
+        if let Some(tone_recorder) = recorder {
+            tone_recorder
+                .stop_and_save(&cfg.output_dir, dtmf_caller_wav(transport))
+                .await
+                .ok();
+        }
+        return Err(error);
+    }
     handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
     if let Some(recorder) = recorder {
         recorder

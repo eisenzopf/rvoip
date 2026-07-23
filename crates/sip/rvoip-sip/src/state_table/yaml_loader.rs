@@ -224,6 +224,15 @@ impl YamlTableLoader {
         loader.build()
     }
 
+    /// Exact bytes compiled by [`Self::load_embedded_default`].
+    ///
+    /// This is crate-private so runtime source selection and beta evidence can
+    /// hash the authority that was actually selected without adding a public
+    /// YAML API or duplicating the embedded file path.
+    pub(crate) fn embedded_default_yaml_bytes() -> &'static [u8] {
+        DEFAULT_STATE_TABLE_YAML.as_bytes()
+    }
+
     /// Load state table from a file
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<StateTable> {
         let mut loader = Self::new();
@@ -332,7 +341,7 @@ impl YamlTableLoader {
                     let parts: Vec<&str> = msg
                         .strip_prefix("WILDCARD_TRANSITION:")
                         .unwrap()
-                        .split(':')
+                        .splitn(3, ':')
                         .collect();
                     if parts.len() == 3 {
                         // Deserialize the components
@@ -421,7 +430,11 @@ impl YamlTableLoader {
 
     fn validate_yaml_data(&self, yaml_data: &YamlStateTable) -> Result<()> {
         let mut errors = Vec::new();
-        let mut seen_transitions: HashMap<(Role, String, String), usize> = HashMap::new();
+        // Duplicate identity must retain event payloads. `EventType::Debug`
+        // deliberately exposes only the variant name, so using its text as a
+        // key collapses distinct typed events such as the RFC 4028 internal
+        // `MediaEvent` capabilities into one false duplicate.
+        let mut seen_transitions: HashMap<(Role, String, EventType), usize> = HashMap::new();
 
         let declared_states: HashSet<String> = yaml_data
             .states
@@ -470,12 +483,12 @@ impl YamlTableLoader {
                     continue;
                 }
             };
-            let event_key = format!("{:?}", event);
-            let key = (role, transition.state.clone(), event_key.clone());
+            let event_label = format!("{:?}", event);
+            let key = (role, transition.state.clone(), event.clone());
             if let Some(previous) = seen_transitions.insert(key, index + 1) {
                 errors.push(format!(
                     "{} duplicates transition #{} for role={:?}, state={}, event={}",
-                    line_hint, previous, role, transition.state, event_key
+                    line_hint, previous, role, transition.state, event_label
                 ));
             }
 
@@ -787,6 +800,30 @@ impl YamlTableLoader {
             "MediaFlowing" => Ok(EventType::MediaEvent("media_flow_established".to_string())),
             "MediaFailed" => Ok(EventType::MediaEvent("media_failed".to_string())),
             "SDPNegotiated" => Ok(EventType::MediaEvent("sdp_negotiated".to_string())),
+            // Reserved RFC 4028 driver events. Their string form is public-
+            // compatible, but the executor rejects them unless accompanied by
+            // the matching crate-private exact-session sidecar.
+            "InternalSessionRefreshUpdateDue" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_DUE_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshReinviteDue" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_REINVITE_DUE_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshUpdateSucceeded" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_UPDATE_OK_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshUpdateFailed" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_UPDATE_FAILED_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshReinviteSucceeded" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_REINVITE_OK_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshReinviteFailed" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_REINVITE_FAILED_EVENT.to_string(),
+            )),
+            "InternalSessionRefreshPeerExpired" => Ok(EventType::MediaEvent(
+                crate::state_machine::executor::SESSION_REFRESH_PEER_EXPIRED_EVENT.to_string(),
+            )),
 
             // Internal coordination
             "CheckReadiness" => Ok(EventType::CheckConditions),
@@ -1038,6 +1075,16 @@ impl YamlTableLoader {
 
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),
+            "ArmSessionRefreshTimer" => Ok(Action::Custom("ArmSessionRefreshTimer".to_string())),
+            "PrepareSessionRefreshUpdate" => {
+                Ok(Action::Custom("PrepareSessionRefreshUpdate".to_string()))
+            }
+            "PrepareSessionRefreshReinvite" => {
+                Ok(Action::Custom("PrepareSessionRefreshReinvite".to_string()))
+            }
+            "PrepareSessionRefreshExpiry" => {
+                Ok(Action::Custom("PrepareSessionRefreshExpiry".to_string()))
+            }
 
             // SIP_API_DESIGN_2 §7.1 — unified outbound dispatch through
             // the option stash. Builder `.send()` stages
@@ -1116,6 +1163,558 @@ impl Default for YamlTableLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+
+    #[derive(Clone, Copy, Debug)]
+    struct VariantAllowance {
+        variant: &'static str,
+        owner: &'static str,
+    }
+
+    // These inventories are deliberately exact. A newly added Rust variant is
+    // unaccounted until it is either wired into default.yaml or added here with
+    // an ownership reason. Conversely, using an allowlisted variant in
+    // default.yaml fails until its allowance is removed, so these lists cannot
+    // become catch-all exemptions.
+    const EVENT_VARIANT_ALLOWANCES: &[VariantAllowance] = &[
+        VariantAllowance {
+            variant: "MuteCall",
+            owner: "public: callable media-control input without an embedded row",
+        },
+        VariantAllowance {
+            variant: "UnmuteCall",
+            owner: "public: callable media-control input without an embedded row",
+        },
+        VariantAllowance {
+            variant: "PlayAudio",
+            owner: "public: callable media-control input without an embedded row",
+        },
+        VariantAllowance {
+            variant: "StartRecording",
+            owner: "public: callable recording input without an embedded row",
+        },
+        VariantAllowance {
+            variant: "StopRecording",
+            owner: "public: callable recording input without an embedded row",
+        },
+        VariantAllowance {
+            variant: "DialogCreated",
+            owner: "direct: typed dialog ingress records correlation before lifecycle routing",
+        },
+        VariantAllowance {
+            variant: "CallEstablished",
+            owner: "public-serde: programmatic-table/history compatibility event; typed dialog establishment routes as Dialog200OK",
+        },
+        VariantAllowance {
+            variant: "DialogInvite",
+            owner: "public-serde: programmatic-table compatibility event; typed inbound INVITE routes as IncomingCall",
+        },
+        VariantAllowance {
+            variant: "DialogREFER",
+            owner: "public-serde: programmatic-table compatibility event; typed REFER ingress routes as TransferRequested",
+        },
+        VariantAllowance {
+            variant: "DialogReINVITE",
+            owner: "public-serde: programmatic-table compatibility event; typed re-INVITE ingress routes as ReinviteReceived",
+        },
+        VariantAllowance {
+            variant: "DialogError",
+            owner: "direct: typed dialog error carries runtime-only detail",
+        },
+        VariantAllowance {
+            variant: "DialogStateChanged",
+            owner: "direct: typed dialog observation is not a lifecycle trigger",
+        },
+        VariantAllowance {
+            variant: "MediaSessionCreated",
+            owner: "direct: typed media ingress is normalized before table lookup",
+        },
+        VariantAllowance {
+            variant: "MediaSessionReady",
+            owner: "direct: typed media ingress is normalized before table lookup",
+        },
+        VariantAllowance {
+            variant: "MediaNegotiated",
+            owner: "direct: typed media ingress is normalized before table lookup",
+        },
+        VariantAllowance {
+            variant: "MediaFlowEstablished",
+            owner: "direct: typed media ingress is normalized before table lookup",
+        },
+        VariantAllowance {
+            variant: "MediaError",
+            owner: "direct: typed media error carries runtime-only detail",
+        },
+        VariantAllowance {
+            variant: "MediaQualityDegraded",
+            owner: "direct: media telemetry is observational, not lifecycle control",
+        },
+        VariantAllowance {
+            variant: "DtmfDetected",
+            owner: "direct: media telemetry is observational, not lifecycle control",
+        },
+        VariantAllowance {
+            variant: "RtpTimeout",
+            owner: "direct: media watchdog dispatches an exact lifecycle event instead",
+        },
+        VariantAllowance {
+            variant: "PacketLossThresholdExceeded",
+            owner: "direct: media telemetry is observational, not lifecycle control",
+        },
+        VariantAllowance {
+            variant: "InternalCheckReady",
+            owner: "internal: executor-owned follow-up event",
+        },
+        VariantAllowance {
+            variant: "InternalACKSent",
+            owner: "public-serde: programmatic-table compatibility event; live ACK ingress routes as DialogACK",
+        },
+        VariantAllowance {
+            variant: "InternalUASMedia",
+            owner: "public-serde: programmatic-table compatibility event; live UAS media readiness uses normalized media ingress",
+        },
+        VariantAllowance {
+            variant: "InternalCleanupComplete",
+            owner: "public-serde: programmatic-table compatibility event; exact lifecycle release owns cleanup completion",
+        },
+        VariantAllowance {
+            variant: "CheckConditions",
+            owner: "runtime-yaml: CheckReadiness alias remains available to custom tables",
+        },
+        VariantAllowance {
+            variant: "PublishCallEstablished",
+            owner: "runtime-yaml: PublishEstablished alias remains available to custom tables",
+        },
+        VariantAllowance {
+            variant: "CreateConference",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "AddParticipant",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "JoinConference",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "LeaveConference",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "MuteInConference",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "UnmuteInConference",
+            owner: "public: conference input is outside the embedded SIP call profile",
+        },
+        VariantAllowance {
+            variant: "BridgeSessions",
+            owner: "direct: server bridge API owns RTP bridging",
+        },
+        VariantAllowance {
+            variant: "UnbridgeSessions",
+            owner: "direct: server bridge API owns RTP unbridging",
+        },
+        VariantAllowance {
+            variant: "ModifySession",
+            owner: "public: generic extension input has no embedded transition",
+        },
+        VariantAllowance {
+            variant: "Registration401",
+            owner: "runtime-yaml/public-serde: legacy name remains accepted and normalizes to AuthRequired for REGISTER",
+        },
+        VariantAllowance {
+            variant: "RetryRegistration",
+            owner: "runtime-yaml: registration retry remains available to custom tables",
+        },
+        VariantAllowance {
+            variant: "UnregisterRequest",
+            owner: "public: builder input is normalized to the embedded unregister flow",
+        },
+        VariantAllowance {
+            variant: "RegistrationExpired",
+            owner: "internal: registration lifecycle timer input",
+        },
+        VariantAllowance {
+            variant: "StartSubscription",
+            owner: "direct: standalone SUBSCRIBE is dialog/transaction-owned",
+        },
+        VariantAllowance {
+            variant: "SendNOTIFY",
+            owner: "public: session-scoped NOTIFY input uses staged outbound dispatch",
+        },
+        VariantAllowance {
+            variant: "SubscriptionAccepted",
+            owner: "direct: standalone subscription response is transaction-owned",
+        },
+        VariantAllowance {
+            variant: "SubscriptionFailed",
+            owner: "direct: standalone subscription response is transaction-owned",
+        },
+        VariantAllowance {
+            variant: "SubscriptionExpired",
+            owner: "direct: standalone subscription timer is transaction-owned",
+        },
+        VariantAllowance {
+            variant: "UnsubscribeRequest",
+            owner: "direct: standalone unsubscribe is dialog/transaction-owned",
+        },
+        VariantAllowance {
+            variant: "SendMessage",
+            owner: "direct: standalone MESSAGE is dialog/transaction-owned",
+        },
+        VariantAllowance {
+            variant: "ReceiveMESSAGE",
+            owner: "direct: standalone MESSAGE delivery is not session lifecycle control",
+        },
+        VariantAllowance {
+            variant: "MessageDelivered",
+            owner: "direct: standalone MESSAGE response is transaction-owned",
+        },
+        VariantAllowance {
+            variant: "MessageFailed",
+            owner: "direct: standalone MESSAGE response is transaction-owned",
+        },
+        VariantAllowance {
+            variant: "CleanupComplete",
+            owner: "public-serde: programmatic-table compatibility event; exact lifecycle release owns cleanup completion",
+        },
+        VariantAllowance {
+            variant: "Reset",
+            owner: "public: programmatic state-table reset input",
+        },
+        VariantAllowance {
+            variant: "InternalProceedWithTransfer",
+            owner: "internal: executor-owned transfer follow-up",
+        },
+        VariantAllowance {
+            variant: "InternalMakeTransferCall",
+            owner: "internal: executor-owned transfer follow-up",
+        },
+        VariantAllowance {
+            variant: "InternalTransferCallEstablished",
+            owner: "internal: executor-owned transfer follow-up",
+        },
+        VariantAllowance {
+            variant: "SendOutboundMessage",
+            owner: "direct: standalone MESSAGE deliberately bypasses session YAML",
+        },
+        VariantAllowance {
+            variant: "SendOutboundOptions",
+            owner: "direct: standalone OPTIONS deliberately bypasses session YAML",
+        },
+        VariantAllowance {
+            variant: "SendOutboundSubscribe",
+            owner: "direct: standalone SUBSCRIBE deliberately bypasses session YAML",
+        },
+    ];
+
+    const GUARD_VARIANT_ALLOWANCES: &[VariantAllowance] = &[
+        VariantAllowance {
+            variant: "HasLocalSDP",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "HasRemoteSDP",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "HasNegotiatedConfig",
+            owner: "direct: programmatic StateTableBuilder guard",
+        },
+        VariantAllowance {
+            variant: "AllConditionsMet",
+            owner: "runtime-yaml: readiness guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "DialogEstablished",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "MediaReady",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "SDPNegotiated",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "IsIdle",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "InActiveCall",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "IsRegistered",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "IsSubscribed",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "HasActiveSubscription",
+            owner: "runtime-yaml: supported guard for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "Custom",
+            owner: "custom: public runtime YAML extension grammar",
+        },
+    ];
+
+    const ACTION_VARIANT_ALLOWANCES: &[VariantAllowance] = &[
+        VariantAllowance {
+            variant: "SendREGISTER",
+            owner: "runtime-yaml: legacy initial/refresh facade over the canonical retained REGISTER options action",
+        },
+        VariantAllowance {
+            variant: "SendREGISTERWithAuth",
+            owner: "runtime-yaml: legacy challenged REGISTER facade over the canonical retained options action",
+        },
+        VariantAllowance {
+            variant: "SendUnREGISTER",
+            owner: "runtime-yaml: legacy Expires-zero facade over the canonical retained REGISTER options action",
+        },
+        VariantAllowance {
+            variant: "HoldCall",
+            owner: "public-serde: programmatic StateTableBuilder action sends the lane-owned hold re-INVITE",
+        },
+        VariantAllowance {
+            variant: "ResumeCall",
+            owner: "public-serde: programmatic StateTableBuilder action sends the lane-owned resume re-INVITE",
+        },
+        VariantAllowance {
+            variant: "TransferCall",
+            owner: "public-serde: programmatic StateTableBuilder action sends the options-based REFER",
+        },
+        VariantAllowance {
+            variant: "StartRecording",
+            owner: "public-serde: programmatic StateTableBuilder media-recording action",
+        },
+        VariantAllowance {
+            variant: "StopRecording",
+            owner: "public-serde: programmatic StateTableBuilder media-recording action",
+        },
+        VariantAllowance {
+            variant: "PlayAudioFile",
+            owner: "public: programmatic media action outside the embedded SIP profile",
+        },
+        VariantAllowance {
+            variant: "StartRecordingMedia",
+            owner: "public: programmatic media action outside the embedded SIP profile",
+        },
+        VariantAllowance {
+            variant: "StopRecordingMedia",
+            owner: "public: programmatic media action outside the embedded SIP profile",
+        },
+        VariantAllowance {
+            variant: "CreateAudioMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "RedirectToMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "ConnectToMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "DisconnectFromMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "MuteToMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "UnmuteToMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "DestroyMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "BridgeToMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "RestoreDirectMedia",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "StartRecordingMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "StopRecordingMixer",
+            owner: "direct: conference media is mixer-owned",
+        },
+        VariantAllowance {
+            variant: "UpdateMediaDirection",
+            owner: "public: programmatic media-direction action",
+        },
+        VariantAllowance {
+            variant: "HoldCurrentCall",
+            owner: "runtime-yaml: transfer helper for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "SetCondition",
+            owner: "runtime-yaml: parameterized condition action for custom tables",
+        },
+        VariantAllowance {
+            variant: "StoreLocalSDP",
+            owner: "runtime-yaml: supported action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "StoreNegotiatedConfig",
+            owner: "runtime-yaml: supported action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "CreateBridge",
+            owner: "runtime-yaml: retained public legacy bridge metadata action; the server bridge path uses media-core directly",
+        },
+        VariantAllowance {
+            variant: "DestroyBridge",
+            owner: "runtime-yaml: retained public legacy bridge metadata action; the server bridge path uses media-core directly",
+        },
+        VariantAllowance {
+            variant: "RestoreMediaFlow",
+            owner: "runtime-yaml: transfer helper for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "ReleaseAllResources",
+            owner: "public-serde: programmatic StateTableBuilder action performs exact dialog and media cleanup",
+        },
+        VariantAllowance {
+            variant: "StartEmergencyCleanup",
+            owner: "public-serde: programmatic StateTableBuilder action performs best-effort exact cleanup",
+        },
+        VariantAllowance {
+            variant: "AttemptMediaRecovery",
+            owner: "public-serde: programmatic compatibility action retained without a live recovery implementation",
+        },
+        VariantAllowance {
+            variant: "CleanupResources",
+            owner: "public-serde: programmatic compatibility no-op; exact lifecycle cleanup uses dedicated owners",
+        },
+        VariantAllowance {
+            variant: "TriggerCallEstablished",
+            owner: "runtime-yaml: callback action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "TriggerCallTerminated",
+            owner: "runtime-yaml: callback action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "StartDialogCleanup",
+            owner: "runtime-yaml: cleanup action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "StartMediaCleanup",
+            owner: "runtime-yaml: cleanup action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "ProcessRegistrationResponse",
+            owner: "runtime-yaml: registration action for externally supplied tables",
+        },
+        VariantAllowance {
+            variant: "SendSUBSCRIBE",
+            owner: "direct: standalone SUBSCRIBE is dialog/transaction-owned",
+        },
+        VariantAllowance {
+            variant: "SendMESSAGE",
+            owner: "direct: standalone MESSAGE is dialog/transaction-owned",
+        },
+        VariantAllowance {
+            variant: "ProcessMESSAGE",
+            owner: "direct: standalone MESSAGE delivery is outside session lifecycle",
+        },
+        VariantAllowance {
+            variant: "SendSUBSCRIBEWithOptions",
+            owner: "direct: standalone SUBSCRIBE deliberately bypasses session YAML",
+        },
+        VariantAllowance {
+            variant: "SendMESSAGEWithOptions",
+            owner: "direct: standalone MESSAGE deliberately bypasses session YAML",
+        },
+        VariantAllowance {
+            variant: "SendOPTIONSWithOptions",
+            owner: "direct: standalone OPTIONS deliberately bypasses session YAML",
+        },
+        VariantAllowance {
+            variant: "ClearPendingReINVITEOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingREGISTEROptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingSUBSCRIBEOptions",
+            owner: "direct: standalone SUBSCRIBE has transaction-owned cleanup",
+        },
+        VariantAllowance {
+            variant: "ClearPendingMESSAGEOptions",
+            owner: "direct: standalone MESSAGE has transaction-owned cleanup",
+        },
+        VariantAllowance {
+            variant: "ClearPendingNOTIFYOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingBYEOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingCANCELOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingREFEROptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingINFOOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingUPDATEOptions",
+            owner: "runtime-yaml: public staged-dispatch cleanup action",
+        },
+        VariantAllowance {
+            variant: "ClearPendingOPTIONSOptions",
+            owner: "direct: standalone OPTIONS has transaction-owned cleanup",
+        },
+    ];
+
+    const EVENT_TEMPLATE_VARIANT_ALLOWANCES: &[VariantAllowance] = &[
+        VariantAllowance {
+            variant: "StateChanged",
+            owner: "direct: programmatic StateTableBuilder publication",
+        },
+        VariantAllowance {
+            variant: "IncomingCall",
+            owner: "public-serde: programmatic Transition template publishes its legacy named Custom observation",
+        },
+        VariantAllowance {
+            variant: "MediaFlowEstablished",
+            owner: "direct: programmatic StateTableBuilder publication",
+        },
+        VariantAllowance {
+            variant: "MediaNegotiated",
+            owner: "public-serde: programmatic Transition template publishes its legacy named Custom observation",
+        },
+        VariantAllowance {
+            variant: "MediaSessionReady",
+            owner: "public-serde: programmatic Transition template publishes its legacy named Custom observation",
+        },
+    ];
 
     #[test]
     fn test_parse_simple_yaml() {
@@ -1197,6 +1796,101 @@ transitions:
             .unwrap_or(false));
     }
 
+    #[test]
+    fn wildcard_transition_retains_json_action_payload() {
+        let yaml = r#"
+version: "1.0"
+transitions:
+  - role: UAC
+    state: Any
+    event:
+      type: ReceiveNOTIFY
+    actions:
+      - type: ProcessNOTIFY
+"#;
+
+        let mut loader = YamlTableLoader::new();
+        loader.load_from_string(yaml).expect("load wildcard YAML");
+        let table = loader.build().expect("build wildcard table");
+        let transition = table
+            .get(&StateKey {
+                role: Role::UAC,
+                state: CallState::Active,
+                event: EventType::ReceiveNOTIFY,
+            })
+            .expect("resolve UAC wildcard transition");
+        assert_eq!(transition.actions, vec![Action::ProcessNOTIFY]);
+        assert!(table
+            .get(&StateKey {
+                role: Role::Both,
+                state: CallState::Active,
+                event: EventType::ReceiveNOTIFY,
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn duplicate_validation_retains_typed_media_event_identity() {
+        let distinct = r#"
+version: "2.0"
+transitions:
+  - role: Both
+    state: Active
+    event:
+      type: InternalSessionRefreshUpdateDue
+  - role: Both
+    state: Active
+    event:
+      type: InternalSessionRefreshReinviteDue
+"#;
+        let mut loader = YamlTableLoader::new();
+        loader
+            .load_from_string(distinct)
+            .expect("load distinct RFC 4028 event rows");
+        let table = loader
+            .build()
+            .expect("distinct typed MediaEvent payloads must coexist");
+        for event in [
+            crate::state_machine::executor::SESSION_REFRESH_DUE_EVENT,
+            crate::state_machine::executor::SESSION_REFRESH_REINVITE_DUE_EVENT,
+        ] {
+            assert!(table
+                .get_transition(&StateKey {
+                    role: Role::Both,
+                    state: CallState::Active,
+                    event: EventType::MediaEvent(event.to_string()),
+                })
+                .is_some());
+        }
+
+        let duplicate = r#"
+version: "2.0"
+transitions:
+  - role: Both
+    state: Active
+    event:
+      type: InternalSessionRefreshUpdateDue
+  - role: Both
+    state: Active
+    event:
+      type: InternalSessionRefreshUpdateDue
+"#;
+        let mut loader = YamlTableLoader::new();
+        loader
+            .load_from_string(duplicate)
+            .expect("load exact duplicate fixture");
+        let error = match loader.build() {
+            Ok(_) => panic!("exact duplicate event row was accepted"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            SessionError::InternalError(ref detail)
+                if detail.contains("duplicates transition #1")
+                    && detail.contains("event=MediaEvent")
+        ));
+    }
+
     /// The embedded `default.yaml` loads without hitting the
     /// `UnknownAction` drift-detection arm. If this regresses, either the
     /// YAML introduced a new action name or an `Action` variant was removed
@@ -1241,5 +1935,329 @@ transitions:
             SessionError::InternalError(ref detail) if detail.contains("Unknown YAML action")
         ));
         assert!(!format!("{err:?}").contains("ThisNameDoesNotExist42"));
+    }
+
+    #[test]
+    fn event_action_hard_failures_do_not_narrow_custom_guard_or_publish_grammar() {
+        let loader = YamlTableLoader::new();
+        let event_error = loader
+            .parse_event_by_name("VendorLifecycleEvent")
+            .expect_err("unknown YAML lifecycle events must remain hard failures");
+        assert!(matches!(
+            event_error,
+            SessionError::InternalError(ref detail) if detail.contains("Unknown YAML event")
+        ));
+
+        assert_eq!(
+            loader
+                .parse_guard_by_name("VendorAdmissionGuard")
+                .expect("custom runtime YAML guards remain supported"),
+            Guard::Custom("VendorAdmissionGuard".to_string())
+        );
+        assert_eq!(
+            loader
+                .parse_event_template("VendorObservation")
+                .expect("custom observational publish templates remain supported"),
+            EventTemplate::Custom("VendorObservation".to_string())
+        );
+    }
+
+    #[test]
+    fn ya_503_retained_serde_boundaries_and_yaml_grammar_are_exact() {
+        // These default-unused EventType variants are part of the public,
+        // serializable programmatic-table contract. Their live ingress has
+        // canonical replacements, but removing the variants would still be a
+        // public/serde break and therefore fails YA-503's first deletion proof.
+        let public_events = [
+            EventType::CallEstablished {
+                session_id: "session-a".to_string(),
+                sdp_answer: Some("v=0".to_string()),
+            },
+            EventType::DialogInvite,
+            EventType::DialogREFER,
+            EventType::DialogReINVITE,
+            EventType::InternalACKSent,
+            EventType::InternalUASMedia,
+            EventType::InternalCleanupComplete,
+            EventType::Registration401,
+            EventType::CleanupComplete,
+        ];
+        for event in public_events {
+            let encoded = serde_json::to_string(&event).expect("serialize retained EventType");
+            let decoded: EventType =
+                serde_json::from_str(&encoded).expect("deserialize retained EventType");
+            assert_eq!(decoded, event, "EventType public serde shape drifted");
+        }
+
+        let public_actions = [
+            Action::HoldCall,
+            Action::ResumeCall,
+            Action::TransferCall("sip:target@example.com".to_string()),
+            Action::StartRecording,
+            Action::StopRecording,
+            Action::ReleaseAllResources,
+            Action::StartEmergencyCleanup,
+            Action::AttemptMediaRecovery,
+            Action::CleanupResources,
+        ];
+        for action in public_actions {
+            let encoded = serde_json::to_string(&action).expect("serialize retained Action");
+            let decoded: Action =
+                serde_json::from_str(&encoded).expect("deserialize retained Action");
+            assert_eq!(decoded, action, "Action public serde shape drifted");
+        }
+
+        let public_templates = [
+            EventTemplate::IncomingCall,
+            EventTemplate::MediaNegotiated,
+            EventTemplate::MediaSessionReady,
+        ];
+        for template in public_templates {
+            let encoded =
+                serde_json::to_string(&template).expect("serialize retained EventTemplate");
+            let decoded: EventTemplate =
+                serde_json::from_str(&encoded).expect("deserialize retained EventTemplate");
+            assert_eq!(
+                decoded, template,
+                "EventTemplate public serde shape drifted"
+            );
+        }
+
+        // Preserve the existing configured-YAML grammar exactly: these are
+        // programmatic-only compatibility variants, not accepted lifecycle
+        // event/action names. Registration401 is the one deliberate legacy
+        // YAML alias and must continue to normalize into canonical auth.
+        let loader = YamlTableLoader::new();
+        for name in [
+            "CallEstablished",
+            "DialogInvite",
+            "DialogREFER",
+            "DialogReINVITE",
+            "InternalACKSent",
+            "InternalUASMedia",
+            "InternalCleanupComplete",
+            "CleanupComplete",
+        ] {
+            loader
+                .parse_event_by_name(name)
+                .expect_err("programmatic-only EventType must not expand YAML grammar");
+        }
+        assert_eq!(
+            loader
+                .parse_event_by_name("Registration401")
+                .expect("legacy Registration401 YAML alias remains accepted"),
+            EventType::AuthRequired {
+                status_code: 401,
+                challenge: String::new(),
+                method: "REGISTER".to_string(),
+            }
+        );
+
+        for name in [
+            "HoldCall",
+            "ResumeCall",
+            "TransferCall",
+            "StartRecording",
+            "StopRecording",
+            "ReleaseAllResources",
+            "StartEmergencyCleanup",
+            "AttemptMediaRecovery",
+            "CleanupResources",
+        ] {
+            loader
+                .parse_action_by_name(name)
+                .expect_err("programmatic-only Action must not expand YAML grammar");
+        }
+
+        for name in ["IncomingCall", "MediaNegotiated", "MediaSessionReady"] {
+            assert_eq!(
+                loader
+                    .parse_event_template(name)
+                    .expect("custom publish-template grammar remains open"),
+                EventTemplate::Custom(name.to_string()),
+                "named custom publication semantics changed"
+            );
+        }
+    }
+
+    #[test]
+    fn default_yaml_and_rust_variant_inventories_are_bidirectional() {
+        let yaml: YamlStateTable = serde_yaml::from_str(DEFAULT_STATE_TABLE_YAML)
+            .expect("embedded default YAML must deserialize for inventory checks");
+        let loader = YamlTableLoader::new();
+
+        let used_events = yaml
+            .transitions
+            .iter()
+            .map(|transition| {
+                loader
+                    .parse_event(transition.event.clone())
+                    .expect("default YAML event must resolve")
+            })
+            .map(|event| {
+                let variant: &'static str = (&event).into();
+                variant
+            })
+            .collect::<BTreeSet<_>>();
+
+        let used_guards = yaml
+            .transitions
+            .iter()
+            .flat_map(|transition| transition.guards.iter())
+            .map(|guard| {
+                loader
+                    .parse_guard(guard.clone())
+                    .expect("default YAML guard must resolve")
+            })
+            .map(|guard| {
+                let variant: &'static str = (&guard).into();
+                variant
+            })
+            .collect::<BTreeSet<_>>();
+
+        let used_actions = yaml
+            .transitions
+            .iter()
+            .flat_map(|transition| transition.actions.iter())
+            .map(|action| {
+                loader
+                    .parse_action(action.clone())
+                    .expect("default YAML action must resolve")
+            })
+            .map(|action| {
+                let variant: &'static str = (&action).into();
+                variant
+            })
+            .collect::<BTreeSet<_>>();
+
+        let used_event_templates = yaml
+            .transitions
+            .iter()
+            .flat_map(|transition| transition.publish.iter())
+            .map(|template| {
+                loader
+                    .parse_event_template(template)
+                    .expect("default YAML event template must resolve")
+            })
+            .map(|template| {
+                let variant: &'static str = (&template).into();
+                variant
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_variant_inventory(
+            "EventType",
+            rust_enum_variants("EventType"),
+            &used_events,
+            EVENT_VARIANT_ALLOWANCES,
+        );
+        assert_variant_inventory(
+            "Guard",
+            rust_enum_variants("Guard"),
+            &used_guards,
+            GUARD_VARIANT_ALLOWANCES,
+        );
+        assert_variant_inventory(
+            "Action",
+            rust_enum_variants("Action"),
+            &used_actions,
+            ACTION_VARIANT_ALLOWANCES,
+        );
+        assert_variant_inventory(
+            "EventTemplate",
+            rust_enum_variants("EventTemplate"),
+            &used_event_templates,
+            EVENT_TEMPLATE_VARIANT_ALLOWANCES,
+        );
+    }
+
+    fn rust_enum_variants(enum_name: &str) -> BTreeSet<String> {
+        let source = include_str!("types.rs");
+        let header = format!("pub enum {enum_name} {{");
+        let (_, after_header) = source
+            .split_once(&header)
+            .unwrap_or_else(|| panic!("missing Rust enum declaration '{enum_name}'"));
+        let (body, _) = after_header
+            .split_once("\n}\n")
+            .unwrap_or_else(|| panic!("missing closing brace for Rust enum '{enum_name}'"));
+
+        let variants = body
+            .lines()
+            .filter_map(|line| {
+                let candidate = line.strip_prefix("    ")?;
+                if candidate.starts_with(char::is_whitespace) {
+                    return None;
+                }
+                let variant = candidate
+                    .chars()
+                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    .collect::<String>();
+                (!variant.is_empty()).then_some(variant)
+            })
+            .collect::<Vec<_>>();
+        let unique = variants.iter().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(
+            variants.len(),
+            unique.len(),
+            "Rust enum '{enum_name}' contains duplicate inventory names"
+        );
+        assert!(!unique.is_empty(), "Rust enum '{enum_name}' is empty");
+        unique
+    }
+
+    fn assert_variant_inventory(
+        enum_name: &str,
+        declared: BTreeSet<String>,
+        used_by_default: &BTreeSet<&'static str>,
+        allowances: &[VariantAllowance],
+    ) {
+        let mut allowlisted = BTreeSet::new();
+        for allowance in allowances {
+            assert!(
+                !allowance.owner.starts_with("inventory-boundary:"),
+                "{enum_name}::{} still has a provisional YA-503 ownership classification",
+                allowance.variant
+            );
+            assert!(
+                allowance.owner.contains(':'),
+                "{enum_name}::{} allowance needs a terse ownership class and reason",
+                allowance.variant
+            );
+            assert!(
+                declared.contains(allowance.variant),
+                "stale {enum_name} allowance for removed variant '{}': {}",
+                allowance.variant,
+                allowance.owner
+            );
+            assert!(
+                !used_by_default.contains(allowance.variant),
+                "{enum_name}::{} is now used by default.yaml; remove its allowance ({})",
+                allowance.variant,
+                allowance.owner
+            );
+            assert!(
+                allowlisted.insert(allowance.variant.to_string()),
+                "duplicate {enum_name} allowance for '{}'",
+                allowance.variant
+            );
+        }
+
+        let used = used_by_default
+            .iter()
+            .map(|variant| (*variant).to_string())
+            .collect::<BTreeSet<_>>();
+        let unknown_used = used.difference(&declared).cloned().collect::<Vec<_>>();
+        assert!(
+            unknown_used.is_empty(),
+            "default.yaml resolves to unknown {enum_name} variants: {unknown_used:?}"
+        );
+
+        let accounted = used.union(&allowlisted).cloned().collect::<BTreeSet<_>>();
+        let missing = declared.difference(&accounted).cloned().collect::<Vec<_>>();
+        let stale = accounted.difference(&declared).cloned().collect::<Vec<_>>();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "{enum_name} inventory drift: unaccounted={missing:?}, stale={stale:?}"
+        );
     }
 }

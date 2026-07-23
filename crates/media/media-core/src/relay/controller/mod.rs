@@ -214,7 +214,11 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+    let guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(kind, 0);
+    rvoip_rtp_core::task_runtime::spawn_media_task(async move {
+        let _guard = guard;
+        future.await
+    })
 }
 
 #[cfg(not(feature = "memory-diagnostics"))]
@@ -223,7 +227,7 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio::spawn(future)
+    rvoip_rtp_core::task_runtime::spawn_media_task(future)
 }
 
 #[cfg(feature = "memory-diagnostics")]

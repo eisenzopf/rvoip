@@ -40,7 +40,6 @@ pub mod builders;
 /// Server transactions are typically created by the `TransactionManager` when it receives
 /// a request from the network. It routes incoming messages to the appropriate transaction
 /// and provides a clean API for the Transaction User (TU) to send responses.
-mod common;
 mod data;
 mod invite;
 mod non_invite;

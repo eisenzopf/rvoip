@@ -33,6 +33,11 @@ For `clean`, it fixes the experiment at:
 The conditioning sequence is part of the measurement identity. The reviewed
 2,000-CPS result was the fifth point of this exact shared-peer sweep, so a cold
 single-point process is useful diagnostic evidence but is not beta-comparable.
+The reviewed comparison input is tracked at
+`perf-baselines/20260706T181609Z/perf_call_setup_cps_pbx-media-server/2000.json`.
+Every clean run snapshots and hashes it; canonical evidence packages that
+snapshot so a copied final attestation does not depend on an ignored or mutable
+workspace report.
 
 The runner resolves `perf_call_setup_cps` from Cargo's
 `compiler-artifact.executable` JSON message. It does not scan
@@ -68,14 +73,16 @@ contains:
 - the run log and profiler output;
 - a v2 manifest with explicit `BUILD_ONLY`, `PASS`, or `FAIL` status, the test
   exit code, report, acceptance and relative-audit status, executable SHA-256,
-  requested features, Cargo release profile, build-time and post-run source
+  reviewed-baseline ID, relative path, origin and SHA-256, requested features,
+  Cargo release profile, build-time and post-run source
   fingerprints, environment, effective
   configuration, conditioning identity, phase markers, requested versus actual
   RSS coverage, and sample counts;
 - an immutable copy of the report produced by that invocation;
 - for `clean`, `acceptance.json` plus a baseline-compatible
   `perf-results/<scenario>/2000.json` audit view and `perf-audit.md` comparison
-  against the reviewed `20260706T181609Z` beta report.
+  against the run-local, hashed snapshot of the tracked `20260706T181609Z`
+  reviewed baseline.
 
 The test writes its raw report beneath that run directory through
 `RVOIP_PERF_OUTPUT_ROOT`; it never selects or overwrites a shared report from a
@@ -292,7 +299,7 @@ clean beta binary.
    RUN_DIR="$(ls -dt target/perf-results/profiles/*_clean_* | head -1)"
    CURRENT_RESULTS="$(cat "${RUN_DIR}/audit-results-dir.txt")"
    python3 crates/sip/rvoip-sip/scripts/perf_audit.py \
-     --baseline crates/sip/rvoip-sip/beta-report/20260706T181609Z/perf-results \
+     --baseline "${RUN_DIR}/reviewed-baseline" \
      --current "${CURRENT_RESULTS}" \
      --out "${RUN_DIR}/perf-audit.md" \
      --fail-on-regression

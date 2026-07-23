@@ -349,6 +349,9 @@ mod tests {
     async fn stub_methods_return_documented_error() {
         let bridge = WebRtcMediaBridge::new_offerer();
         let err = bridge.local_substrate_setup().await.unwrap_err();
-        assert!(format!("{}", err).contains("media-webrtc"));
+        match err {
+            UctpWsError::WebRtc(message) => assert!(message.contains("media-webrtc")),
+            other => panic!("expected WebRTC configuration error, got {other:?}"),
+        }
     }
 }

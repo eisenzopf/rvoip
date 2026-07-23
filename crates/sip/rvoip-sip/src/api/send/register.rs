@@ -7,6 +7,7 @@ use rvoip_sip_core::types::Method;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::{RegistrationHandle, UnifiedCoordinator};
 use crate::errors::Result;
+use crate::session_registry::SessionRegistryHandle;
 
 /// Outbound REGISTER builder (RFC 3261 §10). Reachable via
 /// [`UnifiedCoordinator::register`](crate::api::unified::UnifiedCoordinator::register).
@@ -158,15 +159,21 @@ impl SipRequestOptions for RegisterBuilder {
 pub struct RegisterRefreshBuilder {
     coord: Arc<UnifiedCoordinator>,
     handle: RegistrationHandle,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     expires: Option<u32>,
     state: BuilderHeaderState,
 }
 
 impl RegisterRefreshBuilder {
-    pub(crate) fn new(coord: Arc<UnifiedCoordinator>, handle: RegistrationHandle) -> Self {
+    pub(crate) fn new(
+        coord: Arc<UnifiedCoordinator>,
+        handle: RegistrationHandle,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             coord,
             handle,
+            lifecycle_handle,
             expires: None,
             state: BuilderHeaderState::default(),
         }
@@ -181,67 +188,27 @@ impl RegisterRefreshBuilder {
 
     /// Refresh the registration.
     ///
-    /// Stages a `RegisterRequestOptions { refresh: true, expires,
-    /// extra_headers, ... }` snapshot on the registration's session
-    /// and dispatches `EventType::SendOutboundRegister`. The state
-    /// table routes to `Action::SendREGISTERWithOptions` which drains
-    /// the stash via the dialog-adapter mirror. Call-ID is preserved
-    /// (RFC 3261 §10.2.4), CSeq incremented, and the requested
-    /// `Expires` carried verbatim.
+    /// The builder retains the exact registration lifetime captured when it
+    /// was constructed. Its Call-ID, addressing metadata, and `CSeq + 1` are
+    /// derived only after that generation's state-machine lane is acquired;
+    /// the immutable options snapshot is then staged and dispatched without
+    /// releasing the lane. This preserves RFC 3261 §10.2.4 identity and makes
+    /// concurrent manual/automatic refreshes one ordered CSeq history.
     pub async fn send(mut self) -> Result<()> {
-        // Read the existing registration's metadata off the session so
-        // the refresh REGISTER reuses the AoR / contact / registrar of
-        // the original registration.
-        let session = self
-            .coord
-            .session_state(&self.handle.session_id)
-            .await
-            .map_err(|_| {
-                crate::errors::SessionError::SessionNotFound(self.handle.session_id.to_string())
-            })?;
-
-        let registrar_uri = session.registrar_uri.clone().unwrap_or_default();
-        let contact_uri = session.registration_contact.clone().unwrap_or_default();
-        let aor_uri = session
-            .local_uri
-            .clone()
-            .unwrap_or_else(|| contact_uri.clone());
-        let expires = self
-            .expires
-            .or(session.registration_expires)
-            .unwrap_or(3600);
-        let call_id = session.registration_call_id.clone();
-        let cseq = if session.registration_cseq > 0 {
-            Some(session.registration_cseq + 1)
-        } else {
-            None
-        };
+        let lifecycle_handle = self.lifecycle_handle.take().ok_or_else(|| {
+            crate::errors::SessionError::SessionNotFound(format!(
+                "Session {} has no exact registration refresh authority",
+                self.handle.session_id
+            ))
+        })?;
+        if lifecycle_handle.session_id() != &self.handle.session_id {
+            return Err(crate::errors::SessionError::InvalidTransition(
+                "captured registration refresh authority does not match its session".to_string(),
+            ));
+        }
         let extra_headers = take_staged(&mut self.state);
-        let opts = Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-            registrar_uri,
-            aor_uri,
-            contact_uri,
-            expires,
-            authorization: None,
-            proxy_authorization: None,
-            call_id,
-            cseq,
-            outbound_contact: None,
-            outbound_proxy_uri: None,
-            extra_headers,
-            refresh: true,
-        });
         self.coord
-            .stage_outbound_options(
-                &self.handle.session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Register(opts),
-            )
-            .await?;
-        self.coord
-            .dispatch_outbound(
-                &self.handle.session_id,
-                crate::state_table::EventType::SendOutboundRegister,
-            )
+            .dispatch_registration_refresh_exact(&lifecycle_handle, self.expires, extra_headers)
             .await?;
         Ok(())
     }
@@ -256,5 +223,72 @@ impl SipRequestOptions for RegisterRefreshBuilder {
     }
     fn header_state(&self) -> &BuilderHeaderState {
         &self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::unified::Config;
+    use crate::state_table::Role;
+    use crate::types::SessionId;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn refresh_builder_cannot_cross_a_reused_session_generation() {
+        let coordinator = UnifiedCoordinator::new(Config::local("refresh-builder-generation", 0))
+            .await
+            .expect("create refresh builder coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId("refresh-builder-reused-id".to_string());
+        let created_a = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create registration generation A");
+        let handle_a = created_a
+            .lifecycle_handle
+            .clone()
+            .expect("capture generation A lifecycle");
+        let public_handle = RegistrationHandle {
+            session_id: session_id.clone(),
+        };
+        let builder = coordinator.refresh(&public_handle);
+
+        store
+            .remove_session_exact(&handle_a)
+            .await
+            .expect("retire registration generation A");
+        assert!(store.authority().elapse_reuse_horizon_for_test(&session_id));
+        let created_b = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create registration generation B");
+        let handle_b = created_b
+            .lifecycle_handle
+            .clone()
+            .expect("capture generation B lifecycle");
+        store
+            .update_session_exact_with(&handle_b, None, |session| {
+                session.registration_call_id = Some("generation-b-call-id".to_string());
+                session.registration_cseq = 77;
+            })
+            .expect("mark generation B registration identity");
+        let before = store
+            .get_session_snapshot_exact(&handle_b)
+            .expect("read generation B before stale builder");
+
+        assert!(builder.send().await.is_err());
+
+        let after = store
+            .get_session_snapshot_exact(&handle_b)
+            .expect("read generation B after stale builder");
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.registration_call_id, before.registration_call_id);
+        assert_eq!(after.registration_cseq, 77);
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown refresh builder coordinator");
     }
 }

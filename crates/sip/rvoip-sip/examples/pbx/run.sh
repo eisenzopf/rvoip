@@ -3,7 +3,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../.." && pwd)
+WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 
 # Local PBX interop uses Docker through Colima on macOS. Homebrew installs the
 # CLIs outside the minimal PATH that some CI/desktop shells provide.
@@ -34,6 +34,7 @@ else
   STOP_ON_FAIL=${PBX_STOP_ON_FAIL:-1}
 fi
 RUN_FAILURES=0
+RUN_INITIAL_FAILURES=0
 DIAG_PCAP_PID=""
 DIAG_SAMPLE_PID=""
 
@@ -185,6 +186,7 @@ init_report() {
     printf 'status\tprovider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\tout_dir\n' >"$RUN_MATRIX"
     printf 'provider\tapi\tscenario\ttransport\trole\tduration_s\texit_code\tstarted_at_utc\tended_at_utc\tlog\n' >"$OUT_ROOT/tls-prewarm.tsv"
   fi
+  RUN_INITIAL_FAILURES=$(awk -F '\t' 'NR > 1 && $1 == "FAIL" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
   write_run_environment
   PBX_REPORT_READY=1
 }
@@ -251,7 +253,7 @@ finish() {
   cleanup
   if [ "$status" -eq 0 ] && [ -f "$RUN_MATRIX" ]; then
     failures=$(awk -F '\t' 'NR > 1 && $1 == "FAIL" { n++ } END { print n + 0 }' "$RUN_MATRIX" 2>/dev/null || echo 0)
-    if [ "$failures" -gt 0 ]; then
+    if [ "$failures" -gt "$RUN_INITIAL_FAILURES" ]; then
       status=1
     fi
   fi

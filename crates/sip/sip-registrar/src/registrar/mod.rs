@@ -14,6 +14,7 @@ pub mod user_store;
 
 pub use location::LocationService;
 pub use manager::RegistrationManager;
+pub(crate) use registry::PreparedRegistrationMutation;
 pub use registry::{RegistryConfig, UserRegistry};
 pub use user_store::{
     PlaintextCredentialUnavailable, UserCredentialMetadata, UserCredentials, UserStore,
@@ -69,6 +70,18 @@ impl Registrar {
     ) -> Result<()> {
         let aor = self.canonicalize_aor(aor)?;
         self.registry.register_aor(&aor, contact, expires).await
+    }
+
+    pub(crate) async fn prepare_register_aor(
+        &self,
+        aor: &AddressOfRecord,
+        contact: ContactInfo,
+        expires: u32,
+    ) -> Result<PreparedRegistrationMutation> {
+        let aor = self.canonicalize_aor(aor)?;
+        self.registry
+            .prepare_register_aor(&aor, contact, expires)
+            .await
     }
 
     pub async fn register_contacts(

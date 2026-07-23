@@ -107,17 +107,25 @@ scenarios:
       - { label: warmup, cps: 20, durationSecs: 20 }
       - { label: overload, cps: 300, durationSecs: 30 }
       - { label: recovery, cps: 20, durationSecs: 60 }
+    holdDistribution:
+      # Calls must turn over fast enough that the recovery phase tests restored
+      # admission, rather than merely observing a still-full long-hold pool.
+      - { label: short, weight: 100, minSecs: 2, maxSecs: 5 }
     acceptance:
       # This scenario intentionally exceeds the admission cap; ASR is not
       # the pass criterion. Cleanup, media setup, teardown, and recovery are.
       minAsr: 0.0
+      minRecoveryAsr: 0.999
       allowOverloadRejections: true
       maxMediaSetupFailed: 0
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
       maxRssGrowthMbPerHr: 10
-      maxRecoverySecs: 90
+      # The overload phase can end with all 250 slots legitimately occupied.
+      # Require clean, stable recovery no later than the longest configured
+      # call hold instead of counting that bounded transition as steady state.
+      maxRecoverySecs: 5
 
   - name: high-density-media-burst
     description: "Dense media burst to stress RTP/media queues and pools."

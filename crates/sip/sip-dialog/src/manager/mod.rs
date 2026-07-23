@@ -14,7 +14,6 @@ pub mod unified;
 
 // Helper modules for dialog operations
 pub mod dialog_operations;
-pub mod event_processing;
 pub mod identity_verify;
 pub mod message_routing;
 pub mod outbound_flow;
@@ -34,9 +33,8 @@ pub mod transaction {
 // Re-export the main DialogManager
 pub use core::DialogManager;
 
-// Re-export the STIR/SHAKEN verify-decision type so both publish
-// paths (events/adapter.rs and events/event_hub.rs) can address it
-// without reaching into `manager::core`.
+// Re-export the STIR/SHAKEN verify-decision type for the one event-hub
+// publish path without reaching into `manager::core`.
 pub use core::IdentityVerificationDecision;
 
 // Re-export commonly used types from submodules
@@ -50,7 +48,7 @@ pub use message_routing::{DialogMatcher, MessageRouter};
 pub use protocol_handlers::{MethodHandler, ProtocolHandlers};
 pub use request_lifecycle::RequestLifecycle;
 pub use response_lifecycle::ResponseLifecycle;
-pub use session_coordination::{EventSender, SessionCoordinator};
+pub use session_coordination::SessionCoordinator;
 pub use transaction_integration::{TransactionHelpers, TransactionIntegration};
 pub use utils::{MessageExtensions, SourceExtractor};
 

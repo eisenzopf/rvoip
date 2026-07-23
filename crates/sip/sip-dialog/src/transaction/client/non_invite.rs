@@ -106,11 +106,6 @@ use crate::transaction::{
 #[derive(Debug, Clone)]
 pub struct ClientNonInviteTransaction {
     data: Arc<ClientTransactionData>,
-    /// Logic instance held so the spawned transaction loop keeps the
-    /// same state machine; the transaction itself reads through the
-    /// loop.
-    #[allow(dead_code)]
-    logic: Arc<ClientNonInviteLogic>,
 }
 
 /// Holds cancellation handles and dynamic state for Client Non-INVITE timers.
@@ -464,13 +459,14 @@ impl ClientNonInviteLogic {
 
         // Use the common_logic handler which works for both INVITE and non-INVITE transactions
         // For non-INVITE transactions, is_invite is false
+        let response_source = data.request_route.lock().await.destination;
         let new_state = common_logic::handle_response_by_status(
             tx_id,
             response.clone(),
             current_state,
             &data.events_tx,
             false, // non-INVITE
-            data.remote_addr,
+            response_source,
         )
         .await;
 
@@ -760,6 +756,7 @@ impl ClientNonInviteTransaction {
             ),
             remote_addr,
             request_route: Arc::new(Mutex::new(request_route)),
+            request_route_publisher: std::sync::OnceLock::new(),
             transport,
             events_tx: events_tx.into(),
             cmd_tx: cmd_tx.clone(), // For the transaction itself to send commands to its loop
@@ -782,12 +779,10 @@ impl ClientNonInviteTransaction {
         });
 
         let data_for_runner = data.clone();
-        let logic_for_runner = logic.clone();
-
         // Spawn the generic event loop runner
         let event_loop_handle = tokio::spawn(async move {
             // local_cmd_rx is moved into the loop here
-            run_transaction_loop(data_for_runner, logic_for_runner, local_cmd_rx).await;
+            run_transaction_loop(data_for_runner, logic, local_cmd_rx).await;
         });
 
         // Store the handle for cleanup
@@ -795,7 +790,7 @@ impl ClientNonInviteTransaction {
             *handle_guard = Some(event_loop_handle);
         }
 
-        Ok(Self { data, logic })
+        Ok(Self { data })
     }
 }
 

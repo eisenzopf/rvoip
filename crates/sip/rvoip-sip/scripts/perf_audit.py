@@ -9,6 +9,7 @@ tolerance is found.
 
 Usage:
     perf_audit.py --baseline <dir> --current <dir> --out <file.md>
+                  [--baseline-manifest <manifest.json>]
                   [--tolerance-pct 15] [--latency-tolerance-pct 25]
                   [--fail-on-regression]
 
@@ -22,6 +23,7 @@ Stdlib only — safe to invoke from beta_gate.sh with the system python3.
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import pathlib
@@ -68,6 +70,40 @@ def load_json(path):
             return json.load(fh)
     except (OSError, ValueError):
         return None
+
+
+def baseline_manifest_identity(path):
+    if path is None:
+        return None
+    manifest = load_json(path)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("schema") != "rvoip-perf-regression-baseline-v1"
+        or not isinstance(manifest.get("baseline_id"), str)
+    ):
+        return {"error": "reviewed baseline manifest is invalid"}
+    comparison_paths = manifest.get("comparison_paths")
+    if not isinstance(comparison_paths, list) or not comparison_paths:
+        return {"error": "reviewed baseline manifest has no comparison paths"}
+    normalized_paths = []
+    for value in comparison_paths:
+        if not isinstance(value, str) or not value:
+            return {"error": "reviewed baseline comparison path is invalid"}
+        relative = pathlib.PurePosixPath(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            return {"error": "reviewed baseline comparison path is unsafe"}
+        normalized_paths.append(relative.as_posix())
+    if len(set(normalized_paths)) != len(normalized_paths):
+        return {"error": "reviewed baseline comparison paths are duplicated"}
+    try:
+        encoded = pathlib.Path(path).read_bytes()
+    except OSError as error:
+        return {"error": f"cannot read reviewed baseline manifest: {error}"}
+    return {
+        "baseline_id": manifest["baseline_id"],
+        "manifest_sha256": hashlib.sha256(encoded).hexdigest(),
+        "comparison_paths": normalized_paths,
+    }
 
 
 def index_dir(root):
@@ -326,7 +362,14 @@ def fmt(v):
 
 def main():
     ap = argparse.ArgumentParser(description="Beta-gate perf regression audit.")
-    ap.add_argument("--baseline", required=True, help="previous run's perf-results dir")
+    ap.add_argument("--baseline", required=True, help="reviewed baseline perf-results dir")
+    ap.add_argument(
+        "--baseline-manifest",
+        help=(
+            "optional reviewed-baseline manifest whose declared comparison "
+            "paths are required and recorded in the audit report"
+        ),
+    )
     ap.add_argument("--current", required=True, help="current run's perf-results dir")
     ap.add_argument("--out", required=True, help="Markdown report output path")
     ap.add_argument("--tolerance-pct", type=float, default=15.0,
@@ -336,6 +379,11 @@ def main():
     ap.add_argument("--fail-on-regression", action="store_true",
                     help="exit non-zero if any gated regression is found")
     args = ap.parse_args()
+
+    baseline_manifest = baseline_manifest_identity(args.baseline_manifest)
+    if isinstance(baseline_manifest, dict) and baseline_manifest.get("error"):
+        print(f"perf_audit: {baseline_manifest['error']}", file=sys.stderr)
+        return 2
 
     if not os.path.isdir(args.current):
         print(f"perf_audit: no current perf-results dir: {args.current}", file=sys.stderr)
@@ -358,7 +406,51 @@ def main():
                 return r
         return "?"
 
-    shared = sorted(set(base_idx) & set(cur_idx))
+    if baseline_manifest:
+        required_paths = set(baseline_manifest["comparison_paths"])
+        missing_baseline = sorted(required_paths - set(base_idx))
+        missing_current = sorted(required_paths - set(cur_idx))
+        if missing_baseline or missing_current:
+            details = []
+            if missing_baseline:
+                details.append(
+                    "baseline missing " + ", ".join(missing_baseline)
+                )
+            if missing_current:
+                details.append("current missing " + ", ".join(missing_current))
+            lines = [
+                "# Perf Regression Audit",
+                "",
+                "status: COVERAGE_ERROR",
+                f"baseline: `{args.baseline}`",
+                "reviewed baseline: "
+                f"`{baseline_manifest['baseline_id']}` "
+                f"(manifest SHA-256 `{baseline_manifest['manifest_sha256']}`)",
+                f"current:  `{args.current}`",
+                "",
+                "The manifest-declared comparison coverage is incomplete: "
+                + "; ".join(details)
+                + ".",
+                "",
+            ]
+            try:
+                with open(args.out, "w") as fh:
+                    fh.write("\n".join(lines))
+            except OSError as exc:
+                print(
+                    f"perf_audit: cannot write {args.out}: {exc}",
+                    file=sys.stderr,
+                )
+                return 2
+            print(
+                "perf_audit: COVERAGE_ERROR (required comparison path missing)",
+                file=sys.stderr,
+            )
+            print(f"perf_audit: report written to {args.out}", file=sys.stderr)
+            return 2
+        shared = sorted(required_paths)
+    else:
+        shared = sorted(set(base_idx) & set(cur_idx))
     only_cur = sorted(set(cur_idx) - set(base_idx))
     only_base = sorted(set(base_idx) - set(cur_idx))
 
@@ -374,6 +466,13 @@ def main():
             "This is a coverage error, not a successful performance comparison.",
             "",
         ]
+        if baseline_manifest:
+            lines.insert(
+                5,
+                "reviewed baseline: "
+                f"`{baseline_manifest['baseline_id']}` "
+                f"(manifest SHA-256 `{baseline_manifest['manifest_sha256']}`)",
+            )
         try:
             with open(args.out, "w") as fh:
                 fh.write("\n".join(lines))
@@ -464,6 +563,12 @@ def main():
     lines.append("")
     lines.append(f"status: {status}")
     lines.append(f"baseline: `{args.baseline}` (git_rev {git_rev(base_idx)})")
+    if baseline_manifest:
+        lines.append(
+            "reviewed baseline: "
+            f"`{baseline_manifest['baseline_id']}` "
+            f"(manifest SHA-256 `{baseline_manifest['manifest_sha256']}`)"
+        )
     lines.append(f"current:  `{args.current}` (git_rev {git_rev(cur_idx)})")
     lines.append(f"tolerances: throughput/RSS ±{args.tolerance_pct:g}%, "
                  f"latency +{args.latency_tolerance_pct:g}%, ASR/NER +2%")

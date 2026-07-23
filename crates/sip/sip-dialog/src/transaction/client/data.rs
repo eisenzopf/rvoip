@@ -50,6 +50,13 @@ pub type CommandSender = mpsc::Sender<InternalTransactionCommand>;
 /// components, such as the TransactionManager or the transaction itself.
 pub type CommandReceiver = mpsc::Receiver<InternalTransactionCommand>;
 
+/// Manager-owned publication hook for the exact route selected before a
+/// client transaction's first wire byte. The boolean result confirms that the
+/// same live transaction allocation still owns the response-authentication
+/// entry; a stale or retired runner must not write on a route it no longer
+/// owns.
+pub(crate) type RequestRoutePublisher = Arc<dyn Fn(&TransportRoute) -> bool + Send + Sync>;
+
 const INITIAL_SEND_PENDING: u8 = 0;
 const INITIAL_SEND_SUCCEEDED: u8 = 1;
 const INITIAL_SEND_FAILED_BEFORE_WRITE: u8 = 2;
@@ -107,6 +114,10 @@ pub struct ClientTransactionData {
     /// Authority- and transport-bearing route for every initial send and
     /// retransmission of this client transaction.
     pub request_route: Arc<Mutex<TransportRoute>>,
+
+    /// Exact manager-index publisher installed before this transaction is
+    /// made visible. Standalone transactions intentionally leave it absent.
+    pub(crate) request_route_publisher: std::sync::OnceLock<RequestRoutePublisher>,
 
     /// Transport layer for sending SIP messages
     pub transport: Arc<dyn Transport>,
@@ -209,6 +220,16 @@ impl ClientTransactionData {
         &self,
     ) -> Option<crate::transaction::manager::TransactionAdmissionOwner> {
         self.transaction_admission_owner.get().cloned()
+    }
+
+    pub(crate) fn install_request_route_publisher(&self, publisher: RequestRoutePublisher) {
+        let _ = self.request_route_publisher.set(publisher);
+    }
+
+    fn publish_request_route(&self, route: &TransportRoute) -> bool {
+        self.request_route_publisher
+            .get()
+            .map_or(true, |publisher| publisher(route))
     }
 
     /// Replace a completed UDP non-INVITE client runner with the compact
@@ -383,10 +404,16 @@ impl ClientTransactionData {
             .transport
             .prepare_message_route(&message, route)
             .await?;
-        // Publish the exact flow before the first SIP byte can trigger a
-        // response. The event dispatcher can authenticate against this route
-        // even if the peer responds and closes immediately.
+        // Publish the complete prepared route to both the transaction and its
+        // owner-fenced response-authentication index before the first SIP byte
+        // can trigger a response. This covers UDP route binding as well as
+        // opaque stream-flow selection.
         *self.request_route.lock().await = prepared.clone();
+        if !self.publish_request_route(&prepared) {
+            return Err(rvoip_sip_transport::Error::InvalidState(
+                "client transaction no longer owns its prepared response route".into(),
+            ));
+        }
         // This is the exact conservative wire boundary: route preparation can
         // still fail with zero bytes attempted, while any error returned after
         // this point is treated as wire-unknown and retains the compact
@@ -396,7 +423,11 @@ impl ClientTransactionData {
             .transport
             .send_message_on_route(message, prepared)
             .await?;
-        *self.request_route.lock().await = bound;
+        *self.request_route.lock().await = bound.clone();
+        // A response may have retired the transaction before the transport
+        // returns. In that case the pre-wire prepared route remains the
+        // authoritative retained route and the stale publisher is ignored.
+        let _ = self.publish_request_route(&bound);
         Ok(())
     }
 }

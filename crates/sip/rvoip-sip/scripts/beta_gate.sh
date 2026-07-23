@@ -27,11 +27,20 @@ MODE="${BETA_GATE_MODE:-local}"
 REQUIRE_EXTERNAL="${BETA_GATE_REQUIRE_EXTERNAL:-0}"
 BETA_FUZZ_TOOLCHAIN="${BETA_FUZZ_TOOLCHAIN:-nightly}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ARTIFACT_DIR="${BETA_GATE_ARTIFACT_DIR:-$WORKSPACE_ROOT/target/beta-gate/$TIMESTAMP}"
 SUMMARY="$ARTIFACT_DIR/summary.md"
 ENV_REPORT="$ARTIFACT_DIR/environment/environment.md"
 BETA_SOURCE_AT_START="$ARTIFACT_DIR/environment/source-at-beta-start.json"
+BETA_SOURCE_AT_END="$ARTIFACT_DIR/environment/source-at-beta-end.json"
 CANONICAL_2K_EVIDENCE_HELPER="$SCRIPT_DIR/canonical_2k_evidence.py"
+BETA_ATTESTATION_HELPER="$SCRIPT_DIR/beta_attestation.py"
+DOCKER_PEER_SNAPSHOT_HELPER="$SCRIPT_DIR/docker_peer_snapshot.py"
+PERF_REGRESSION_BASELINE_HELPER="$SCRIPT_DIR/perf_regression_baseline.py"
+PERF_RESULTS_DIR="$WORKSPACE_ROOT/target/perf-results"
+PERF_RESULTS_ARCHIVE_ROOT="$WORKSPACE_ROOT/target/perf-results-archive"
+PERF_RESULTS_CAPTURE_MARKER="$ARTIFACT_DIR/environment/perf-results-capture.md"
+ENDED_AT_UTC=""
 FAILURES=0
 SKIPS=0
 SIPP_LISTENER_PID=""
@@ -94,10 +103,15 @@ Environment:
   BETA_GATE_ARTIFACT_DIR         Output directory. Defaults to target/beta-gate/<timestamp>.
   BETA_REPORT_DIR                Crate-local report directory. Defaults to crates/sip/rvoip-sip/beta-report.
   BETA_REPORT_PACKAGE=0          Disable copying completed artifacts into BETA_REPORT_DIR.
+                                  The raw artifact directory still receives an attestation.
   BETA_GATE_REQUIRE_EXTERNAL=1   Treat skipped external gates as failures.
   BETA_DENY_WARNINGS=0           Allow Rust warnings during beta gates. Defaults to 1.
   BETA_TEST_LOG_FILTER           Runtime tracing filter for cargo test/build gates.
                                   Defaults to off for clean release evidence.
+  RVOIP_REQUIRE_API_TOOLS=1      Require the pinned cargo-public-api and
+                                  cargo-semver-checks tools. Full mode defaults
+                                  to 1; development modes default to 0 while
+                                  still running the compiler fixture.
   BETA_REQUIRE_CLEAN_SOURCE=0    Allow a dirty or changing source fingerprint for a full gate.
                                   Full gates require clean, unchanged source by default; other modes do not.
   BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1
@@ -106,6 +120,21 @@ Environment:
   BETA_CANONICAL_2K_RUN_DIRS     Three chronological run directories separated by `:`. Required
                                   when canonical evidence is enabled; paths are copied into the
                                   beta report after fingerprint and gate revalidation.
+  BETA_ATTESTATION_FEATURES      Additional comma-separated Cargo features to record.
+  BETA_ATTESTATION_TARGET        Explicit Cargo target triple to attest. Defaults to
+                                  CARGO_BUILD_TARGET, then the captured rustc host.
+  BETA_STATE_TABLE_SOURCE        Selected runtime YAML source: embedded-default,
+                                  configured-path, or configured-path-fallback.
+                                  Defaults to embedded-default.
+  BETA_STATE_TABLE_SELECTED_YAML Exact YAML file selected by the tested runtime. Required for
+                                  configured-path; defaults to state_tables/default.yaml only
+                                  for embedded-default/configured-path-fallback.
+  BETA_STATE_TABLE_FALLBACK_REASON
+                                  Bounded fallback reason: read-failed, decode-failed,
+                                  load-failed, or validation-failed. Required only for fallback.
+  BETA_REQUIRE_CONFIGURED_STATE_TABLE_EVIDENCE=1
+                                  Fail closed unless configured-path and an explicit selected
+                                  YAML file are supplied for attestation.
   BETA_RUN_PBX=1                 Run examples/pbx/run.sh when PBX configs are present.
   BETA_RUN_LOCAL_PBX=1           Manage ~/Developer/asterisk and ~/Developer/freeswitch sequentially.
   BETA_RESTORE_LOCAL_PBX=0       Do not restore the PBX container that was running before the gate.
@@ -150,7 +179,14 @@ Environment:
   RVOIP_PERF_MIN_SUCCESS_PCT     SIPp pass threshold. Defaults to 99.9.
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
-  BETA_PERF_REGRESSION_FAIL=1    Make a perf regression vs the previous run a hard gate failure. Default 0 (report-only + perf-audit.md).
+  BETA_PERF_REGRESSION_FAIL=1    Make a regression vs the reviewed immutable baseline a hard gate failure. Default 0 (report-only + perf-audit.md).
+  BETA_PERF_REGRESSION_BASELINE_ROOT
+                                  Reviewed immutable regression-baseline root. Defaults to
+                                  perf-baselines/20260706T181609Z in this crate.
+  BETA_PERF_REGRESSION_BASELINE_MANIFEST
+                                  Manifest for the reviewed regression baseline. Defaults to
+                                  <baseline-root>/manifest.json. The manifest and every listed
+                                  result are verified and packaged before comparison.
   BETA_PERF_REGRESSION_TOLERANCE_PCT  Throughput/RSS regression tolerance (percent). Defaults to 15.
   BETA_PERF_LATENCY_TOLERANCE_PCT     Latency p50/p95/p99 regression tolerance (percent). Defaults to 25.
   BETA_RUN_FUZZ_SMOKE=0          Disable parser fuzz-smoke coverage; fails with --require-external.
@@ -219,6 +255,138 @@ if [ -z "${BETA_REQUIRE_CLEAN_SOURCE+x}" ]; then
   fi
 fi
 export BETA_REQUIRE_CLEAN_SOURCE
+
+# A full release gate always executes the pinned structural and semantic API
+# checks. Development modes retain the opt-in default so contributors can run
+# compiler-only diagnostics without installing release tooling.
+if [ -z "${RVOIP_REQUIRE_API_TOOLS+x}" ]; then
+  if [ "$MODE" = "full" ]; then
+    RVOIP_REQUIRE_API_TOOLS=1
+  else
+    RVOIP_REQUIRE_API_TOOLS=0
+  fi
+fi
+case "$RVOIP_REQUIRE_API_TOOLS" in
+  0|1) ;;
+  *) echo "RVOIP_REQUIRE_API_TOOLS must be 0 or 1" >&2; exit 2 ;;
+esac
+export RVOIP_REQUIRE_API_TOOLS
+
+# Use one effective retention fence for every beta performance target. Without
+# this export, the monolithic soak received 120 seconds while mass teardown and
+# session churn silently fell back to their direct-test default of 40 seconds.
+RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}"
+export RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS
+
+PERF_REGRESSION_BASELINE_ROOT="${BETA_PERF_REGRESSION_BASELINE_ROOT:-$CRATE_DIR/perf-baselines/20260706T181609Z}"
+case "$PERF_REGRESSION_BASELINE_ROOT" in
+  /*) ;;
+  *) PERF_REGRESSION_BASELINE_ROOT="$WORKSPACE_ROOT/$PERF_REGRESSION_BASELINE_ROOT" ;;
+esac
+PERF_REGRESSION_BASELINE_MANIFEST="${BETA_PERF_REGRESSION_BASELINE_MANIFEST:-$PERF_REGRESSION_BASELINE_ROOT/manifest.json}"
+case "$PERF_REGRESSION_BASELINE_MANIFEST" in
+  /*) ;;
+  *) PERF_REGRESSION_BASELINE_MANIFEST="$WORKSPACE_ROOT/$PERF_REGRESSION_BASELINE_MANIFEST" ;;
+esac
+if [ -f "$PERF_REGRESSION_BASELINE_MANIFEST" ] && [ ! -L "$PERF_REGRESSION_BASELINE_MANIFEST" ]; then
+  perf_regression_baseline_manifest_sha256="$(python3 - "$PERF_REGRESSION_BASELINE_MANIFEST" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+  perf_regression_baseline_id="$(python3 - "$PERF_REGRESSION_BASELINE_MANIFEST" <<'PY'
+import json
+import pathlib
+import sys
+
+try:
+    value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    value = {}
+print(value.get("baseline_id", "invalid"))
+PY
+)"
+else
+  perf_regression_baseline_manifest_sha256=unavailable
+  perf_regression_baseline_id=unavailable
+fi
+
+BETA_STATE_TABLE_SOURCE="${BETA_STATE_TABLE_SOURCE:-embedded-default}"
+BETA_STATE_TABLE_FALLBACK_REASON="${BETA_STATE_TABLE_FALLBACK_REASON:-}"
+state_table_yaml_was_explicit=0
+if [ -n "${BETA_STATE_TABLE_SELECTED_YAML:-}" ]; then
+  state_table_yaml_was_explicit=1
+  selected_state_table_yaml="$BETA_STATE_TABLE_SELECTED_YAML"
+else
+  selected_state_table_yaml="$CRATE_DIR/state_tables/default.yaml"
+fi
+case "$selected_state_table_yaml" in
+  /*) ;;
+  *) selected_state_table_yaml="$WORKSPACE_ROOT/$selected_state_table_yaml" ;;
+esac
+
+case "$BETA_STATE_TABLE_SOURCE" in
+  embedded-default)
+    if [ -n "$BETA_STATE_TABLE_FALLBACK_REASON" ]; then
+      echo "BETA_STATE_TABLE_FALLBACK_REASON is only valid for configured-path-fallback" >&2
+      exit 2
+    fi
+    ;;
+  configured-path)
+    if [ "$state_table_yaml_was_explicit" != "1" ]; then
+      echo "configured-path requires BETA_STATE_TABLE_SELECTED_YAML" >&2
+      exit 2
+    fi
+    if [ -n "$BETA_STATE_TABLE_FALLBACK_REASON" ]; then
+      echo "BETA_STATE_TABLE_FALLBACK_REASON is only valid for configured-path-fallback" >&2
+      exit 2
+    fi
+    ;;
+  configured-path-fallback)
+    case "$BETA_STATE_TABLE_FALLBACK_REASON" in
+      read-failed|decode-failed|load-failed|validation-failed) ;;
+      *)
+        echo "configured-path-fallback requires a bounded BETA_STATE_TABLE_FALLBACK_REASON" >&2
+        exit 2
+        ;;
+    esac
+    ;;
+  *)
+    echo "Invalid BETA_STATE_TABLE_SOURCE: $BETA_STATE_TABLE_SOURCE" >&2
+    exit 2
+    ;;
+esac
+
+case "${BETA_REQUIRE_CONFIGURED_STATE_TABLE_EVIDENCE:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    if [ "$BETA_STATE_TABLE_SOURCE" != "configured-path" ] \
+      || [ "$state_table_yaml_was_explicit" != "1" ]; then
+      echo "configured state-table evidence requires configured-path and an explicit selected YAML file" >&2
+      exit 2
+    fi
+    ;;
+esac
+
+if [ ! -f "$selected_state_table_yaml" ] || [ -L "$selected_state_table_yaml" ]; then
+  echo "Selected state-table evidence must be a regular non-symlink file" >&2
+  exit 2
+fi
+if [ "$BETA_STATE_TABLE_SOURCE" != "configured-path" ] \
+  && ! cmp -s "$selected_state_table_yaml" "$CRATE_DIR/state_tables/default.yaml"; then
+  echo "embedded/fallback state-table evidence must match the embedded default YAML" >&2
+  exit 2
+fi
+selected_state_table_sha256="$(python3 - "$selected_state_table_yaml" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
 
 # Capture the source before creating any beta artifact. This keeps a custom
 # artifact directory inside the checkout from changing the identity it is
@@ -300,6 +468,14 @@ run_gate() {
   fi
 }
 
+# A failed gate is evidence, not a reason to lose the rest of the evidence.
+# Callers that need success-dependent control flow use run_gate directly in an
+# if statement. Every independent gate uses this wrapper so the terminal source
+# fence, summary, attestation, and report package are still attempted.
+run_gate_continue() {
+  run_gate "$@" || true
+}
+
 skip_gate() {
   local name="$1"
   local reason="$2"
@@ -308,7 +484,7 @@ skip_gate() {
     echo "SKIP: $name"
     echo "$reason"
   } > "$log"
-  record "SKIP" "$name" "$log" "-"
+  record "SKIP" "$name" "$log" "0s"
   SKIPS=$((SKIPS + 1))
   echo "SKIP: $name - $reason"
   if [ "$REQUIRE_EXTERNAL" = "1" ]; then
@@ -345,6 +521,10 @@ PY
 append_feature() {
   local current="$1"
   local feature="$2"
+  if [ -z "$current" ]; then
+    printf '%s' "$feature"
+    return
+  fi
   case ",$current," in
     *,"$feature",*) printf '%s' "$current" ;;
     *) printf '%s,%s' "$current" "$feature" ;;
@@ -398,6 +578,8 @@ redacted_env() {
       upper=toupper(key)
       if (upper ~ /(PASSWORD|PASS|SECRET|TOKEN|CREDENTIAL|PRIVATE|AUTHORIZATION)/) {
         print key"=<redacted>"
+      } else if (key == "BETA_STATE_TABLE_SELECTED_YAML") {
+        print key"=<captured as hashed attestation input>"
       } else {
         print key"="value
       }
@@ -510,7 +692,20 @@ capture_docker_snapshot() {
   capture_command "$dir/docker-ps.txt" docker ps --all
   for container in rvoip-asterisk rvoip-freeswitch; do
     if docker inspect "$container" >/dev/null 2>&1; then
-      capture_command "$dir/${container}-inspect.json" docker inspect "$container"
+      local snapshot_tmp="$dir/.${container}-peer.json.tmp"
+      local snapshot_error="$dir/${container}-peer.stderr.txt"
+      if docker inspect "$container" 2>"$snapshot_error" \
+        | python3 "$DOCKER_PEER_SNAPSHOT_HELPER" \
+            --product "${container#rvoip-}" >"$snapshot_tmp" 2>>"$snapshot_error"; then
+        mv "$snapshot_tmp" "$dir/${container}-peer.json"
+        if [ ! -s "$snapshot_error" ]; then
+          rm -f "$snapshot_error"
+        fi
+      else
+        rm -f "$snapshot_tmp"
+        echo "sanitized Docker peer snapshot failed; see $(basename "$snapshot_error")" \
+          > "$dir/${container}-peer-missing.txt"
+      fi
       capture_command "$dir/${container}-logs-tail.txt" docker logs --tail "$tail_lines" "$container"
     else
       echo "$container not found" > "$dir/${container}-missing.txt"
@@ -545,6 +740,14 @@ write_environment_report() {
   capture_command "$env_dir/git-status.txt" git -C "$WORKSPACE_ROOT" status --short
   capture_command "$env_dir/rustc-version.txt" rustc --version --verbose
   capture_command "$env_dir/cargo-version.txt" cargo --version --verbose
+  local cargo_metadata_tmp="$env_dir/.cargo-metadata.json.tmp"
+  if ! (cd "$WORKSPACE_ROOT" && cargo metadata --no-deps --format-version 1 \
+    > "$cargo_metadata_tmp" 2> "$env_dir/cargo-metadata.stderr.txt"); then
+    rm -f "$cargo_metadata_tmp"
+    echo "failed to capture Cargo metadata for beta attestation" >&2
+    return 1
+  fi
+  mv "$cargo_metadata_tmp" "$env_dir/cargo-metadata.json"
   capture_command "$env_dir/host-uname.txt" uname -a
   if command -v sw_vers >/dev/null 2>&1; then
     capture_command "$env_dir/macos-version.txt" sw_vers
@@ -587,11 +790,26 @@ write_environment_report() {
 - git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
 - rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- cargo_metadata: \`environment/cargo-metadata.json\`
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
+- rvoip_require_api_tools: \`${RVOIP_REQUIRE_API_TOOLS}\`
 - source_at_beta_start: \`environment/source-at-beta-start.json\`
+- source_at_beta_end: \`environment/source-at-beta-end.json\`
 - beta_require_clean_source: \`${BETA_REQUIRE_CLEAN_SOURCE}\`
+- beta_gate_require_external: \`${REQUIRE_EXTERNAL}\`
+- beta_attestation_features: \`$(attestation_features)\`
+- beta_attestation_target: \`${BETA_ATTESTATION_TARGET:-${CARGO_BUILD_TARGET:-rustc-host}}\`
 - beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
+- beta_state_table_source: \`${BETA_STATE_TABLE_SOURCE}\`
+- beta_state_table_fallback_reason: \`${BETA_STATE_TABLE_FALLBACK_REASON:-none}\`
+- beta_state_table_sha256: \`${selected_state_table_sha256}\`
+- beta_require_configured_state_table_evidence: \`${BETA_REQUIRE_CONFIGURED_STATE_TABLE_EVIDENCE:-0}\`
+- beta_run_pbx: \`${BETA_RUN_PBX:-0}\`
+- beta_run_local_pbx: \`${BETA_RUN_LOCAL_PBX:-0}\`
+- beta_perf_regression_fail: \`${BETA_PERF_REGRESSION_FAIL:-0}\`
+- beta_perf_regression_baseline_id: \`${perf_regression_baseline_id}\`
+- beta_perf_regression_baseline_manifest_sha256: \`${perf_regression_baseline_manifest_sha256}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
@@ -602,8 +820,10 @@ write_environment_report() {
 - beta_perf_rtp_memory_diagnostics: \`${BETA_PERF_RTP_MEMORY_DIAGNOSTICS:-0}\`
 
 Docker snapshots captured during local PBX lifecycle events are stored under
-\`environment/docker-<phase>/\`. Secrets in copied local env/config files are
-redacted by key name before being written into this artifact tree.
+\`environment/docker-<phase>/\`. Peer JSON uses a strict allowlist; raw Docker
+inspect documents are never written and are rejected by attestation. Secrets in
+copied local env/config files are redacted by key name before being written into
+this artifact tree.
 EOF
 
     echo
@@ -654,17 +874,30 @@ write_summary_gate_table_header() {
 - git_status: \`$(captured_status_label "$env_dir/git-status.txt")\`
 - rustc: \`$(captured_first_line "$env_dir/rustc-version.txt")\`
 - cargo: \`$(captured_first_line "$env_dir/cargo-version.txt")\`
+- cargo_metadata: \`environment/cargo-metadata.json\`
 - beta_deny_warnings: \`${BETA_DENY_WARNINGS:-1}\`
 - beta_test_log_filter: \`${BETA_TEST_LOG_FILTER:-off}\`
+- rvoip_require_api_tools: \`${RVOIP_REQUIRE_API_TOOLS}\`
 - source_at_beta_start: \`environment/source-at-beta-start.json\`
+- source_at_beta_end: \`environment/source-at-beta-end.json\`
 - beta_require_clean_source: \`${BETA_REQUIRE_CLEAN_SOURCE}\`
+- beta_gate_require_external: \`${REQUIRE_EXTERNAL}\`
+- beta_attestation_features: \`$(attestation_features)\`
+- beta_attestation_target: \`${BETA_ATTESTATION_TARGET:-${CARGO_BUILD_TARGET:-rustc-host}}\`
 - beta_require_canonical_2k_evidence: \`${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}\`
 - beta_canonical_2k_run_dirs: \`${BETA_CANONICAL_2K_RUN_DIRS:-not supplied}\`
+- beta_state_table_source: \`${BETA_STATE_TABLE_SOURCE}\`
+- beta_state_table_fallback_reason: \`${BETA_STATE_TABLE_FALLBACK_REASON:-none}\`
+- beta_state_table_sha256: \`${selected_state_table_sha256}\`
+- beta_require_configured_state_table_evidence: \`${BETA_REQUIRE_CONFIGURED_STATE_TABLE_EVIDENCE:-0}\`
 - host: \`$(captured_first_line "$env_dir/host-uname.txt")\`
 - colima: \`$(captured_first_line "$env_dir/colima-status.txt")\`
 - docker: \`$(captured_first_line "$env_dir/docker-version.txt")\`
 - beta_profile_matrix: \`$(perf_profile_matrix)\`
 - beta_run_perf_all: \`${BETA_RUN_PERF_ALL:-0}\`
+- beta_perf_regression_fail: \`${BETA_PERF_REGRESSION_FAIL:-0}\`
+- beta_perf_regression_baseline_id: \`${perf_regression_baseline_id}\`
+- beta_perf_regression_baseline_manifest_sha256: \`${perf_regression_baseline_manifest_sha256}\`
 - beta_perf_media_churn_duration_secs: \`${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}\`
 - beta_perf_monolithic_soak_duration_secs: \`${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
@@ -682,6 +915,7 @@ write_summary_gate_table_header() {
 - beta_pbx_scenario: \`${BETA_PBX_SCENARIO:-all}\`
 - beta_pbx_g729_profiles: \`${BETA_PBX_G729_PROFILES:-g729a g729ab}\`
 - beta_run_local_pbx: \`${BETA_RUN_LOCAL_PBX:-0}\`
+- beta_run_pbx: \`${BETA_RUN_PBX:-0}\`
 - beta_run_sipp: \`${BETA_RUN_SIPP:-1}\`
 - beta_sipp_diagnostics: \`${BETA_SIPP_DIAGNOSTICS:-0}\`
 - beta_run_strict_ua: \`${BETA_RUN_STRICT_UA:-1}\`
@@ -693,7 +927,7 @@ write_summary_gate_table_header() {
 - rvoip_perf_soak_cps: \`${RVOIP_PERF_SOAK_CPS:-0}\`
 - rvoip_perf_soak_drain_cps: \`${RVOIP_PERF_SOAK_DRAIN_CPS:-10}\`
 - rvoip_perf_soak_error_sample_limit: \`${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}\`
-- rvoip_perf_retention_drain_wait_secs: \`${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-120}\`
+- rvoip_perf_retention_drain_wait_secs: \`${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}\`
 - rvoip_perf_mass_teardown_calls: \`${RVOIP_PERF_MASS_TEARDOWN_CALLS:-500}\`
 - rvoip_perf_mass_teardown_setup_cps: \`${RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS:-30}\`
 - rvoip_perf_memory_diagnostics: \`${RVOIP_PERF_MEMORY_DIAGNOSTICS:-0}\`
@@ -730,6 +964,104 @@ beta_report_run_dir() {
   printf '%s/%s' "$(beta_report_root)" "$TIMESTAMP"
 }
 
+beta_report_mode_pointer() {
+  case "$MODE" in
+    local) printf '%s/latest-local.txt' "$(beta_report_root)" ;;
+    interop) printf '%s/latest-interop.txt' "$(beta_report_root)" ;;
+    security) printf '%s/latest-security.txt' "$(beta_report_root)" ;;
+    perf) printf '%s/latest-perf.txt' "$(beta_report_root)" ;;
+    full) printf '%s/latest-full-clean.txt' "$(beta_report_root)" ;;
+  esac
+}
+
+attestation_features() {
+  local features=""
+  local automatic=""
+  local requested
+  local feature
+  case "$MODE" in
+    local)
+      automatic="generated-validation,dev-insecure-tls"
+      ;;
+    full)
+      automatic="generated-validation,dev-insecure-tls,$(perf_features)"
+      ;;
+    interop)
+      automatic="dev-insecure-tls"
+      ;;
+    perf)
+      automatic="$(perf_features)"
+      ;;
+    security)
+      automatic=""
+      ;;
+  esac
+
+  # PBX examples are built separately from the local feature matrix. Record
+  # their effective Cargo features automatically whenever that interop surface
+  # is enabled; the default includes the claim-bearing G.729A/G.729AB codec.
+  local pbx_features=""
+  if [ "$MODE" = "full" ] || [ "$MODE" = "interop" ]; then
+    if [ "${BETA_RUN_LOCAL_PBX:-0}" = "1" ] || [ "${BETA_RUN_PBX:-0}" = "1" ]; then
+      pbx_features="${PBX_CARGO_FEATURES:-dev-insecure-tls,g729}"
+    fi
+  fi
+
+  for requested in "${BETA_ATTESTATION_FEATURES:-}" "$automatic" "$pbx_features"; do
+    requested="${requested//,/ }"
+    for feature in $requested; do
+      features="$(append_feature "$features" "$feature")"
+    done
+  done
+  printf '%s' "$features"
+}
+
+attestation_input_path() {
+  local value="$1"
+  case "$value" in
+    /*) printf '%s' "$value" ;;
+    *) printf '%s/%s' "$WORKSPACE_ROOT" "$value" ;;
+  esac
+}
+
+write_beta_attestation() {
+  local report_root="$1"
+  local overall="PASS"
+  local recipe_file
+  local burst_file
+  local -a state_table_args=(
+    --state-table-source "$BETA_STATE_TABLE_SOURCE"
+    --state-table-sha256 "$selected_state_table_sha256"
+  )
+  if [ "$FAILURES" -ne 0 ]; then
+    overall="FAIL"
+  fi
+  if [ -n "$BETA_STATE_TABLE_FALLBACK_REASON" ]; then
+    state_table_args+=(--state-table-fallback-reason "$BETA_STATE_TABLE_FALLBACK_REASON")
+  fi
+  recipe_file="$(attestation_input_path "${BETA_PERFORMANCE_RECIPE_FILE:-$CRATE_DIR/config/performance-recipes.yaml}")"
+  burst_file="$(attestation_input_path "${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}")"
+  python3 "$BETA_ATTESTATION_HELPER" create \
+    --report-root "$report_root" \
+    --mode "$MODE" \
+    --run-id "$TIMESTAMP" \
+    --started-at "$STARTED_AT_UTC" \
+    --ended-at "$ENDED_AT_UTC" \
+    --features "$(attestation_features)" \
+    --target "${BETA_ATTESTATION_TARGET:-${CARGO_BUILD_TARGET:-}}" \
+    "${state_table_args[@]}" \
+    --input "state-machine-yaml=$selected_state_table_yaml" \
+    --input "performance-recipe=$recipe_file" \
+    --input "burst-scenarios=$burst_file" \
+    --input "performance-regression-baseline=$PERF_REGRESSION_BASELINE_MANIFEST" \
+    --input "performance-regression-baseline-helper=$PERF_REGRESSION_BASELINE_HELPER" \
+    --input "sipp-scenario=$CRATE_DIR/tests/perf/sipp_scenarios/uac_perf.xml" \
+    --input "attestation-verifier=$BETA_ATTESTATION_HELPER" \
+    --failures "$FAILURES" \
+    --skips "$SKIPS" \
+    --overall "$overall"
+}
+
 write_report_manifest() {
   local report_dir="$1"
   local perf_results_status="${2:-not packaged}"
@@ -744,11 +1076,15 @@ write_report_manifest() {
 - report_dir: $report_dir
 - summary: \`summary.md\`
 - environment: \`environment/environment.md\`
+- machine_attestation: \`attestation.json\`
+- attestation_checksum: \`attestation.json.sha256\`
 - generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 ## Primary Evidence
 
 - \`summary.md\`
+- \`attestation.json\` and \`attestation.json.sha256\`
+- \`inputs/attestation-verifier.py\` (copied standalone verifier)
 - \`environment/environment.md\`
 - \`pbx/summary.md\`
 - \`pbx/matrix.tsv\`
@@ -759,32 +1095,102 @@ write_report_manifest() {
 - \`security/cargo-audit.txt\`
 - \`security/fuzz/\`
 - \`perf-results/\`
-- \`perf-audit.md\` (current-vs-previous perf regression audit)
+- \`perf-regression-baseline/manifest.json\` and \`perf-regression-baseline/perf-results/\`
+  (reviewed immutable inputs copied before comparison)
+- \`perf-audit.md\` (current-vs-reviewed-baseline regression audit)
 - \`canonical-2k/index.json\` and \`canonical-2k/run-{1,2,3}/\`
   (required release evidence when enabled)
 
-The report directory is a packaged copy of the beta-gate artifact tree plus
-the current raw perf result files. Logs, matrices, redacted
+The report directory is a packaged copy of the beta-gate artifact tree,
+including the isolated current-run perf result capture when performance gates
+are enabled. Logs, matrices, redacted
 environment evidence, PBX lifecycle snapshots, scenario metadata, and perf
 JSON/markdown outputs are kept with their original relative paths where
 possible.
 
 Perf results package status: ${perf_results_status}
+
+Verify this copied report without reading workspace paths:
+
+\`python3 inputs/attestation-verifier.py verify --report-root .\`
+
+Require formal mode-complete release evidence (the clean/full report must also
+meet every release-pointer prerequisite):
+
+\`python3 inputs/attestation-verifier.py verify --report-root . --require-clean --require-unchanged-source --require-no-skips --require-pass --require-mode-eligible\`
+EOF
+}
+
+prepare_perf_results_capture() {
+  local archive_dir="$PERF_RESULTS_ARCHIVE_ROOT/$TIMESTAMP-before-$MODE"
+  local prior_files=0
+  local prior_kib=0
+  mkdir -p "$PERF_RESULTS_ARCHIVE_ROOT" "$(dirname "$PERF_RESULTS_CAPTURE_MARKER")"
+
+  if [ -L "$PERF_RESULTS_DIR" ]; then
+    echo "refusing symlinked perf-results directory: $PERF_RESULTS_DIR" >&2
+    return 1
+  fi
+  if [ -e "$archive_dir" ] || [ -L "$archive_dir" ]; then
+    echo "perf-results archive destination already exists: $archive_dir" >&2
+    return 1
+  fi
+  if [ -e "$PERF_RESULTS_DIR" ]; then
+    if [ ! -d "$PERF_RESULTS_DIR" ]; then
+      echo "perf-results path is not a directory: $PERF_RESULTS_DIR" >&2
+      return 1
+    fi
+    prior_files="$(find "$PERF_RESULTS_DIR" -type f | wc -l | tr -d ' ')"
+    prior_kib="$(du -sk "$PERF_RESULTS_DIR" | awk '{print $1}')"
+    mv "$PERF_RESULTS_DIR" "$archive_dir"
+  else
+    archive_dir="none (no prior perf-results directory)"
+  fi
+  mkdir -p "$PERF_RESULTS_DIR"
+  cat > "$PERF_RESULTS_CAPTURE_MARKER" <<EOF
+# Performance Results Capture Boundary
+
+- created_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- current_run_directory: $PERF_RESULTS_DIR
+- prior_results_archive: $archive_dir
+- prior_file_count: $prior_files
+- prior_size_kib: $prior_kib
+- policy: only files written after this boundary may be analyzed or packaged
+EOF
+}
+
+perf_results_capture_ready() {
+  [ -f "$PERF_RESULTS_CAPTURE_MARKER" ] \
+    && [ -d "$PERF_RESULTS_DIR" ] \
+    && [ ! -L "$PERF_RESULTS_DIR" ]
+}
+
+capture_current_perf_results() {
+  if ! perf_results_capture_ready; then
+    echo "performance results capture boundary is absent" >&2
+    return 1
+  fi
+  local destination="$ARTIFACT_DIR/perf-results"
+  mkdir -p "$destination"
+  (cd "$PERF_RESULTS_DIR" && tar cf - .) | (cd "$destination" && tar xf -)
+  cat >> "$PERF_RESULTS_CAPTURE_MARKER" <<EOF
+- captured_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+- captured_artifact_directory: $destination
+- captured_file_count: $(find "$PERF_RESULTS_DIR" -type f | wc -l | tr -d ' ')
 EOF
 }
 
 copy_perf_results_into_report() {
   local report_dir="$1"
-  local source="$WORKSPACE_ROOT/target/perf-results"
-
-  if [ ! -d "$source" ]; then
-    printf 'not packaged; no perf-results directory found under %s/target' "$WORKSPACE_ROOT"
+  if [ ! -d "$ARTIFACT_DIR/perf-results" ]; then
+    printf 'not packaged; this mode produced no isolated perf-results capture'
     return 0
   fi
-
-  mkdir -p "$report_dir/perf-results"
-  (cd "$source" && tar cf - .) | (cd "$report_dir/perf-results" && tar xf -)
-  printf 'packaged from: %s' "$source"
+  if [ ! -d "$report_dir/perf-results" ]; then
+    echo "packaged report is missing the isolated perf-results capture" >&2
+    return 1
+  fi
+  printf 'packaged from isolated raw artifact capture: %s/perf-results' "$ARTIFACT_DIR"
 }
 
 package_beta_report() {
@@ -810,7 +1216,10 @@ package_beta_report() {
   perf_results_status="$(copy_perf_results_into_report "$report_dir")"
 
   write_report_manifest "$report_dir" "$perf_results_status"
-  printf '%s\n' "$TIMESTAMP" > "$root/latest.txt"
+  write_beta_attestation "$report_dir"
+  python3 "$BETA_ATTESTATION_HELPER" update-pointers \
+    --report-root "$report_dir" \
+    --index-root "$root"
 }
 
 container_running() {
@@ -866,49 +1275,49 @@ run_local_pbx_gate() {
       return
     fi
     if [ "$initially_asterisk" = "1" ]; then
-      run_gate "restore local FreeSWITCH down" "$freeswitch_dir/scripts/down.sh" || true
-      run_gate "restore local Asterisk up" "$asterisk_dir/scripts/up.sh" || true
+      run_gate_continue "restore local FreeSWITCH down" "$freeswitch_dir/scripts/down.sh"
+      run_gate_continue "restore local Asterisk up" "$asterisk_dir/scripts/up.sh"
       capture_docker_snapshot after-restore
     elif [ "$initially_freeswitch" = "1" ]; then
-      run_gate "restore local Asterisk down" "$asterisk_dir/scripts/down.sh" || true
-      run_gate "restore local FreeSWITCH up" "$freeswitch_dir/scripts/up.sh" || true
+      run_gate_continue "restore local Asterisk down" "$asterisk_dir/scripts/down.sh"
+      run_gate_continue "restore local FreeSWITCH up" "$freeswitch_dir/scripts/up.sh"
       capture_docker_snapshot after-restore
     else
-      run_gate "restore local Asterisk down" "$asterisk_dir/scripts/down.sh" || true
-      run_gate "restore local FreeSWITCH down" "$freeswitch_dir/scripts/down.sh" || true
+      run_gate_continue "restore local Asterisk down" "$asterisk_dir/scripts/down.sh"
+      run_gate_continue "restore local FreeSWITCH down" "$freeswitch_dir/scripts/down.sh"
       capture_docker_snapshot after-restore
     fi
   }
 
   if pbx_provider_enabled asterisk; then
-    run_gate "local FreeSWITCH down before Asterisk" "$freeswitch_dir/scripts/down.sh" || true
+    run_gate_continue "local FreeSWITCH down before Asterisk" "$freeswitch_dir/scripts/down.sh"
     if run_gate "local Asterisk up" "$asterisk_dir/scripts/up.sh"; then
       capture_docker_snapshot after-asterisk-up
-      run_gate "local Asterisk PBX matrix" \
+      run_gate_continue "local Asterisk PBX matrix" \
         env PBX_OUT_ROOT="$pbx_output_root" \
         PBX_REPORT_APPEND=1 \
         PBX_G729_PROFILES="$pbx_g729_profiles" \
         "$CRATE_DIR/examples/pbx/run.sh" \
-        --pbx asterisk --api "$pbx_api" --scenario "$pbx_scenario" || true
+        --pbx asterisk --api "$pbx_api" --scenario "$pbx_scenario"
       capture_docker_snapshot after-asterisk-matrix
     fi
-    run_gate "local Asterisk down after matrix" "$asterisk_dir/scripts/down.sh" || true
+    run_gate_continue "local Asterisk down after matrix" "$asterisk_dir/scripts/down.sh"
     capture_docker_snapshot after-asterisk-down
   fi
 
   if pbx_provider_enabled freeswitch; then
-    run_gate "local Asterisk down before FreeSWITCH" "$asterisk_dir/scripts/down.sh" || true
+    run_gate_continue "local Asterisk down before FreeSWITCH" "$asterisk_dir/scripts/down.sh"
     if run_gate "local FreeSWITCH up" "$freeswitch_dir/scripts/up.sh"; then
       capture_docker_snapshot after-freeswitch-up
-      run_gate "local FreeSWITCH PBX matrix" \
+      run_gate_continue "local FreeSWITCH PBX matrix" \
         env PBX_OUT_ROOT="$pbx_output_root" \
         PBX_REPORT_APPEND=1 \
         PBX_G729_PROFILES="$pbx_g729_profiles" \
         "$CRATE_DIR/examples/pbx/run.sh" \
-        --pbx freeswitch --api "$pbx_api" --scenario "$pbx_scenario" || true
+        --pbx freeswitch --api "$pbx_api" --scenario "$pbx_scenario"
       capture_docker_snapshot after-freeswitch-matrix
     fi
-    run_gate "local FreeSWITCH down after matrix" "$freeswitch_dir/scripts/down.sh" || true
+    run_gate_continue "local FreeSWITCH down after matrix" "$freeswitch_dir/scripts/down.sh"
     capture_docker_snapshot after-freeswitch-down
   fi
 
@@ -926,7 +1335,10 @@ start_managed_sipp_target() {
   local duration
   mkdir -p "$sipp_dir"
 
-  run_gate "SIPp standalone target build" cargo build -p rvoip-sip --release --example perf_listener
+  if ! run_gate "SIPp standalone target build" \
+    cargo build -p rvoip-sip --release --example perf_listener; then
+    return 1
+  fi
 
   echo
   echo "==> SIPp standalone target start"
@@ -1002,18 +1414,20 @@ run_sipp_standalone_gate() {
     return
   fi
   if ! command -v "${SIPP_BIN:-sipp}" >/dev/null 2>&1; then
-    run_gate "SIPp standalone matrix" bash -c "echo \"SIPp binary '${SIPP_BIN:-sipp}' not found on PATH\" >&2; exit 1"
+    run_gate_continue "SIPp standalone matrix" bash -c "echo \"SIPp binary '${SIPP_BIN:-sipp}' not found on PATH\" >&2; exit 1"
     return
   fi
 
   local managed_target=0
   if [ -z "${BETA_SIPP_TARGET_HOST:-}" ] || [ -z "${BETA_SIPP_TARGET_PORT:-}" ]; then
     managed_target=1
-    start_managed_sipp_target
+    if ! start_managed_sipp_target; then
+      return 0
+    fi
   fi
 
   local cps="${BETA_SIPP_CPS:-30 100 300 1000 2000}"
-  run_gate "SIPp standalone matrix" env \
+  run_gate_continue "SIPp standalone matrix" env \
     RVOIP_PERF_RESULTS="$ARTIFACT_DIR/sipp" \
     RVOIP_PERF_CPS="$cps" \
     RVOIP_PERF_MIN_SUCCESS_PCT="${RVOIP_PERF_MIN_SUCCESS_PCT:-99.9}" \
@@ -1026,7 +1440,7 @@ run_sipp_standalone_gate() {
 }
 
 run_proxy_descope_audit() {
-  run_gate "Kamailio/OpenSIPS proxy de-scope audit" bash -c \
+  run_gate_continue "Kamailio/OpenSIPS proxy de-scope audit" bash -c \
     "set -euo pipefail
      rg -q 'Kamailio/OpenSIPS.*planned validation targets, not release' crates/sip/rvoip-sip/README.md
      rg -q 'Kamailio/OpenSIPS plus RTPengine.*Investigation' crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md
@@ -1053,7 +1467,7 @@ run_dependency_audit() {
 - reason: transitive via the `quinn` (QUIC) and `rustls` stacks; no fixed upgrade adopted in the currently pinned versions.
 - beta stance: revisit when the pinned stacks bump `quinn-proto` >= 0.11.15 and `rustls-webpki` to the fixed line.
 EOF
-  run_gate "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
+  run_gate_continue "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
     set -euo pipefail
     mkdir -p "$SECURITY_DIR"
     if ! cargo audit --version > "$SECURITY_DIR/cargo-audit-version.txt" 2>&1; then
@@ -1085,7 +1499,7 @@ run_fuzz_smoke_target() {
   local fuzz_dir="$ARTIFACT_DIR/security/fuzz"
   local fuzz_crate_dir="${2:-${BETA_FUZZ_CRATE_DIR:-$CRATE_DIR/../fuzz}}"
   mkdir -p "$fuzz_dir"
-  run_gate "parser fuzz smoke ($target)" env \
+  run_gate_continue "parser fuzz smoke ($target)" env \
     FUZZ_CRATE_DIR="$fuzz_crate_dir" \
     WORKSPACE_ROOT="$WORKSPACE_ROOT" \
     FUZZ_TARGET="$target" \
@@ -1141,15 +1555,89 @@ run_security_gates() {
   run_fuzz_smoke_gates || true
 }
 
+run_downstream_compatibility_gates() {
+  # Keep every package/profile in its own Cargo invocation. A combined
+  # workspace check can unify optional dependency features across consumers
+  # and produce a false compatibility pass that no standalone consumer gets.
+  run_gate_continue "downstream rvoip default check" \
+    cargo check -p rvoip --lib
+  run_gate_continue "downstream rvoip app check" \
+    cargo check -p rvoip --lib --no-default-features --features app
+
+  run_gate_continue "downstream rvoip-client default check" \
+    cargo check -p rvoip-client --lib
+  run_gate_continue "downstream rvoip-client full check" \
+    cargo check -p rvoip-client --lib --no-default-features --features full
+
+  # rvoip-core consumes the SIP adapter through its examples, so all targets
+  # are required here rather than a library-only check.
+  run_gate_continue "downstream rvoip-core check" \
+    cargo check -p rvoip-core --all-targets
+  run_gate_continue "downstream rvoip-amazon-connect server check" \
+    cargo check -p rvoip-amazon-connect --all-targets --features server
+
+  run_gate_continue "downstream rvoip-uctp check" \
+    cargo check -p rvoip-uctp --all-targets
+  run_gate_continue "downstream rvoip-quic check" \
+    cargo check -p rvoip-quic --all-targets
+  run_gate_continue "downstream rvoip-webtransport check" \
+    cargo check -p rvoip-webtransport --all-targets
+  run_gate_continue "downstream rvoip-websocket media and TLS check" \
+    cargo check -p rvoip-websocket --all-targets --features media-webrtc,wss
+
+  # These profiles cover the headless shipping surfaces without opting into
+  # camera/audio/browser or live-cloud features that need external hardware,
+  # credentials, or native SDKs.
+  run_gate_continue "downstream rvoip-webrtc interop check" \
+    cargo check -p rvoip-webrtc --all-targets \
+      --features comprehensive,tls-rustls,bridge-quic
+  run_gate_continue "downstream rvoip-audio-device check" \
+    cargo check -p rvoip-audio-device --all-targets
+}
+
+run_standalone_example_gates() {
+  # Each directory is an intentionally detached Cargo workspace. Keep the
+  # explicit inventory so adding, dropping, or truncating the release matrix
+  # is reviewable; examples 12 and 13 exercise the cross-product gateways.
+  local -a examples=(
+    01-quickstart-p2p
+    02-softphone-audio
+    03-register-to-pbx
+    04-call-control
+    05-blind-transfer
+    06-attended-transfer
+    07-secure-call-srtp
+    08-tls-transport
+    09-ivr-server
+    10-call-center-b2bua
+    11-ai-harness-demo
+    12-customer-escalation-sip-webrtc
+    13-sip-to-amazon-connect
+  )
+  local example
+  for example in "${examples[@]}"; do
+    run_gate_continue "standalone example $example tests" \
+      cargo test \
+        --manifest-path "$WORKSPACE_ROOT/examples/$example/Cargo.toml" \
+        --all-targets
+  done
+}
+
 run_local_gates() {
-  run_gate "format check" cargo fmt --all -- --check
-  run_gate "beta evidence helper tests" python3 -m unittest \
+  run_gate_continue "format check" cargo fmt --all -- --check
+  run_gate_continue "beta evidence helper tests" python3 -m unittest \
+    crates/sip/rvoip-sip/scripts/test_beta_attestation.py \
+    crates/sip/rvoip-sip/scripts/test_beta_gate_source.py \
     crates/sip/rvoip-sip/scripts/test_perf_audit.py \
     crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py \
     crates/sip/rvoip-sip/scripts/test_perf_2k_acceptance.py \
-    crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py
-  run_gate "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
-  run_gate "claimed lower-crate check" cargo check \
+    crates/sip/rvoip-sip/scripts/test_perf_2k_baseline.py \
+    crates/sip/rvoip-sip/scripts/test_perf_regression_baseline.py \
+    crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py \
+    crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py
+  run_gate_continue "public API compatibility" "$SCRIPT_DIR/check_public_api.sh"
+  run_gate_continue "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
+  run_gate_continue "claimed lower-crate check" cargo check \
     -p rvoip-sip-core \
     -p rvoip-sip-transport \
     -p rvoip-sip-dialog \
@@ -1159,32 +1647,46 @@ run_local_gates() {
     -p rvoip-sip-registrar \
     -p rvoip-sip-proxy \
     --all-targets
-  run_gate "supporting SIP crate tests" cargo test \
+  run_gate_continue "supporting SIP crate tests" cargo test \
     -p rvoip-auth-core \
     -p rvoip-sip-registrar \
     -p rvoip-sip-proxy \
     --all-targets
   # rtp-core is compile-checked above but its tests (RTP/RTCP/SRTP parsers +
   # the malformed-input regression guards) were not run by the local gate.
-  run_gate "rtp-core tests" cargo test -p rvoip-rtp-core --all-targets
-  run_gate "rvoip-sip unit tests" cargo test -p rvoip-sip --lib
-  run_gate "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
-  run_gate "rvoip-sip doctests" cargo test -p rvoip-sip --doc
-  run_gate "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls
-  run_gate "PBX analyzer unit tests" cargo test -p rvoip-sip --example pbx_analyze --features dev-insecure-tls
-  run_gate "rvoip-sip rustdoc" env RUSTDOCFLAGS="-D warnings" cargo doc -p rvoip-sip --no-deps --features generated-validation,dev-insecure-tls
-  run_gate "sip-core RFC 4475 torture tests" cargo test -p rvoip-sip-core --features lenient_parsing --test torture_tests
-  run_gate "sip-core generated message validation" cargo test -p rvoip-sip-core --features generated-validation --test generated_message_compliance
-  run_gate "sip dialog generated validation" cargo test -p rvoip-sip-dialog --features generated-validation --test generated_sip_compliance
+  run_gate_continue "rtp-core tests" cargo test -p rvoip-rtp-core --all-targets
+  # The release gate must execute every workspace library unit test and
+  # doctest, not merely compile downstream crates. Keep rvoip-sip excluded
+  # here because its dedicated stages below preserve feature-specific logs and
+  # avoid silently replacing the SIP integration contract with feature-unified
+  # workspace coverage.
+  run_gate_continue "workspace unit tests" cargo test --workspace --exclude rvoip-sip --lib
+  run_gate_continue "workspace target and integration tests" cargo test --workspace --exclude rvoip-sip --bins --examples --tests
+  run_gate_continue "workspace doctests" cargo test --workspace --exclude rvoip-sip --doc
+  run_gate_continue "rvoip-sip unit tests" cargo test -p rvoip-sip --lib
+  run_gate_continue "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
+  run_gate_continue "rvoip-sip doctests" cargo test -p rvoip-sip --doc
+  run_gate_continue "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls
+  run_downstream_compatibility_gates
+  run_standalone_example_gates
+  run_gate_continue "PBX analyzer unit tests" cargo test -p rvoip-sip --example pbx_analyze --features dev-insecure-tls
+  run_gate_continue "rvoip-sip rustdoc" env RUSTDOCFLAGS="-D warnings" cargo doc -p rvoip-sip --no-deps --features generated-validation,dev-insecure-tls
+  run_gate_continue "sip-core RFC 4475 torture tests" cargo test -p rvoip-sip-core --features lenient_parsing --test torture_tests
+  run_gate_continue "sip-core generated message validation" cargo test -p rvoip-sip-core --features generated-validation --test generated_message_compliance
+  run_gate_continue "sip dialog generated validation" cargo test -p rvoip-sip-dialog --features generated-validation --test generated_sip_compliance
 }
 
 run_interop_gates() {
   if [ "${BETA_RUN_LOCAL_PBX:-0}" = "1" ]; then
     run_local_pbx_gate
   elif [ "${BETA_RUN_PBX:-0}" = "1" ]; then
-    run_gate "PBX interop matrix" \
-      env PBX_G729_PROFILES="${BETA_PBX_G729_PROFILES:-g729a g729ab}" \
-      "$CRATE_DIR/examples/pbx/run.sh" --pbx both --api all --scenario all
+    run_gate_continue "PBX interop matrix" \
+      env PBX_OUT_ROOT="$ARTIFACT_DIR/pbx" \
+      PBX_G729_PROFILES="${BETA_PBX_G729_PROFILES:-g729a g729ab}" \
+      "$CRATE_DIR/examples/pbx/run.sh" \
+      --pbx "${BETA_PBX_PROVIDER:-both}" \
+      --api "${BETA_PBX_API:-all}" \
+      --scenario "${BETA_PBX_SCENARIO:-all}"
   else
     skip_gate "PBX interop matrix" "Set BETA_RUN_LOCAL_PBX=1 for ~/Developer PBX lifecycle management, or BETA_RUN_PBX=1 after starting PBX containers yourself."
   fi
@@ -1194,7 +1696,7 @@ run_interop_gates() {
   if [ "${BETA_RUN_STRICT_UA:-1}" = "0" ]; then
     skip_gate "baresip strict-UA matrix" "BETA_RUN_STRICT_UA=0 disables required strict-UA evidence."
   else
-    run_gate "baresip strict-UA matrix" env \
+    run_gate_continue "baresip strict-UA matrix" env \
       RVOIP_STRICT_UA_RESULTS="$ARTIFACT_DIR/strict-ua" \
       "$CRATE_DIR/tests/interop/baresip/run_strict_ua.sh"
   fi
@@ -1203,49 +1705,46 @@ run_interop_gates() {
 }
 
 run_perf_regression_audit() {
-  # Audit this run's perf JSON against the most recent prior beta-report run and
-  # flag degradations beyond tolerance. Report-only by default (a WARN that still
-  # passes the gate) so dev-box run-to-run variance does not block releases; set
-  # BETA_PERF_REGRESSION_FAIL=1 to make a regression a hard failure (e.g. on a
-  # dedicated perf host). Either way perf-audit.md is written into the report.
-  local current="$WORKSPACE_ROOT/target/perf-results"
+  # Verify and package the reviewed immutable baseline before comparing it.
+  # Never select a mutable "latest" report directory: a copied attestation must
+  # contain the exact bytes that drove the hard regression decision.
+  local current="$PERF_RESULTS_DIR"
   if [ ! -d "$current" ] || [ -z "$(ls "$current"/*.json 2>/dev/null)" ]; then
     skip_gate "perf regression audit" "no current perf-results to compare."
     return
   fi
-  # The current run's report package is written only at the end of the gate, so
-  # every match here is a prior run; the newest one with perf JSON is the baseline.
-  local baseline=""
-  local d
-  # Sort by directory name (ISO timestamp) descending, so the newest prior run
-  # wins regardless of mtime changes from copying/restoring report packages.
-  for d in $(ls -d "$(beta_report_root)"/*/perf-results 2>/dev/null | sort -r); do
-    if [ -n "$(ls "$d"/*.json 2>/dev/null)" ]; then
-      baseline="$d"
-      break
-    fi
-  done
-  if [ -z "$baseline" ]; then
+  run_gate_continue "perf regression baseline evidence" \
+    python3 "$PERF_REGRESSION_BASELINE_HELPER" package \
+      --manifest "$PERF_REGRESSION_BASELINE_MANIFEST" \
+      --source-root "$PERF_REGRESSION_BASELINE_ROOT" \
+      --artifact-dir "$ARTIFACT_DIR"
+  local baseline="$ARTIFACT_DIR/perf-regression-baseline/perf-results"
+  if [ ! -f "$ARTIFACT_DIR/perf-regression-baseline/manifest.json" ] \
+    || [ ! -d "$baseline" ]; then
     skip_gate "perf regression audit" \
-      "no prior beta-report run with perf-results; this run establishes the baseline."
+      "the reviewed performance-regression baseline could not be verified and packaged."
     return
   fi
   local tol="${BETA_PERF_REGRESSION_TOLERANCE_PCT:-15}"
   local lat_tol="${BETA_PERF_LATENCY_TOLERANCE_PCT:-25}"
   local out="$ARTIFACT_DIR/perf-audit.md"
   if [ "${BETA_PERF_REGRESSION_FAIL:-0}" = "1" ]; then
-    run_gate "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
-      --baseline "$baseline" --current "$current" --out "$out" \
+    run_gate_continue "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
+      --baseline "$baseline" \
+      --baseline-manifest "$ARTIFACT_DIR/perf-regression-baseline/manifest.json" \
+      --current "$current" --out "$out" \
       --tolerance-pct "$tol" --latency-tolerance-pct "$lat_tol" \
       --fail-on-regression
   else
-    run_gate "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
-      --baseline "$baseline" --current "$current" --out "$out" \
+    run_gate_continue "perf regression audit" python3 "$SCRIPT_DIR/perf_audit.py" \
+      --baseline "$baseline" \
+      --baseline-manifest "$ARTIFACT_DIR/perf-regression-baseline/manifest.json" \
+      --current "$current" --out "$out" \
       --tolerance-pct "$tol" --latency-tolerance-pct "$lat_tol"
     # Report-only mode still passed the gate above; surface any regression on the
     # console so it is not lost among the PASS rows.
     if grep -q "^status: REGRESSION" "$out" 2>/dev/null; then
-      echo "WARNING: perf regression audit flagged degradations vs $baseline (report-only; see perf-audit.md). Set BETA_PERF_REGRESSION_FAIL=1 to gate on it." >&2
+      echo "WARNING: perf regression audit flagged degradations vs reviewed baseline $perf_regression_baseline_id (report-only; see perf-audit.md). Set BETA_PERF_REGRESSION_FAIL=1 to gate on it." >&2
     fi
   fi
 }
@@ -1273,7 +1772,7 @@ run_canonical_2k_evidence_gate() {
       arguments+=(--run-dir "$run_dir")
     fi
   done
-  run_gate "canonical 2k three-pass evidence" \
+  run_gate_continue "canonical 2k three-pass evidence" \
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" "${arguments[@]}"
 }
 
@@ -1282,7 +1781,7 @@ run_perf_gates() {
   local features
   features="$(perf_features)"
   if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
-    run_gate "literal-all perf configuration" env \
+    run_gate_continue "literal-all perf configuration" env \
       BETA_RUN_BURST_MATRIX="${BETA_RUN_BURST_MATRIX:-0}" \
       BETA_BURST_MATRIX="${BETA_BURST_MATRIX:-all}" \
       BETA_RUN_LONG_SOAK="${BETA_RUN_LONG_SOAK:-1}" \
@@ -1313,58 +1812,61 @@ run_perf_gates() {
     if [ -n "${BETA_PERFORMANCE_RECIPE_FILE:-}" ]; then
       perf_env+=(RVOIP_PERF_RECIPE_FILE="$BETA_PERFORMANCE_RECIPE_FILE")
     fi
-    run_gate "perf call setup CPS ($profile)" env \
+    run_gate_continue "perf call setup CPS ($profile)" env \
       "${perf_env[@]}" \
       cargo test -p rvoip-sip --release --features "$features" --test perf_call_setup_cps -- --nocapture
   done
-  run_gate "perf registration throughput" cargo test -p rvoip-sip --release --features "$features" --test perf_registration_throughput -- --nocapture
-  run_gate "perf concurrent active calls" cargo test -p rvoip-sip --release --features "$features" --test perf_concurrent_active_calls -- --nocapture
-  run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features "$features" --test perf_rtp_steady_state -- --nocapture
-  run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features "$features" --test perf_backpressure_step -- --nocapture
-  run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features "$features" --test perf_transport_recovery -- --nocapture
+  run_gate_continue "perf registration throughput" cargo test -p rvoip-sip --release --features "$features" --test perf_registration_throughput -- --nocapture
+  run_gate_continue "perf concurrent active calls" cargo test -p rvoip-sip --release --features "$features" --test perf_concurrent_active_calls -- --nocapture
+  run_gate_continue "perf RTP steady state" cargo test -p rvoip-sip --release --features "$features" --test perf_rtp_steady_state -- --nocapture
+  run_gate_continue "perf backpressure step" cargo test -p rvoip-sip --release --features "$features" --test perf_backpressure_step -- --nocapture
+  run_gate_continue "perf transport recovery" cargo test -p rvoip-sip --release --features "$features" --test perf_transport_recovery -- --nocapture
   if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
     local all_features
     all_features="$(append_feature "$features" "dev-insecure-tls")"
     # The standard gates above cover call setup, registration, active calls,
     # RTP, backpressure, and transport recovery. These are the remaining
     # registered non-paired perf targets plus the perf-only resiliency target.
-    run_gate "all registered resiliency tests" cargo test -p rvoip-sip --release --features "$all_features" --test 'resilien*' -- --nocapture
-    run_gate "perf mid-call signaling under media" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mid_call_signal_under_media -- --nocapture
-    run_gate "perf TLS overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_tls_overhead -- --nocapture
-    run_gate "perf SRTP overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_srtp_overhead -- --nocapture
-    run_gate "perf PDD with 180 first" cargo test -p rvoip-sip --release --features "$all_features" --test perf_pdd_with_180_first -- --nocapture
-    run_gate "perf sustained long-duration calls" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sustained_long_duration_calls -- --nocapture
-    run_gate "perf registrar binding scale" cargo test -p rvoip-sip --release --features "$all_features" --test perf_registrar_binding_scale -- --nocapture
-    run_gate "perf mixed workload" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mixed_workload -- --nocapture
-    run_gate "perf B2BUA forwarding" cargo test -p rvoip-sip --release --features "$all_features" --test perf_b2bua_forwarding -- --nocapture
-    run_gate "perf AI-agent load" cargo test -p rvoip-sip --release --features "$all_features" --test perf_ai_agent_load -- --nocapture
-    run_gate "perf contact-center transfers" cargo test -p rvoip-sip --release --features "$all_features" --test perf_contact_center_transfers -- --nocapture
-    run_gate "perf SIPp parity" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sipp_parity -- --nocapture
+    run_gate_continue "all registered resiliency tests" cargo test -p rvoip-sip --release --features "$all_features" --test 'resilien*' -- --nocapture
+    run_gate_continue "perf mid-call signaling under media" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mid_call_signal_under_media -- --nocapture
+    run_gate_continue "perf TLS overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_tls_overhead -- --nocapture
+    run_gate_continue "perf SRTP overhead" cargo test -p rvoip-sip --release --features "$all_features" --test perf_srtp_overhead -- --nocapture
+    run_gate_continue "perf PDD with 180 first" cargo test -p rvoip-sip --release --features "$all_features" --test perf_pdd_with_180_first -- --nocapture
+    run_gate_continue "perf sustained long-duration calls" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sustained_long_duration_calls -- --nocapture
+    run_gate_continue "perf registrar binding scale" cargo test -p rvoip-sip --release --features "$all_features" --test perf_registrar_binding_scale -- --nocapture
+    run_gate_continue "perf mixed workload" cargo test -p rvoip-sip --release --features "$all_features" --test perf_mixed_workload -- --nocapture
+    run_gate_continue "perf B2BUA forwarding" cargo test -p rvoip-sip --release --features "$all_features" --test perf_b2bua_forwarding -- --nocapture
+    run_gate_continue "perf AI-agent load" cargo test -p rvoip-sip --release --features "$all_features" --test perf_ai_agent_load -- --nocapture
+    run_gate_continue "perf contact-center transfers" cargo test -p rvoip-sip --release --features "$all_features" --test perf_contact_center_transfers -- --nocapture
+    run_gate_continue "perf SIPp parity" cargo test -p rvoip-sip --release --features "$all_features" --test perf_sipp_parity -- --nocapture
     # Exercise non-ignored invariant/unit checks in the paired soak targets.
-    run_gate "perf soak target invariant tests" cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_caller --test perf_soak_30min -- --nocapture
+    run_gate_continue "perf soak target invariant tests" cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_caller --test perf_soak_30min -- --nocapture
     # The remaining ignored paired tests run through the burst and split-soak
     # scripts below. These two ignored standalone tests need explicit gates.
     # Do not let the split-soak duration leak into these standalone targets.
     # They intentionally have independent evidence windows: a short isolated
     # media churn diagnostic and the legacy 30-minute monolithic soak.
-    run_gate "perf media churn" env \
+    run_gate_continue "perf media churn" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_media_churn perf_media_churn -- --exact --ignored --nocapture
-    run_gate "perf monolithic soak" env \
+    run_gate_continue "perf monolithic soak" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}" \
       RVOIP_PERF_SOAK_DRAIN_CPS="${RVOIP_PERF_SOAK_DRAIN_CPS:-10}" \
       RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
-      RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-120}" \
+      RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}" \
       RVOIP_PERF_ARCHIVE_DIR="$ARTIFACT_DIR/perf-results" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_30min perf_soak_30min -- --exact --ignored --nocapture
-    run_gate "perf mass teardown stress" env \
+    run_gate_continue "perf mass teardown stress" env \
       RVOIP_PERF_MASS_TEARDOWN_CALLS="${RVOIP_PERF_MASS_TEARDOWN_CALLS:-500}" \
       RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS="${RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS:-30}" \
       RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
+      RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="$RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS" \
       RVOIP_PERF_ARCHIVE_DIR="$ARTIFACT_DIR/perf-results" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_soak_30min perf_mass_teardown_stress -- --exact --ignored --nocapture
   fi
-  run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features "$features" --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
+  run_gate_continue "perf session churn leak" env \
+    RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="$RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS" \
+    cargo test -p rvoip-sip --release --features "$features" --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
   local burst_smoke_covered_by_matrix=0
   if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ] &&
      [ "${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" = "carrier-smoke" ]; then
@@ -1386,10 +1888,9 @@ run_perf_gates() {
         echo "COVERED: perf media burst smoke"
         echo "The selected full burst matrix includes carrier-smoke; the standalone invocation is coalesced into that gate."
       } > "$burst_smoke_log"
-      record "COVERED" "perf media burst smoke" "$burst_smoke_log" "-"
       echo "COVERED: perf media burst smoke - coalesced into perf media burst matrix"
     else
-      run_gate "perf media burst smoke" env \
+      run_gate_continue "perf media burst smoke" env \
         RVOIP_PERF_FEATURES="$features" \
         RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
         RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_SMOKE_SCENARIOS:-carrier-smoke}" \
@@ -1403,7 +1904,7 @@ run_perf_gates() {
     skip_gate "perf media burst smoke" "BETA_RUN_BURST_SMOKE=0 disables required media burst smoke evidence."
   fi
   if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ]; then
-    run_gate "perf media burst matrix" env \
+    run_gate_continue "perf media burst matrix" env \
       RVOIP_PERF_FEATURES="$features" \
       RVOIP_PERF_BURST_SCENARIO_FILE="${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}" \
       RVOIP_PERF_BURST_SCENARIOS="${BETA_BURST_MATRIX:-all}" \
@@ -1414,7 +1915,7 @@ run_perf_gates() {
       "$SCRIPT_DIR/perf_burst_matrix.sh"
   fi
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
-    run_gate "perf soak candidate" env \
+    run_gate_continue "perf soak candidate" env \
       RVOIP_PERF_FEATURES="$features" \
       RVOIP_PERF_SOAK_DURATION_SECS="${RVOIP_PERF_SOAK_DURATION_SECS:-3600}" \
       RVOIP_PERF_SOAK_ACTIVE_CALLS="${RVOIP_PERF_SOAK_ACTIVE_CALLS:-500}" \
@@ -1438,8 +1939,18 @@ run_perf_gates() {
     skip_gate "perf soak" "BETA_RUN_LONG_SOAK=0 disables release-candidate soak evidence."
   fi
 
-  # Compare this run's perf metrics against the previous run and flag regressions.
+  # Compare this run's perf metrics against the packaged reviewed baseline.
   run_perf_regression_audit
+}
+
+run_isolated_perf_gates() {
+  run_gate_continue "perf results capture boundary" prepare_perf_results_capture
+  if perf_results_capture_ready; then
+    run_perf_gates
+  else
+    skip_gate "performance gates" \
+      "The stale-result isolation boundary failed; refusing to analyze or package an unbounded target/perf-results tree."
+  fi
 }
 
 write_environment_report
@@ -1448,7 +1959,6 @@ write_summary_gate_table_header
 if bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
   if ! run_gate "clean beta source fingerprint" verify_clean_source_fingerprint; then
     echo "Release-candidate gates require a clean source fingerprint. Set BETA_REQUIRE_CLEAN_SOURCE=0 only for development diagnostics." >&2
-    exit 1
   fi
 fi
 
@@ -1464,13 +1974,13 @@ case "$MODE" in
     run_local_gates
     run_security_gates
     run_interop_gates
-    run_perf_gates
+    run_isolated_perf_gates
     ;;
   interop)
     run_interop_gates
     ;;
   perf)
-    run_perf_gates
+    run_isolated_perf_gates
     ;;
   security)
     run_security_gates
@@ -1481,17 +1991,33 @@ case "$MODE" in
     ;;
 esac
 
+if [ "$MODE" = "full" ] || [ "$MODE" = "perf" ]; then
+  if perf_results_capture_ready; then
+    run_gate_continue "perf results evidence capture" capture_current_perf_results
+  fi
+fi
+
+# Capture the terminal source identity for every mode. Clean/full runs also
+# execute the fail-closed equality gate below; development modes retain the
+# comparison as diagnostic evidence in attestation.json.
+run_gate_continue "beta final source fingerprint capture" \
+  python3 "$CANONICAL_2K_EVIDENCE_HELPER" fingerprint \
+    --workspace-root "$WORKSPACE_ROOT" \
+    --out "$BETA_SOURCE_AT_END"
+
 if canonical_2k_evidence_requested; then
-  run_gate "canonical 2k beta source unchanged" \
+  run_gate_continue "canonical 2k beta source unchanged" \
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
       --workspace-root "$WORKSPACE_ROOT" \
       --beta-start "$BETA_SOURCE_AT_START"
 elif bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
-  run_gate "beta source unchanged" \
+  run_gate_continue "beta source unchanged" \
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
       --workspace-root "$WORKSPACE_ROOT" \
       --beta-start "$BETA_SOURCE_AT_START"
 fi
+
+ENDED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
   cat >> "$SUMMARY" <<'EOF'
@@ -1511,7 +2037,14 @@ cat >> "$SUMMARY" <<EOF
 
 - enabled: \`${BETA_REPORT_PACKAGE:-1}\`
 - report_dir: \`$(beta_report_run_dir)\`
-- latest_pointer: \`$(beta_report_root)/latest.txt\`
+- raw_attestation: \`attestation.json\`
+- generic_latest_pointer_informational_only: \`$(beta_report_root)/latest.txt\`
+- successful_mode_pointer: \`$(beta_report_mode_pointer)\`
+- pointer_policy: mode-specific pointers update only after an independently
+  verified PASS with zero skips and the mode's required evidence. Interop
+  requires an identified peer; performance requires an executable and result
+  JSON; full additionally requires unchanged clean source, an identified peer,
+  performance result JSON, and three canonical 2K runs.
 
 ## Result
 
@@ -1519,6 +2052,7 @@ cat >> "$SUMMARY" <<EOF
 - skips: $SKIPS
 EOF
 
+write_beta_attestation "$ARTIFACT_DIR"
 package_beta_report
 
 echo

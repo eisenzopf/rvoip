@@ -9,10 +9,12 @@
 //! — it requires session-core wiring to drop incoming UPDATEs, which
 //! is not currently exposed by the public API.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35065;
 const BOB_PORT: u16 = 35066;
@@ -23,27 +25,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
@@ -63,20 +44,10 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
 
 #[test]
 fn session_timer_refresh_emits_event() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_session_timer_alice",
-            "--example",
-            "regression_session_timer_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "regression_session_timer_alice",
+        "regression_session_timer_bob",
+    ]);
 
     let env_vars: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

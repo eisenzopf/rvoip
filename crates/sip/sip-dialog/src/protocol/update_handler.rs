@@ -62,12 +62,8 @@ impl UpdateHandler for DialogManager {
                 StatusCode::CallOrTransactionDoesNotExist,
             );
 
-            self.transaction_manager
-                .send_response(&transaction_id, response)
-                .await
-                .map_err(|_error| DialogError::TransactionError {
-                    message: "Failed to send 481 response to UPDATE".to_string(),
-                })?;
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
 
             debug!("UPDATE processed with 481 response (no dialog found)");
             Ok(())
@@ -114,12 +110,49 @@ impl DialogManager {
 
         let event = SessionCoordinationEvent::ReInvite {
             dialog_id: dialog_id.clone(),
-            transaction_id,
+            transaction_id: transaction_id.clone(),
             request: request.clone(),
         };
 
-        self.notify_session_layer(event).await?;
+        if self.notify_session_layer(event).await.is_err() {
+            let response =
+                response_builders::create_response(&request, StatusCode::ServiceUnavailable);
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+            return Ok(());
+        }
         debug!("UPDATE processed for dialog {}", dialog_id);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod exact_update_response_tests {
+    #[test]
+    fn update_481_and_dispatch_503_are_exact_and_classified() {
+        let source = include_str!("update_handler.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("UPDATE implementation source");
+        assert!(source.contains("StatusCode::CallOrTransactionDoesNotExist"));
+        assert!(source.contains("StatusCode::ServiceUnavailable"));
+        assert_eq!(
+            source
+                .matches("send_unowned_final_response_classified")
+                .count(),
+            2
+        );
+        let dispatch_failure = source
+            .split("if self.notify_session_layer(event).await.is_err()")
+            .nth(1)
+            .expect("UPDATE dispatch failure source");
+        let send = dispatch_failure
+            .find("send_unowned_final_response_classified")
+            .expect("classified UPDATE fallback");
+        let retire = dispatch_failure
+            .find("retire_unowned_response_indexes")
+            .expect("UPDATE fallback index retirement");
+        assert!(send < retire);
     }
 }

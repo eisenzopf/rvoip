@@ -22,6 +22,13 @@ const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_ENABLED_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
 static UDP_DATAGRAMS_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static UDP_WORKER_QUEUE_ENQUEUED: AtomicU64 = AtomicU64::new(0);
 static UDP_WORKER_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
@@ -345,6 +352,11 @@ pub struct Snapshot {
 }
 
 pub fn enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = TEST_ENABLED_OVERRIDE.with(std::cell::Cell::get) {
+        return enabled;
+    }
+
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
         2 => true,
         _ => false,
@@ -356,8 +368,8 @@ pub fn set_enabled(enabled: bool) {
 }
 
 #[cfg(test)]
-fn set_enabled_for_tests(enabled: bool) {
-    set_enabled(enabled);
+fn replace_enabled_for_tests(enabled: Option<bool>) -> Option<bool> {
+    TEST_ENABLED_OVERRIDE.with(|current| current.replace(enabled))
 }
 
 pub fn reset() {
@@ -1391,9 +1403,36 @@ mod tests {
     use super::*;
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 
+    static DIAGNOSTICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct TestEnabledOverrideGuard {
+        previous: Option<bool>,
+    }
+
+    impl TestEnabledOverrideGuard {
+        fn new(enabled: bool) -> Self {
+            Self {
+                previous: replace_enabled_for_tests(Some(enabled)),
+            }
+        }
+
+        fn set(&self, enabled: bool) {
+            replace_enabled_for_tests(Some(enabled));
+        }
+    }
+
+    impl Drop for TestEnabledOverrideGuard {
+        fn drop(&mut self) {
+            replace_enabled_for_tests(self.previous);
+        }
+    }
+
     #[test]
     fn diagnostics_summary_includes_counter_values() {
-        set_enabled_for_tests(false);
+        let _test_lock = DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let enabled_override = TestEnabledOverrideGuard::new(false);
         reset();
         record_udp_datagram_received();
         record_udp_read_to_worker_queue(Duration::from_micros(25));
@@ -1403,7 +1442,7 @@ mod tests {
         assert_eq!(disabled.udp_read_to_worker_queue.count, 0);
         assert_eq!(disabled.udp_receive_poll.count, 0);
 
-        set_enabled_for_tests(true);
+        enabled_override.set(true);
         reset();
 
         record_udp_datagram_received();
@@ -1500,8 +1539,11 @@ mod tests {
 
     #[test]
     fn call_traces_store_only_consistent_opaque_correlations() {
+        let _test_lock = DIAGNOSTICS_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _enabled_override = TestEnabledOverrideGuard::new(true);
         const RAW_CALL_ID: &str = "private-call\r\nAuthorization: Bearer transport-secret";
-        set_enabled_for_tests(true);
         reset();
 
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")

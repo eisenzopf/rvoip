@@ -27,6 +27,17 @@ CANONICAL_SCENARIO = "perf_call_setup_cps_pbx-media-server"
 MANIFEST_SCHEMA = "rvoip-perf-profile-manifest-v2"
 INDEX_SCHEMA = "rvoip-canonical-2k-evidence-v2"
 ACCEPTANCE_SCHEMA = "rvoip-sip-2k-acceptance-v3"
+REVIEWED_BASELINE_ID = "20260706T181609Z"
+REVIEWED_BASELINE_RELATIVE_PATH = (
+    "perf_call_setup_cps_pbx-media-server/2000.json"
+)
+REVIEWED_BASELINE_SHA256 = (
+    "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3"
+)
+REVIEWED_BASELINE_PACKAGED_PATH = (
+    f"reviewed-baseline/{REVIEWED_BASELINE_RELATIVE_PATH}"
+)
+REVIEWED_BASELINE_ORIGINS = {"tracked-default", "explicit-override"}
 
 
 class EvidenceError(RuntimeError):
@@ -54,6 +65,7 @@ def capture_source_provenance(root):
     try:
         commit = git_bytes(root, "rev-parse", "HEAD").decode().strip()
         short = git_bytes(root, "rev-parse", "--short", "HEAD").decode().strip()
+        tree = git_bytes(root, "rev-parse", "HEAD^{tree}").decode().strip()
         status = git_bytes(
             root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
         )
@@ -79,6 +91,7 @@ def capture_source_provenance(root):
         return {
             "git_commit": commit,
             "git_rev": short,
+            "git_tree": tree,
             "git_dirty": bool(status),
             "source_fingerprint_sha256": digest.hexdigest(),
         }
@@ -86,6 +99,7 @@ def capture_source_provenance(root):
         return {
             "git_commit": "unknown",
             "git_rev": "unknown",
+            "git_tree": "unknown",
             "git_dirty": None,
             "source_fingerprint_sha256": "unknown",
             "error": str(error),
@@ -255,6 +269,37 @@ def validate_run(run_dir, expected_fingerprint):
             f"{run_dir.name} exact executable content differs from manifest hash"
         )
 
+    for key, expected in (
+        ("reviewed_baseline_id", REVIEWED_BASELINE_ID),
+        ("reviewed_baseline_relative_path", REVIEWED_BASELINE_RELATIVE_PATH),
+        ("reviewed_baseline_sha256", REVIEWED_BASELINE_SHA256),
+    ):
+        require_equal(manifest, key, expected, "manifest")
+    baseline_origin = manifest.get("reviewed_baseline_origin")
+    if baseline_origin not in REVIEWED_BASELINE_ORIGINS:
+        raise EvidenceError(
+            f"manifest.reviewed_baseline_origin must identify its source, found "
+            f"{baseline_origin!r}"
+        )
+    baseline_root = manifest.get("reviewed_baseline_path")
+    if not isinstance(baseline_root, str) or not baseline_root:
+        raise EvidenceError("manifest.reviewed_baseline_path is missing")
+    baseline_root_path = pathlib.Path(baseline_root).resolve()
+    expected_baseline_root = run_dir / "reviewed-baseline"
+    if baseline_root_path != expected_baseline_root:
+        raise EvidenceError(
+            f"{run_dir.name} reviewed baseline is not the run-local immutable snapshot"
+        )
+    baseline_path = baseline_root_path / REVIEWED_BASELINE_RELATIVE_PATH
+    if not baseline_path.is_file():
+        raise EvidenceError(
+            f"{run_dir.name} reviewed baseline does not exist: {baseline_path}"
+        )
+    if file_sha256(baseline_path) != REVIEWED_BASELINE_SHA256:
+        raise EvidenceError(
+            f"{run_dir.name} reviewed baseline content differs from its manifest hash"
+        )
+
     captured_at = parse_timestamp(manifest.get("captured_at_utc"), "captured_at_utc")
     return {
         "run_dir": run_dir,
@@ -263,6 +308,9 @@ def validate_run(run_dir, expected_fingerprint):
         "source_fingerprint_sha256": expected_fingerprint,
         "executable_path": executable_path,
         "executable_sha256": executable_digest,
+        "reviewed_baseline_path": baseline_path,
+        "reviewed_baseline_origin": baseline_origin,
+        "reviewed_baseline_sha256": REVIEWED_BASELINE_SHA256,
         "tree_sha256": tree_sha256(run_dir),
     }
 
@@ -332,6 +380,11 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
         shutil.copy2(validated[0]["executable_path"], packaged_executable)
         if file_sha256(packaged_executable) != common_executable_sha256:
             raise EvidenceError("packaged exact executable hash changed during copy")
+        packaged_baseline = staging / REVIEWED_BASELINE_PACKAGED_PATH
+        packaged_baseline.parent.mkdir(parents=True)
+        shutil.copy2(validated[0]["reviewed_baseline_path"], packaged_baseline)
+        if file_sha256(packaged_baseline) != REVIEWED_BASELINE_SHA256:
+            raise EvidenceError("packaged reviewed baseline hash changed during copy")
         runs_index = []
         for index, item in enumerate(validated, start=1):
             target = staging / f"run-{index}"
@@ -349,6 +402,10 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
                     "captured_at_utc": item["captured_at_utc"],
                     "source_fingerprint_sha256": fingerprint,
                     "executable_sha256": item["executable_sha256"],
+                    "reviewed_baseline_id": REVIEWED_BASELINE_ID,
+                    "reviewed_baseline_relative_path": REVIEWED_BASELINE_RELATIVE_PATH,
+                    "reviewed_baseline_sha256": item["reviewed_baseline_sha256"],
+                    "reviewed_baseline_origin": item["reviewed_baseline_origin"],
                     "source_tree_sha256": item["tree_sha256"],
                     "packaged_tree_sha256": packaged_tree_sha256,
                 }
@@ -362,6 +419,12 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
             "common_source_fingerprint_sha256": fingerprint,
             "common_executable_sha256": common_executable_sha256,
             "packaged_executable": packaged_executable.relative_to(staging).as_posix(),
+            "reviewed_baseline": {
+                "id": REVIEWED_BASELINE_ID,
+                "relative_path": REVIEWED_BASELINE_RELATIVE_PATH,
+                "sha256": REVIEWED_BASELINE_SHA256,
+                "packaged_path": packaged_baseline.relative_to(staging).as_posix(),
+            },
             "runs": runs_index,
         }
         (staging / "index.json").write_text(
@@ -372,8 +435,9 @@ def import_evidence(workspace_root, beta_start_path, artifact_dir, run_dirs):
             "Three chronological clean PASS runs, validated against the current "
             "absolute acceptance and relative-audit gates and one beta-start "
             "source fingerprint. All runs used one byte-identical executable, "
-            "which is packaged and re-hashed here. See `index.json` and each "
-            "`run-N/manifest.json`.\n",
+            "which is packaged and re-hashed here. The reviewed relative-performance "
+            "baseline is also packaged and content-addressed. See `index.json` and "
+            "each `run-N/manifest.json`.\n",
             encoding="utf-8",
         )
         staging.replace(destination)

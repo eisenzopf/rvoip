@@ -376,22 +376,6 @@ impl Default for TimerConfig {
     }
 }
 
-/// Creates a minimal, empty SIP INVITE request for placeholder or default usage.
-/// This is `pub(crate)` and intended for internal use within the `transaction-core` crate,
-/// for example, when a transaction needs a `Request` object before one is available,
-/// or for default initialization in tests or certain internal states.
-///
-/// The created request uses `Method::Register` and a dummy URI `sip:example.com`.
-/// This might need to be `Method::Invite` or more generic if its use implies an INVITE.
-/// Currently uses `Method::Register`. Let's assume it's generic enough or update if specific to INVITE.
-#[allow(dead_code)]
-pub(crate) fn create_empty_request() -> Request {
-    let uri = Uri::sip("example.com"); // Creates sip:example.com
-                                       // Corrected: Request::new in sip-core only takes method and uri.
-                                       // Version, headers, body are set via builder or other means if needed.
-    Request::new(Method::Register, uri)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,8 +392,8 @@ mod tests {
     #[test]
     fn internal_transaction_command_creation() {
         let _cmd1 = InternalTransactionCommand::TransitionTo(TransactionState::Completed);
-        let _cmd2 =
-            InternalTransactionCommand::ProcessMessage(Message::Request(create_empty_request()));
+        let request = Request::new(Method::Register, Uri::sip("example.com"));
+        let _cmd2 = InternalTransactionCommand::ProcessMessage(Message::Request(request));
         let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
         let _cmd4 = InternalTransactionCommand::TransportError;
         let _cmd5 = InternalTransactionCommand::Terminate;
@@ -433,12 +417,5 @@ mod tests {
 
         assert_eq!(config1.t1, config2.t1);
         assert_eq!(config1.t1, config3.t1);
-    }
-
-    #[test]
-    fn create_empty_request_works() {
-        let req = create_empty_request();
-        assert_eq!(req.method(), Method::Register); // As per current implementation
-        assert_eq!(req.uri().to_string(), "sip:example.com");
     }
 }

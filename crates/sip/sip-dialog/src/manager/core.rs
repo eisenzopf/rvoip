@@ -755,19 +755,15 @@ pub struct DialogManager {
     /// Event hub for global event coordination
     pub(crate) event_hub: Arc<tokio::sync::RwLock<Option<Arc<crate::events::DialogEventHub>>>>,
 
-    /// Channel for sending session coordination events to session-core
+    /// Unit-test observation sink. Production coordination uses only the
+    /// acknowledged event hub.
+    #[cfg(test)]
     pub(crate) session_coordinator:
         Arc<tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
 
-    /// Channel for sending dialog events to external consumers (session-core)
+    /// Unit-test dialog observation sink. There is no production channel path.
+    #[cfg(test)]
     pub(crate) dialog_event_sender: Arc<tokio::sync::RwLock<Option<mpsc::Sender<DialogEvent>>>>,
-
-    /// Channel for receiving dialog events (for shutdown coordination).
-    /// Retained so a future "consume remaining events on shutdown"
-    /// path can drain the channel; today the manager just drops the
-    /// receiver to signal completion.
-    #[allow(dead_code)]
-    pub(crate) dialog_event_receiver: Arc<tokio::sync::RwLock<Option<mpsc::Receiver<DialogEvent>>>>,
 
     /// Shutdown signal for global event processor
     pub(crate) shutdown_signal: Arc<tokio::sync::Notify>,
@@ -1163,9 +1159,10 @@ impl DialogManager {
             session_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_to_session: Arc::new(DashMap::with_capacity(index_capacity)),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(test)]
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(test)]
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
-            dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
             reliable_provisional_tasks:
@@ -1340,10 +1337,9 @@ impl DialogManager {
 
     /// Decision returned by [`Self::run_identity_verification`].
     ///
-    /// Owned by [`crate::manager`] (re-exported) so both publish paths
-    /// — [`DialogEventAdapter`](crate::events::DialogEventAdapter) and
-    /// [`DialogEventHub`](crate::events::DialogEventHub) — apply the
-    /// same RFC 8224 §6.2.2 reject contract.
+    /// Owned by [`crate::manager`] so the one
+    /// [`DialogEventHub`](crate::events::DialogEventHub) publish path applies
+    /// the RFC 8224 §6.2.2 reject contract.
     pub async fn run_identity_verification(
         &self,
         event: &crate::events::SessionCoordinationEvent,
@@ -1901,9 +1897,10 @@ impl DialogManager {
             session_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_to_session: Arc::new(DashMap::with_capacity(index_capacity)),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(test)]
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            #[cfg(test)]
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
-            dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
             reliable_provisional_tasks:
@@ -2270,12 +2267,48 @@ impl DialogManager {
             _ => {}
         }
 
-        if matches!(
-            self.handle_invite_failover_event(&event).await,
-            super::transaction_integration::InviteFailoverEventDisposition::Consumed
-        ) {
-            return;
+        // Response-derived NAT, Service-Route, GRUU, and outbound-flow state
+        // is protocol metadata, not a second dialog response state machine.
+        // Apply it once at the canonical transaction-event ingress, including
+        // responses that have no dialog mapping or are consumed by INVITE
+        // failover.
+        match &event {
+            TransactionEvent::ProvisionalResponse {
+                transaction_id,
+                response,
+            }
+            | TransactionEvent::FailureResponse {
+                transaction_id,
+                response,
+            }
+            | TransactionEvent::SuccessResponse {
+                transaction_id,
+                response,
+                ..
+            } => {
+                crate::protocol::response_handler::apply_response_protocol_metadata(
+                    self,
+                    response,
+                    transaction_id,
+                )
+                .await;
+            }
+            _ => {}
         }
+
+        let (selected_success_delivery, cancel_terminal_delivery) =
+            match self.handle_invite_failover_event(&event).await {
+            super::transaction_integration::InviteFailoverEventDisposition::Consumed => return,
+            super::transaction_integration::InviteFailoverEventDisposition::Continue => {
+                (None, None)
+            }
+            super::transaction_integration::InviteFailoverEventDisposition::ContinueSelectedSuccess(
+                claim,
+            ) => (Some(claim), None),
+            super::transaction_integration::InviteFailoverEventDisposition::ContinueCancelTerminal(
+                claim,
+            ) => (None, Some(claim)),
+        };
 
         if matches!(
             &event,
@@ -2297,7 +2330,13 @@ impl DialogManager {
         // Find the dialog associated with this transaction
         if let Some(dialog_id) = dialog_id {
             if let Err(_error) = self
-                .process_transaction_event(&transaction_id, &dialog_id, event)
+                .process_transaction_event_with_causal_delivery(
+                    &transaction_id,
+                    &dialog_id,
+                    event,
+                    selected_success_delivery,
+                    cancel_terminal_delivery,
+                )
                 .await
             {
                 error!(
@@ -2305,45 +2344,23 @@ impl DialogManager {
                     dialog_id
                 );
             }
+        } else if matches!(&event, TransactionEvent::AckReceived { .. }) {
+            // A 2xx ACK is emitted by transaction-core with the exact matched
+            // server INVITE key. Never recover a missing authoritative binding
+            // by independently matching request tags: that could route a stale
+            // ACK into a newer dialog generation.
+            warn!(
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id),
+                "Dropping ACK whose exact server INVITE has no dialog binding"
+            );
         } else {
-            // No dialog found using transaction-to-dialog mapping
-
-            // Special handling for AckReceived events: use dialog-based matching
-            if let TransactionEvent::AckReceived { request, .. } = &event {
-                // Find dialog using Call-ID, From tag, To tag from the ACK request
-                let lookup_started = crate::diagnostics::dialog_timing_enabled().then(Instant::now);
-                let dialog_id = self.find_dialog_for_request(request).await;
-                if let Some(started) = lookup_started {
-                    crate::diagnostics::record_dialog_lookup(started.elapsed());
-                }
-                if let Some(dialog_id) = dialog_id {
-                    if let Err(_error) = self
-                        .process_transaction_event(&transaction_id, &dialog_id, event)
-                        .await
-                    {
-                        error!(
-                            "Failed to process AckReceived event for dialog {}",
-                            dialog_id
-                        );
-                    }
-                } else {
-                    // Still treat as unassociated event
-                    if let Err(_error) = self
-                        .handle_unassociated_transaction_event(&transaction_id, event)
-                        .await
-                    {
-                        error!("Failed to handle unassociated AckReceived event");
-                    }
-                }
-            } else {
-                // Event for transaction not associated with any dialog
-                // Check if this is a new incoming INVITE that should create a dialog
-                if let Err(_error) = self
-                    .handle_unassociated_transaction_event(&transaction_id, event)
-                    .await
-                {
-                    error!("Failed to handle unassociated transaction event");
-                }
+            // Event for transaction not associated with any dialog. Check if
+            // this is a new incoming request that should create a dialog.
+            if let Err(_error) = self
+                .handle_unassociated_transaction_event(&transaction_id, event)
+                .await
+            {
+                error!("Failed to handle unassociated transaction event");
             }
         }
     }
@@ -2652,28 +2669,9 @@ impl DialogManager {
                             message: "Failed to find INVITE server transaction for CANCEL"
                                 .to_string(),
                         })?;
-
-                    if let Some(invite_tx_id) = invite_tx_id {
-                        return self
-                            .handle_cancel_request_event(transaction_id, &invite_tx_id, request)
-                            .await;
-                    }
-
-                    let response = crate::transaction::utils::response_builders::create_response(
-                        &request,
-                        rvoip_sip_core::StatusCode::CallOrTransactionDoesNotExist,
-                    );
-                    self.transaction_manager
-                        .send_response(transaction_id, response)
-                        .await
-                        .map_err(|_error| DialogError::TransactionError {
-                            message: "Failed to send 481 response to CANCEL".to_string(),
-                        })?;
-                    let _ = self
-                        .transaction_manager
-                        .terminate_transaction(transaction_id)
+                    return self
+                        .handle_cancel_request_event(transaction_id, invite_tx_id.as_ref(), request)
                         .await;
-                    return Ok(());
                 }
 
                 // For REFER requests, check if they belong to an existing dialog
@@ -2709,8 +2707,12 @@ impl DialogManager {
                 ..
             } => {
                 debug!("Processing unassociated CANCEL request from transaction");
-                self.handle_cancel_request_event(transaction_id, &target_transaction_id, request)
-                    .await
+                self.handle_cancel_request_event(
+                    transaction_id,
+                    Some(&target_transaction_id),
+                    request,
+                )
+                .await
             }
 
             _ => {
@@ -2724,12 +2726,34 @@ impl DialogManager {
         }
     }
 
-    async fn handle_cancel_request_event(
+    /// Materialize the one authoritative UAS response sequence for an inbound
+    /// CANCEL transaction. Both transaction-event ingress and the direct
+    /// protocol facade delegate here; neither caller writes SIP responses.
+    pub(crate) async fn handle_cancel_request_event(
         &self,
         cancel_tx_id: &TransactionKey,
-        invite_tx_id: &TransactionKey,
+        invite_tx_id: Option<&TransactionKey>,
         request: Request,
     ) -> DialogResult<()> {
+        let Some(invite_tx_id) = invite_tx_id else {
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                rvoip_sip_core::StatusCode::CallOrTransactionDoesNotExist,
+            );
+            self.transaction_manager
+                .send_response(cancel_tx_id, response)
+                .await
+                .map_err(|_error| DialogError::TransactionError {
+                    message: "Failed to send 481 response to CANCEL".to_string(),
+                })?;
+            let _ = self
+                .transaction_manager
+                .terminate_transaction(cancel_tx_id)
+                .await;
+            debug!("CANCEL processed with 481 response (no matching INVITE)");
+            return Ok(());
+        };
+
         let ok = crate::transaction::utils::response_builders::create_response(
             &request,
             rvoip_sip_core::StatusCode::Ok,
@@ -2763,8 +2787,11 @@ impl DialogManager {
                 message: "Failed to send 487 Request Terminated".to_string(),
             })?;
 
-        self.terminate_dialog_for_tx_and_emit_cancelled(invite_tx_id, "CANCEL received")
-            .await;
+        self.terminate_dialog_for_tx_and_emit_cancelled_authoritative(
+            invite_tx_id,
+            "CANCEL received",
+        )
+        .await?;
 
         debug!("CANCEL processed for INVITE server transaction (200 CANCEL, 487 INVITE sent)");
         Ok(())
@@ -2866,25 +2893,19 @@ impl DialogManager {
     /// This maintains the proper architectural separation where dialog-core handles
     /// SIP protocol details and session-core handles session logic.
     pub async fn emit_dialog_event(&self, event: DialogEvent) {
-        // Try event hub first (new global event bus)
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
             if let Err(_error) = hub.publish_dialog_event(event.clone()).await {
-                warn!("Failed to publish dialog event to global bus");
+                warn!("Authoritative dialog event delivery failed");
             } else {
-                debug!("Published dialog event to global bus");
-                return;
+                debug!("Delivered dialog event to the authoritative session handler");
             }
+        } else {
+            warn!("No authoritative route for dialog event");
         }
-
-        // Fall back to channel (legacy)
-        let sender = self.dialog_event_sender.read().await.clone();
-        if let Some(sender) = sender {
-            if let Err(_error) = sender.send(event.clone()).await {
-                warn!("Failed to send dialog event to session-core");
-            } else {
-                debug!("Emitted dialog event");
-            }
+        #[cfg(test)]
+        if let Some(sender) = self.dialog_event_sender.read().await.clone() {
+            let _ = sender.send(event).await;
         }
     }
 
@@ -2901,14 +2922,13 @@ impl DialogManager {
             session_coordination_event_kind(&event)
         );
 
-        // Try event hub first (new global event bus)
         let hub = self.event_hub.read().await.clone();
         if let Some(hub) = hub {
-            trace!("Event hub exists, publishing session coordination event");
+            trace!("Delivering session coordination event to authoritative handler");
             if let Err(_error) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!("Failed to publish session coordination event to global bus");
+                warn!("Authoritative session coordination delivery failed");
             } else {
-                trace!("Published session coordination event to global bus");
+                trace!("Delivered session coordination event");
                 if let Some(started) = publish_started {
                     crate::diagnostics::record_dialog_session_publish(
                         publish_kind.expect("timed session coordination event kind"),
@@ -2918,20 +2938,11 @@ impl DialogManager {
                 return;
             }
         } else {
-            trace!("Event hub is None, trying legacy session channel");
+            warn!("No authoritative route for session coordination event");
         }
-
-        // Fall back to channel (legacy)
-        let sender = self.session_coordinator.read().await.clone();
-        if let Some(sender) = sender {
-            trace!("Legacy session channel exists, sending event");
-            if let Err(_error) = sender.send(event.clone()).await {
-                warn!("Failed to send session coordination event");
-            } else {
-                trace!("Emitted session coordination event to legacy channel");
-            }
-        } else {
-            warn!("Both event hub and legacy channel are None - event not sent");
+        #[cfg(test)]
+        if let Some(sender) = self.session_coordinator.read().await.clone() {
+            let _ = sender.send(event).await;
         }
         if let Some(started) = publish_started {
             crate::diagnostics::record_dialog_session_publish(
@@ -2943,7 +2954,7 @@ impl DialogManager {
 
     /// Deliver the internal BYE cleanup command through an acknowledged
     /// dialog-to-session route. Public event subscribers are observational;
-    /// only the direct cross-crate handler or legacy session queue can satisfy
+    /// only the direct cross-crate handler can satisfy
     /// this protocol boundary. A dialog without a session mapping has no
     /// session owner to notify and is therefore already complete.
     pub(crate) async fn deliver_bye_received_authoritative(
@@ -2972,22 +2983,23 @@ impl DialogManager {
             };
         }
 
-        let sender = self.session_coordinator.read().await.clone();
-        let Some(sender) = sender else {
-            return Err(DialogError::InternalError {
-                message: "No authoritative session route for ByeReceived".into(),
-                context: None,
-            });
-        };
-        sender
-            .send(SessionCoordinationEvent::ByeReceived {
-                dialog_id: dialog_id.clone(),
-            })
-            .await
-            .map_err(|_| DialogError::InternalError {
-                message: "Authoritative ByeReceived session route closed".into(),
-                context: None,
-            })
+        #[cfg(test)]
+        if let Some(sender) = self.session_coordinator.read().await.clone() {
+            return sender
+                .send(SessionCoordinationEvent::ByeReceived {
+                    dialog_id: dialog_id.clone(),
+                })
+                .await
+                .map_err(|_| DialogError::InternalError {
+                    message: "Test ByeReceived session route closed".into(),
+                    context: None,
+                });
+        }
+
+        Err(DialogError::InternalError {
+            message: "No authoritative session route for ByeReceived".into(),
+            context: None,
+        })
     }
 
     /// Try to emit a session coordination event and report whether any session
@@ -2999,44 +3011,25 @@ impl DialogManager {
         &self,
         event: SessionCoordinationEvent,
     ) -> DialogResult<bool> {
-        // Try the legacy in-process session_coordinator first — it
-        // signals "definite consumer" because the receiver is held by
-        // the application (rather than the event-hub fan-out which can
-        // succeed even when no subscriber is listening). This is the
-        // path the OPTIONS-fallback test relies on: in test setups
-        // without a session_coordinator wired, the protocol handler
-        // must observe `false` here and emit a basic 200 OK locally.
-        let mut delivered = false;
-        let sender = self.session_coordinator.read().await.clone();
-        if let Some(sender) = sender {
-            match sender.send(event.clone()).await {
-                Ok(()) => delivered = true,
-                Err(_error) => {
-                    warn!("Failed to send session coordination event");
-                }
-            }
-        }
-
-        // Best-effort fan-out via the event hub. Success here is not
-        // sufficient to claim "consumer exists" because the global bus
-        // accepts publishes whether or not any subscriber is wired.
         let hub = self.event_hub.read().await.clone();
-        if let Some(hub) = hub {
-            match hub
-                .try_publish_session_coordination_event(event.clone())
-                .await
-            {
-                Ok(true) | Ok(false) => {
-                    // either mapped or not; either way the in-process
-                    // delivered flag above is the authoritative signal.
-                }
-                Err(_error) => {
-                    warn!("Failed to publish session coordination event to global bus");
-                }
+        let Some(hub) = hub else {
+            #[cfg(test)]
+            if let Some(sender) = self.session_coordinator.read().await.clone() {
+                return sender.send(event).await.map(|_| true).map_err(|_| {
+                    DialogError::InternalError {
+                        message: "Test session coordination route closed".into(),
+                        context: None,
+                    }
+                });
             }
-        }
-
-        Ok(delivered)
+            return Ok(false);
+        };
+        hub.try_publish_session_coordination_event(event)
+            .await
+            .map_err(|error| DialogError::InternalError {
+                message: format!("Authoritative session coordination failed: {error}"),
+                context: None,
+            })
     }
 
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
@@ -3099,12 +3092,11 @@ impl DialogManager {
             Method::Notify => self.handle_notify(request, source).await,
             Method::Prack => self.handle_prack(request).await,
             Method::Message => {
-                // RFC 3428 — MESSAGE is a fire-and-forget transport.  The
-                // transaction layer owns the immediate response, while an
-                // in-dialog request must also reach session-core so adapters
-                // can surface its byte-exact body as a DataMessage.  An
-                // out-of-dialog MESSAGE still creates no dialog state.
-                debug!("Replying 200 OK to inbound MESSAGE from {}", source);
+                // RFC 3428 success means the UAS accepted the message. For an
+                // attached dialog, exact session delivery is therefore causal
+                // and precedes the one 200 response. Standalone inbound
+                // MESSAGE remains sessionless; without a standalone consumer
+                // it is rejected instead of fabricating delivery.
                 let server_transaction = self
                     .transaction_manager
                     .create_server_transaction(request.clone(), source)
@@ -3113,26 +3105,60 @@ impl DialogManager {
                         message: "Failed to create server transaction for MESSAGE".to_string(),
                     })?;
                 let transaction_id = server_transaction.id().clone();
-                let response = crate::transaction::utils::response_builders::create_response(
-                    &request,
-                    rvoip_sip_core::StatusCode::Ok,
-                );
-                if let Err(_error) = self
-                    .transaction_manager
-                    .send_response(&transaction_id, response)
-                    .await
+                let accepted = if let Some(dialog_id) = self.find_dialog_for_request(&request).await
                 {
-                    debug!("Failed to send 200 OK for MESSAGE");
-                }
-
-                if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
                     self.notify_session_layer(crate::events::SessionCoordinationEvent::ReInvite {
                         dialog_id,
-                        transaction_id,
-                        request,
+                        transaction_id: transaction_id.clone(),
+                        request: request.clone(),
                     })
                     .await?;
-                }
+                    true
+                } else {
+                    // Standalone MESSAGE is transaction-owned and has no
+                    // SessionState. Deliver its byte-exact application fact
+                    // through the existing sessionless MessageReceived shape.
+                    let raw_request = self
+                        .transaction_manager
+                        .take_inbound_bytes(&transaction_id)
+                        .or_else(|| Some(bytes::Bytes::from(request.to_bytes())));
+                    let transport = self
+                        .transaction_manager
+                        .take_inbound_transport(&transaction_id);
+                    let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
+                        rvoip_infra_common::events::cross_crate::DialogToSessionEvent::MessageReceived {
+                            session_id: String::new(),
+                            raw_request,
+                            transport,
+                        },
+                    );
+                    match self.event_hub.read().await.as_ref().cloned() {
+                        Some(hub) => {
+                            hub.try_publish_cross_crate_event(event)
+                                .await
+                                .map_err(|_error| {
+                                    DialogError::routing_error(
+                                        "standalone MESSAGE application handler failed",
+                                    )
+                                })?
+                        }
+                        None => false,
+                    }
+                };
+                let response = crate::transaction::utils::response_builders::create_response(
+                    &request,
+                    if accepted {
+                        rvoip_sip_core::StatusCode::Ok
+                    } else {
+                        rvoip_sip_core::StatusCode::TemporarilyUnavailable
+                    },
+                );
+                self.transaction_manager
+                    .send_response(&transaction_id, response)
+                    .await
+                    .map_err(|_error| DialogError::TransactionError {
+                        message: "Failed to send final response for MESSAGE".to_string(),
+                    })?;
                 Ok(())
             }
             method => {
@@ -3225,6 +3251,13 @@ impl DialogManager {
                 message: "BYE cleanup tasks did not drain during shutdown".to_string(),
                 context: None,
             })?;
+
+        // RFC 6665 expiry tasks own subscription termination. Close their
+        // admission and observe completion before clearing the dialog store,
+        // otherwise a retained expiry generation could terminate after stop.
+        if let Some(subscription_manager) = &self.subscription_manager {
+            subscription_manager.close_expiry_tasks().await?;
+        }
 
         // Reliable provisional tasks may still call TransactionManager for a
         // retransmit. Close admission and observe every pending/active task's
@@ -3955,7 +3988,9 @@ impl DialogManager {
             .unwrap_or(false)
     }
 
-    /// Check if auto-response to REGISTER requests is enabled
+    /// Check whether the legacy automatic 501 REGISTER rejection is enabled.
+    ///
+    /// This flag never authorizes a fabricated registrar-success response.
     pub fn should_auto_respond_to_register(&self) -> bool {
         self.config
             .read()
@@ -4343,78 +4378,19 @@ impl DialogManager {
         content_type: String,
         body: bytes::Bytes,
     ) -> DialogResult<TransactionKey> {
-        use crate::transaction::dialog::quick as dialog_quick;
-
         debug!(
             "Sending INFO with Content-Type: {} for dialog {}",
             content_type, dialog_id
         );
-
-        let (candidates, request) = {
-            let mut dialog = self.get_dialog_mut(dialog_id)?;
-
-            let template = dialog.create_request_template(Method::Info);
-
-            let local_tag = match template.local_tag {
-                Some(tag) if !tag.is_empty() => tag,
-                _ => {
-                    let new_tag = dialog.generate_local_tag();
-                    dialog.local_tag = Some(new_tag.clone());
-                    new_tag
-                }
-            };
-
-            let remote_tag = template
-                .remote_tag
-                .filter(|t| !t.is_empty())
-                .ok_or_else(|| {
-                    DialogError::protocol_error("INFO requires remote tag in established dialog")
-                })?;
-
-            let body_str = String::from_utf8_lossy(&body).into_owned();
-            let request = dialog_quick::info_for_dialog(
-                &template.call_id,
-                &template.local_uri.to_string(),
-                &local_tag,
-                &template.remote_uri.to_string(),
-                &remote_tag,
-                body_str,
-                Some(content_type),
-                template.cseq_number,
-                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set),
-                if template.route_set.is_empty() {
-                    None
-                } else {
-                    Some(template.route_set.clone())
-                },
-            )
-            .map_err(|_error| DialogError::InternalError {
-                message: "Failed to build INFO request".to_string(),
-                context: None,
-            })?;
-
-            let next_hop =
-                crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(
-                    &request,
-                )
-                .map_err(|_| {
-                    DialogError::routing_error("INFO contains an unusable Route header")
-                })?;
-            let candidates = self.resolve_uri_to_candidates(&next_hop).await;
-            if candidates.is_empty() {
-                return Err(DialogError::routing_error(
-                    "No address candidates for the exact INFO next hop",
-                ));
-            }
-
-            (candidates, request)
-        };
-
-        let (transaction_id, _) = self
-            .send_request_with_candidate_failover(request, candidates, Some(dialog_id))
-            .await?;
-
-        Ok(transaction_id)
+        self.send_info_request_snapshot(
+            dialog_id,
+            super::transaction_integration::InfoRequestSnapshot::legacy_with_content_type(
+                content_type,
+                body,
+                Vec::new(),
+            ),
+        )
+        .await
     }
 
     pub async fn send_response(
@@ -4606,6 +4582,36 @@ mod outbound_flow_handler_tests {
     use std::time::Duration;
 
     #[test]
+    fn inbound_message_has_causal_delivery_and_one_final_response() {
+        let source = include_str!("core.rs");
+        let handler = source
+            .split("Method::Message => {")
+            .nth(1)
+            .and_then(|tail| tail.split("method => {").next())
+            .expect("MESSAGE request handler source");
+
+        assert!(handler.contains("notify_session_layer("));
+        assert!(handler.contains("try_publish_cross_crate_event(event)"));
+        assert!(handler.contains("session_id: String::new()"));
+        assert!(handler.contains("StatusCode::TemporarilyUnavailable"));
+        assert_eq!(
+            handler
+                .matches(".send_response(&transaction_id, response)")
+                .count(),
+            1
+        );
+        let response = handler.find("create_response(").expect("final response");
+        assert!(handler.find("notify_session_layer(").unwrap() < response);
+        assert!(
+            handler
+                .find("try_publish_cross_crate_event(event)")
+                .unwrap()
+                < response
+        );
+        assert!(!handler.contains("Failed to send 200 OK for MESSAGE"));
+    }
+
+    #[test]
     fn outbound_transport_lookup_keys_match_response_identity() {
         let request = SimpleRequestBuilder::new(Method::Register, "sip:registrar.example.com")
             .unwrap()
@@ -4635,12 +4641,174 @@ mod outbound_flow_handler_tests {
         closed: AtomicBool,
     }
 
+    #[derive(Debug)]
+    struct CancelRecordingTransport {
+        addr: SocketAddr,
+        closed: AtomicBool,
+        sent: tokio::sync::Mutex<Vec<(rvoip_sip_core::Message, SocketAddr)>>,
+    }
+
+    #[derive(Debug)]
+    struct SelectedSuccessTransport {
+        addr: SocketAddr,
+        closed: AtomicBool,
+        fail_next_ack: AtomicBool,
+        ack_attempts: AtomicUsize,
+        ack_successes: AtomicUsize,
+    }
+
+    impl SelectedSuccessTransport {
+        fn new(fail_first_ack: bool) -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                closed: AtomicBool::new(false),
+                fail_next_ack: AtomicBool::new(fail_first_ack),
+                ack_attempts: AtomicUsize::new(0),
+                ack_successes: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct SelectedSuccessHandler {
+        fail_next_delivery: Arc<AtomicBool>,
+        delivery_attempts: Arc<AtomicUsize>,
+        delivery_successes: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct CancelLifecycleHandler {
+        deliveries: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl rvoip_infra_common::events::coordinator::CrossCrateEventHandler for CancelLifecycleHandler {
+        async fn handle(
+            &self,
+            event: Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>,
+        ) -> anyhow::Result<()> {
+            use rvoip_infra_common::events::cross_crate::{
+                DialogToSessionEvent, RvoipCrossCrateEvent,
+            };
+
+            if matches!(
+                event.as_any().downcast_ref::<RvoipCrossCrateEvent>(),
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::CallCancelled { .. }
+                ))
+            ) {
+                self.deliveries.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl rvoip_infra_common::events::coordinator::CrossCrateEventHandler for SelectedSuccessHandler {
+        async fn handle(
+            &self,
+            event: Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>,
+        ) -> anyhow::Result<()> {
+            use rvoip_infra_common::events::cross_crate::{
+                DialogToSessionEvent, RvoipCrossCrateEvent,
+            };
+
+            let is_call_established = matches!(
+                event.as_any().downcast_ref::<RvoipCrossCrateEvent>(),
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::CallEstablished { .. }
+                ))
+            );
+            if !is_call_established {
+                return Ok(());
+            }
+
+            self.delivery_attempts.fetch_add(1, Ordering::AcqRel);
+            if self.fail_next_delivery.swap(false, Ordering::AcqRel) {
+                return Err(anyhow::anyhow!(
+                    "injected selected-success delivery failure"
+                ));
+            }
+            self.delivery_successes.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    impl CancelRecordingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+                closed: AtomicBool::new(false),
+                sent: tokio::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        async fn response_signature(&self) -> Vec<(u16, Method, u32, String, SocketAddr)> {
+            self.sent
+                .lock()
+                .await
+                .iter()
+                .filter_map(|(message, destination)| match message {
+                    rvoip_sip_core::Message::Response(response) => {
+                        let cseq = response.cseq().expect("CANCEL response CSeq");
+                        Some((
+                            response.status_code(),
+                            cseq.method.clone(),
+                            cseq.seq,
+                            response
+                                .call_id()
+                                .expect("CANCEL response Call-ID")
+                                .as_str()
+                                .to_string(),
+                            *destination,
+                        ))
+                    }
+                    rvoip_sip_core::Message::Request(_) => None,
+                })
+                .collect()
+        }
+    }
+
     impl NoopTransport {
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 addr: SocketAddr::from_str("127.0.0.1:5060").unwrap(),
                 closed: AtomicBool::new(false),
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for SelectedSuccessTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: rvoip_sip_core::Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            if matches!(
+                &message,
+                rvoip_sip_core::Message::Request(request) if request.method() == Method::Ack
+            ) {
+                self.ack_attempts.fetch_add(1, Ordering::AcqRel);
+                if self.fail_next_ack.swap(false, Ordering::AcqRel) {
+                    return Err(rvoip_sip_transport::Error::TransportClosed);
+                }
+                self.ack_successes.fetch_add(1, Ordering::AcqRel);
+            }
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::Acquire)
         }
     }
 
@@ -4728,6 +4896,31 @@ mod outbound_flow_handler_tests {
         }
     }
 
+    #[async_trait::async_trait]
+    impl Transport for CancelRecordingTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: rvoip_sip_core::Message,
+            destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.sent.lock().await.push((message, destination));
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
     async fn make_manager() -> (DialogManager, mpsc::Receiver<SessionCoordinationEvent>) {
         let transport = NoopTransport::new();
         let (_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
@@ -4751,6 +4944,303 @@ mod outbound_flow_handler_tests {
         *manager.session_coordinator.write().await = Some(sc_tx);
 
         (manager, sc_rx)
+    }
+
+    async fn make_selected_success_manager(
+        fail_first_ack: bool,
+        fail_first_delivery: bool,
+    ) -> (
+        DialogManager,
+        Arc<SelectedSuccessTransport>,
+        Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
+        SelectedSuccessHandler,
+    ) {
+        use rvoip_infra_common::events::{EventCoordinatorConfig, GlobalEventCoordinator};
+
+        let transport = SelectedSuccessTransport::new(fail_first_ack);
+        let transaction_transport: Arc<dyn Transport> = transport.clone();
+        let (_transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let (transaction_manager, mut transaction_events) =
+            TransactionManager::new(transaction_transport, transport_rx, Some(16))
+                .await
+                .expect("build selected-success TransactionManager");
+        tokio::spawn(async move { while transaction_events.recv().await.is_some() {} });
+
+        let manager = DialogManager::new(
+            Arc::new(transaction_manager),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+        )
+        .await
+        .expect("build selected-success DialogManager");
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .expect("build selected-success coordinator"),
+        );
+        let handler = SelectedSuccessHandler {
+            fail_next_delivery: Arc::new(AtomicBool::new(fail_first_delivery)),
+            delivery_attempts: Arc::new(AtomicUsize::new(0)),
+            delivery_successes: Arc::new(AtomicUsize::new(0)),
+        };
+        coordinator
+            .register_handler("dialog_to_session", handler.clone())
+            .await
+            .expect("register selected-success handler");
+        let event_hub =
+            crate::events::DialogEventHub::new(coordinator.clone(), Arc::new(manager.clone()))
+                .await
+                .expect("build selected-success event hub");
+        manager.set_event_hub(event_hub).await;
+
+        (manager, transport, coordinator, handler)
+    }
+
+    #[derive(Clone, Copy)]
+    enum CancelIngress {
+        DirectFacade,
+        TransactionEvent,
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct CancelObservation {
+        wire: Vec<(u16, Method, u32, String, SocketAddr)>,
+        published_request_events: usize,
+        call_cancelled_events: usize,
+        dialog_state: Option<DialogState>,
+    }
+
+    fn inbound_cancel_requests() -> (Request, Request, SocketAddr) {
+        const BRANCH: &str = "z9hG4bK-single-cancel-writer";
+        const CALL_ID: &str = "single-cancel-writer-call";
+        let source = SocketAddr::from_str("127.0.0.1:5070").unwrap();
+        let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-cancel"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id(CALL_ID)
+            .cseq(7)
+            .via("127.0.0.1:5070", "UDP", Some(BRANCH))
+            .max_forwards(70)
+            .build();
+        let cancel = SimpleRequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-cancel"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id(CALL_ID)
+            .cseq(7)
+            .via("127.0.0.1:5070", "UDP", Some(BRANCH))
+            .max_forwards(70)
+            .build();
+        (invite, cancel, source)
+    }
+
+    async fn observe_inbound_cancel(matched: bool, ingress: CancelIngress) -> CancelObservation {
+        let transport = CancelRecordingTransport::new();
+        let (_transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(16);
+        let mut timer_settings = crate::transaction::timer::TimerSettings::default();
+        timer_settings.timer_100_interval = Duration::ZERO;
+        let (transaction_manager, mut transaction_events) = TransactionManager::new_with_config(
+            transport.clone(),
+            transport_rx,
+            Some(64),
+            Some(timer_settings),
+        )
+        .await
+        .expect("build CANCEL TransactionManager");
+        let manager = DialogManager::new(
+            Arc::new(transaction_manager),
+            SocketAddr::from_str("127.0.0.1:5060").unwrap(),
+        )
+        .await
+        .expect("build CANCEL DialogManager");
+        let cancel_deliveries = Arc::new(AtomicUsize::new(0));
+        let coordinator = Arc::new(
+            rvoip_infra_common::events::coordinator::GlobalEventCoordinator::new(
+                rvoip_infra_common::events::EventCoordinatorConfig::monolithic(),
+            )
+            .await
+            .expect("build CANCEL event coordinator"),
+        );
+        coordinator
+            .register_handler(
+                "dialog_to_session",
+                CancelLifecycleHandler {
+                    deliveries: cancel_deliveries.clone(),
+                },
+            )
+            .await
+            .expect("register authoritative CANCEL lifecycle handler");
+        let event_hub = crate::events::DialogEventHub::new(coordinator, Arc::new(manager.clone()))
+            .await
+            .expect("build authoritative CANCEL event hub");
+        manager.set_event_hub(event_hub).await;
+
+        let (invite, cancel, source) = inbound_cancel_requests();
+        let mut invite_tx_id = None;
+        let mut dialog_id = None;
+        if matched {
+            let invite_transaction = manager
+                .transaction_manager()
+                .create_server_transaction_deferred_events(invite.clone(), source)
+                .await
+                .expect("create pending INVITE server transaction");
+            invite_tx_id = Some(invite_transaction.id().clone());
+
+            let mut dialog = Dialog::new(
+                "single-cancel-writer-call".to_string(),
+                "sip:bob@example.com".parse().unwrap(),
+                "sip:alice@example.com".parse().unwrap(),
+                Some("bob-cancel".to_string()),
+                Some("alice-cancel".to_string()),
+                false,
+            );
+            dialog.state = DialogState::Early;
+            let stored_dialog_id = dialog.id.clone();
+            manager
+                .store_dialog(dialog)
+                .await
+                .expect("store early dialog");
+            manager.store_dialog_mapping(
+                "single-cancel-writer-session",
+                stored_dialog_id.clone(),
+                invite_tx_id.as_ref().expect("pending INVITE key").clone(),
+                invite,
+                source,
+            );
+            dialog_id = Some(stored_dialog_id);
+        }
+
+        let mut published_request_events = 0;
+        match ingress {
+            CancelIngress::DirectFacade => manager
+                .handle_cancel(cancel)
+                .await
+                .expect("direct CANCEL facade"),
+            CancelIngress::TransactionEvent => {
+                let cancel_transaction = manager
+                    .transaction_manager()
+                    .create_server_transaction(cancel, source)
+                    .await
+                    .expect("create event-path CANCEL server transaction");
+                let cancel_tx_id = cancel_transaction.id().clone();
+                let event = tokio::time::timeout(Duration::from_millis(250), async {
+                    loop {
+                        match transaction_events.recv().await {
+                            Some(event)
+                                if matches!(
+                                    &event,
+                                    TransactionEvent::CancelRequest { .. }
+                                        | TransactionEvent::NonInviteRequest { .. }
+                                ) =>
+                            {
+                                break event;
+                            }
+                            Some(_) => continue,
+                            None => panic!("event-path CANCEL publication channel closed"),
+                        }
+                    }
+                })
+                .await
+                .expect("event-path CANCEL publication");
+                match (matched, &event) {
+                    (
+                        true,
+                        TransactionEvent::CancelRequest {
+                            target_transaction_id,
+                            ..
+                        },
+                    ) => assert_eq!(
+                        Some(target_transaction_id),
+                        invite_tx_id.as_ref(),
+                        "matched CANCEL must target the pending server INVITE",
+                    ),
+                    (false, TransactionEvent::NonInviteRequest { .. }) => {}
+                    (true, other) => panic!("matched CANCEL misclassified as {other:?}"),
+                    (false, other) => panic!("unmatched CANCEL misclassified as {other:?}"),
+                }
+                published_request_events += 1;
+                manager
+                    .handle_unassociated_transaction_event(&cancel_tx_id, event)
+                    .await
+                    .expect("transaction-event CANCEL path");
+            }
+        }
+
+        while let Ok(event) = transaction_events.try_recv() {
+            if matches!(
+                event,
+                TransactionEvent::CancelRequest { .. } | TransactionEvent::NonInviteRequest { .. }
+            ) {
+                published_request_events += 1;
+            }
+        }
+        let call_cancelled_events = cancel_deliveries.load(Ordering::Acquire);
+
+        CancelObservation {
+            wire: transport.response_signature().await,
+            published_request_events,
+            call_cancelled_events,
+            dialog_state: dialog_id
+                .as_ref()
+                .map(|dialog_id| manager.get_dialog_state(dialog_id).expect("stored dialog")),
+        }
+    }
+
+    #[tokio::test]
+    async fn matched_cancel_direct_and_event_ingress_have_one_identical_response_sequence() {
+        let direct = observe_inbound_cancel(true, CancelIngress::DirectFacade).await;
+        let event = observe_inbound_cancel(true, CancelIngress::TransactionEvent).await;
+
+        assert_eq!(direct.wire, event.wire);
+        assert_eq!(direct.call_cancelled_events, event.call_cancelled_events);
+        assert_eq!(direct.dialog_state, event.dialog_state);
+        assert_eq!(
+            direct.wire,
+            vec![
+                (
+                    200,
+                    Method::Cancel,
+                    7,
+                    "single-cancel-writer-call".to_string(),
+                    SocketAddr::from_str("127.0.0.1:5070").unwrap(),
+                ),
+                (
+                    487,
+                    Method::Invite,
+                    7,
+                    "single-cancel-writer-call".to_string(),
+                    SocketAddr::from_str("127.0.0.1:5070").unwrap(),
+                ),
+            ]
+        );
+        assert_eq!(direct.published_request_events, 0);
+        assert_eq!(event.published_request_events, 1);
+        assert_eq!(direct.call_cancelled_events, 1);
+        assert_eq!(direct.dialog_state, Some(DialogState::Terminated));
+    }
+
+    #[tokio::test]
+    async fn unmatched_cancel_direct_and_event_ingress_have_one_identical_481() {
+        let direct = observe_inbound_cancel(false, CancelIngress::DirectFacade).await;
+        let event = observe_inbound_cancel(false, CancelIngress::TransactionEvent).await;
+
+        assert_eq!(direct.wire, event.wire);
+        assert_eq!(direct.call_cancelled_events, event.call_cancelled_events);
+        assert_eq!(direct.dialog_state, event.dialog_state);
+        assert_eq!(
+            direct.wire,
+            vec![(
+                481,
+                Method::Cancel,
+                7,
+                "single-cancel-writer-call".to_string(),
+                SocketAddr::from_str("127.0.0.1:5070").unwrap(),
+            )]
+        );
+        assert_eq!(direct.published_request_events, 0);
+        assert_eq!(event.published_request_events, 1);
+        assert_eq!(direct.call_cancelled_events, 0);
+        assert_eq!(direct.dialog_state, None);
     }
 
     async fn make_manager_with_global_processor() -> DialogManager {
@@ -5785,7 +6275,11 @@ mod outbound_flow_handler_tests {
             phase: InviteFailoverPlanPhase::Closed,
             retained_attempts: Box::new([]),
             accepted_candidate_index: None,
+            accepted_transaction: None,
             accepted_to_tag: None,
+            cancel_dispatch_state:
+                crate::manager::transaction_integration::InviteCancelDispatchState::Idle,
+            cancel_transaction: None,
             fork_cleanup: None,
             expires_at: Instant::now() - Duration::from_millis(1),
             expiry_generation: 0,
@@ -5808,6 +6302,12 @@ mod outbound_flow_handler_tests {
                 plan_id,
                 dialog_id: dialog_id.clone(),
                 candidate_index: 0,
+                selected_success_delivery:
+                    crate::manager::transaction_integration::SelectedInviteSuccessDelivery::default(
+                    ),
+                cancel_terminal_delivery:
+                    crate::manager::transaction_integration::SelectedInviteSuccessDelivery::default(
+                    ),
                 _admission_owner: None,
             },
         );
@@ -6533,6 +7033,12 @@ mod outbound_flow_handler_tests {
 
         let (manager, mut session_events) = make_manager().await;
         let dialog_id = DialogId::new();
+        manager
+            .session_to_dialog
+            .insert("internal-failure-session".to_string(), dialog_id.clone());
+        manager
+            .dialog_to_session
+            .insert(dialog_id.clone(), "internal-failure-session".to_string());
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
             .from(
@@ -6628,7 +7134,28 @@ mod outbound_flow_handler_tests {
     async fn cancelled_retained_invite_hands_terminal_487_to_dialog_once() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
-        let (manager, mut session_events) = make_manager().await;
+        let (manager, _session_events) = make_manager().await;
+        let cancel_deliveries = Arc::new(AtomicUsize::new(0));
+        let coordinator = Arc::new(
+            rvoip_infra_common::events::coordinator::GlobalEventCoordinator::new(
+                rvoip_infra_common::events::EventCoordinatorConfig::monolithic(),
+            )
+            .await
+            .expect("build terminal-CANCEL event coordinator"),
+        );
+        coordinator
+            .register_handler(
+                "dialog_to_session",
+                CancelLifecycleHandler {
+                    deliveries: cancel_deliveries.clone(),
+                },
+            )
+            .await
+            .expect("register terminal-CANCEL lifecycle handler");
+        let event_hub = crate::events::DialogEventHub::new(coordinator, Arc::new(manager.clone()))
+            .await
+            .expect("build terminal-CANCEL event hub");
+        manager.set_event_hub(event_hub).await;
         let mut dialog = Dialog::new(
             "retained-cancel-terminal".to_string(),
             "sip:alice@example.com".parse().unwrap(),
@@ -6673,6 +7200,13 @@ mod outbound_flow_handler_tests {
             .await
             .expect("request lookup")
             .expect("request retained");
+        manager.store_dialog_mapping(
+            "session-retained-cancel-terminal",
+            dialog_id.clone(),
+            transaction_id.clone(),
+            sent_request.clone(),
+            dest_addr(5093),
+        );
         let response = SimpleResponseBuilder::response_from_request(
             &sent_request,
             rvoip_sip_core::StatusCode::RequestTerminated,
@@ -6698,30 +7232,11 @@ mod outbound_flow_handler_tests {
             })
             .await;
 
-        let cancelled = tokio::time::timeout(Duration::from_millis(200), session_events.recv())
-            .await
-            .expect("CallCancelled must arrive")
-            .expect("session channel open");
-        assert!(matches!(
-            cancelled,
-            SessionCoordinationEvent::CallCancelled {
-                dialog_id: cancelled_dialog,
-                ..
-            } if cancelled_dialog == dialog_id
-        ));
-        let response_received =
-            tokio::time::timeout(Duration::from_millis(200), session_events.recv())
-                .await
-                .expect("ResponseReceived must arrive")
-                .expect("session channel open");
-        assert!(matches!(
-            response_received,
-            SessionCoordinationEvent::ResponseReceived {
-                dialog_id: response_dialog,
-                transaction_id: response_transaction,
-                ..
-            } if response_dialog == dialog_id && response_transaction == transaction_id
-        ));
+        assert_eq!(
+            cancel_deliveries.load(Ordering::Acquire),
+            1,
+            "487 must have one authoritative cancellation lifecycle projection"
+        );
 
         let plan = manager
             .invite_failover_plans
@@ -6730,8 +7245,8 @@ mod outbound_flow_handler_tests {
             .value()
             .clone();
         let plan = plan.lock().await;
-        assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
-        assert!(plan.current_transaction.is_none());
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+        assert_eq!(plan.current_transaction.as_deref(), Some(&transaction_id));
         assert!(plan.active_payload.is_none());
         drop(plan);
 
@@ -6741,11 +7256,21 @@ mod outbound_flow_handler_tests {
                 response,
             })
             .await;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), session_events.recv())
-                .await
-                .is_err(),
+        assert_eq!(
+            cancel_deliveries.load(Ordering::Acquire),
+            1,
             "duplicate 487 must not publish cancellation twice"
+        );
+
+        manager
+            .complete_wire_unknown_invite_for_dialog(&dialog_id)
+            .await;
+        assert!(!manager.invite_failover_plans.contains_key(&plan_id));
+        assert_eq!(
+            manager
+                .invite_failover_plan_reservations
+                .load(Ordering::Acquire),
+            0
         );
     }
 
@@ -6821,7 +7346,7 @@ mod outbound_flow_handler_tests {
             .value()
             .clone();
         let plan = plan.lock().await;
-        assert_eq!(plan.phase, InviteFailoverPlanPhase::Cancelled);
+        assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
         assert!(plan.active_payload.is_none());
         assert!((1..=2).contains(&plan.retained_attempts.len()));
         let current_transaction = plan
@@ -6893,7 +7418,10 @@ mod outbound_flow_handler_tests {
             .value()
             .clone();
         let cancel_first_plan = cancel_first_plan.lock().await;
-        assert_eq!(cancel_first_plan.phase, InviteFailoverPlanPhase::Cancelled);
+        assert_eq!(
+            cancel_first_plan.phase,
+            InviteFailoverPlanPhase::WireUnknown
+        );
         assert!(cancel_first_plan.active_payload.is_none());
         assert_eq!(cancel_first_plan.retained_attempts.len(), 1);
     }
@@ -6956,7 +7484,11 @@ mod outbound_flow_handler_tests {
                     phase: InviteFailoverPlanPhase::Active,
                     retained_attempts: Box::new([]),
                     accepted_candidate_index: None,
+                    accepted_transaction: None,
                     accepted_to_tag: None,
+                    cancel_dispatch_state:
+                        crate::manager::transaction_integration::InviteCancelDispatchState::Idle,
+                    cancel_transaction: None,
                     fork_cleanup: None,
                     expires_at: now + Duration::from_secs(90),
                     expiry_generation: 0,
@@ -6972,6 +7504,12 @@ mod outbound_flow_handler_tests {
                 plan_id: 1,
                 dialog_id: retained_dialog.clone(),
                 candidate_index: 0,
+                selected_success_delivery:
+                    crate::manager::transaction_integration::SelectedInviteSuccessDelivery::default(
+                    ),
+                cancel_terminal_delivery:
+                    crate::manager::transaction_integration::SelectedInviteSuccessDelivery::default(
+                    ),
                 _admission_owner: None,
             },
         );
@@ -7049,7 +7587,141 @@ mod outbound_flow_handler_tests {
     }
 
     #[tokio::test]
-    async fn duplicate_selected_invite_success_is_reacked_without_duplicate_answer_event() {
+    async fn direct_initial_invite_200_confirms_once_without_dead_ack_coordination() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+        use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+        use rvoip_sip_core::types::TypedHeader;
+
+        const CALL_ID: &str = "direct-initial-invite-200";
+        let (manager, mut session_events) = make_manager().await;
+        let (dialog_event_tx, mut dialog_events) = mpsc::channel(4);
+        *manager.dialog_event_sender.write().await = Some(dialog_event_tx);
+
+        let dialog = Dialog::new(
+            CALL_ID.to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-direct".to_string()),
+            None,
+            true,
+        );
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager
+            .session_to_dialog
+            .insert("direct-invite-session".to_string(), dialog_id.clone());
+        manager
+            .dialog_to_session
+            .insert(dialog_id.clone(), "direct-invite-session".to_string());
+
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-direct"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id(CALL_ID)
+            .cseq(1)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-direct-200"))
+            .max_forwards(70)
+            .build();
+        let (transaction_id, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5093),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("send initial INVITE");
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&transaction_id)
+            .await
+            .expect("request lookup")
+            .expect("initial INVITE retained");
+        let response = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::Ok,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-direct"))
+        .contact("sip:bob@127.0.0.1:5093", None)
+        .body(bytes::Bytes::from_static(b"v=0\r\n"))
+        .build()
+        .with_header(TypedHeader::SessionExpires(SessionExpires::new(
+            1_800,
+            Some(Refresher::Uas),
+        )));
+
+        manager
+            .process_global_transaction_event(TransactionEvent::SuccessResponse {
+                transaction_id: transaction_id.clone(),
+                response,
+                need_ack: true,
+                source: dest_addr(5093),
+            })
+            .await;
+
+        let confirmed = manager.get_dialog(&dialog_id).expect("confirmed dialog");
+        assert_eq!(confirmed.state, DialogState::Confirmed);
+        assert_eq!(confirmed.remote_tag.as_deref(), Some("bob-direct"));
+        assert_eq!(
+            confirmed.remote_target,
+            "sip:bob@127.0.0.1:5093".parse::<Uri>().unwrap()
+        );
+        assert_eq!(confirmed.session_expires_secs, Some(1_800));
+        assert!(!confirmed.is_session_refresher);
+        let lookup_key = crate::manager::utils::DialogUtils::create_lookup_key(
+            CALL_ID,
+            "alice-direct",
+            "bob-direct",
+        );
+        drop(confirmed);
+        assert_eq!(
+            manager
+                .dialog_lookup
+                .get(&lookup_key)
+                .map(|entry| entry.value().clone()),
+            Some(dialog_id.clone())
+        );
+
+        assert!(matches!(
+            dialog_events.try_recv(),
+            Ok(DialogEvent::StateChanged {
+                dialog_id: ref event_dialog_id,
+                old_state: DialogState::Initial,
+                new_state: DialogState::Confirmed,
+            }) if event_dialog_id == &dialog_id
+        ));
+        assert!(dialog_events.try_recv().is_err());
+
+        let mut response_events = 0;
+        let mut ack_events = 0;
+        let mut answer_events = 0;
+        while let Ok(event) = session_events.try_recv() {
+            match event {
+                SessionCoordinationEvent::ResponseReceived { .. } => response_events += 1,
+                SessionCoordinationEvent::AckSent { .. } => ack_events += 1,
+                SessionCoordinationEvent::CallAnswered { .. } => answer_events += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(response_events, 1);
+        assert_eq!(
+            ack_events, 0,
+            "automatic ACK must not publish a dead coordination event"
+        );
+        assert_eq!(
+            answer_events, 0,
+            "ResponseReceived is the sole INVITE success lifecycle projection"
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_selected_invite_success_is_reacked_without_parallel_answer_event() {
         use crate::manager::transaction_integration::CandidateWirePlan;
 
         let (manager, mut session_events) = make_manager().await;
@@ -7144,11 +7816,144 @@ mod outbound_flow_handler_tests {
                 answer_events += 1;
             }
         }
-        assert_eq!(answer_events, 1);
+        assert_eq!(answer_events, 0);
         assert_eq!(
             manager.get_dialog_state(&dialog_id).expect("dialog state"),
             DialogState::Confirmed
         );
+    }
+
+    async fn assert_selected_success_retries_until_delivery_commit(
+        fail_first_ack: bool,
+        fail_first_delivery: bool,
+        expected_ack_successes: usize,
+        expected_delivery_attempts: usize,
+    ) {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        let (manager, transport, coordinator, handler) =
+            make_selected_success_manager(fail_first_ack, fail_first_delivery).await;
+        let mut dialog = Dialog::new(
+            "selected-success-delivery-fence".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-delivery-fence".to_string()),
+            None,
+            true,
+        );
+        dialog.state = DialogState::Early;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+        manager
+            .session_to_dialog
+            .insert("selected-success-session".to_string(), dialog_id.clone());
+        manager
+            .dialog_to_session
+            .insert(dialog_id.clone(), "selected-success-session".to_string());
+
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from(
+                "Alice",
+                "sip:alice@example.com",
+                Some("alice-delivery-fence"),
+            )
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("selected-success-delivery-fence")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5060",
+                "UDP",
+                Some("z9hG4bK-selected-delivery-fence"),
+            )
+            .max_forwards(70)
+            .build();
+        let (transaction_id, _) = manager
+            .send_request_with_candidate_wire_plan(
+                request,
+                vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                    dest_addr(5094),
+                    rvoip_sip_transport::transport::TransportType::Udp,
+                )],
+                Some(&dialog_id),
+                CandidateWirePlan::default(),
+            )
+            .await
+            .expect("send selected INVITE");
+        let sent_request = manager
+            .transaction_manager
+            .original_request(&transaction_id)
+            .await
+            .expect("request lookup")
+            .expect("request retained");
+        let response = SimpleResponseBuilder::response_from_request(
+            &sent_request,
+            rvoip_sip_core::StatusCode::Ok,
+            None,
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-delivery-fence"))
+        .contact("sip:bob@127.0.0.1:5094", None)
+        .body(bytes::Bytes::from_static(b"v=0\r\n"))
+        .build();
+        let success_event = || TransactionEvent::SuccessResponse {
+            transaction_id: transaction_id.clone(),
+            response: response.clone(),
+            need_ack: true,
+            source: dest_addr(5094),
+        };
+
+        manager
+            .process_global_transaction_event(success_event())
+            .await;
+        let delivery_fence = manager
+            .invite_failover_attempts
+            .get(&transaction_id)
+            .expect("selected attempt retained")
+            .selected_success_delivery
+            .clone();
+        assert!(
+            !delivery_fence.is_delivered(),
+            "first injected failure must leave selected success retryable"
+        );
+
+        manager
+            .process_global_transaction_event(success_event())
+            .await;
+        assert!(
+            delivery_fence.is_delivered(),
+            "identical retransmission must commit selected success"
+        );
+
+        // A duplicate after commit still gets its mandatory 2xx ACK, but the
+        // exact delivery fence keeps it out of the lifecycle path.
+        manager
+            .process_global_transaction_event(success_event())
+            .await;
+
+        assert_eq!(transport.ack_attempts.load(Ordering::Acquire), 3);
+        assert_eq!(
+            transport.ack_successes.load(Ordering::Acquire),
+            expected_ack_successes
+        );
+        assert_eq!(
+            handler.delivery_attempts.load(Ordering::Acquire),
+            expected_delivery_attempts
+        );
+        assert_eq!(handler.delivery_successes.load(Ordering::Acquire), 1);
+        assert_eq!(
+            manager.get_dialog_state(&dialog_id).expect("dialog state"),
+            DialogState::Confirmed
+        );
+
+        manager.stop().await.expect("stop manager");
+        coordinator.shutdown().await.expect("shutdown coordinator");
+    }
+
+    #[tokio::test]
+    async fn selected_invite_success_retransmission_retries_ack_and_causal_delivery_once() {
+        assert_selected_success_retries_until_delivery_commit(true, false, 2, 1).await;
+        assert_selected_success_retries_until_delivery_commit(false, true, 3, 2).await;
     }
 
     #[tokio::test]
@@ -7186,6 +7991,74 @@ mod outbound_flow_handler_tests {
         assert!(!manager
             .transaction_dialog_route_hash
             .contains_key(&invite_tx));
+    }
+
+    #[tokio::test]
+    async fn server_invite_terminal_before_ack_retains_exact_dialog_delivery() {
+        let (manager, mut session_events) = make_manager().await;
+        let mut dialog = Dialog::new(
+            "terminal-before-ack".to_string(),
+            "sip:bob@example.com".parse().unwrap(),
+            "sip:alice@example.com".parse().unwrap(),
+            Some("bob-tag".to_string()),
+            Some("alice-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let invite_tx = TransactionKey::new(
+            "z9hG4bK-terminal-before-ack".to_string(),
+            Method::Invite,
+            true,
+        );
+        manager.link_transaction_to_dialog_indexed(&invite_tx, &dialog_id);
+
+        manager
+            .process_global_transaction_event(TransactionEvent::TransactionTerminated {
+                transaction_id: invite_tx.clone(),
+            })
+            .await;
+
+        assert_eq!(
+            manager
+                .find_dialog_for_transaction(&invite_tx)
+                .expect("server INVITE binding survives terminal ordering"),
+            dialog_id
+        );
+
+        let ack = SimpleRequestBuilder::new(Method::Ack, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", Some("bob-tag"))
+            .call_id("terminal-before-ack")
+            .cseq(1)
+            .via(
+                "127.0.0.1:5070",
+                "UDP",
+                Some("z9hG4bK-terminal-before-ack-ack"),
+            )
+            .max_forwards(70)
+            .build();
+        manager
+            .process_global_transaction_event(TransactionEvent::AckReceived {
+                transaction_id: invite_tx.clone(),
+                request: ack,
+            })
+            .await;
+
+        assert!(matches!(
+            session_events.recv().await,
+            Some(SessionCoordinationEvent::AckReceived {
+                transaction_id,
+                ..
+            }) if transaction_id == invite_tx
+        ));
+        assert!(
+            manager.find_dialog_for_transaction(&invite_tx).is_err(),
+            "authoritatively delivered ACK retires the server INVITE binding"
+        );
     }
 
     #[tokio::test]

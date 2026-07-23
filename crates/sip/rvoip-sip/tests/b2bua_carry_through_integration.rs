@@ -35,10 +35,8 @@
 //!   downstream UAS). The b2bua's `CallHandler` reads the real
 //!   `IncomingCall` from alice, drives `with_headers_from(&incoming,
 //!   ...)` on the outbound leg to bob, and the test asserts bob's
-//!   inbound wire trace. This exercises the full §11.2 flow now that
-//!   `IncomingCall::raw_request()` round-trips correctly (the
-//!   `rvoip-sip-dialog/src/events/adapter.rs:282` reserialization fix
-//!   landed in the 2026-05-13 session).
+//!   inbound wire trace. This exercises the full §11.2 flow through
+//!   the byte-preserving authoritative event-hub ingress.
 
 use std::time::Duration;
 

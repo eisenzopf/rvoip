@@ -79,8 +79,7 @@
 //!
 //! let mut config = ServerConfig::new("0.0.0.0:5060".parse().unwrap())
 //!     .with_domain("sip.mycompany.com")
-//!     .with_auto_options()
-//!     .with_auto_register();
+//!     .with_auto_options();
 //!
 //! // Optimize for high-performance scenarios
 //! config.dialog = config.dialog
@@ -576,8 +575,7 @@ impl DialogConfig {
 ///
 /// let mut config = ServerConfig::new("0.0.0.0:5060".parse().unwrap())
 ///     .with_domain("sip.production.com")
-///     .with_auto_options()
-///     .with_auto_register();
+///     .with_auto_options();
 ///
 /// // Customize for production load
 /// config.dialog = config.dialog
@@ -599,11 +597,11 @@ pub struct ServerConfig {
     /// requests are forwarded to the application for custom handling.
     pub auto_options_response: bool,
 
-    /// Enable automatic response to REGISTER requests
+    /// Legacy automatic REGISTER-response flag.
     ///
-    /// When true, the server automatically handles REGISTER requests
-    /// for basic registration functionality. When false, REGISTER
-    /// requests are forwarded to the application.
+    /// Dialog-core has no location-service binding store. When true it returns
+    /// 501 rather than fabricating a successful registration. When false,
+    /// REGISTER is delivered to the authoritative application registrar.
     pub auto_register_response: bool,
 
     /// Server domain name
@@ -703,11 +701,11 @@ impl ServerConfig {
         self
     }
 
-    /// Enable automatic REGISTER response
+    /// Set the legacy automatic REGISTER-response flag.
     ///
-    /// Configures the server to automatically handle REGISTER requests
-    /// for basic SIP registration functionality. Use this for simple
-    /// registrar services or disable for custom registration handling.
+    /// This does not create a registrar. REGISTER requests receive 501 while
+    /// the flag is set; leave it disabled and install an application registrar
+    /// to author standards-compliant binding responses.
     ///
     /// # Returns
     /// Self for method chaining

@@ -1,8 +1,14 @@
-use crate::adapters::dialog_adapter::RegisterAttemptOutcome;
+use crate::adapters::dialog_adapter::{
+    RegisterAttemptContext, RegisterAttemptOutcome, RegistrationPostCommitEffect,
+};
 use crate::adapters::outbound_request_tracker::{TrackedInDialogMethod, TrackedInDialogOptions};
-use crate::state_machine::executor::{PendingOptionsSlot, StageDispatchClaim};
+use crate::session_registry::SessionRegistryHandle;
+use crate::state_machine::executor::{
+    InboundResponseStateInput, PendingOptionsSlot, PendingOptionsSlotKind, StageDispatchClaim,
+};
 use crate::state_table::types::{EventType, SessionId};
 use rvoip_sip_core::types::{HeaderName, TypedHeader};
+use rvoip_sip_dialog::api::unified::{ReInviteRequestOptions, ReferRequestOptions};
 use std::fmt;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
@@ -11,12 +17,202 @@ use crate::{
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
     api::events::Event,
     cleanup_diag::{self, CleanupStage},
-    session_store::{SessionState, SessionStore},
+    session_store::SessionState,
     state_table::{Action, Condition},
 };
 
 const SIP_RESPONSE_DISPATCH_JOIN_FAILURE: &str = "SIP response dispatch task failed (class=join)";
 const DIALOG_CLEANUP_JOIN_FAILURE: &str = "SIP dialog cleanup task failed (class=join)";
+
+fn exact_dialog_cleanup_handle(
+    session: &SessionState,
+) -> crate::errors::Result<SessionRegistryHandle> {
+    session.lifecycle_handle.clone().ok_or_else(|| {
+        crate::errors::SessionError::InvalidTransition(
+            "SIP dialog cleanup requires exact session authority".to_string(),
+        )
+    })
+}
+
+fn retire_lane_owned_dialog_identity(session: &mut SessionState) {
+    session.dialog_id = None;
+    session.dialog_established = false;
+}
+
+fn exact_request_tracker_handle(
+    session: &SessionState,
+) -> crate::errors::Result<&SessionRegistryHandle> {
+    session.lifecycle_handle.as_ref().ok_or_else(|| {
+        crate::errors::SessionError::InvalidTransition(
+            "outbound request tracking requires exact session authority".to_string(),
+        )
+    })
+}
+
+fn next_session_refresh_generation(session: &mut SessionState) -> u64 {
+    let next = session.session_refresh_timer_generation.wrapping_add(1);
+    session.session_refresh_timer_generation = if next == 0 { 1 } else { next };
+    session.session_refresh_timer_generation
+}
+
+fn session_refresh_retry_effect(
+    session: &mut SessionState,
+    kind: SessionRefreshDeadlineKind,
+) -> ActionOutcome {
+    let generation = next_session_refresh_generation(session);
+    ActionOutcome::with_deferred_effect(DeferredActionEffect::SessionRefreshTimer(
+        SessionRefreshTimerEffect {
+            generation,
+            delay: std::time::Duration::from_secs(1),
+            kind,
+        },
+    ))
+}
+
+fn session_refresh_immediate_effect(
+    session: &SessionState,
+    kind: SessionRefreshDeadlineKind,
+) -> ActionOutcome {
+    ActionOutcome::with_deferred_effect(DeferredActionEffect::SessionRefreshTimer(
+        SessionRefreshTimerEffect {
+            generation: session.session_refresh_timer_generation,
+            delay: std::time::Duration::ZERO,
+            kind,
+        },
+    ))
+}
+
+fn session_refresh_transaction_deadline_effect(
+    session: &SessionState,
+    delay: std::time::Duration,
+    kind: SessionRefreshDeadlineKind,
+) -> ActionOutcome {
+    ActionOutcome::with_deferred_effect(DeferredActionEffect::SessionRefreshTimer(
+        SessionRefreshTimerEffect {
+            generation: session.session_refresh_timer_generation,
+            delay,
+            kind,
+        },
+    ))
+}
+
+fn session_refresh_headers(session: &SessionState) -> crate::errors::Result<Vec<TypedHeader>> {
+    use rvoip_sip_core::types::session_expires::{Refresher, SessionExpires};
+    use rvoip_sip_core::types::{min_se::MinSE, supported::Supported};
+
+    let interval = session.session_refresh_interval_secs.ok_or_else(|| {
+        crate::errors::SessionError::InvalidTransition(
+            "RFC 4028 refresh has no negotiated Session-Expires interval".to_string(),
+        )
+    })?;
+    let refresher = match session.role {
+        crate::state_table::Role::UAC => Refresher::Uac,
+        crate::state_table::Role::UAS => Refresher::Uas,
+        crate::state_table::Role::Both => {
+            return Err(crate::errors::SessionError::InvalidTransition(
+                "RFC 4028 refresh requires a concrete dialog role".to_string(),
+            ));
+        }
+    };
+    Ok(vec![
+        TypedHeader::SessionExpires(SessionExpires::new(interval, Some(refresher))),
+        TypedHeader::MinSE(MinSE::new(interval.min(90).max(1))),
+        TypedHeader::Supported(Supported::new(vec!["timer".to_string()])),
+    ])
+}
+
+fn prepare_session_refresh_update(
+    session: &mut SessionState,
+    dialog_adapter: &DialogAdapter,
+) -> crate::errors::Result<ActionOutcome> {
+    use crate::session_store::state::SessionRefreshPhase;
+
+    let handle = exact_request_tracker_handle(session)?;
+    if session.pending_reinvite.is_some()
+        || session.pending_reinvite_options.is_some()
+        || session.pending_update_options.is_some()
+        || dialog_adapter
+            .outbound_request_tracker
+            .has_request(handle, TrackedInDialogMethod::Update)
+    {
+        return Ok(session_refresh_retry_effect(
+            session,
+            SessionRefreshDeadlineKind::UpdateDue,
+        ));
+    }
+    session.pending_update_options = Some(Arc::new(
+        rvoip_sip_dialog::api::unified::UpdateRequestOptions {
+            sdp: None,
+            session_timer_refresh: true,
+            extra_headers: session_refresh_headers(session)?,
+        },
+    ));
+    session.session_refresh_phase = SessionRefreshPhase::UpdateInFlight;
+    Ok(ActionOutcome::with_event(EventType::SendOutboundUpdate))
+}
+
+fn prepare_session_refresh_reinvite(
+    session: &mut SessionState,
+) -> crate::errors::Result<ActionOutcome> {
+    use crate::session_store::state::SessionRefreshPhase;
+
+    if session.pending_reinvite.is_some() || session.pending_reinvite_options.is_some() {
+        session.session_refresh_phase = SessionRefreshPhase::Idle;
+        return Ok(session_refresh_retry_effect(
+            session,
+            SessionRefreshDeadlineKind::ReinviteDue,
+        ));
+    }
+    session.pending_reinvite_options = Some(Arc::new(ReInviteRequestOptions {
+        sdp: None,
+        session_timer_refresh: true,
+        precomputed_authorization: None,
+        extra_headers: session_refresh_headers(session)?,
+    }));
+    session.session_refresh_phase = SessionRefreshPhase::ReinviteInFlight;
+    Ok(ActionOutcome::with_event(EventType::SendOutboundReInvite))
+}
+
+/// Retire every lifecycle attachment derived from one media allocation in the
+/// lane-owned working state. The executor publishes this mutation exactly once
+/// after all ordered actions have finished.
+fn retire_lane_owned_media_identity(session: &mut SessionState) {
+    session.media_session_id = None;
+    session.media_session_ready = false;
+    session.sdp_negotiated = false;
+    session.local_sdp = None;
+    session.negotiated_config = None;
+}
+
+/// Run lower cleanup without publishing `SessionStore`, then retire the
+/// event-local identity even if lower cleanup reports an error. In the error
+/// case the exact lifecycle resource remains responsible for quiesced
+/// teardown; recommitting a stale media identity would only recreate the
+/// duplicate-writer race this lane is intended to prevent.
+async fn cleanup_lane_owned_media(
+    session: &mut SessionState,
+    media_adapter: &Arc<MediaAdapter>,
+) -> crate::errors::Result<()> {
+    let cleanup = media_adapter.cleanup_session_lane_owned(session).await;
+    retire_lane_owned_media_identity(session);
+    cleanup
+}
+
+/// Release every lower-layer resource represented by the lane-owned working
+/// state. All state-table cleanup spellings delegate here so dialog/media
+/// teardown has one ordering rule and one identity-retirement rule.
+async fn release_lane_owned_resources(
+    session: &mut SessionState,
+    dialog_adapter: &Arc<DialogAdapter>,
+    media_adapter: &Arc<MediaAdapter>,
+) -> crate::errors::Result<()> {
+    let handle = exact_dialog_cleanup_handle(session)?;
+    dialog_adapter
+        .cleanup_session_exact_lane_owned(&handle)
+        .await?;
+    retire_lane_owned_dialog_identity(session);
+    cleanup_lane_owned_media(session, media_adapter).await
+}
 
 fn negotiated_audio_shape(codec: &str) -> (u32, u8) {
     if codec.eq_ignore_ascii_case("opus") {
@@ -62,11 +258,7 @@ impl<T> Drop for AbortSipResponseTaskOnDrop<T> {
     }
 }
 
-enum SipResponseTarget {
-    Session,
-    Transaction(rvoip_sip_dialog::transaction::TransactionKey),
-}
-
+#[cfg(test)]
 async fn join_sip_response_task(
     task: AbortSipResponseTaskOnDrop<crate::errors::Result<()>>,
 ) -> crate::errors::Result<()> {
@@ -75,34 +267,592 @@ async fn join_sip_response_task(
     })?
 }
 
-async fn send_sip_response_on_fresh_task(
+/// Action-layer wrapper that retains dialog/transaction-core's authoritative
+/// final-response wire classification across type erasure in the executor.
+#[derive(Debug)]
+pub(crate) struct ExactSipResponseActionError {
+    disposition: rvoip_sip_dialog::FinalResponseCompletionDisposition,
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl ExactSipResponseActionError {
+    fn new(
+        disposition: rvoip_sip_dialog::FinalResponseCompletionDisposition,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            disposition,
+            source: Box::new(source),
+        }
+    }
+}
+
+impl fmt::Display for ExactSipResponseActionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "exact SIP response failed ({:?}): {}",
+            self.disposition, self.source
+        )
+    }
+}
+
+impl std::error::Error for ExactSipResponseActionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+pub(crate) fn exact_sip_response_failure_disposition(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<rvoip_sip_dialog::FinalResponseCompletionDisposition> {
+    error
+        .downcast_ref::<ExactSipResponseActionError>()
+        .map(|error| error.disposition)
+}
+
+type ExactSipResponseResult = Result<
+    rvoip_sip_dialog::FinalResponseCompletionDisposition,
+    Box<dyn std::error::Error + Send + Sync>,
+>;
+
+async fn send_exact_sip_response_on_fresh_task(
     dialog_adapter: Arc<DialogAdapter>,
     session_id: SessionId,
-    target: SipResponseTarget,
+    transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
     code: u16,
     sdp: Option<String>,
-) -> crate::errors::Result<()> {
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> ExactSipResponseResult {
     let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
-        match target {
-            SipResponseTarget::Session => {
-                dialog_adapter.send_response(&session_id, code, sdp).await
+        if let Some(scripted) =
+            scripted_exact_sip_response(&session_id, &transaction_id, code).await
+        {
+            return scripted;
+        }
+        let result = match extra_headers {
+            Some(extra_headers) => {
+                dialog_adapter
+                    .send_response_with_options_for_transaction_classified(
+                        &session_id,
+                        &transaction_id,
+                        code,
+                        sdp,
+                        extra_headers,
+                    )
+                    .await
             }
-            SipResponseTarget::Transaction(transaction_id) => {
+            None => {
+                dialog_adapter
+                    .send_response_for_transaction_classified(
+                        &session_id,
+                        &transaction_id,
+                        code,
+                        sdp,
+                    )
+                    .await
+            }
+        };
+        result.map_err(|error| {
+            Box::new(ExactSipResponseActionError::new(error.disposition, error))
+                as Box<dyn std::error::Error + Send + Sync>
+        })
+    }));
+
+    task.join().await.map_err(|_| {
+        Box::new(ExactSipResponseActionError::new(
+            rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            crate::errors::SessionError::InternalError(
+                SIP_RESPONSE_DISPATCH_JOIN_FAILURE.to_string(),
+            ),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?
+}
+
+async fn send_exact_refer_response_on_fresh_task(
+    dialog_adapter: Arc<DialogAdapter>,
+    session_id: SessionId,
+    transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+    transaction_id_text: String,
+    code: u16,
+) -> ExactSipResponseResult {
+    let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
+        if let Some(scripted) =
+            scripted_exact_sip_response(&session_id, &transaction_id, code).await
+        {
+            return scripted;
+        }
+        dialog_adapter
+            .send_refer_response_classified(&transaction_id_text, code)
+            .await
+            .map_err(|error| {
+                Box::new(ExactSipResponseActionError::new(error.disposition, error))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })
+    }));
+
+    task.join().await.map_err(|_| {
+        Box::new(ExactSipResponseActionError::new(
+            rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            crate::errors::SessionError::InternalError(
+                SIP_RESPONSE_DISPATCH_JOIN_FAILURE.to_string(),
+            ),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?
+}
+
+async fn send_exact_provisional_sip_response_on_fresh_task(
+    dialog_adapter: Arc<DialogAdapter>,
+    session_id: SessionId,
+    transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+    code: u16,
+    sdp: Option<String>,
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
+        if let Some(scripted) =
+            scripted_exact_sip_response(&session_id, &transaction_id, code).await
+        {
+            return match scripted {
+                Ok(
+                    rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal,
+                ) => Ok(()),
+                Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+                    Err(zero_wire_exact_response_error(
+                        "exact provisional response stopped before transport write",
+                    ))
+                }
+                Ok(
+                    rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                ) => Err(Box::new(ExactSipResponseActionError::new(
+                    rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                    crate::errors::SessionError::DialogError(
+                        "exact provisional response crossed an unknown transport boundary"
+                            .to_string(),
+                    ),
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>),
+                Err(error) => Err(error),
+            };
+        }
+
+        let result = match extra_headers {
+            Some(extra_headers) => {
+                dialog_adapter
+                    .send_response_with_options_for_transaction(
+                        &session_id,
+                        &transaction_id,
+                        code,
+                        sdp,
+                        extra_headers,
+                    )
+                    .await
+            }
+            None => {
                 dialog_adapter
                     .send_response_for_transaction(&session_id, &transaction_id, code, sdp)
                     .await
             }
-        }
+        };
+        result.map_err(|error| {
+            Box::new(ExactSipResponseActionError::new(
+                // The unclassified provisional surface cannot prove that a
+                // transport error preceded its first write. Preserve the
+                // authority for a later final response, but never auto-retry
+                // this provisional response as though it were proven zero-wire.
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                error,
+            )) as Box<dyn std::error::Error + Send + Sync>
+        })
     }));
-    join_sip_response_task(task).await
+
+    task.join().await.map_err(|_| {
+        Box::new(ExactSipResponseActionError::new(
+            rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            crate::errors::SessionError::InternalError(
+                SIP_RESPONSE_DISPATCH_JOIN_FAILURE.to_string(),
+            ),
+        )) as Box<dyn std::error::Error + Send + Sync>
+    })?
+}
+
+struct ExactInitialInviteTerminal {
+    transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+    written_success: bool,
+    terminal_error: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+fn zero_wire_exact_response_error(
+    detail: impl Into<String>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(ExactSipResponseActionError::new(
+        rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable,
+        crate::errors::SessionError::InvalidTransition(detail.into()),
+    ))
+}
+
+async fn send_exact_initial_invite_final_response(
+    session: &SessionState,
+    dialog_adapter: &Arc<DialogAdapter>,
+    status: u16,
+    body: Option<String>,
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<ExactInitialInviteTerminal, Box<dyn std::error::Error + Send + Sync>> {
+    let transaction_id = session
+        .pending_inbound_invite_transaction_id
+        .clone()
+        .ok_or_else(|| {
+            zero_wire_exact_response_error(
+                "initial INVITE final response has no exact inbound transaction",
+            )
+        })?;
+    let dispatch = send_exact_sip_response_on_fresh_task(
+        Arc::clone(dialog_adapter),
+        session.session_id.clone(),
+        transaction_id.clone(),
+        status,
+        body,
+        extra_headers,
+    )
+    .await;
+    let (written_success, terminal_error) = match dispatch {
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => {
+            (true, None)
+        }
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+            return Err(zero_wire_exact_response_error(
+                "exact initial INVITE response stopped before transport write",
+            ));
+        }
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => (
+            false,
+            Some(Box::new(ExactSipResponseActionError::new(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                crate::errors::SessionError::DialogError(
+                    "exact initial INVITE response crossed an unknown transport boundary"
+                        .to_string(),
+                ),
+            )) as Box<dyn std::error::Error + Send + Sync>),
+        ),
+        Err(error) => match exact_sip_response_failure_disposition(error.as_ref()) {
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+                return Err(error);
+            }
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => {
+                (true, None)
+            }
+            Some(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            ) => (false, Some(error)),
+            None => return Err(error),
+        },
+    };
+    Ok(ExactInitialInviteTerminal {
+        transaction_id,
+        written_success,
+        terminal_error,
+    })
+}
+
+fn validate_initial_invite_event_response_authority(
+    session: &SessionState,
+    inbound_response: Option<&InboundResponseStateInput>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let event_transaction = inbound_response
+        .ok_or_else(|| {
+            zero_wire_exact_response_error(
+                "initial INVITE event has no event-local response authority",
+            )
+        })?
+        .transaction_id()
+        .map_err(|error| zero_wire_exact_response_error(error.to_string()))?;
+    let retained_transaction = session
+        .pending_inbound_invite_transaction_id
+        .as_ref()
+        .ok_or_else(|| {
+            zero_wire_exact_response_error(
+                "initial INVITE event has no retained response authority",
+            )
+        })?;
+    if event_transaction != retained_transaction {
+        return Err(zero_wire_exact_response_error(
+            "initial INVITE event-local and retained response authorities differ",
+        ));
+    }
+    Ok(())
+}
+
+async fn send_exact_initial_invite_provisional_response(
+    session: &SessionState,
+    dialog_adapter: &Arc<DialogAdapter>,
+    status: u16,
+    body: Option<String>,
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !(100..=199).contains(&status) {
+        return Err(zero_wire_exact_response_error(
+            "initial INVITE provisional response is not 1xx",
+        ));
+    }
+    let transaction_id = session
+        .pending_inbound_invite_transaction_id
+        .clone()
+        .ok_or_else(|| {
+            zero_wire_exact_response_error(
+                "initial INVITE provisional response has no exact inbound transaction",
+            )
+        })?;
+    send_exact_provisional_sip_response_on_fresh_task(
+        Arc::clone(dialog_adapter),
+        session.session_id.clone(),
+        transaction_id,
+        status,
+        body,
+        extra_headers,
+    )
+    .await
+}
+
+pub(crate) struct ExactInboundResponseTerminal {
+    pub(crate) terminal_error: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+pub(crate) struct ExactReferResponseTerminal {
+    pub(crate) terminal_error: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+/// Author one REFER final through its immutable inbound transaction. Only a
+/// proven zero-wire result is retryable. Written and wire-unknown results are
+/// terminal for the response authority, so callers must clear the matching
+/// lane-owned REFER state before surfacing `terminal_error`.
+pub(crate) async fn send_exact_refer_final_response(
+    session_id: &SessionId,
+    transaction_id_text: &str,
+    dialog_adapter: &Arc<DialogAdapter>,
+    status: u16,
+) -> Result<ExactReferResponseTerminal, Box<dyn std::error::Error + Send + Sync>> {
+    if !(200..=699).contains(&status) {
+        return Err(zero_wire_exact_response_error(
+            "REFER response status is not final",
+        ));
+    }
+    let transaction_id = transaction_id_text
+        .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+        .map_err(|_| zero_wire_exact_response_error("REFER transaction authority is invalid"))?;
+    if !transaction_id.is_server() || transaction_id.method() != &rvoip_sip_core::Method::Refer {
+        return Err(zero_wire_exact_response_error(
+            "REFER response authority is not an inbound REFER transaction",
+        ));
+    }
+    let dispatch = send_exact_refer_response_on_fresh_task(
+        Arc::clone(dialog_adapter),
+        session_id.clone(),
+        transaction_id,
+        transaction_id_text.to_string(),
+        status,
+    )
+    .await;
+    let terminal_error = match dispatch {
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => None,
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+            return Err(zero_wire_exact_response_error(
+                "exact REFER response stopped before transport write",
+            ));
+        }
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => {
+            Some(Box::new(ExactSipResponseActionError::new(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                crate::errors::SessionError::DialogError(
+                    "exact REFER response crossed an unknown transport boundary".to_string(),
+                ),
+            )) as Box<dyn std::error::Error + Send + Sync>)
+        }
+        Err(error) => match exact_sip_response_failure_disposition(error.as_ref()) {
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+                return Err(error);
+            }
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => {
+                None
+            }
+            Some(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            ) => Some(error),
+            None => return Err(error),
+        },
+    };
+    Ok(ExactReferResponseTerminal { terminal_error })
+}
+
+/// Author one final response using only the transaction captured from this
+/// inbound event. Written and wire-unknown outcomes consume the transient
+/// authority; a zero-wire outcome deliberately leaves it retryable.
+pub(crate) async fn send_exact_inbound_final_response(
+    session_id: &SessionId,
+    inbound_response: Option<&mut InboundResponseStateInput>,
+    dialog_adapter: &Arc<DialogAdapter>,
+    status: u16,
+    body: Option<String>,
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<ExactInboundResponseTerminal, Box<dyn std::error::Error + Send + Sync>> {
+    if !(200..=699).contains(&status) {
+        return Err(zero_wire_exact_response_error(
+            "inbound re-INVITE/UPDATE response is not final",
+        ));
+    }
+    let inbound_response = inbound_response.ok_or_else(|| {
+        zero_wire_exact_response_error(
+            "inbound re-INVITE/UPDATE final response has no event-local transaction authority",
+        )
+    })?;
+    let transaction_id = inbound_response
+        .transaction_id()
+        .map_err(|error| zero_wire_exact_response_error(error.to_string()))?
+        .clone();
+    let dispatch = send_exact_sip_response_on_fresh_task(
+        Arc::clone(dialog_adapter),
+        session_id.clone(),
+        transaction_id,
+        status,
+        body,
+        extra_headers,
+    )
+    .await;
+    let terminal_error = match dispatch {
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => None,
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+            return Err(zero_wire_exact_response_error(
+                "exact inbound re-INVITE/UPDATE response stopped before transport write",
+            ));
+        }
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => {
+            Some(Box::new(ExactSipResponseActionError::new(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                crate::errors::SessionError::DialogError(
+                    "exact inbound re-INVITE/UPDATE response crossed an unknown transport boundary"
+                        .to_string(),
+                ),
+            )) as Box<dyn std::error::Error + Send + Sync>)
+        }
+        Err(error) => match exact_sip_response_failure_disposition(error.as_ref()) {
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+                return Err(error);
+            }
+            Some(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal) => {
+                None
+            }
+            Some(
+                rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+            ) => Some(error),
+            None => return Err(error),
+        },
+    };
+    inbound_response.consume_terminal();
+    Ok(ExactInboundResponseTerminal { terminal_error })
+}
+
+async fn send_exact_inbound_provisional_response(
+    session_id: &SessionId,
+    inbound_response: Option<&mut InboundResponseStateInput>,
+    dialog_adapter: &Arc<DialogAdapter>,
+    status: u16,
+    body: Option<String>,
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !(100..=199).contains(&status) {
+        return Err(zero_wire_exact_response_error(
+            "inbound response is not provisional",
+        ));
+    }
+    let inbound_response = inbound_response.ok_or_else(|| {
+        zero_wire_exact_response_error(
+            "inbound provisional response has no event-local transaction authority",
+        )
+    })?;
+    let transaction_id = inbound_response
+        .transaction_id()
+        .map_err(|error| zero_wire_exact_response_error(error.to_string()))?
+        .clone();
+    send_exact_provisional_sip_response_on_fresh_task(
+        Arc::clone(dialog_adapter),
+        session_id.clone(),
+        transaction_id,
+        status,
+        body,
+        extra_headers,
+    )
+    .await
+}
+
+fn consume_exact_initial_invite_response_authority(
+    session: &mut SessionState,
+    dialog_adapter: &DialogAdapter,
+    terminal: &ExactInitialInviteTerminal,
+    record_invite_200_metrics: bool,
+) {
+    // The transaction/timing pair is one immutable response authority. It is
+    // retired together only after the transaction classifies the response as
+    // written or wire-unknown terminal.
+    let response_started_at = session.incoming_invite_received_at.take();
+    session.pending_inbound_invite_transaction_id.take();
+    let udp_receive_timing = dialog_adapter
+        .dialog_api
+        .dialog_manager()
+        .core()
+        .transaction_manager()
+        .take_inbound_timing(&terminal.transaction_id);
+    if terminal.written_success && record_invite_200_metrics {
+        if let Some(timing) = udp_receive_timing {
+            if let Some(received_at) = timing.received_at {
+                rvoip_sip_dialog::diagnostics::record_udp_receive_to_invite_200(
+                    received_at.elapsed(),
+                );
+            }
+        }
+        if let Some(started_at) = response_started_at {
+            rvoip_sip_dialog::diagnostics::record_200_ok_invite_first();
+            rvoip_sip_dialog::diagnostics::record_first_invite_to_200(started_at.elapsed());
+        }
+    }
+}
+
+fn exact_redirect_response_headers(
+    contacts: &[String],
+    extra_headers: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
+) -> Result<Vec<rvoip_sip_core::types::TypedHeader>, Box<dyn std::error::Error + Send + Sync>> {
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo},
+        uri::Uri,
+        TypedHeader,
+    };
+
+    if contacts.is_empty() {
+        return Err(zero_wire_exact_response_error(
+            "initial INVITE redirect has no Contact URI",
+        ));
+    }
+    let mut params = Vec::with_capacity(contacts.len());
+    for contact in contacts {
+        let uri = contact.parse::<Uri>().map_err(|_| {
+            zero_wire_exact_response_error("initial INVITE redirect has an invalid Contact URI")
+        })?;
+        params.push(ContactParamInfo {
+            address: Address::new(uri),
+        });
+    }
+    let mut headers = vec![TypedHeader::Contact(Contact::new_params(params))];
+    headers.extend(extra_headers.unwrap_or_default());
+    Ok(headers)
 }
 
 async fn cleanup_dialog_on_fresh_task(
     dialog_adapter: Arc<DialogAdapter>,
-    session_id: SessionId,
+    handle: SessionRegistryHandle,
 ) -> crate::errors::Result<()> {
     let task = AbortSipResponseTaskOnDrop::new(tokio::spawn(async move {
-        dialog_adapter.cleanup_session(&session_id).await
+        dialog_adapter
+            .cleanup_session_exact_lane_owned(&handle)
+            .await
     }));
     task.join().await.map_err(|_| {
         crate::errors::SessionError::InternalError(DIALOG_CLEANUP_JOIN_FAILURE.to_string())
@@ -117,13 +867,100 @@ async fn cleanup_dialog_on_fresh_task(
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ActionOutcome {
     pub(crate) follow_up_events: Vec<EventType>,
+    pub(crate) deferred_effects: Vec<DeferredActionEffect>,
 }
 
 impl ActionOutcome {
     fn with_event(event: EventType) -> Self {
         Self {
             follow_up_events: vec![event],
+            deferred_effects: Vec::new(),
         }
+    }
+
+    fn with_deferred_effect(effect: DeferredActionEffect) -> Self {
+        Self {
+            follow_up_events: Vec::new(),
+            deferred_effects: vec![effect],
+        }
+    }
+
+    fn with_event_and_deferred_effect(event: EventType, effect: DeferredActionEffect) -> Self {
+        Self {
+            follow_up_events: vec![event],
+            deferred_effects: vec![effect],
+        }
+    }
+}
+
+/// Work that is admitted only after the transition's exact state publication.
+///
+/// Keeping this descriptor private to the state-machine implementation lets an
+/// action declare delayed work without sleeping in the session lane or
+/// manufacturing a second signaling dispatcher.
+#[derive(Debug, Clone)]
+pub(crate) enum DeferredActionEffect {
+    ReinviteRetry(ReinviteRetryEffect),
+    Registration(RegistrationPostCommitEffect),
+    TransferNotify(TransferNotifyEffect),
+    SessionRefreshTimer(SessionRefreshTimerEffect),
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum SessionRefreshDeadlineKind {
+    UpdateDue,
+    ReinviteDue,
+    PeerExpired,
+    UpdateFailed,
+    ReinviteFailed,
+}
+
+/// One generation-qualified RFC 4028 deadline admitted only after the YAML
+/// transition that armed it has committed.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionRefreshTimerEffect {
+    pub(crate) generation: u64,
+    pub(crate) delay: std::time::Duration,
+    pub(crate) kind: SessionRefreshDeadlineKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReinviteRetryEffect {
+    pub(crate) kind: crate::session_store::state::PendingReinvite,
+    pub(crate) attempt: u8,
+    pub(crate) backoff: std::time::Duration,
+}
+
+/// One post-commit REFER progress operation bound to the exact lifetime that
+/// owns the implicit subscription dialog.
+///
+/// The target-leg transition constructs this descriptor while holding its own
+/// lane. The executor later admits the wire NOTIFY on the transferor's lane,
+/// preventing cross-session lock inversion and raw session-ID reuse.
+#[derive(Debug, Clone)]
+pub(crate) struct TransferNotifyEffect {
+    pub(crate) transferor: SessionRegistryHandle,
+    pub(crate) status_code: u16,
+    pub(crate) reason: String,
+    pub(crate) observations: Vec<Event>,
+}
+
+fn exact_transferor_link(
+    session: &SessionState,
+) -> crate::errors::Result<Option<(SessionId, SessionRegistryHandle)>> {
+    match (
+        session.transferor_session_id.as_ref(),
+        session.transferor_lifecycle_handle.as_ref(),
+    ) {
+        (None, None) if !session.is_transfer_call => Ok(None),
+        (Some(session_id), Some(handle))
+            if session.is_transfer_call && handle.session_id() == session_id =>
+        {
+            Ok(Some((session_id.clone(), handle.clone())))
+        }
+        _ => Err(crate::errors::SessionError::InvalidTransition(
+            "transfer progress requires one matching exact transferor lifetime".to_string(),
+        )),
     }
 }
 
@@ -134,78 +971,13 @@ enum RegisterActionMode {
     Unregister,
 }
 
-/// Narrow copy of fields that dialog-side REGISTER processing may mutate
-/// while an action awaits the wire response.
-///
-/// The executor owns an event-local `SessionState`, while `DialogAdapter`
-/// atomically advances registration identity, digest nonce-count, transport,
-/// and outcome fields in the store.  Reloading the complete session after
-/// every attempt cloned all call/media/SDP/history state.  This projection
-/// keeps the two views coherent without paying that unrelated cost.
-struct RegistrationStateProjection {
-    registration_expires: Option<u32>,
-    registration_call_id: Option<String>,
-    registration_cseq: u32,
-    registration_accepted_expires: Option<u32>,
-    registration_registered_at: Option<std::time::Instant>,
-    registration_next_refresh_at: Option<std::time::Instant>,
-    registration_last_failure: Option<String>,
-    registration_service_route: Option<Vec<String>>,
-    registration_pub_gruu: Option<String>,
-    registration_temp_gruu: Option<String>,
-    is_registered: bool,
-    registration_retry_count: u32,
-    pending_auth_transport: Option<crate::auth::SipTransportSecurityContext>,
-    digest_nc: std::collections::HashMap<(String, String), u32>,
+fn record_registration_auth_retry(session: &mut SessionState) {
+    session.registration_retry_count = session.registration_retry_count.saturating_add(1);
 }
 
-impl RegistrationStateProjection {
-    fn capture(session: &SessionState) -> Self {
-        Self {
-            registration_expires: session.registration_expires,
-            registration_call_id: session.registration_call_id.clone(),
-            registration_cseq: session.registration_cseq,
-            registration_accepted_expires: session.registration_accepted_expires,
-            registration_registered_at: session.registration_registered_at,
-            registration_next_refresh_at: session.registration_next_refresh_at,
-            registration_last_failure: session.registration_last_failure.clone(),
-            registration_service_route: session.registration_service_route.clone(),
-            registration_pub_gruu: session.registration_pub_gruu.clone(),
-            registration_temp_gruu: session.registration_temp_gruu.clone(),
-            is_registered: session.is_registered,
-            registration_retry_count: session.registration_retry_count,
-            pending_auth_transport: session.pending_auth_transport.clone(),
-            digest_nc: session.digest_nc.clone(),
-        }
-    }
-
-    fn apply(self, session: &mut SessionState) {
-        session.registration_expires = self.registration_expires;
-        session.registration_call_id = self.registration_call_id;
-        session.registration_cseq = self.registration_cseq;
-        session.registration_accepted_expires = self.registration_accepted_expires;
-        session.registration_registered_at = self.registration_registered_at;
-        session.registration_next_refresh_at = self.registration_next_refresh_at;
-        session.registration_last_failure = self.registration_last_failure;
-        session.registration_service_route = self.registration_service_route;
-        session.registration_pub_gruu = self.registration_pub_gruu;
-        session.registration_temp_gruu = self.registration_temp_gruu;
-        session.is_registered = self.is_registered;
-        session.registration_retry_count = self.registration_retry_count;
-        session.pending_auth_transport = self.pending_auth_transport;
-        session.digest_nc = self.digest_nc;
-    }
-}
-
-fn sync_registration_state(
-    store: &SessionStore,
-    session_id: &SessionId,
-    session: &mut SessionState,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    store
-        .with_session(session_id, RegistrationStateProjection::capture)?
-        .apply(session);
-    Ok(())
+fn record_registration_interval_retry(session: &mut SessionState, min_expires: u32) {
+    session.registration_expires = Some(min_expires);
+    session.registration_retry_count = session.registration_retry_count.saturating_add(1);
 }
 
 /// Redacted validation error for SIP-owned INVITE option materialization.
@@ -259,112 +1031,140 @@ impl InviteEndpointDiagnostics {
 async fn execute_register_action(
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
-    session_store: &Arc<SessionStore>,
+    triggering_event: &EventType,
     mode: RegisterActionMode,
+    stage_claim: Option<&StageDispatchClaim>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     let session_id = session.session_id.clone();
-    let from_uri = session
-        .local_uri
-        .clone()
-        .ok_or_else(|| "local_uri not set for registration".to_string())?;
-    let registrar_uri = match mode {
-        RegisterActionMode::Unregister => session
-            .registrar_uri
-            .clone()
-            .ok_or_else(|| "registrar_uri not set for unregistration".to_string())?,
-        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => session
+    let staged_options = claim_builder_request_staging(
+        session,
+        PendingOptionsSlotKind::Register,
+        BuilderStageLifetime::RetainedForRetry,
+        stage_claim,
+    )?;
+
+    let unregister = mode == RegisterActionMode::Unregister
+        || matches!(triggering_event, EventType::StartUnregistration)
+        || matches!(
+            staged_options.as_ref(),
+            Some(PendingOptionsSlot::Register(options)) if options.expires == 0
+        );
+    let authenticated = mode == RegisterActionMode::RegisterWithAuth
+        || matches!(triggering_event, EventType::AuthRequired { .. })
+        || unregister;
+
+    let mut options = if let Some(PendingOptionsSlot::Register(options)) = staged_options {
+        (*options).clone()
+    } else {
+        let registrar_uri = session
             .registrar_uri
             .clone()
             .or_else(|| session.remote_uri.clone())
-            .ok_or_else(|| "registrar_uri not set for registration".to_string())?,
-    };
-    let contact_uri = match mode {
-        RegisterActionMode::Unregister => session
-            .registration_contact
+            .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
+        let aor_uri = session
+            .local_uri
             .clone()
-            .ok_or_else(|| "contact_uri not set for unregistration".to_string())?,
-        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => session
+            .ok_or_else(|| "local_uri not set for registration".to_string())?;
+        let contact_uri = session
             .registration_contact
             .clone()
             .or_else(|| session.local_uri.clone())
-            .ok_or_else(|| "contact_uri not set for registration".to_string())?,
-    };
-    let auth = match mode {
-        RegisterActionMode::Register => None,
-        RegisterActionMode::RegisterWithAuth | RegisterActionMode::Unregister => session
-            .auth
-            .clone()
-            .or_else(|| session.credentials.clone().map(Into::into)),
-    };
-    let mut expires = match mode {
-        RegisterActionMode::Unregister => 0,
-        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => {
-            session.registration_expires.unwrap_or(3600)
+            .ok_or_else(|| "contact_uri not set for registration".to_string())?;
+        let refresh = unregister
+            || matches!(triggering_event, EventType::RefreshRegistration)
+            || (authenticated && session.is_registered);
+        rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+            registrar_uri,
+            aor_uri,
+            contact_uri,
+            expires: if unregister {
+                0
+            } else {
+                session.registration_expires.unwrap_or(3600)
+            },
+            authorization: None,
+            proxy_authorization: None,
+            call_id: session.registration_call_id.clone(),
+            // The dialog adapter advances from lane-owned state. A staged
+            // manual refresh may carry an explicitly reserved next CSeq;
+            // synthesized lifecycle sends deliberately do not.
+            cseq: None,
+            outbound_contact: None,
+            outbound_proxy_uri: None,
+            extra_headers: Vec::new(),
+            refresh,
         }
     };
+    if unregister {
+        options.expires = 0;
+        options.refresh = true;
+    }
 
-    // SIP_API_DESIGN_2 §7.3 — preserve builder-staged extras across the
-    // 401/407 retry hop. We `clone()` (not `take()`) so the stash persists
-    // for the auth-retry pass; `Action::ClearPendingREGISTEROptions` (or
-    // the Terminated backstop) clears it on final response.
-    let staged_extras: Vec<rvoip_sip_core::types::TypedHeader> = session
-        .pending_register_options
-        .as_ref()
-        .map(|opts| opts.extra_headers.clone())
-        .unwrap_or_default();
+    let registrar_uri = options.registrar_uri.clone();
+    let from_uri = options.aor_uri.clone();
+    let contact_uri = options.contact_uri.clone();
+    let auth = authenticated.then(|| {
+        session
+            .auth
+            .clone()
+            .or_else(|| session.credentials.clone().map(Into::into))
+    });
+    let auth = auth.flatten();
 
     loop {
-        let outcome = dialog_adapter
-            .send_register(
+        let attempt = dialog_adapter
+            .send_register_attempt(
                 &session_id,
-                &registrar_uri,
-                &from_uri,
-                &contact_uri,
-                expires,
+                options,
                 auth.as_ref(),
-                staged_extras.clone(),
+                RegisterAttemptContext::capture(session),
             )
             .await?;
+        attempt.context.apply(session);
+        options = attempt.request_options;
+        session.pending_register_options = Some(Arc::new(options.clone()));
 
-        match outcome {
+        match attempt.outcome {
             RegisterAttemptOutcome::Registered {
                 accepted_expires,
                 metadata,
             } => {
-                dialog_adapter
-                    .apply_registration_success(
-                        &session_id,
-                        &registrar_uri,
-                        &from_uri,
-                        &contact_uri,
-                        accepted_expires,
-                        metadata,
-                    )
-                    .await?;
-                sync_registration_state(session_store, &session_id, session)?;
-                return Ok(ActionOutcome::with_event(EventType::Registration200OK));
+                let effect = dialog_adapter.record_registration_success(
+                    session,
+                    &registrar_uri,
+                    &from_uri,
+                    &contact_uri,
+                    accepted_expires,
+                    metadata,
+                );
+                session.pending_register_options = None;
+                return Ok(ActionOutcome::with_event_and_deferred_effect(
+                    EventType::Registration200OK,
+                    DeferredActionEffect::Registration(effect),
+                ));
             }
             RegisterAttemptOutcome::Unregistered => {
-                if mode == RegisterActionMode::Unregister {
-                    dialog_adapter
-                        .apply_unregistration_success(&session_id, &registrar_uri)
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
+                if unregister {
+                    let effect =
+                        dialog_adapter.record_unregistration_success(session, &registrar_uri);
+                    session.pending_register_options = None;
+                    return Ok(ActionOutcome::with_event_and_deferred_effect(
+                        EventType::Unregistration200OK,
+                        DeferredActionEffect::Registration(effect),
+                    ));
                 }
 
-                dialog_adapter
-                    .apply_registration_failure(
-                        &session_id,
-                        &registrar_uri,
-                        200,
-                        "REGISTER returned an unregistration success while registering",
-                    )
-                    .await?;
-                sync_registration_state(session_store, &session_id, session)?;
-                return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                let effect = dialog_adapter.record_registration_failure(
+                    session,
+                    &registrar_uri,
                     200,
-                )));
+                    "REGISTER returned an unregistration success while registering",
+                );
+                session.pending_register_options = None;
+                return Ok(ActionOutcome::with_event_and_deferred_effect(
+                    EventType::RegistrationFailed(200),
+                    DeferredActionEffect::Registration(effect),
+                ));
             }
             RegisterAttemptOutcome::AuthChallenge {
                 status_code,
@@ -372,32 +1172,24 @@ async fn execute_register_action(
             } => {
                 let challenge_details =
                     rvoip_auth_core::DigestAuthenticator::parse_challenge_details(&challenge).ok();
-                if mode == RegisterActionMode::Unregister {
-                    dialog_adapter
-                        .apply_unregistration_failure(
-                            &session_id,
-                            &registrar_uri,
-                            format!(
-                                "unregistration received {} authentication challenge",
-                                status_code
-                            ),
-                        )
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
-                }
-
-                let (retry_count, previous_nonce) =
-                    session_store.with_session(&session_id, |latest| {
-                        (
-                            latest.registration_retry_count,
-                            latest
-                                .auth_challenge
-                                .as_ref()
-                                .map(|challenge| challenge.nonce.clone()),
-                        )
-                    })?;
-                let stale_recovery = retry_count == 1
+                let retry_count = session.registration_retry_count;
+                let previous_nonce = session
+                    .auth_challenge
+                    .as_ref()
+                    .map(|challenge| challenge.nonce.clone());
+                // Origin (401) and proxy (407) protection spaces are
+                // independent. A response only repeats an already-attempted
+                // space when the exact request snapshot carried that space's
+                // credential; the other challenge may still be answered while
+                // retaining the first header.
+                let challenged_space_was_authenticated = if status_code == 407 {
+                    options.proxy_authorization.is_some()
+                } else {
+                    options.authorization.is_some()
+                };
+                let has_prior_auth_retry = retry_count > 0 && challenged_space_was_authenticated;
+                let stale_recovery = has_prior_auth_retry
+                    && !session.auth_challenge_stale
                     && challenge_details
                         .as_ref()
                         .is_some_and(|details| details.stale)
@@ -406,33 +1198,37 @@ async fn execute_register_action(
                             .as_ref()
                             .is_some_and(|details| nonce != details.challenge.nonce)
                     });
-                if retry_count >= 1 && !stale_recovery {
+                if has_prior_auth_retry && !stale_recovery {
                     tracing::error!(
                         "❌ REGISTER auth failed (retry count {}); invalid credentials",
                         retry_count
                     );
-                    dialog_adapter
-                        .apply_registration_failure(
-                            &session_id,
+                    session.pending_register_options = None;
+                    if unregister {
+                        let effect = dialog_adapter.record_unregistration_failure(
+                            session,
+                            &registrar_uri,
+                            "unregistration authentication failed",
+                        );
+                        return Ok(ActionOutcome::with_event_and_deferred_effect(
+                            EventType::UnregistrationFailed,
+                            DeferredActionEffect::Registration(effect),
+                        ));
+                    } else {
+                        let effect = dialog_adapter.record_registration_failure(
+                            session,
                             &registrar_uri,
                             status_code,
                             "REGISTER authentication failed",
-                        )
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
-                        status_code,
-                    )));
+                        );
+                        return Ok(ActionOutcome::with_event_and_deferred_effect(
+                            EventType::RegistrationFailed(status_code),
+                            DeferredActionEffect::Registration(effect),
+                        ));
+                    }
                 }
 
-                let retry_count = session_store
-                    .update_session_with(&session_id, |latest| {
-                        latest.registration_retry_count += 1;
-                        latest.registration_retry_count
-                    })
-                    .await?;
-                sync_registration_state(session_store, &session_id, session)?;
-                session.registration_retry_count = retry_count;
+                record_registration_auth_retry(session);
                 return Ok(ActionOutcome::with_event(EventType::AuthRequired {
                     status_code,
                     challenge,
@@ -440,80 +1236,77 @@ async fn execute_register_action(
                 }));
             }
             RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
-                if mode == RegisterActionMode::Unregister {
-                    dialog_adapter
-                        .apply_unregistration_failure(
-                            &session_id,
-                            &registrar_uri,
-                            format!(
-                                "unregistration received 423 Interval Too Brief Min-Expires={}",
-                                min_expires
-                            ),
-                        )
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                if unregister {
+                    let effect = dialog_adapter.record_unregistration_failure(
+                        session,
+                        &registrar_uri,
+                        format!(
+                            "unregistration received 423 Interval Too Brief Min-Expires={}",
+                            min_expires
+                        ),
+                    );
+                    session.pending_register_options = None;
+                    return Ok(ActionOutcome::with_event_and_deferred_effect(
+                        EventType::UnregistrationFailed,
+                        DeferredActionEffect::Registration(effect),
+                    ));
                 }
 
-                let retry_count = session_store
-                    .with_session(&session_id, |latest| latest.registration_retry_count)?;
+                let retry_count = session.registration_retry_count;
                 if retry_count >= 2 {
                     tracing::error!(
                         "❌ Registration failed with repeated 423 — giving up (retry count {})",
                         retry_count
                     );
-                    dialog_adapter
-                        .apply_registration_failure(
-                            &session_id,
-                            &registrar_uri,
-                            423,
-                            "Registration failed with repeated 423 Interval Too Brief responses",
-                        )
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                    let effect = dialog_adapter.record_registration_failure(
+                        session,
+                        &registrar_uri,
                         423,
-                    )));
+                        "Registration failed with repeated 423 Interval Too Brief responses",
+                    );
+                    session.pending_register_options = None;
+                    return Ok(ActionOutcome::with_event_and_deferred_effect(
+                        EventType::RegistrationFailed(423),
+                        DeferredActionEffect::Registration(effect),
+                    ));
                 }
 
                 tracing::info!(
                     "🔄 423 Interval Too Brief — retrying REGISTER with Expires={} (server required min)",
                     min_expires
                 );
-                let (retry_count, registration_expires) = session_store
-                    .update_session_with(&session_id, |latest| {
-                        latest.registration_expires = Some(min_expires);
-                        latest.registration_retry_count += 1;
-                        (latest.registration_retry_count, latest.registration_expires)
-                    })
-                    .await?;
-                session.registration_retry_count = retry_count;
-                session.registration_expires = registration_expires;
-                expires = min_expires;
+                record_registration_interval_retry(session, min_expires);
+                options.expires = min_expires;
+                session.pending_register_options = Some(Arc::new(options.clone()));
             }
             RegisterAttemptOutcome::Failure {
                 status_code,
                 reason,
             } => {
-                if mode == RegisterActionMode::Unregister {
-                    dialog_adapter
-                        .apply_unregistration_failure(
-                            &session_id,
-                            &registrar_uri,
-                            format!("{} (status {})", reason, status_code),
-                        )
-                        .await?;
-                    sync_registration_state(session_store, &session_id, session)?;
-                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                if unregister {
+                    let effect = dialog_adapter.record_unregistration_failure(
+                        session,
+                        &registrar_uri,
+                        format!("{} (status {})", reason, status_code),
+                    );
+                    session.pending_register_options = None;
+                    return Ok(ActionOutcome::with_event_and_deferred_effect(
+                        EventType::UnregistrationFailed,
+                        DeferredActionEffect::Registration(effect),
+                    ));
                 }
 
-                dialog_adapter
-                    .apply_registration_failure(&session_id, &registrar_uri, status_code, reason)
-                    .await?;
-                sync_registration_state(session_store, &session_id, session)?;
-                return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                let effect = dialog_adapter.record_registration_failure(
+                    session,
+                    &registrar_uri,
                     status_code,
-                )));
+                    reason,
+                );
+                session.pending_register_options = None;
+                return Ok(ActionOutcome::with_event_and_deferred_effect(
+                    EventType::RegistrationFailed(status_code),
+                    DeferredActionEffect::Registration(effect),
+                ));
             }
         }
     }
@@ -664,9 +1457,8 @@ pub(crate) fn materialize_invite_options(
 }
 
 /// Execute an action from the state table
-async fn claim_tracked_request_staging(
+fn claim_tracked_request_staging(
     session: &mut SessionState,
-    session_store: &SessionStore,
     method: TrackedInDialogMethod,
     dispatch_claim: Option<&StageDispatchClaim>,
 ) -> crate::errors::Result<TrackedInDialogOptions> {
@@ -687,6 +1479,10 @@ async fn claim_tracked_request_staging(
             .pending_update_options
             .as_ref()
             .map(|options| PendingOptionsSlot::Update(Arc::clone(options))),
+        TrackedInDialogMethod::Reinvite => session
+            .pending_reinvite_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::ReInvite(Arc::clone(options))),
     };
     let fallback_claim = fallback_slot.map(StageDispatchClaim::new);
     let claim = dispatch_claim.or(fallback_claim.as_ref()).ok_or_else(|| {
@@ -702,15 +1498,11 @@ async fn claim_tracked_request_staging(
         )));
     }
 
-    let claimed = session_store
-        .update_session_with(&session.session_id, |stored| claim.claim_exact(stored))
-        .await
-        .map_err(|_| {
-            crate::errors::SessionError::InternalError(
-                "failed to atomically claim outbound request staging".to_string(),
-            )
-        })??;
-    claimed.clear_if_exact(session);
+    // The executor holds this exact session's complete-event lane for the
+    // entire transition. Claim the staged Arc from its one lane-owned working
+    // state; publishing a second store revision here would create a competing
+    // writer without adding any serialization.
+    let claimed = claim.claim_exact(session)?;
 
     match (method, claimed) {
         (TrackedInDialogMethod::Refer, PendingOptionsSlot::Refer(options)) => {
@@ -725,41 +1517,124 @@ async fn claim_tracked_request_staging(
         (TrackedInDialogMethod::Update, PendingOptionsSlot::Update(options)) => {
             Ok(TrackedInDialogOptions::Update(options))
         }
+        (TrackedInDialogMethod::Reinvite, PendingOptionsSlot::ReInvite(options)) => {
+            Ok(TrackedInDialogOptions::Reinvite(options))
+        }
         _ => Err(crate::errors::SessionError::InvalidTransition(
             "outbound request stage claim changed method".to_string(),
         )),
     }
 }
 
-async fn advance_tracked_auth_owner(
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum BuilderStageLifetime {
+    /// The immutable snapshot remains staged until the final-response owner
+    /// clears it because a protocol/authentication retry may need it.
+    RetainedForRetry,
+    /// The action takes the immutable snapshot before its first wire await.
+    ConsumeBeforeWire,
+}
+
+fn pending_options_slot(
+    session: &SessionState,
+    kind: PendingOptionsSlotKind,
+) -> Option<PendingOptionsSlot> {
+    match kind {
+        PendingOptionsSlotKind::Invite => session
+            .pending_invite_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Invite(Arc::clone(options))),
+        PendingOptionsSlotKind::ReInvite => session
+            .pending_reinvite_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::ReInvite(Arc::clone(options))),
+        PendingOptionsSlotKind::Register => session
+            .pending_register_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Register(Arc::clone(options))),
+        PendingOptionsSlotKind::Refer => session
+            .pending_refer_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Refer(Arc::clone(options))),
+        PendingOptionsSlotKind::Bye => session
+            .pending_bye_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Bye(Arc::clone(options))),
+        PendingOptionsSlotKind::Cancel => session
+            .pending_cancel_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Cancel(Arc::clone(options))),
+        PendingOptionsSlotKind::Notify => session
+            .pending_notify_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Notify(Arc::clone(options))),
+        PendingOptionsSlotKind::Subscribe => session
+            .pending_subscribe_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Subscribe(Arc::clone(options))),
+        PendingOptionsSlotKind::Info => session
+            .pending_info_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Info(Arc::clone(options))),
+        PendingOptionsSlotKind::Update => session
+            .pending_update_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Update(Arc::clone(options))),
+        PendingOptionsSlotKind::Message => session
+            .pending_message_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Message(Arc::clone(options))),
+        PendingOptionsSlotKind::Options => session
+            .pending_options_options
+            .as_ref()
+            .map(|options| PendingOptionsSlot::Options(Arc::clone(options))),
+    }
+}
+
+/// Transfer one builder's exact staged Arc into its action before the first
+/// wire await. `stage_claim == None` is the public two-step compatibility
+/// path: synthesize a claim around the already-staged exact Arc and apply the
+/// same retained/consumed lifetime policy.
+fn claim_builder_request_staging(
     session: &mut SessionState,
-    session_store: &SessionStore,
+    kind: PendingOptionsSlotKind,
+    lifetime: BuilderStageLifetime,
+    stage_claim: Option<&StageDispatchClaim>,
+) -> crate::errors::Result<Option<PendingOptionsSlot>> {
+    let fallback_slot = pending_options_slot(session, kind);
+    let fallback_claim = fallback_slot.map(StageDispatchClaim::new);
+    let Some(claim) = stage_claim.or(fallback_claim.as_ref()) else {
+        return Ok(None);
+    };
+    if claim.kind() != kind {
+        return Err(crate::errors::SessionError::InvalidTransition(format!(
+            "outbound staged-options kind mismatch: expected {kind:?}, received {:?}",
+            claim.kind()
+        )));
+    }
+
+    let claimed = match lifetime {
+        BuilderStageLifetime::RetainedForRetry => claim.claim_retained_exact(session)?,
+        BuilderStageLifetime::ConsumeBeforeWire => claim.claim_exact(session)?,
+    };
+    Ok(Some(claimed))
+}
+
+fn advance_tracked_auth_owner(
+    session: &mut SessionState,
     method: TrackedInDialogMethod,
-    challenged_transaction: &rvoip_sip_dialog::transaction::TransactionKey,
     retry_transaction: &rvoip_sip_dialog::transaction::TransactionKey,
     request_uri: &str,
 ) {
-    let challenged_id = challenged_transaction.to_string();
     let retry_id = retry_transaction.to_string();
-    let method_name = method.as_sip_method().to_string();
 
-    session.pending_auth_transaction_id = Some(retry_id.clone());
+    // The executor owns this mutable state for the complete AuthRequired
+    // transition. Advancing the exact request owner here is therefore the
+    // authoritative mutation; publishing a second partial SessionStore write
+    // would recreate the race this lane exists to prevent.
+    session.pending_auth_transaction_id = Some(retry_id);
     session.pending_auth_request_uri = Some(request_uri.to_string());
-    session.pending_auth_method = Some(method_name.clone());
-
-    // Do not overwrite a concurrently recorded challenge for another exact
-    // request. The retry is already on the wire, so its tracker entry remains
-    // authoritative; this compatibility projection advances only while it
-    // still owns the challenged transaction.
-    let _ = session_store
-        .update_session_with(&session.session_id, |stored| {
-            if stored.pending_auth_transaction_id.as_deref() == Some(challenged_id.as_str()) {
-                stored.pending_auth_transaction_id = Some(retry_id);
-                stored.pending_auth_request_uri = Some(request_uri.to_string());
-                stored.pending_auth_method = Some(method_name);
-            }
-        })
-        .await;
+    session.pending_auth_method = Some(method.as_sip_method().to_string());
 }
 
 pub(crate) async fn execute_action(
@@ -768,10 +1643,9 @@ pub(crate) async fn execute_action(
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
-    session_store: &Arc<SessionStore>,
-    auto_180_ringing: bool,
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
     stage_claim: Option<&StageDispatchClaim>,
+    mut inbound_response: Option<&mut InboundResponseStateInput>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
 
@@ -791,9 +1665,40 @@ pub(crate) async fn execute_action(
                 "Preparing dialog: {:?}",
                 InviteEndpointDiagnostics::new(Some(from), Some(to), session.local_sdp.is_some())
             );
-            // Don't create dialog here - it will be created when we send INVITE
-            // Just log that we're preparing to create a dialog
-            info!("Dialog will be created when INVITE is sent");
+            if session.role == crate::state_table::Role::UAS {
+                // Dialog-core has already created and registered the inbound
+                // UAS dialog before the IncomingCall event enters this exact
+                // lane. Adopt that canonical identity into the working state
+                // so later in-dialog actions can require registry/state
+                // agreement without falling back to a raw-ID lookup.
+                let handle = exact_dialog_cleanup_handle(session)?;
+                let dialog_id = dialog_adapter
+                    .store
+                    .registry()
+                    .get_dialog_handle_exact(&handle)
+                    .ok_or_else(|| {
+                        crate::errors::SessionError::InvalidTransition(
+                            "inbound UAS session has no exact registry dialog".to_string(),
+                        )
+                    })?;
+                if session
+                    .dialog_id
+                    .as_ref()
+                    .is_some_and(|current| current != &dialog_id)
+                {
+                    return Err(crate::errors::SessionError::InvalidTransition(
+                        "inbound UAS state dialog conflicts with its exact registry owner"
+                            .to_string(),
+                    )
+                    .into());
+                }
+                session.dialog_id = Some(dialog_id);
+                info!("Adopted inbound UAS dialog from exact registry owner");
+            } else {
+                // Outbound UAC dialog creation remains owned by the initial
+                // INVITE dispatch, which installs the exact registry mapping.
+                info!("Dialog will be created when INVITE is sent");
+            }
         }
         Action::CreateMediaSession => {
             info!(
@@ -834,20 +1739,13 @@ pub(crate) async fn execute_action(
                     "Action::GenerateLocalSDP for session {}",
                     session.session_id
                 );
-                let sdp = media_adapter
-                    .generate_local_sdp(&session.session_id)
-                    .await?;
+                let sdp = media_adapter.generate_local_sdp_lane_owned(session).await?;
                 session.local_sdp = Some(sdp.clone());
                 info!("Generated SDP with {} bytes", sdp.len());
             }
-            // Persist before SendINVITE. A fast 401/407 can re-enter the
-            // state machine while SendINVITE is still awaiting, and the auth
-            // retry needs the original SDP offer from the store.
-            session_store
-                .update_session_with(&session.session_id, |stored| {
-                    stored.local_sdp = session.local_sdp.clone();
-                })
-                .await?;
+            // A fast 401/407 is delivered through the same exact-session lane,
+            // so it cannot run until this transition canonically publishes the
+            // lane-owned SDP below.
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session.session_id,
@@ -862,24 +1760,32 @@ pub(crate) async fn execute_action(
                 "Action::SendRejectResponse for session {} with status {}",
                 session.session_id, status
             );
-            // SIP_API_DESIGN_2 §3.4 — when the application built the
-            // 4xx/6xx via `RejectBuilder` / `AuthChallengeBuilder`, the
-            // staged extras (`Retry-After`, `Warning`,
-            // `WWW-Authenticate`, custom `X-*`, …) ride here. The
-            // builder writes to `reject_response_extras` BEFORE
-            // dispatching the state-machine `RejectCall` event, so we
-            // consume the stash on the first SendRejectResponse and
-            // clear it so a follow-up reject_call (e.g. cleanup) does
-            // not pick up stale headers.
-            let extras = session.reject_response_extras.take();
-            if let Some(extras) = extras {
-                dialog_adapter
-                    .send_response_with_options(&session.session_id, status, None, extras)
-                    .await?;
-            } else {
-                dialog_adapter
-                    .send_response(&session.session_id, status, None)
-                    .await?;
+            if !(400..=699).contains(&status) {
+                return Err(zero_wire_exact_response_error(
+                    "initial INVITE rejection status is not 4xx, 5xx, or 6xx",
+                ));
+            }
+            let extras = session
+                .reject_response_extras
+                .clone()
+                .filter(|extras| !extras.is_empty());
+            let terminal = send_exact_initial_invite_final_response(
+                session,
+                dialog_adapter,
+                status,
+                None,
+                extras,
+            )
+            .await?;
+            consume_exact_initial_invite_response_authority(
+                session,
+                dialog_adapter,
+                &terminal,
+                false,
+            );
+            session.reject_response_extras.take();
+            if let Some(error) = terminal.terminal_error {
+                return Err(error);
             }
         }
         Action::SendRedirectResponse => {
@@ -891,86 +1797,136 @@ pub(crate) async fn execute_action(
                 status,
                 contacts.len()
             );
-            if contacts.is_empty() {
-                return Err(format!(
-                    "SendRedirectResponse for session {} with no contacts",
-                    session.session_id
-                )
-                .into());
+            let extras = session
+                .reject_response_extras
+                .clone()
+                .filter(|extras| !extras.is_empty());
+            if !(300..=399).contains(&status) {
+                return Err(zero_wire_exact_response_error(
+                    "initial INVITE redirect status is not 3xx",
+                ));
             }
-            dialog_adapter
-                .send_redirect_response(&session.session_id, status, contacts)
-                .await?;
+            let headers = exact_redirect_response_headers(&contacts, extras)?;
+            let terminal = send_exact_initial_invite_final_response(
+                session,
+                dialog_adapter,
+                status,
+                None,
+                Some(headers),
+            )
+            .await?;
+            consume_exact_initial_invite_response_authority(
+                session,
+                dialog_adapter,
+                &terminal,
+                false,
+            );
+            session.reject_response_extras.take();
+            if let Some(error) = terminal.terminal_error {
+                return Err(error);
+            }
         }
         Action::SendSIPResponse(code, _reason) => {
-            if *code == 180 && !auto_180_ringing {
-                debug!(
-                    "Suppressing automatic 180 Ringing for session {} via Config::auto_180_ringing=false",
-                    session.session_id
-                );
-                return Ok(ActionOutcome::default());
-            }
-            let guard = (*code == 200).then(|| {
+            let response_code = session.pending_response_status_override.unwrap_or(*code);
+            let extras = session
+                .reject_response_extras
+                .clone()
+                .filter(|extras| !extras.is_empty());
+            let guard = (response_code == 200).then(|| {
                 cleanup_diag::stage_guard(CleanupStage::ActionSend200Ok, &session.session_id.0)
             });
-            if *code == 200 {
-                let response_started_at = session.incoming_invite_received_at.take();
-                if let Some(transaction_id) = session.pending_inbound_invite_transaction_id.take() {
-                    let udp_receive_timing = dialog_adapter
-                        .dialog_api
-                        .dialog_manager()
-                        .core()
-                        .transaction_manager()
-                        .take_inbound_timing(&transaction_id);
-                    send_sip_response_on_fresh_task(
-                        Arc::clone(dialog_adapter),
-                        session.session_id.clone(),
-                        SipResponseTarget::Transaction(transaction_id),
-                        *code,
-                        session.local_sdp.clone(),
-                    )
-                    .await?;
-                    if let Some(timing) = udp_receive_timing {
-                        if let Some(received_at) = timing.received_at {
-                            rvoip_sip_dialog::diagnostics::record_udp_receive_to_invite_200(
-                                received_at.elapsed(),
-                            );
-                        }
-                    }
-                } else {
-                    send_sip_response_on_fresh_task(
-                        Arc::clone(dialog_adapter),
-                        session.session_id.clone(),
-                        SipResponseTarget::Session,
-                        *code,
-                        session.local_sdp.clone(),
-                    )
-                    .await?;
-                }
-                if let Some(started_at) = response_started_at {
-                    rvoip_sip_dialog::diagnostics::record_200_ok_invite_first();
-                    rvoip_sip_dialog::diagnostics::record_first_invite_to_200(started_at.elapsed());
-                }
-            } else {
-                send_sip_response_on_fresh_task(
-                    Arc::clone(dialog_adapter),
-                    session.session_id.clone(),
-                    SipResponseTarget::Session,
-                    *code,
+            let response_is_final = (200..=699).contains(&response_code);
+            let response_is_provisional = (100..=199).contains(&response_code);
+            if !response_is_final && !response_is_provisional {
+                return Err(zero_wire_exact_response_error(
+                    "YAML UAS response status is outside the SIP response range",
+                ));
+            }
+
+            let initial_invite_event = matches!(
+                triggering_event,
+                EventType::IncomingCall { .. } | EventType::IncomingCallAutoAccept { .. }
+            );
+            if initial_invite_event {
+                validate_initial_invite_event_response_authority(
+                    session,
+                    inbound_response.as_deref(),
+                )?;
+            }
+            // Event-local authority always wins. The retained initial-INVITE
+            // capability is consulted only for a later application event that
+            // has no inbound request attached (Accept/Reject/EarlyMedia).
+            let initial_invite_response = initial_invite_event
+                || (inbound_response.is_none()
+                    && session.pending_inbound_invite_transaction_id.is_some());
+            let mut terminal_error = None;
+            if response_is_final && initial_invite_response {
+                let terminal = send_exact_initial_invite_final_response(
+                    session,
+                    dialog_adapter,
+                    response_code,
                     session.local_sdp.clone(),
+                    extras,
+                )
+                .await?;
+                consume_exact_initial_invite_response_authority(
+                    session,
+                    dialog_adapter,
+                    &terminal,
+                    response_code == 200,
+                );
+                terminal_error = terminal.terminal_error;
+            } else if response_is_final {
+                let terminal = send_exact_inbound_final_response(
+                    &session.session_id,
+                    inbound_response.as_deref_mut(),
+                    dialog_adapter,
+                    response_code,
+                    session.local_sdp.clone(),
+                    extras,
+                )
+                .await?;
+                terminal_error = terminal.terminal_error;
+            } else if initial_invite_response {
+                send_exact_initial_invite_provisional_response(
+                    session,
+                    dialog_adapter,
+                    response_code,
+                    session.local_sdp.clone(),
+                    extras,
+                )
+                .await?;
+            } else {
+                send_exact_inbound_provisional_response(
+                    &session.session_id,
+                    inbound_response.as_deref_mut(),
+                    dialog_adapter,
+                    response_code,
+                    session.local_sdp.clone(),
+                    extras,
                 )
                 .await?;
             }
-            // RFC 3261: Dialog is established when UAS sends 200 OK to INVITE
-            if *code == 200 {
+
+            // The event-local response input remains intact across every
+            // await. Consume it only after success or an explicitly terminal
+            // wire-unknown classification.
+            session.pending_response_status_override.take();
+            session.reject_response_extras.take();
+            // RFC 3261: Dialog is established when the UAS sends a 2xx final
+            // response to the initial INVITE.
+            if response_is_final && initial_invite_response && (200..300).contains(&response_code) {
                 session.dialog_established = true;
                 info!(
-                    "Dialog established (UAS sent 200 OK) for session {}",
-                    session.session_id
+                    "Dialog established (UAS sent {} final response) for session {}",
+                    response_code, session.session_id
                 );
             }
-            if let Some(guard) = guard {
-                guard.finish_success();
+            if let Some(error) = terminal_error {
+                return Err(error);
+            }
+            if let Some(success_guard) = guard {
+                success_guard.finish_success();
             }
         }
         Action::SendINVITE => {
@@ -1053,10 +2009,7 @@ pub(crate) async fn execute_action(
             }
 
             // Now get the real dialog ID that was created
-            if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id)
-            {
-                // Convert RvoipDialogId to our DialogId type
-                let dialog_id: crate::types::DialogId = real_dialog_id.value().clone().into();
+            if let Ok(dialog_id) = dialog_adapter.initial_invite_dialog_lane_owned(session) {
                 session.dialog_id = Some(dialog_id);
                 info!("INVITE sent successfully with dialog ID {:?}", dialog_id);
             } else {
@@ -1079,7 +2032,6 @@ pub(crate) async fn execute_action(
             // non-owner retries first on every round, breaking the glare
             // deterministically instead of letting both sides keep racing
             // until the retry cap trips.
-            use crate::session_store::state::PendingReinvite;
             use crate::state_table::types::Role;
             const MAX_GLARE_RETRIES: u8 = 3;
             if session.reinvite_retry_attempts >= MAX_GLARE_RETRIES {
@@ -1111,30 +2063,20 @@ pub(crate) async fn execute_action(
             };
             let backoff = std::time::Duration::from_millis(millis);
             info!(
-                "⏳ 491 glare: sleeping {:?} before retrying {:?} for session {} (attempt {}/{})",
-                backoff,
+                "⏳ 491 glare: scheduling {:?} retry after {:?} for session {} (attempt {}/{})",
                 kind,
+                backoff,
                 session.session_id,
                 session.reinvite_retry_attempts,
                 MAX_GLARE_RETRIES
             );
-            tokio::time::sleep(backoff).await;
-
-            let sdp = match kind {
-                PendingReinvite::Hold => media_adapter
-                    .create_hold_sdp_for_session(&session.session_id)
-                    .await
-                    .map_err(|e| format!("create_hold_sdp failed: {}", e))?,
-                PendingReinvite::Resume => media_adapter
-                    .create_active_sdp_for_session(&session.session_id)
-                    .await
-                    .map_err(|e| format!("create_active_sdp failed: {}", e))?,
-                PendingReinvite::SdpUpdate(sdp) => sdp,
-            };
-            session.local_sdp = Some(sdp.clone());
-            dialog_adapter
-                .send_reinvite_session(&session.session_id, sdp)
-                .await?;
+            return Ok(ActionOutcome::with_deferred_effect(
+                DeferredActionEffect::ReinviteRetry(ReinviteRetryEffect {
+                    kind,
+                    attempt: session.reinvite_retry_attempts,
+                    backoff,
+                }),
+            ));
         }
         Action::RetryWithContact => {
             // RFC 3261 §8.1.3.4 / §19.1.5 — follow a 3xx redirect's Contact URI.
@@ -1209,9 +2151,7 @@ pub(crate) async fn execute_action(
             dialog_adapter
                 .send_invite_with_options(&session.session_id, invite_opts, apply_global_proxy)
                 .await?;
-            if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id)
-            {
-                let dialog_id: crate::types::DialogId = real_dialog_id.value().clone().into();
+            if let Ok(dialog_id) = dialog_adapter.initial_invite_dialog_lane_owned(session) {
                 session.dialog_id = Some(dialog_id);
             }
         }
@@ -1232,45 +2172,40 @@ pub(crate) async fn execute_action(
             // persist the snapshot first so that retry observes the exact
             // headers/reason used by this generation.
             let reason = session.pending_bye_reason.take();
-            let snapshot = if let Some(opts) = session.pending_bye_options.as_ref() {
+            let mut snapshot = if let Some(opts) = session.pending_bye_options.as_ref() {
                 (**opts).clone()
             } else {
-                let mut extra_headers = dialog_adapter.auto_emit_extra_headers.clone();
-                if let Some((protocol, cause, text)) = reason {
-                    extra_headers.push(TypedHeader::Reason(
-                        rvoip_sip_core::types::reason::Reason::new(protocol, cause, text),
-                    ));
-                }
                 let materialized = Arc::new(rvoip_sip_dialog::api::unified::ByeRequestOptions {
                     reason: None,
-                    extra_headers,
+                    extra_headers: dialog_adapter.auto_emit_extra_headers.clone(),
                 });
-                // If a builder raced legacy hangup before Terminating became
-                // visible, its already-staged immutable snapshot wins rather
-                // than being overwritten by automatic options.
-                let retained = session_store
-                    .update_session_with(&session.session_id, |stored| {
-                        stored
-                            .pending_bye_options
-                            .get_or_insert_with(|| Arc::clone(&materialized))
-                            .clone()
-                    })
-                    .await?;
-                session.pending_bye_options = Some(Arc::clone(&retained));
-                (*retained).clone()
+                // Builder staging and this transition share the exact-session
+                // lane. A snapshot staged first was selected above; otherwise
+                // this transition owns and publishes the automatic snapshot.
+                session.pending_bye_options = Some(Arc::clone(&materialized));
+                (*materialized).clone()
             };
+            // An automatic lifecycle reason is authoritative even when an
+            // application snapshot was already staged. Preserve every other
+            // immutable option, but materialize exactly one RFC 3326 Reason so
+            // timer expiry cannot silently inherit an unrelated cause=200.
+            if let Some((protocol, cause, text)) = reason {
+                snapshot.reason = None;
+                snapshot
+                    .extra_headers
+                    .retain(|header| !matches!(header, TypedHeader::Reason(_)));
+                snapshot.extra_headers.push(TypedHeader::Reason(
+                    rvoip_sip_core::types::reason::Reason::new(protocol, cause, text),
+                ));
+                session.pending_bye_options = Some(Arc::new(snapshot.clone()));
+            }
             if let Err(error) = dialog_adapter
-                .send_bye_with_options(&session.session_id, snapshot)
+                .send_bye_with_options_lane_owned(session, snapshot)
                 .await
             {
                 // An immediate zero-wire failure has no exact final-response
                 // owner to release the retained builder slot.
                 session.pending_bye_options = None;
-                let _ = session_store
-                    .update_session_with(&session.session_id, |stored| {
-                        stored.pending_bye_options = None;
-                    })
-                    .await;
                 return Err(error.into());
             }
             // Retain through 401/407 and release with exact BYE finalization.
@@ -1285,33 +2220,57 @@ pub(crate) async fn execute_action(
             // Send re-INVITE with sendonly SDP. Record that this is a Hold so
             // RFC 3261 §14.1 glare (491) retry can reissue the correct kind.
             let hold_sdp = media_adapter
-                .create_hold_sdp_for_session(&session.session_id)
+                .create_hold_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
             session.local_sdp = Some(hold_sdp.clone());
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Hold);
             dialog_adapter
-                .send_reinvite_session(&session.session_id, hold_sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(hold_sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
         }
         Action::ResumeCall => {
             // Send re-INVITE with sendrecv SDP.
             let active_sdp = media_adapter
-                .create_active_sdp_for_session(&session.session_id)
+                .create_active_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_active_sdp failed: {}", e))?;
             session.local_sdp = Some(active_sdp.clone());
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Resume);
             dialog_adapter
-                .send_reinvite_session(&session.session_id, active_sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(active_sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
         }
         Action::TransferCall(target) => {
             session.transfer_target = Some(target.clone());
             session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
             dialog_adapter
-                .send_refer_session(&session.session_id, target)
+                .send_refer_with_options_lane_owned(
+                    session,
+                    ReferRequestOptions {
+                        refer_to: target.clone(),
+                        ..Default::default()
+                    },
+                )
                 .await?;
+            info!(
+                session = %session.session_id.0,
+                target_present = !target.is_empty(),
+                target_bytes = target.len(),
+                "Sent REFER"
+            );
         }
         Action::StartRecording => {
             // Start recording the media session
@@ -1360,9 +2319,9 @@ pub(crate) async fn execute_action(
             }
         }
         Action::NegotiateSDPAsUAC => {
-            if let Some(remote_sdp) = &session.remote_sdp {
+            if let Some(remote_sdp) = session.remote_sdp.clone() {
                 let config = media_adapter
-                    .negotiate_sdp_as_uac(&session.session_id, remote_sdp)
+                    .negotiate_sdp_as_uac_lane_owned(session, &remote_sdp)
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
@@ -1394,9 +2353,9 @@ pub(crate) async fn execute_action(
                     "Action::NegotiateSDPAsUAS for session {}: using pre-set SDP",
                     session.session_id
                 );
-            } else if let Some(remote_sdp) = &session.remote_sdp {
+            } else if let Some(remote_sdp) = session.remote_sdp.clone() {
                 let (local_sdp, config) = media_adapter
-                    .negotiate_sdp_as_uas(&session.session_id, remote_sdp)
+                    .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
@@ -1427,7 +2386,7 @@ pub(crate) async fn execute_action(
                 );
             } else if let Some(remote_sdp) = session.remote_sdp.clone() {
                 let (local_sdp, config) = media_adapter
-                    .negotiate_sdp_as_uas(&session.session_id, &remote_sdp)
+                    .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
                     .await?;
                 let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
@@ -1505,14 +2464,18 @@ pub(crate) async fn execute_action(
 
         // Cleanup
         Action::StartDialogCleanup => {
-            dialog_adapter.cleanup_session(&session.session_id).await?;
+            let handle = exact_dialog_cleanup_handle(session)?;
+            dialog_adapter
+                .cleanup_session_exact_lane_owned(&handle)
+                .await?;
+            retire_lane_owned_dialog_identity(session);
             debug!(
                 "Dialog cleanup completed for session {}",
                 session.session_id
             );
         }
         Action::StartMediaCleanup => {
-            media_adapter.cleanup_session(&session.session_id).await?;
+            cleanup_lane_owned_media(session, media_adapter).await?;
             debug!("Media cleanup completed for session {}", session.session_id);
         }
 
@@ -1542,34 +2505,32 @@ pub(crate) async fn execute_action(
 
             let sdp = if hold_direction {
                 media_adapter
-                    .create_hold_sdp_for_session(&session.session_id)
+                    .create_hold_sdp_for_session_lane_owned(session)
                     .await
                     .map_err(|e| format!("create_hold_sdp failed: {}", e))?
             } else {
                 media_adapter
-                    .create_active_sdp_for_session(&session.session_id)
+                    .create_active_sdp_for_session_lane_owned(session)
                     .await
                     .map_err(|e| format!("create_active_sdp failed: {}", e))?
             };
             session.local_sdp = Some(sdp.clone());
             session.pending_reinvite = Some(kind);
-            // Persist pending_reinvite before awaiting the wire send — the
-            // 491/ReinviteGlare response races with our await, and the glare
-            // handler's `ScheduleReinviteRetry` reads `pending_reinvite` from
-            // the store to know what kind of re-INVITE to reissue.
-            session_store
-                .update_session_with(&session.session_id, |stored| {
-                    stored.local_sdp = session.local_sdp.clone();
-                    stored.pending_reinvite = session.pending_reinvite.clone();
-                })
-                .await
-                .map_err(|e| format!("persist pending_reinvite failed: {}", e))?;
+            // A 491/ReinviteGlare response is queued on the same exact-session
+            // lane. It observes this SDP and retry intent only after the
+            // executor's canonical transition publication.
             debug!(
                 "Sending re-INVITE for session {} (hold={})",
                 session.session_id, hold_direction
             );
             dialog_adapter
-                .send_reinvite_session(&session.session_id, sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
         }
 
@@ -1623,52 +2584,83 @@ pub(crate) async fn execute_action(
 
         Action::RedirectToMixer => {
             debug!("Redirecting session {} to mixer", session.session_id);
-            if let Some(mixer_id) = &session.conference_mixer_id {
-                if let Some(media_id) = &session.media_session_id {
-                    media_adapter
-                        .redirect_to_mixer(media_id.clone(), mixer_id.clone())
-                        .await?;
-                }
-            }
+            let mixer_id = session.conference_mixer_id.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "RedirectToMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+            })?;
+            let media_id = session.media_session_id.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "RedirectToMixer requires an owned media session for session {}",
+                    session.session_id
+                ))
+            })?;
+            media_adapter.redirect_to_mixer(media_id, mixer_id).await?;
         }
 
         Action::ConnectToMixer => {
-            debug!(
-                "Connecting session {} to conference mixer",
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "ConnectToMixer has no media-plane implementation for session {}; use an owned BridgeHandle",
                 session.session_id
-            );
-            // This would connect to an existing conference mixer
-            // Implementation depends on media adapter capabilities
+            ))
+            .into());
         }
 
         Action::DisconnectFromMixer => {
-            debug!("Disconnecting session {} from mixer", session.session_id);
-            if let Some(_media_id) = &session.media_session_id {
-                // TODO: Implement restore_direct_media
-                warn!("restore_direct_media not implemented yet");
-            }
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "DisconnectFromMixer has no media-plane implementation for session {}; release the owned BridgeHandle",
+                session.session_id
+            ))
+            .into());
         }
 
         Action::MuteToMixer => {
             debug!("Muting session {} to mixer", session.session_id);
-            if let Some(media_id) = &session.media_session_id {
-                media_adapter.set_mute(media_id.clone(), true).await?;
+            if session.conference_mixer_id.is_none() {
+                return Err(crate::errors::SessionError::InvalidTransition(format!(
+                    "MuteToMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+                .into());
             }
+            let media_id = session.media_session_id.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "MuteToMixer requires an owned media session for session {}",
+                    session.session_id
+                ))
+            })?;
+            media_adapter.set_mute(media_id, true).await?;
         }
 
         Action::UnmuteToMixer => {
             debug!("Unmuting session {} to mixer", session.session_id);
-            if let Some(media_id) = &session.media_session_id {
-                media_adapter.set_mute(media_id.clone(), false).await?;
+            if session.conference_mixer_id.is_none() {
+                return Err(crate::errors::SessionError::InvalidTransition(format!(
+                    "UnmuteToMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+                .into());
             }
+            let media_id = session.media_session_id.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "UnmuteToMixer requires an owned media session for session {}",
+                    session.session_id
+                ))
+            })?;
+            media_adapter.set_mute(media_id, false).await?;
         }
 
         Action::DestroyMixer => {
             debug!("Destroying conference mixer");
-            if let Some(mixer_id) = &session.conference_mixer_id {
-                media_adapter.destroy_mixer(mixer_id.clone()).await?;
-                session.conference_mixer_id = None;
-            }
+            let mixer_id = session.conference_mixer_id.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "DestroyMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+            })?;
+            media_adapter.destroy_mixer(mixer_id).await?;
+            session.conference_mixer_id = None;
         }
 
         // Media direction actions
@@ -1711,25 +2703,31 @@ pub(crate) async fn execute_action(
         // `MediaAdapter::send_dtmf_rfc4733` directly.
         Action::StartRecordingMixer => {
             debug!("Starting recording of conference mixer");
-            if let Some(mixer_id) = &session.conference_mixer_id {
-                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
-                media_adapter.start_recording(&mixer_session_id).await?;
-            }
+            let mixer_id = session.conference_mixer_id.as_ref().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "StartRecordingMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+            })?;
+            let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
+            media_adapter.start_recording(&mixer_session_id).await?;
         }
 
         Action::StopRecordingMixer => {
             debug!("Stopping recording of conference mixer");
-            if let Some(mixer_id) = &session.conference_mixer_id {
-                let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
-                media_adapter.stop_recording(&mixer_session_id).await?;
-            }
+            let mixer_id = session.conference_mixer_id.as_ref().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(format!(
+                    "StopRecordingMixer requires an owned mixer for session {}",
+                    session.session_id
+                ))
+            })?;
+            let mixer_session_id = SessionId(format!("mixer-{}", mixer_id.as_str()));
+            media_adapter.stop_recording(&mixer_session_id).await?;
         }
 
         Action::ReleaseAllResources => {
             debug!("Releasing all resources for session {}", session.session_id);
-            // Final cleanup - both dialog and media
-            dialog_adapter.cleanup_session(&session.session_id).await?;
-            media_adapter.cleanup_session(&session.session_id).await?;
+            release_lane_owned_resources(session, dialog_adapter, media_adapter).await?;
         }
 
         Action::StartEmergencyCleanup => {
@@ -1738,20 +2736,24 @@ pub(crate) async fn execute_action(
                 session.session_id
             );
             // Best-effort cleanup on error
-            let _ = dialog_adapter.cleanup_session(&session.session_id).await;
-            let _ = media_adapter.cleanup_session(&session.session_id).await;
+            if let Ok(handle) = exact_dialog_cleanup_handle(session) {
+                if dialog_adapter
+                    .cleanup_session_exact_lane_owned(&handle)
+                    .await
+                    .is_ok()
+                {
+                    retire_lane_owned_dialog_identity(session);
+                }
+            }
+            let _ = cleanup_lane_owned_media(session, media_adapter).await;
         }
 
         Action::AttemptMediaRecovery => {
-            warn!(
-                "Attempting media recovery for session {}",
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "AttemptMediaRecovery is not implemented for session {}; the state table must choose an explicit cleanup or retry transition",
                 session.session_id
-            );
-            // Try to recover from media errors
-            if let Some(_media_id) = &session.media_session_id {
-                // TODO: Implement attempt_recovery
-                warn!("attempt_recovery not implemented yet");
-            }
+            ))
+            .into());
         }
 
         Action::Custom(action_name) => {
@@ -1761,35 +2763,53 @@ pub(crate) async fn execute_action(
             );
             // Handle custom SIP actions
             match action_name.as_str() {
-                "Send180Ringing" => {
-                    info!("Sending 180 Ringing for session {}", session.session_id);
-                    dialog_adapter
-                        .send_response_session(&session.session_id, 180, "Ringing")
-                        .await?;
-                }
-                "Send200OK" => {
-                    let guard = cleanup_diag::stage_guard(
-                        CleanupStage::ActionSend200Ok,
-                        &session.session_id.0,
-                    );
-                    info!("Sending 200 OK for session {}", session.session_id);
-                    // For UAS, include SDP in 200 OK
-                    if session.role == crate::state_table::Role::UAS {
-                        if let Some(local_sdp) = &session.local_sdp {
-                            dialog_adapter
-                                .send_response_with_sdp(&session.session_id, 200, "OK", local_sdp)
-                                .await?;
-                        } else {
-                            dialog_adapter
-                                .send_response_session(&session.session_id, 200, "OK")
-                                .await?;
-                        }
+                "ArmSessionRefreshTimer" => {
+                    use crate::session_store::state::SessionRefreshPhase;
+
+                    let Some((interval_secs, local_refresher)) =
+                        dialog_adapter.session_timer_settings_lane_owned(session)?
+                    else {
+                        next_session_refresh_generation(session);
+                        session.session_refresh_interval_secs = None;
+                        session.session_refresh_local_refresher = false;
+                        session.session_refresh_phase = SessionRefreshPhase::Idle;
+                        return Ok(ActionOutcome::default());
+                    };
+                    let generation = next_session_refresh_generation(session);
+                    session.session_refresh_interval_secs = Some(interval_secs);
+                    session.session_refresh_local_refresher = local_refresher;
+                    session.session_refresh_phase = SessionRefreshPhase::Idle;
+                    let delay_secs = if local_refresher {
+                        (interval_secs / 2).max(1)
                     } else {
-                        dialog_adapter
-                            .send_response_session(&session.session_id, 200, "OK")
-                            .await?;
-                    }
-                    guard.finish_success();
+                        interval_secs.max(1)
+                    };
+                    let kind = if local_refresher {
+                        SessionRefreshDeadlineKind::UpdateDue
+                    } else {
+                        SessionRefreshDeadlineKind::PeerExpired
+                    };
+                    return Ok(ActionOutcome::with_deferred_effect(
+                        DeferredActionEffect::SessionRefreshTimer(SessionRefreshTimerEffect {
+                            generation,
+                            delay: std::time::Duration::from_secs(u64::from(delay_secs)),
+                            kind,
+                        }),
+                    ));
+                }
+                "PrepareSessionRefreshUpdate" => {
+                    return Ok(prepare_session_refresh_update(session, dialog_adapter)?);
+                }
+                "PrepareSessionRefreshReinvite" => {
+                    return Ok(prepare_session_refresh_reinvite(session)?);
+                }
+                "PrepareSessionRefreshExpiry" => {
+                    use crate::session_store::state::SessionRefreshPhase;
+
+                    next_session_refresh_generation(session);
+                    session.session_refresh_phase = SessionRefreshPhase::Idle;
+                    session.pending_bye_reason =
+                        Some(("SIP".to_string(), 408, Some("Session expired".to_string())));
                 }
                 "SuspendMedia" => {
                     if let Some(media_id) = &session.media_session_id {
@@ -1809,17 +2829,25 @@ pub(crate) async fn execute_action(
                         session.local_media_direction = direction;
                     }
                 }
+                "CheckReadiness" => {
+                    return Ok(ActionOutcome::with_event(EventType::CheckConditions));
+                }
                 _ => {
-                    // Other custom actions
+                    return Err(crate::errors::SessionError::InvalidTransition(format!(
+                        "unsupported custom state-machine action '{}' for session {}",
+                        action_name, session.session_id
+                    ))
+                    .into());
                 }
             }
         }
 
-        // Missing actions that need implementation
         Action::BridgeToMixer => {
-            debug!("Bridging session {} to mixer", session.session_id);
-            // TODO: Implement bridge to mixer functionality
-            warn!("BridgeToMixer not implemented yet");
+            return Err(crate::errors::SessionError::InvalidTransition(format!(
+                "BridgeToMixer has no media-plane implementation for session {}; use an owned BridgeHandle",
+                session.session_id
+            ))
+            .into());
         }
 
         Action::RestoreDirectMedia => {
@@ -1835,12 +2863,18 @@ pub(crate) async fn execute_action(
 
             // Send re-INVITE with sendrecv
             let active_sdp = media_adapter
-                .create_active_sdp_for_session(&session.session_id)
+                .create_active_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_active_sdp failed: {}", e))?;
             session.local_sdp = Some(active_sdp.clone());
             dialog_adapter
-                .send_reinvite_session(&session.session_id, active_sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(active_sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
             info!("Media flow restored for session {}", session.session_id);
         }
@@ -1857,12 +2891,18 @@ pub(crate) async fn execute_action(
 
             // Send re-INVITE with sendrecv
             let active_sdp = media_adapter
-                .create_active_sdp_for_session(&session.session_id)
+                .create_active_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_active_sdp failed: {}", e))?;
             session.local_sdp = Some(active_sdp.clone());
             dialog_adapter
-                .send_reinvite_session(&session.session_id, active_sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(active_sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
             info!("Media flow restored for session {}", session.session_id);
         }
@@ -1881,12 +2921,18 @@ pub(crate) async fn execute_action(
 
             // Send re-INVITE with sendonly SDP
             let hold_sdp = media_adapter
-                .create_hold_sdp_for_session(&session.session_id)
+                .create_hold_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
             session.local_sdp = Some(hold_sdp.clone());
             dialog_adapter
-                .send_reinvite_session(&session.session_id, hold_sdp)
+                .send_reinvite_with_options_lane_owned(
+                    session,
+                    ReInviteRequestOptions {
+                        sdp: Some(hold_sdp),
+                        ..Default::default()
+                    },
+                )
                 .await?;
 
             info!("Call {} put on hold", session.session_id);
@@ -1894,8 +2940,7 @@ pub(crate) async fn execute_action(
 
         Action::CleanupResources => {
             debug!("Cleaning up resources for session {}", session.session_id);
-            // TODO: Implement resource cleanup
-            warn!("CleanupResources not implemented yet");
+            release_lane_owned_resources(session, dialog_adapter, media_adapter).await?;
         }
 
         // Registration actions
@@ -1904,8 +2949,9 @@ pub(crate) async fn execute_action(
             return execute_register_action(
                 session,
                 dialog_adapter,
-                session_store,
+                triggering_event,
                 RegisterActionMode::Register,
+                stage_claim,
             )
             .await;
         }
@@ -1918,8 +2964,9 @@ pub(crate) async fn execute_action(
             return execute_register_action(
                 session,
                 dialog_adapter,
-                session_store,
+                triggering_event,
                 RegisterActionMode::RegisterWithAuth,
+                stage_claim,
             )
             .await;
         }
@@ -1929,8 +2976,9 @@ pub(crate) async fn execute_action(
             return execute_register_action(
                 session,
                 dialog_adapter,
-                session_store,
+                triggering_event,
                 RegisterActionMode::Unregister,
+                stage_claim,
             )
             .await;
         }
@@ -1944,11 +2992,6 @@ pub(crate) async fn execute_action(
             // executor (for AuthRequired events). Digest challenges are also
             // parsed into session.auth_challenge for nonce-count/stale handling;
             // non-Digest schemes use the raw challenge string.
-            //
-            // Fallback: the legacy REGISTER shortcut in DialogAdapter may have
-            // already populated session.auth_challenge directly (Phase 2 will
-            // remove that path). If pending_auth is None and auth_challenge is
-            // already set, treat this action as a no-op.
             if let Some((_, challenge_str)) = session.pending_auth.clone() {
                 let previous_nonce = session
                     .auth_challenge
@@ -1978,27 +3021,12 @@ pub(crate) async fn execute_action(
                     session.auth_challenge_replaces_nonce = previous_nonce;
                     session.auth_challenge = None;
                 }
-                // Persist so the next action — `SendREGISTERWithAuth` or
-                // `SendINVITEWithAuth` — sees the challenge when it re-reads
-                // the session from the store inside the dialog adapter.
-                // Actions share a mutable local `session`, while the adapter
-                // reads the persisted exact cell. Publish only the fields
-                // this action owns so concurrent transport/session metadata
-                // is not replaced by a stale full-session clone.
-                session_store
-                    .update_session_with(&session.session_id, |stored| {
-                        stored.auth_challenge_raw = session.auth_challenge_raw.clone();
-                        stored.auth_challenge_stale = session.auth_challenge_stale;
-                        stored.auth_challenge_replaces_nonce =
-                            session.auth_challenge_replaces_nonce.clone();
-                        stored.auth_challenge = session.auth_challenge.clone();
-                    })
-                    .await?;
-            } else if session.auth_challenge.is_some() {
-                debug!("Auth challenge already stored (legacy path); continuing");
+                // The following auth action consumes this same lane-owned
+                // working state. The executor commits it once after the
+                // transition, including on an action failure.
             } else {
                 return Err(format!(
-                    "StoreAuthChallenge: no pending_auth on session {} and no prior challenge",
+                    "StoreAuthChallenge: no admitted pending_auth on session {}",
                     session.session_id
                 )
                 .into());
@@ -2295,7 +3323,7 @@ pub(crate) async fn execute_action(
                     dialog_adapter
                         .outbound_request_tracker
                         .auth_retry_state_for_transaction(
-                            &session.session_id,
+                            exact_request_tracker_handle(session)?,
                             tracked_method,
                             transaction,
                         )?
@@ -2401,7 +3429,7 @@ pub(crate) async fn execute_action(
                     dialog_adapter
                         .outbound_request_tracker
                         .request_body_for_transaction(
-                            &session.session_id,
+                            exact_request_tracker_handle(session)?,
                             tracked_method,
                             transaction,
                         )?
@@ -2458,7 +3486,7 @@ pub(crate) async fn execute_action(
                             )
                         })?;
                     dialog_adapter
-                        .send_bye_with_auth(&session.session_id, opts, header_name, header_value)
+                        .send_bye_with_auth_lane_owned(session, opts, header_name, header_value)
                         .await?;
                 }
                 "REFER" => {
@@ -2469,7 +3497,7 @@ pub(crate) async fn execute_action(
                         )
                     })?;
                     let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
-                        &session.session_id,
+                        exact_request_tracker_handle(session)?,
                         TrackedInDialogMethod::Refer,
                         challenged_transaction,
                         challenge_nonce.clone(),
@@ -2480,8 +3508,8 @@ pub(crate) async fn execute_action(
                         );
                     };
                     let transaction_id = dialog_adapter
-                        .send_refer_with_auth(
-                            &session.session_id,
+                        .send_refer_with_auth_lane_owned(
+                            session,
                             (*options).clone(),
                             header_name,
                             header_value,
@@ -2492,13 +3520,10 @@ pub(crate) async fn execute_action(
                         .activate(lease, transaction_id.clone())?;
                     advance_tracked_auth_owner(
                         session,
-                        session_store,
                         TrackedInDialogMethod::Refer,
-                        challenged_transaction,
                         &transaction_id,
                         &request_uri,
-                    )
-                    .await;
+                    );
                 }
                 "NOTIFY" => {
                     let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
@@ -2508,7 +3533,7 @@ pub(crate) async fn execute_action(
                         )
                     })?;
                     let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
-                        &session.session_id,
+                        exact_request_tracker_handle(session)?,
                         TrackedInDialogMethod::Notify,
                         challenged_transaction,
                         challenge_nonce.clone(),
@@ -2519,8 +3544,8 @@ pub(crate) async fn execute_action(
                         );
                     };
                     let transaction_id = dialog_adapter
-                        .send_notify_with_auth(
-                            &session.session_id,
+                        .send_notify_with_auth_lane_owned(
+                            session,
                             (*options).clone(),
                             header_name,
                             header_value,
@@ -2531,13 +3556,10 @@ pub(crate) async fn execute_action(
                         .activate(lease, transaction_id.clone())?;
                     advance_tracked_auth_owner(
                         session,
-                        session_store,
                         TrackedInDialogMethod::Notify,
-                        challenged_transaction,
                         &transaction_id,
                         &request_uri,
-                    )
-                    .await;
+                    );
                 }
                 "INFO" => {
                     let challenged_transaction =
@@ -2548,7 +3570,7 @@ pub(crate) async fn execute_action(
                         )
                         })?;
                     let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
-                        &session.session_id,
+                        exact_request_tracker_handle(session)?,
                         TrackedInDialogMethod::Info,
                         challenged_transaction,
                         challenge_nonce.clone(),
@@ -2559,8 +3581,8 @@ pub(crate) async fn execute_action(
                         );
                     };
                     let transaction_id = dialog_adapter
-                        .send_info_with_auth(
-                            &session.session_id,
+                        .send_info_with_auth_lane_owned(
+                            session,
                             (*options).clone(),
                             header_name,
                             header_value,
@@ -2571,13 +3593,10 @@ pub(crate) async fn execute_action(
                         .activate(lease, transaction_id.clone())?;
                     advance_tracked_auth_owner(
                         session,
-                        session_store,
                         TrackedInDialogMethod::Info,
-                        challenged_transaction,
                         &transaction_id,
                         &request_uri,
-                    )
-                    .await;
+                    );
                 }
                 "UPDATE" => {
                     let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
@@ -2587,7 +3606,7 @@ pub(crate) async fn execute_action(
                         )
                     })?;
                     let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
-                        &session.session_id,
+                        exact_request_tracker_handle(session)?,
                         TrackedInDialogMethod::Update,
                         challenged_transaction,
                         challenge_nonce,
@@ -2598,8 +3617,8 @@ pub(crate) async fn execute_action(
                         );
                     };
                     let transaction_id = dialog_adapter
-                        .send_update_with_auth(
-                            &session.session_id,
+                        .send_update_with_auth_lane_owned(
+                            session,
                             (*options).clone(),
                             header_name,
                             header_value,
@@ -2610,13 +3629,46 @@ pub(crate) async fn execute_action(
                         .activate(lease, transaction_id.clone())?;
                     advance_tracked_auth_owner(
                         session,
-                        session_store,
                         TrackedInDialogMethod::Update,
-                        challenged_transaction,
                         &transaction_id,
                         &request_uri,
-                    )
-                    .await;
+                    );
+                }
+                "INVITE" => {
+                    let challenged_transaction = challenged_transaction.as_ref().ok_or_else(|| {
+                        crate::errors::SessionError::InvalidTransition(
+                            "SendRequestWithAuth(INVITE): exact challenged re-INVITE transaction is unavailable"
+                                .to_string(),
+                        )
+                    })?;
+                    let (lease, options) = dialog_adapter.outbound_request_tracker.prepare_retry(
+                        exact_request_tracker_handle(session)?,
+                        TrackedInDialogMethod::Reinvite,
+                        challenged_transaction,
+                        challenge_nonce,
+                    )?;
+                    let TrackedInDialogOptions::Reinvite(options) = options else {
+                        return Err(
+                            "SendRequestWithAuth(INVITE): tracker option type mismatch".into()
+                        );
+                    };
+                    let transaction_id = dialog_adapter
+                        .send_reinvite_with_auth_lane_owned(
+                            session,
+                            (*options).clone(),
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                    dialog_adapter
+                        .outbound_request_tracker
+                        .activate(lease, transaction_id.clone())?;
+                    advance_tracked_auth_owner(
+                        session,
+                        TrackedInDialogMethod::Reinvite,
+                        &transaction_id,
+                        &request_uri,
+                    );
                 }
                 "MESSAGE" => {
                     let opts = session
@@ -2830,8 +3882,11 @@ pub(crate) async fn execute_action(
         }
         Action::ProcessNOTIFY => {
             debug!("Processing NOTIFY for session {}", session.session_id);
-            // NOTIFY processing is handled by events from dialog adapter
-            // This action is a placeholder for any additional processing needed
+            // Dialog-core already validated and acknowledged the wire request.
+            // The executor applies the private typed REFER-NOTIFY input to this
+            // lane-owned working state before invoking the action; retaining an
+            // explicit YAML action makes the canonical commit an auditable
+            // prerequisite for derived application observations.
         }
         // Action::SendNOTIFY deleted per SIP_API_DESIGN_2.md Phase 5 —
         // consolidated into Action::SendNOTIFYWithOptions. YAML emit
@@ -2842,11 +3897,11 @@ pub(crate) async fn execute_action(
             info!("Action::SendMESSAGE for session {}", session.session_id);
             let from_uri = session
                 .local_uri
-                .as_deref()
+                .clone()
                 .ok_or_else(|| "local_uri not set for message".to_string())?;
             let to_uri = session
                 .remote_uri
-                .as_deref()
+                .clone()
                 .ok_or_else(|| "to_uri not set for message".to_string())?;
             // Get message body from session (could be stored in a specific field)
             let body = session
@@ -2855,7 +3910,7 @@ pub(crate) async fn execute_action(
                 .unwrap_or_else(|| "Test message".to_string());
             let in_dialog = session.dialog_id.is_some(); // Send in-dialog if we have a dialog
             if let Some(follow_up) = dialog_adapter
-                .send_message(&session.session_id, from_uri, to_uri, body, in_dialog)
+                .send_message_lane_owned(session, &from_uri, &to_uri, body, in_dialog)
                 .await?
             {
                 return Ok(ActionOutcome::with_event(follow_up));
@@ -2871,12 +3926,15 @@ pub(crate) async fn execute_action(
         Action::CleanupDialog => {
             debug!("Cleaning up dialog for session {}", session.session_id);
             if session.dialog_id.is_some() {
-                cleanup_dialog_on_fresh_task(
-                    Arc::clone(dialog_adapter),
-                    session.session_id.clone(),
-                )
-                .await?;
+                let handle = exact_dialog_cleanup_handle(session)?;
+                cleanup_dialog_on_fresh_task(Arc::clone(dialog_adapter), handle).await?;
             }
+            // Cleanup and the replacement INVITE execute in the same exact
+            // session lane. Retire the lane-owned identity immediately after
+            // lower cleanup succeeds so a redirect cannot try to publish its
+            // new dialog while the working snapshot still names the old one.
+            // The executor remains the only publisher of this mutation.
+            retire_lane_owned_dialog_identity(session);
         }
         Action::CleanupMedia => {
             // NEXT_STEPS B.1 diag — promoted from debug! to info! so the
@@ -2889,20 +3947,11 @@ pub(crate) async fn execute_action(
                 "Action::CleanupMedia firing for session {} (media_session_id={:?})",
                 session.session_id, session.media_session_id
             );
-            // Always call cleanup_session — the adapter is idempotent and
+            // Always run cleanup — the adapter is idempotent and
             // media-core may still have state even when our `media_session_id`
             // field looks empty (e.g. a previous cleanup cleared the field
             // but stop_media hasn't landed yet).
-            media_adapter.cleanup_session(&session.session_id).await?;
-            // Reset field so the subsequent CreateMediaSession (in a redirect
-            // transition) doesn't trip the idempotency guard that now lives
-            // in GenerateLocalSDP / NegotiateSDPAsUAS (added for
-            // accept_call_with_sdp).
-            session.media_session_id = None;
-            session.media_session_ready = false;
-            session.sdp_negotiated = false;
-            session.local_sdp = None;
-            session.negotiated_config = None;
+            cleanup_lane_owned_media(session, media_adapter).await?;
         }
 
         // ===== REFER Response Action =====
@@ -2912,32 +3961,19 @@ pub(crate) async fn execute_action(
             let transaction_id = session
                 .refer_transaction_id
                 .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-
-            // Send ReferResponse event back to dialog-core via global event bus
-            let refer_response =
-                rvoip_infra_common::events::cross_crate::SessionToDialogEvent::ReferResponse {
-                    transaction_id,
-                    accept: true,
-                    status_code: 202,
-                    reason: "Accepted".to_string(),
-                };
-
-            let event =
-                rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(
-                    refer_response,
-                );
-
-            // Get global coordinator from dialog adapter
-            if dialog_adapter
-                .global_coordinator
-                .publish(Arc::new(event))
-                .await
-                .is_err()
-            {
-                error!("Failed to publish ReferResponse event (class=coordination)");
-            } else {
-                debug!("Published ReferResponse (202 Accepted) event to dialog-core");
+                .ok_or_else(|| "REFER acceptance has no pending transaction".to_string())?;
+            let terminal = send_exact_refer_final_response(
+                &session.session_id,
+                &transaction_id,
+                dialog_adapter,
+                202,
+            )
+            .await?;
+            if session.refer_transaction_id.as_deref() == Some(transaction_id.as_str()) {
+                session.refer_transaction_id = None;
+            }
+            if let Some(error) = terminal.terminal_error {
+                return Err(error);
             }
         }
 
@@ -2951,8 +3987,13 @@ pub(crate) async fn execute_action(
             // the acceptance ack of the implicit subscription, not a
             // dialog-progress NOTIFY, so it has no linkage dependency.
             debug!("SendRefer100Trying on session {}", session.session_id);
+            let handle = session.lifecycle_handle.clone().ok_or_else(|| {
+                crate::errors::SessionError::InvalidTransition(
+                    "REFER acceptance NOTIFY requires exact session authority".to_string(),
+                )
+            })?;
             if dialog_adapter
-                .send_refer_notify(&session.session_id, 100, "Trying")
+                .send_refer_notify_lane_owned(&handle, session, 100, "Trying")
                 .await
                 .is_err()
             {
@@ -2961,143 +4002,118 @@ pub(crate) async fn execute_action(
         }
 
         Action::SendTransferNotifyRinging => {
-            if let Some(transferor) = session.transferor_session_id.clone() {
+            if let Some((transferor, transferor_handle)) = exact_transferor_link(session)? {
                 debug!(
                     "SendTransferNotifyRinging: leg {} -> transferor {}",
                     session.session_id, transferor
                 );
-                if dialog_adapter
-                    .send_refer_notify(&transferor, 180, "Ringing")
-                    .await
-                    .is_err()
-                {
-                    warn!(transferor = %transferor, "Failed to send 180 Ringing NOTIFY");
-                }
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::ReferNotify {
-                        call_id: transferor.clone(),
+                return Ok(ActionOutcome::with_deferred_effect(
+                    DeferredActionEffect::TransferNotify(TransferNotifyEffect {
+                        transferor: transferor_handle,
                         status_code: 180,
                         reason: "Ringing".to_string(),
-                        subscription_state: None,
-                        body: Some("SIP/2.0 180 Ringing\r\n".to_string()),
-                    },
-                );
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::ReferProgress {
-                        call_id: transferor,
-                        status_code: 180,
-                        reason: "Ringing".to_string(),
-                    },
-                );
-            } else {
-                debug!(
-                    "SendTransferNotifyRinging on non-transfer session {} — no-op",
-                    session.session_id
-                );
+                        observations: vec![
+                            Event::ReferNotify {
+                                call_id: transferor.clone(),
+                                status_code: 180,
+                                reason: "Ringing".to_string(),
+                                subscription_state: None,
+                                body: Some("SIP/2.0 180 Ringing\r\n".to_string()),
+                            },
+                            Event::ReferProgress {
+                                call_id: transferor,
+                                status_code: 180,
+                                reason: "Ringing".to_string(),
+                            },
+                        ],
+                    }),
+                ));
             }
+            // Shared dialog-progress rows also serve ordinary calls. `None`
+            // means no transfer operation was requested, so there is no
+            // transfer outcome to report. Any partial/stale transfer linkage
+            // already failed closed in `exact_transferor_link` above.
         }
 
         Action::SendTransferNotifySuccess => {
-            if let Some(transferor) = session.transferor_session_id.clone() {
+            if let Some((transferor, transferor_handle)) = exact_transferor_link(session)? {
                 debug!(
                     "SendTransferNotifySuccess: leg {} -> transferor {}",
                     session.session_id, transferor
                 );
-                if dialog_adapter
-                    .send_refer_notify(&transferor, 200, "OK")
-                    .await
-                    .is_err()
-                {
-                    warn!(transferor = %transferor, "Failed to send 200 OK NOTIFY");
-                }
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::ReferNotify {
-                        call_id: transferor.clone(),
+                return Ok(ActionOutcome::with_deferred_effect(
+                    DeferredActionEffect::TransferNotify(TransferNotifyEffect {
+                        transferor: transferor_handle,
                         status_code: 200,
                         reason: "OK".to_string(),
-                        subscription_state: None,
-                        body: Some("SIP/2.0 200 OK\r\n".to_string()),
-                    },
-                );
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::TransferTargetAnswered {
-                        transfer_call_id: transferor.clone(),
-                        target_uri: session.remote_uri.clone().unwrap_or_default(),
-                        evidence: crate::api::events::TransferTargetEvidence::LocalTargetLeg {
-                            call_id: session.session_id.clone(),
-                        },
-                    },
-                );
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::ReferCompleted {
-                        call_id: transferor,
-                        target: session.remote_uri.clone().unwrap_or_default(),
-                        status_code: 200,
-                        reason: "OK".to_string(),
-                    },
-                );
-            } else {
-                debug!(
-                    "SendTransferNotifySuccess on non-transfer session {} — no-op",
-                    session.session_id
-                );
+                        observations: vec![
+                            Event::ReferNotify {
+                                call_id: transferor.clone(),
+                                status_code: 200,
+                                reason: "OK".to_string(),
+                                subscription_state: None,
+                                body: Some("SIP/2.0 200 OK\r\n".to_string()),
+                            },
+                            Event::TransferTargetAnswered {
+                                transfer_call_id: transferor.clone(),
+                                target_uri: session.remote_uri.clone().unwrap_or_default(),
+                                evidence:
+                                    crate::api::events::TransferTargetEvidence::LocalTargetLeg {
+                                        call_id: session.session_id.clone(),
+                                    },
+                            },
+                            Event::ReferCompleted {
+                                call_id: transferor,
+                                target: session.remote_uri.clone().unwrap_or_default(),
+                                status_code: 200,
+                                reason: "OK".to_string(),
+                            },
+                        ],
+                    }),
+                ));
             }
+            // Intentional conditional projection for an ordinary call; an
+            // inconsistent transfer marker cannot reach this point.
         }
 
         Action::SendTransferNotifyFailure => {
-            if let Some(transferor) = session.transferor_session_id.clone() {
-                // We don't currently stash the non-2xx status code on
-                // `SessionState` mid-failure, so the progress NOTIFY
-                // carries a coarse 500. The transferor still gets a
-                // terminal `TransferFailed` signal; the b2bua crate can
-                // narrow the reason once SessionState grows a
-                // `last_failure_status` field.
-                let status_code: u16 = 500;
+            if let Some((transferor, transferor_handle)) = exact_transferor_link(session)? {
+                let status_code = match triggering_event {
+                    EventType::Dialog4xxFailure(code)
+                    | EventType::Dialog5xxFailure(code)
+                    | EventType::Dialog6xxFailure(code) => *code,
+                    EventType::DialogTimeout => 408,
+                    _ => 500,
+                };
                 let reason = "Transfer leg failed".to_string();
                 debug!(
                     "SendTransferNotifyFailure: leg {} -> transferor {} ({} {})",
                     session.session_id, transferor, status_code, reason
                 );
-                if dialog_adapter
-                    .send_refer_notify(&transferor, status_code, &reason)
-                    .await
-                    .is_err()
-                {
-                    warn!(
-                        status_code,
-                        transferor = %transferor,
-                        "Failed to send transfer-failure NOTIFY"
-                    );
-                }
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::ReferNotify {
-                        call_id: transferor.clone(),
+                return Ok(ActionOutcome::with_deferred_effect(
+                    DeferredActionEffect::TransferNotify(TransferNotifyEffect {
+                        transferor: transferor_handle,
                         status_code,
                         reason: reason.clone(),
-                        subscription_state: None,
-                        body: Some(format!("SIP/2.0 {} {}\r\n", status_code, reason)),
-                    },
-                );
-                publish_transfer_event(
-                    dialog_adapter,
-                    Event::TransferFailed {
-                        call_id: transferor,
-                        reason,
-                        status_code,
-                    },
-                );
-            } else {
-                debug!(
-                    "SendTransferNotifyFailure on non-transfer session {} — no-op",
-                    session.session_id
-                );
+                        observations: vec![
+                            Event::ReferNotify {
+                                call_id: transferor.clone(),
+                                status_code,
+                                reason: reason.clone(),
+                                subscription_state: None,
+                                body: Some(format!("SIP/2.0 {} {}\r\n", status_code, reason)),
+                            },
+                            Event::TransferFailed {
+                                call_id: transferor,
+                                reason,
+                                status_code,
+                            },
+                        ],
+                    }),
+                ));
             }
+            // Intentional conditional projection for an ordinary call; an
+            // inconsistent transfer marker cannot reach this point.
         }
 
         // ──────────────────────────────────────────────────────────────
@@ -3107,57 +4123,40 @@ pub(crate) async fn execute_action(
         // Each handler reads `session.pending_<method>_options` with
         // `.take()`, so the stash is consumed-on-dispatch. This
         // matches the Phase 2 lifecycle: builder `.send()` stages the
-        // slot (with the §7.3 invariant #5 conflict guard), the
-        // matching `EventType::SendOutbound<METHOD>` queues, the
-        // handler below dispatches via the dialog-adapter mirror and
-        // the slot returns to `None`. A second `.send()` for the same
-        // method is then immediately allowed — concurrent overlaps
-        // are still rejected by the conflict guard at stage time.
-        //
-        // Phase 4 (auth-retry) will reintroduce `.clone()` semantics
-        // alongside per-method response correlation so the same
-        // snapshot can drive a 401 retransmit. Until that lands, the
-        // `Send<METHOD>WithAuth` actions read their own session state
-        // (auth_challenge / credentials) rather than the stash.
+        // slot (with the §7.3 invariant #5 conflict guard), the matching
+        // `EventType::SendOutbound<METHOD>` queues, and the action claims the
+        // exact staged Arc before its first wire await. One-shot requests
+        // consume the slot during that claim. INVITE, REGISTER, and BYE retain
+        // the pointer-exact immutable snapshot until their retry/final-response
+        // owner clears it.
         //
         // §7.4 precedence (stash wins over auto-emit) on BYE / NOTIFY /
         // CANCEL lives in the auto-emit handlers above
         // (`Action::SendBYE`, `Action::SendCANCEL`, `Action::SendNOTIFY`).
         // ──────────────────────────────────────────────────────────────
-        // SIP_API_DESIGN_2 §7.3 — R2: snapshot-then-clear-after-dispatch.
-        // Mirrors `execute_register_action`'s `.as_ref().clone()` pattern
-        // so the application-staged extras stay readable for the entire
-        // duration of `send_X_with_options(...)`. Today these dialog
-        // adapter calls do not internally drive 401/407 retries for the
-        // non-INVITE/non-REGISTER methods; when that auth-retry plumbing
-        // lands the snapshot will already be available. The post-dispatch
-        // `= None` mirrors today's `.take()` semantics for the success
-        // path, and the `Terminated` backstop in `executor.rs:533-546`
-        // still sweeps the slot on session teardown if a dispatch errors
-        // out unexpectedly.
+        // SIP_API_DESIGN_2 §7.3 — R2: exact snapshot ownership transfer.
         Action::SendBYEWithOptions => {
-            let snapshot = session
-                .pending_bye_options
-                .as_ref()
-                .map(|opts| (**opts).clone())
-                .ok_or_else(|| {
-                    format!(
-                        "SendBYEWithOptions: no pending_bye_options for session {}",
-                        session.session_id
-                    )
-                })?;
+            let Some(PendingOptionsSlot::Bye(options)) = claim_builder_request_staging(
+                session,
+                PendingOptionsSlotKind::Bye,
+                BuilderStageLifetime::RetainedForRetry,
+                stage_claim,
+            )?
+            else {
+                return Err(format!(
+                    "SendBYEWithOptions: no pending_bye_options for session {}",
+                    session.session_id
+                )
+                .into());
+            };
+            let snapshot = (*options).clone();
             if let Err(error) = dialog_adapter
-                .send_bye_with_options(&session.session_id, snapshot)
+                .send_bye_with_options_lane_owned(session, snapshot)
                 .await
             {
                 // No exact transaction exists to drive terminal cleanup when
                 // dispatch itself fails. Release the builder slot immediately.
-                session.pending_bye_options = None;
-                let _ = session_store
-                    .update_session_with(&session.session_id, |stored| {
-                        stored.pending_bye_options = None;
-                    })
-                    .await;
+                PendingOptionsSlot::Bye(options).clear_if_exact(session);
                 return Err(error.into());
             }
             // Keep the immutable options until the exact BYE final-response
@@ -3169,35 +4168,45 @@ pub(crate) async fn execute_action(
             // back to `Config.auto_emit_extra_headers` (operators stamp
             // tenant/trace headers on every CANCEL); else legacy fast
             // path. Consolidated from the deleted `Action::SendCANCEL`.
-            if let Some(opts_arc) = session.pending_cancel_options.as_ref() {
-                let opts = (**opts_arc).clone();
+            if stage_claim.is_some() || session.pending_cancel_options.is_some() {
+                let Some(PendingOptionsSlot::Cancel(options)) = claim_builder_request_staging(
+                    session,
+                    PendingOptionsSlotKind::Cancel,
+                    BuilderStageLifetime::ConsumeBeforeWire,
+                    stage_claim,
+                )?
+                else {
+                    return Err(crate::errors::SessionError::InvalidTransition(
+                        "SendCANCELWithOptions requires exact staged options".to_string(),
+                    )
+                    .into());
+                };
                 dialog_adapter
-                    .send_cancel_with_options(&session.session_id, opts)
+                    .send_cancel_with_options_lane_owned(session, (*options).clone())
                     .await?;
-                session.pending_cancel_options = None;
             } else {
                 let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
                 if auto_extras.is_empty() {
-                    dialog_adapter.send_cancel(&session.session_id).await?;
+                    dialog_adapter
+                        .send_cancel_with_options_lane_owned(
+                            session,
+                            rvoip_sip_dialog::api::unified::CancelRequestOptions::default(),
+                        )
+                        .await?;
                 } else {
                     let opts = rvoip_sip_dialog::api::unified::CancelRequestOptions {
                         reason: None,
                         extra_headers: auto_extras,
                     };
                     dialog_adapter
-                        .send_cancel_with_options(&session.session_id, opts)
+                        .send_cancel_with_options_lane_owned(session, opts)
                         .await?;
                 }
             }
         }
         Action::SendREFERWithOptions => {
-            let TrackedInDialogOptions::Refer(options) = claim_tracked_request_staging(
-                session,
-                session_store,
-                TrackedInDialogMethod::Refer,
-                stage_claim,
-            )
-            .await?
+            let TrackedInDialogOptions::Refer(options) =
+                claim_tracked_request_staging(session, TrackedInDialogMethod::Refer, stage_claim)?
             else {
                 return Err(crate::errors::SessionError::InvalidTransition(
                     "SendREFERWithOptions claimed the wrong method".to_string(),
@@ -3205,11 +4214,11 @@ pub(crate) async fn execute_action(
                 .into());
             };
             let lease = dialog_adapter.outbound_request_tracker.prepare(
-                &session.session_id,
+                exact_request_tracker_handle(session)?,
                 TrackedInDialogOptions::Refer(Arc::clone(&options)),
             )?;
             let transaction_id = dialog_adapter
-                .send_refer_with_options(&session.session_id, (*options).clone())
+                .send_refer_with_options_lane_owned(session, (*options).clone())
                 .await?;
             dialog_adapter
                 .outbound_request_tracker
@@ -3223,11 +4232,9 @@ pub(crate) async fn execute_action(
             if stage_claim.is_some() || session.pending_notify_options.is_some() {
                 let TrackedInDialogOptions::Notify(options) = claim_tracked_request_staging(
                     session,
-                    session_store,
                     TrackedInDialogMethod::Notify,
                     stage_claim,
-                )
-                .await?
+                )?
                 else {
                     return Err(crate::errors::SessionError::InvalidTransition(
                         "SendNOTIFYWithOptions claimed the wrong method".to_string(),
@@ -3235,11 +4242,11 @@ pub(crate) async fn execute_action(
                     .into());
                 };
                 let lease = dialog_adapter.outbound_request_tracker.prepare(
-                    &session.session_id,
+                    exact_request_tracker_handle(session)?,
                     TrackedInDialogOptions::Notify(Arc::clone(&options)),
                 )?;
                 let transaction_id = dialog_adapter
-                    .send_notify_with_options(&session.session_id, (*options).clone())
+                    .send_notify_with_options_lane_owned(session, (*options).clone())
                     .await?;
                 dialog_adapter
                     .outbound_request_tracker
@@ -3255,7 +4262,17 @@ pub(crate) async fn execute_action(
                 let body = session.local_sdp.clone();
                 if auto_extras.is_empty() {
                     let _ = dialog_adapter
-                        .send_notify(&session.session_id, event_package, body, None)
+                        .send_notify_with_options_lane_owned(
+                            session,
+                            rvoip_sip_dialog::api::unified::NotifyRequestOptions {
+                                event: event_package.to_string(),
+                                subscription_state: String::new(),
+                                content_type: None,
+                                body: body.map(bytes::Bytes::from),
+                                subscription_id: None,
+                                extra_headers: Vec::new(),
+                            },
+                        )
                         .await?;
                 } else {
                     let opts = rvoip_sip_dialog::api::unified::NotifyRequestOptions {
@@ -3267,19 +4284,14 @@ pub(crate) async fn execute_action(
                         extra_headers: auto_extras,
                     };
                     let _ = dialog_adapter
-                        .send_notify_with_options(&session.session_id, opts)
+                        .send_notify_with_options_lane_owned(session, opts)
                         .await?;
                 }
             }
         }
         Action::SendINFOWithOptions => {
-            let TrackedInDialogOptions::Info(options) = claim_tracked_request_staging(
-                session,
-                session_store,
-                TrackedInDialogMethod::Info,
-                stage_claim,
-            )
-            .await?
+            let TrackedInDialogOptions::Info(options) =
+                claim_tracked_request_staging(session, TrackedInDialogMethod::Info, stage_claim)?
             else {
                 return Err(crate::errors::SessionError::InvalidTransition(
                     "SendINFOWithOptions claimed the wrong method".to_string(),
@@ -3287,24 +4299,19 @@ pub(crate) async fn execute_action(
                 .into());
             };
             let lease = dialog_adapter.outbound_request_tracker.prepare(
-                &session.session_id,
+                exact_request_tracker_handle(session)?,
                 TrackedInDialogOptions::Info(Arc::clone(&options)),
             )?;
             let transaction_id = dialog_adapter
-                .send_info_with_options(&session.session_id, (*options).clone())
+                .send_info_with_options_lane_owned(session, (*options).clone())
                 .await?;
             dialog_adapter
                 .outbound_request_tracker
                 .activate(lease, transaction_id)?;
         }
         Action::SendUPDATEWithOptions => {
-            let TrackedInDialogOptions::Update(options) = claim_tracked_request_staging(
-                session,
-                session_store,
-                TrackedInDialogMethod::Update,
-                stage_claim,
-            )
-            .await?
+            let TrackedInDialogOptions::Update(options) =
+                claim_tracked_request_staging(session, TrackedInDialogMethod::Update, stage_claim)?
             else {
                 return Err(crate::errors::SessionError::InvalidTransition(
                     "SendUPDATEWithOptions claimed the wrong method".to_string(),
@@ -3312,237 +4319,142 @@ pub(crate) async fn execute_action(
                 .into());
             };
             let lease = dialog_adapter.outbound_request_tracker.prepare(
-                &session.session_id,
+                exact_request_tracker_handle(session)?,
                 TrackedInDialogOptions::Update(Arc::clone(&options)),
             )?;
-            let transaction_id = dialog_adapter
-                .send_update_with_options(&session.session_id, (*options).clone())
-                .await?;
+            let transaction_id = match dialog_adapter
+                .send_update_with_options_lane_owned(session, (*options).clone())
+                .await
+            {
+                Ok(transaction_id) => transaction_id,
+                Err(_) if options.session_timer_refresh => {
+                    return Ok(session_refresh_immediate_effect(
+                        session,
+                        SessionRefreshDeadlineKind::UpdateFailed,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
             dialog_adapter
                 .outbound_request_tracker
                 .activate(lease, transaction_id)?;
+            if options.session_timer_refresh {
+                return Ok(session_refresh_transaction_deadline_effect(
+                    session,
+                    dialog_adapter
+                        .non_invite_transaction_timeout()
+                        .saturating_add(std::time::Duration::from_secs(2)),
+                    SessionRefreshDeadlineKind::UpdateFailed,
+                ));
+            }
         }
         Action::SendReINVITEWithOptions => {
-            if let Some(opts) = session.pending_reinvite_options.as_ref() {
-                let snapshot = (**opts).clone();
-                // RFC 3261 §14.1 — track the in-flight builder-API
-                // re-INVITE so `HasPendingReinvite` fires the UAS-side
-                // glare path if the peer's re-INVITE arrives before our
-                // final response. Hold/Resume set this in their own
-                // action handlers; the builder API needs the same
-                // treatment. Cleared on terminal response by the
-                // Active+Dialog{200OK,4xx,5xx,6xx,Timeout}+HasPendingReinvite
-                // YAML rows.
-                let sdp_snapshot = snapshot.sdp.clone().unwrap_or_default();
-                session.pending_reinvite = Some(
-                    crate::session_store::state::PendingReinvite::SdpUpdate(sdp_snapshot),
-                );
-                dialog_adapter
-                    .send_reinvite_with_options(&session.session_id, snapshot)
-                    .await?;
-                session.pending_reinvite_options = None;
+            let TrackedInDialogOptions::Reinvite(options) = claim_tracked_request_staging(
+                session,
+                TrackedInDialogMethod::Reinvite,
+                stage_claim,
+            )?
+            else {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "SendReINVITEWithOptions claimed the wrong method".to_string(),
+                )
+                .into());
+            };
+            let lease = dialog_adapter.outbound_request_tracker.prepare(
+                exact_request_tracker_handle(session)?,
+                TrackedInDialogOptions::Reinvite(Arc::clone(&options)),
+            )?;
+            let snapshot = (*options).clone();
+            // RFC 3261 §14.1 — track the in-flight builder-API
+            // re-INVITE so `HasPendingReinvite` fires the UAS-side glare path.
+            let sdp_snapshot = snapshot.sdp.clone().unwrap_or_default();
+            session.pending_reinvite = Some(
+                crate::session_store::state::PendingReinvite::SdpUpdate(sdp_snapshot),
+            );
+            let transaction_id = match dialog_adapter
+                .send_reinvite_with_options_lane_owned(session, snapshot)
+                .await
+            {
+                Ok(transaction_id) => transaction_id,
+                Err(_) if options.session_timer_refresh => {
+                    return Ok(session_refresh_immediate_effect(
+                        session,
+                        SessionRefreshDeadlineKind::ReinviteFailed,
+                    ));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            dialog_adapter
+                .outbound_request_tracker
+                .activate(lease, transaction_id)?;
+            if options.session_timer_refresh {
+                return Ok(session_refresh_transaction_deadline_effect(
+                    session,
+                    dialog_adapter
+                        .non_invite_transaction_timeout()
+                        .saturating_add(std::time::Duration::from_secs(2)),
+                    SessionRefreshDeadlineKind::ReinviteFailed,
+                ));
             }
         }
         Action::SendMESSAGEWithOptions => {
-            if let Some(opts) = session.pending_message_options.as_ref() {
-                let snapshot = (**opts).clone();
+            if let Some(PendingOptionsSlot::Message(options)) = claim_builder_request_staging(
+                session,
+                PendingOptionsSlotKind::Message,
+                BuilderStageLifetime::ConsumeBeforeWire,
+                stage_claim,
+            )? {
                 dialog_adapter
-                    .send_message_oob_with_options(snapshot)
+                    .send_message_oob_with_options((*options).clone())
                     .await?;
-                session.pending_message_options = None;
             }
         }
         Action::SendOPTIONSWithOptions => {
-            if let Some(opts) = session.pending_options_options.as_ref() {
-                let snapshot = (**opts).clone();
+            if let Some(PendingOptionsSlot::Options(options)) = claim_builder_request_staging(
+                session,
+                PendingOptionsSlotKind::Options,
+                BuilderStageLifetime::ConsumeBeforeWire,
+                stage_claim,
+            )? {
                 dialog_adapter
-                    .send_options_oob_with_options(snapshot)
+                    .send_options_oob_with_options((*options).clone())
                     .await?;
-                session.pending_options_options = None;
             }
         }
         Action::SendSUBSCRIBEWithOptions => {
-            if let Some(opts) = session.pending_subscribe_options.as_ref() {
+            if let Some(PendingOptionsSlot::Subscribe(options)) = claim_builder_request_staging(
+                session,
+                PendingOptionsSlotKind::Subscribe,
+                BuilderStageLifetime::ConsumeBeforeWire,
+                stage_claim,
+            )? {
                 // Out-of-dialog SUBSCRIBE uses the target as the
                 // request URI; falls back to the session's remote
                 // URI for in-dialog refresh.
                 let target = session.remote_uri.clone().unwrap_or_default();
-                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_subscribe_oob_with_options(&target, snapshot)
+                    .send_subscribe_oob_with_options(&target, (*options).clone())
                     .await?;
-                session.pending_subscribe_options = None;
             }
         }
         Action::SendREGISTERWithOptions => {
-            if let Some(opts) = session.pending_register_options.clone() {
-                // SIP_API_DESIGN_2 §7.1 — REGISTER dispatch through the
-                // unified options surface, routed through the
-                // DialogAdapter mirror so HeaderPolicy::validate_outbound
-                // and prepend_outbound_proxy_route run on the application
-                // extras. The legacy automatic refresh path (driven by
-                // Config.registration_auto_refresh) remains; this Action
-                // covers builder dispatch (initial + manual refresh) and
-                // consults `opts.refresh` for Call-ID / CSeq reuse
-                // semantics in dialog-core.
-                let opts = (*opts).clone();
-                let refresh_flag = opts.refresh;
-                let registrar_uri = opts.registrar_uri.clone();
-                let from_uri = opts.aor_uri.clone();
-                let contact_uri = opts.contact_uri.clone();
-                let requested_expires = opts.expires;
-                let session_id = session.session_id.clone();
-                let (response, register_route) = dialog_adapter
-                    .send_register_with_options_and_route(opts.clone())
-                    .await
-                    .map_err(|e| {
-                        Box::<dyn std::error::Error + Send + Sync>::from(format!(
-                            "SendREGISTERWithOptions: {}",
-                            e
-                        ))
-                    })?;
-                debug!(
-                    "SendREGISTERWithOptions (refresh={}) on session {}: status={}",
-                    refresh_flag,
-                    session_id,
-                    response.status_code()
-                );
-
-                match DialogAdapter::register_attempt_outcome_from_response(
-                    &response,
-                    &contact_uri,
-                    requested_expires,
-                ) {
-                    RegisterAttemptOutcome::Registered {
-                        accepted_expires,
-                        mut metadata,
-                    } => {
-                        metadata.transport_route = Some(register_route);
-                        dialog_adapter
-                            .apply_registration_success(
-                                &session_id,
-                                &registrar_uri,
-                                &from_uri,
-                                &contact_uri,
-                                accepted_expires,
-                                metadata,
-                            )
-                            .await?;
-                        sync_registration_state(session_store, &session_id, session)?;
-                        session.pending_register_options = None;
-                        return Ok(ActionOutcome::with_event(EventType::Registration200OK));
-                    }
-                    RegisterAttemptOutcome::Unregistered => {
-                        dialog_adapter
-                            .apply_unregistration_success(&session_id, &registrar_uri)
-                            .await?;
-                        sync_registration_state(session_store, &session_id, session)?;
-                        session.pending_register_options = None;
-                        return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
-                    }
-                    RegisterAttemptOutcome::AuthChallenge {
-                        status_code,
-                        challenge,
-                    } => {
-                        let retry_count = session_store
-                            .with_session(&session_id, |latest| latest.registration_retry_count)?;
-                        if retry_count >= 1 {
-                            dialog_adapter
-                                .apply_registration_failure(
-                                    &session_id,
-                                    &registrar_uri,
-                                    status_code,
-                                    "REGISTER authentication failed",
-                                )
-                                .await?;
-                            sync_registration_state(session_store, &session_id, session)?;
-                            session.pending_register_options = None;
-                            return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
-                                status_code,
-                            )));
-                        }
-
-                        let retry_count = session_store
-                            .update_session_with(&session_id, |latest| {
-                                latest.registration_retry_count += 1;
-                                latest.registration_retry_count
-                            })
-                            .await?;
-                        session.registration_retry_count = retry_count;
-                        return Ok(ActionOutcome::with_event(EventType::AuthRequired {
-                            status_code,
-                            challenge,
-                            method: "REGISTER".to_string(),
-                        }));
-                    }
-                    RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
-                        let retry_count = session_store
-                            .with_session(&session_id, |latest| latest.registration_retry_count)?;
-                        if retry_count >= 2 {
-                            dialog_adapter
-                                .apply_registration_failure(
-                                    &session_id,
-                                    &registrar_uri,
-                                    423,
-                                    "Registration failed with repeated 423 Interval Too Brief responses",
-                                )
-                                .await?;
-                            sync_registration_state(session_store, &session_id, session)?;
-                            session.pending_register_options = None;
-                            return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
-                                423,
-                            )));
-                        }
-
-                        let mut retry_opts = opts;
-                        retry_opts.expires = min_expires;
-                        let retry_opts = Arc::new(retry_opts);
-                        let retry_count = session_store
-                            .update_session_with(&session_id, |latest| {
-                                latest.registration_expires = Some(min_expires);
-                                latest.registration_retry_count += 1;
-                                latest.pending_register_options = Some(Arc::clone(&retry_opts));
-                                latest.registration_retry_count
-                            })
-                            .await?;
-                        session.registration_expires = Some(min_expires);
-                        session.registration_retry_count = retry_count;
-                        session.pending_register_options = Some(retry_opts);
-                        return Ok(ActionOutcome::with_event(EventType::SendOutboundRegister));
-                    }
-                    RegisterAttemptOutcome::Failure {
-                        status_code,
-                        reason,
-                    } => {
-                        if requested_expires == 0 {
-                            dialog_adapter
-                                .apply_unregistration_failure(
-                                    &session_id,
-                                    &registrar_uri,
-                                    format!("{} (status {})", reason, status_code),
-                                )
-                                .await?;
-                            sync_registration_state(session_store, &session_id, session)?;
-                            session.pending_register_options = None;
-                            return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
-                        }
-
-                        dialog_adapter
-                            .apply_registration_failure(
-                                &session_id,
-                                &registrar_uri,
-                                status_code,
-                                reason,
-                            )
-                            .await?;
-                        sync_registration_state(session_store, &session_id, session)?;
-                        session.pending_register_options = None;
-                        return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
-                            status_code,
-                        )));
-                    }
-                }
-            }
+            // Canonical REGISTER lifecycle action. A builder snapshot is used
+            // when present; initial registration, automatic refresh, and
+            // unregister synthesize the same options type from lane-owned
+            // state. Compatibility action variants above delegate to this
+            // exact implementation as well.
+            return execute_register_action(
+                session,
+                dialog_adapter,
+                triggering_event,
+                if matches!(triggering_event, EventType::StartUnregistration) {
+                    RegisterActionMode::Unregister
+                } else {
+                    RegisterActionMode::Register
+                },
+                stage_claim,
+            )
+            .await;
         }
         Action::SendINVITEWithOptions => {
             // INVITE uses `.clone()` (not `.take()`) so the snapshot
@@ -3554,8 +4466,13 @@ pub(crate) async fn execute_action(
             // Initiating → Active (Dialog200OK) and Initiating → Failed
             // (Dialog4xx/5xx/6xx/Timeout) transitions in YAML, and
             // backstopped by the executor's `Terminated` sweep.
-            if let Some(opts) = session.pending_invite_options.clone() {
-                let snapshot = (*opts).clone();
+            if let Some(PendingOptionsSlot::Invite(options)) = claim_builder_request_staging(
+                session,
+                PendingOptionsSlotKind::Invite,
+                BuilderStageLifetime::RetainedForRetry,
+                stage_claim,
+            )? {
+                let snapshot = (*options).clone();
                 // SDP precedence: builder-supplied `snapshot.sdp` wins;
                 // otherwise fall back to `session.local_sdp` populated by the
                 // preceding `GenerateLocalSDP` action.
@@ -3593,16 +4510,7 @@ pub(crate) async fn execute_action(
                         !suppress_global_proxy,
                     )
                     .await?;
-                if let Some(real_dialog_id) =
-                    dialog_adapter.session_to_dialog.get(&session.session_id)
-                {
-                    session.dialog_id = Some(real_dialog_id.value().clone().into());
-                } else {
-                    return Err(crate::errors::SessionError::InternalError(
-                        "initial INVITE committed without an exact dialog mapping".to_string(),
-                    )
-                    .into());
-                }
+                session.dialog_id = Some(dialog_adapter.initial_invite_dialog_lane_owned(session)?);
                 #[cfg(feature = "perf-call-setup-diagnostics")]
                 crate::call_setup_diag::record_stage(
                     &session.session_id,
@@ -3677,7 +4585,7 @@ pub(crate) async fn execute_action(
     Ok(ActionOutcome::default())
 }
 
-/// SIP_API_DESIGN_2 R2 — resolve the SIP method for a non-INVITE/
+/// SIP_API_DESIGN_2 R2 — resolve the SIP method for a non-initial-INVITE/
 /// non-REGISTER auth retry. Prefers the explicit
 /// `session.pending_auth_method` (populated by the cross-crate
 /// `AuthRequired` event's `method` field, originally extracted from
@@ -3689,6 +4597,9 @@ fn resolve_auth_method(session: &crate::session_store::SessionState) -> String {
         if !m.is_empty() {
             return safe_outbound_auth_method_label(m).to_string();
         }
+    }
+    if session.pending_reinvite_options.is_some() {
+        return "INVITE".to_string();
     }
     if session.pending_bye_options.is_some() {
         return "BYE".to_string();
@@ -3721,6 +4632,7 @@ fn resolve_auth_method(session: &crate::session_store::SessionState) -> String {
 
 fn auth_method_for_error(method: &str) -> rvoip_sip_core::Method {
     match method {
+        "INVITE" => rvoip_sip_core::Method::Invite,
         "BYE" => rvoip_sip_core::Method::Bye,
         "REFER" => rvoip_sip_core::Method::Refer,
         "NOTIFY" => rvoip_sip_core::Method::Notify,
@@ -3822,8 +4734,8 @@ fn invite_credential_slot_for_challenge(
 }
 
 /// SIP_API_DESIGN_2 R2 — pick the request-URI to fold into HA2 for the
-/// digest computation. In-dialog methods (BYE, REFER, NOTIFY, INFO,
-/// UPDATE) target `session.remote_uri`. OOB methods (MESSAGE,
+/// digest computation. In-dialog methods (re-INVITE, BYE, REFER, NOTIFY,
+/// INFO, UPDATE) target `session.remote_uri`. OOB methods (MESSAGE,
 /// OPTIONS) carry their target on the options struct; SUBSCRIBE
 /// targets `session.remote_uri` (which the builder stashes there
 /// before dispatch).
@@ -3844,19 +4756,221 @@ fn resolve_auth_request_uri(
     }
 }
 
-/// Publish an app-level `Event` to the global coordinator's session-to-app
-/// channel, using the same fire-and-forget spawn pattern as
-/// `session_event_handler::publish_api_event`. Errors are logged, not
-/// propagated — a progress-NOTIFY transport failure should not roll back
-/// the dialog transition that triggered it.
-fn publish_transfer_event(dialog_adapter: &Arc<DialogAdapter>, api_event: Event) {
-    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-    let coordinator = dialog_adapter.global_coordinator.clone();
-    tokio::spawn(async move {
-        if coordinator.publish(wrapped).await.is_err() {
-            tracing::warn!("Failed to publish Transfer* event (class=coordination)");
+#[cfg(not(test))]
+async fn scripted_exact_sip_response(
+    _session_id: &SessionId,
+    _transaction_id: &rvoip_sip_dialog::transaction::TransactionKey,
+    _code: u16,
+) -> Option<ExactSipResponseResult> {
+    None
+}
+
+#[cfg(test)]
+async fn scripted_exact_sip_response(
+    session_id: &SessionId,
+    transaction_id: &rvoip_sip_dialog::transaction::TransactionKey,
+    code: u16,
+) -> Option<ExactSipResponseResult> {
+    exact_response_dispatch_test_hook::dispatch(session_id, transaction_id, code).await
+}
+
+#[cfg(test)]
+pub(crate) mod exact_response_dispatch_test_hook {
+    use super::{ExactSipResponseActionError, ExactSipResponseResult};
+    use crate::state_table::types::SessionId;
+    use rvoip_sip_dialog::transaction::TransactionKey;
+    use rvoip_sip_dialog::FinalResponseCompletionDisposition;
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::Notify;
+
+    static SCRIPTS: LazyLock<Mutex<HashMap<String, Arc<Script>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    #[derive(Clone)]
+    pub(crate) enum Step {
+        ZeroWire,
+        Written,
+        WireUnknown,
+        Owned(Arc<OwnedCompletion>),
+    }
+
+    pub(crate) struct Script {
+        steps: Mutex<VecDeque<Step>>,
+        attempts: AtomicUsize,
+        wire_authorships: AtomicUsize,
+        dispatches: Mutex<Vec<(TransactionKey, u16)>>,
+    }
+
+    impl Script {
+        pub(crate) fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::Acquire)
         }
-    });
+
+        pub(crate) fn wire_authorships(&self) -> usize {
+            self.wire_authorships.load(Ordering::Acquire)
+        }
+
+        pub(crate) fn dispatches(&self) -> Vec<(TransactionKey, u16)> {
+            self.dispatches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    pub(crate) struct OwnedCompletion {
+        authored: AtomicBool,
+        entered: AtomicBool,
+        entered_notify: Notify,
+        outcome: AtomicU8,
+        outcome_notify: Notify,
+    }
+
+    impl OwnedCompletion {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                authored: AtomicBool::new(false),
+                entered: AtomicBool::new(false),
+                entered_notify: Notify::new(),
+                outcome: AtomicU8::new(0),
+                outcome_notify: Notify::new(),
+            })
+        }
+
+        pub(crate) async fn wait_until_entered(&self) {
+            loop {
+                if self.entered.load(Ordering::Acquire) {
+                    return;
+                }
+                let notified = self.entered_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.entered.load(Ordering::Acquire) {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        pub(crate) fn complete_written(&self) {
+            self.outcome.store(1, Ordering::Release);
+            self.outcome_notify.notify_waiters();
+        }
+
+        async fn wait(&self) -> ExactSipResponseResult {
+            loop {
+                let notified = self.outcome_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                match self.outcome.load(Ordering::Acquire) {
+                    0 => notified.await,
+                    1 => {
+                        return Ok(FinalResponseCompletionDisposition::WrittenSuccessTerminal);
+                    }
+                    2 => {
+                        return Err(classified_error(
+                            FinalResponseCompletionDisposition::ZeroWireRetryable,
+                            "scripted owned response failed before transport write",
+                        ))
+                    }
+                    3 => {
+                        return Err(classified_error(
+                            FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                            "scripted owned response crossed an unknown transport boundary",
+                        ))
+                    }
+                    _ => unreachable!("invalid scripted exact-response outcome"),
+                }
+            }
+        }
+    }
+
+    pub(crate) fn install(session_id: &SessionId, steps: Vec<Step>) -> Arc<Script> {
+        let script = Arc::new(Script {
+            steps: Mutex::new(steps.into()),
+            attempts: AtomicUsize::new(0),
+            wire_authorships: AtomicUsize::new(0),
+            dispatches: Mutex::new(Vec::new()),
+        });
+        SCRIPTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(session_id.0.clone(), Arc::clone(&script));
+        script
+    }
+
+    pub(crate) fn remove(session_id: &SessionId) {
+        SCRIPTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_id.0);
+    }
+
+    fn classified_error(
+        disposition: FinalResponseCompletionDisposition,
+        detail: &str,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        Box::new(ExactSipResponseActionError::new(
+            disposition,
+            crate::errors::SessionError::DialogError(detail.to_string()),
+        ))
+    }
+
+    pub(super) async fn dispatch(
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+    ) -> Option<ExactSipResponseResult> {
+        let script = SCRIPTS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&session_id.0)
+            .cloned()?;
+        script.attempts.fetch_add(1, Ordering::AcqRel);
+        script
+            .dispatches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push((transaction_id.clone(), code));
+        let step = script
+            .steps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front();
+        let Some(step) = step else {
+            return Some(Err(classified_error(
+                FinalResponseCompletionDisposition::ZeroWireRetryable,
+                "scripted exact-response sequence was exhausted",
+            )));
+        };
+        Some(match step {
+            Step::ZeroWire => Err(classified_error(
+                FinalResponseCompletionDisposition::ZeroWireRetryable,
+                "scripted exact response failed before transport write",
+            )),
+            Step::Written => {
+                script.wire_authorships.fetch_add(1, Ordering::AcqRel);
+                Ok(FinalResponseCompletionDisposition::WrittenSuccessTerminal)
+            }
+            Step::WireUnknown => {
+                script.wire_authorships.fetch_add(1, Ordering::AcqRel);
+                Err(classified_error(
+                    FinalResponseCompletionDisposition::WireUnknownErrorTerminal,
+                    "scripted exact response crossed an unknown transport boundary",
+                ))
+            }
+            Step::Owned(operation) => {
+                if !operation.authored.swap(true, Ordering::AcqRel) {
+                    script.wire_authorships.fetch_add(1, Ordering::AcqRel);
+                    operation.entered.store(true, Ordering::Release);
+                    operation.entered_notify.notify_waiters();
+                }
+                operation.wait().await
+            }
+        })
+    }
 }
 
 #[cfg(test)]
@@ -3873,34 +4987,473 @@ mod negotiated_audio_shape_tests {
 }
 
 #[cfg(test)]
-mod registration_projection_tests {
+mod registration_lane_state_tests {
     use super::*;
     use crate::state_table::Role;
-    use crate::types::CallState;
 
     #[test]
-    fn registration_projection_does_not_replace_unrelated_call_state() {
-        let mut stored = SessionState::new(SessionId::new(), Role::UAC);
-        stored.registration_call_id = Some("registration-call".into());
-        stored.registration_cseq = 17;
-        stored.registration_retry_count = 2;
-        stored.is_registered = true;
+    fn fast_401_updates_only_the_lane_owned_retry_state() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.local_sdp = Some("v=0\r\n".into());
 
-        let mut event_local = SessionState::new(stored.session_id.clone(), Role::UAC);
-        event_local.call_state = CallState::Active;
-        event_local.local_sdp = Some("v=0\r\n".into());
+        record_registration_auth_retry(&mut session);
 
-        RegistrationStateProjection::capture(&stored).apply(&mut event_local);
+        assert_eq!(session.registration_retry_count, 1);
+        assert_eq!(session.local_sdp.as_deref(), Some("v=0\r\n"));
+    }
 
-        assert_eq!(event_local.call_state, CallState::Active);
-        assert_eq!(event_local.local_sdp.as_deref(), Some("v=0\r\n"));
+    #[test]
+    fn fast_423_updates_expiry_and_retry_in_one_working_state() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.registration_expires = Some(60);
+
+        record_registration_interval_retry(&mut session, 300);
+
+        assert_eq!(session.registration_expires, Some(300));
+        assert_eq!(session.registration_retry_count, 1);
+    }
+
+    #[test]
+    fn registration_actions_have_no_store_reconciliation_path() {
+        let source = include_str!("actions.rs");
+        let removed_projection = ["RegistrationState", "Projection"].concat();
+        let removed_sync = ["sync_registration", "_state"].concat();
+        assert!(!source.contains(&removed_projection));
+        assert!(!source.contains(&removed_sync));
+
+        let register_action = source
+            .split("async fn execute_register_action")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Materialize the per-call INVITE").next())
+            .expect("execute_register_action source");
+        assert!(!register_action.contains("with_session("));
+        assert!(!register_action.contains("update_session_with("));
+
+        let options_action = source
+            .split("Action::SendREGISTERWithOptions =>")
+            .nth(1)
+            .and_then(|tail| tail.split("Action::SendINVITEWithOptions =>").next())
+            .expect("SendREGISTERWithOptions source");
+        assert!(!options_action.contains("with_session("));
+        assert!(!options_action.contains("update_session_with("));
+
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production source");
         assert_eq!(
-            event_local.registration_call_id.as_deref(),
-            Some("registration-call")
+            production.matches(".send_register_attempt(").count(),
+            1,
+            "all REGISTER action variants must share one wire implementation"
         );
-        assert_eq!(event_local.registration_cseq, 17);
-        assert_eq!(event_local.registration_retry_count, 2);
-        assert!(event_local.is_registered);
+        assert!(register_action.contains("claim_builder_request_staging("));
+        for action in [
+            "Action::SendREGISTER =>",
+            "Action::SendREGISTERWithAuth =>",
+            "Action::SendUnREGISTER =>",
+            "Action::SendREGISTERWithOptions =>",
+        ] {
+            let body = production
+                .split(action)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing {action}"));
+            assert!(
+                body.contains("execute_register_action("),
+                "{action} bypasses the canonical REGISTER action"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lane_owned_action_state_tests {
+    use super::{retire_lane_owned_dialog_identity, retire_lane_owned_media_identity};
+
+    #[test]
+    fn dialog_cleanup_retires_the_working_identity_before_redirect_dispatch() {
+        let mut session = crate::session_store::SessionState::new(
+            crate::state_table::SessionId::new(),
+            crate::state_table::Role::UAC,
+        );
+        session.dialog_id = Some(crate::types::DialogId::new());
+        session.dialog_established = true;
+
+        retire_lane_owned_dialog_identity(&mut session);
+
+        assert!(session.dialog_id.is_none());
+        assert!(!session.dialog_established);
+
+        let source = include_str!("actions.rs");
+        let cleanup = source
+            .split("Action::CleanupDialog =>")
+            .nth(1)
+            .and_then(|tail| tail.split("Action::CleanupMedia =>").next())
+            .expect("CleanupDialog action source");
+        assert!(cleanup.contains("cleanup_dialog_on_fresh_task"));
+        assert!(cleanup.contains("retire_lane_owned_dialog_identity(session)"));
+        assert!(
+            cleanup.find("cleanup_dialog_on_fresh_task")
+                < cleanup.find("retire_lane_owned_dialog_identity(session)"),
+            "the old lane-owned identity must retire only after lower cleanup succeeds"
+        );
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+        assert_eq!(
+            production
+                .matches("retire_lane_owned_dialog_identity(session);")
+                .count(),
+            4,
+            "every successful dialog cleanup action must retire its lane-owned identity"
+        );
+    }
+
+    #[test]
+    fn media_cleanup_retires_every_lane_owned_media_field() {
+        let mut session = crate::session_store::SessionState::new(
+            crate::state_table::SessionId::new(),
+            crate::state_table::Role::UAC,
+        );
+        session.media_session_id = Some(crate::types::MediaSessionId::new("lane-media"));
+        session.media_session_ready = true;
+        session.sdp_negotiated = true;
+        session.local_sdp = Some("v=0\r\n".to_string());
+        session.negotiated_config = Some(crate::session_store::state::NegotiatedConfig {
+            local_addr: "127.0.0.1:16000".parse().expect("local address"),
+            remote_addr: "127.0.0.1:16002".parse().expect("remote address"),
+            codec: "PCMU".to_string(),
+            sample_rate: 8_000,
+            channels: 1,
+        });
+
+        retire_lane_owned_media_identity(&mut session);
+
+        assert!(session.media_session_id.is_none());
+        assert!(!session.media_session_ready);
+        assert!(!session.sdp_negotiated);
+        assert!(session.local_sdp.is_none());
+        assert!(session.negotiated_config.is_none());
+    }
+
+    #[test]
+    fn every_state_machine_media_cleanup_uses_the_lane_owned_path() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+
+        assert_eq!(
+            production
+                .matches("cleanup_lane_owned_media(session, media_adapter)")
+                .count(),
+            4,
+            "every media cleanup action must share the lane-owned implementation"
+        );
+        assert!(
+            !production.contains("media_adapter.cleanup_session(&session.session_id)"),
+            "state-machine actions must not enter retained-store media cleanup"
+        );
+
+        let helper = production
+            .split("async fn cleanup_lane_owned_media")
+            .nth(1)
+            .and_then(|tail| tail.split("fn negotiated_audio_shape").next())
+            .expect("lane-owned media cleanup helper");
+        assert!(helper.contains("cleanup_session_lane_owned(session)"));
+        assert!(helper.contains("retire_lane_owned_media_identity(session)"));
+        assert!(!helper.contains("update_session"));
+        assert!(!helper.contains("clear_media_session_retained_exact"));
+    }
+
+    #[test]
+    fn yaml_uas_responses_have_no_session_or_dialog_transaction_fallback() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+        assert!(!production.contains("send_sip_response_on_fresh_task"));
+        assert!(!production.contains(".send_response_with_options(&session_id"));
+        assert!(!production.contains(".send_response(&session_id"));
+
+        let response_action = production
+            .split("Action::SendSIPResponse(code, _reason) =>")
+            .nth(1)
+            .and_then(|tail| tail.split("Action::SendINVITE =>").next())
+            .expect("SendSIPResponse action source");
+        assert!(response_action.contains("send_exact_initial_invite_provisional_response"));
+        assert!(response_action.contains("send_exact_inbound_provisional_response"));
+        assert!(response_action.contains("send_exact_initial_invite_final_response"));
+        assert!(response_action.contains("send_exact_inbound_final_response"));
+        assert!(!response_action.contains("dialog_adapter.send_response"));
+    }
+
+    #[test]
+    fn unsupported_actions_fail_closed_and_cleanup_has_one_authority() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+
+        for retired_success_log in [
+            "restore_direct_media not implemented yet",
+            "attempt_recovery not implemented yet",
+            "BridgeToMixer not implemented yet",
+            "CleanupResources not implemented yet",
+            "// Other custom actions",
+        ] {
+            assert!(
+                !production.contains(retired_success_log),
+                "retired false-success path remains: {retired_success_log}"
+            );
+        }
+
+        for action in [
+            "Action::ConnectToMixer =>",
+            "Action::DisconnectFromMixer =>",
+            "Action::AttemptMediaRecovery =>",
+            "Action::BridgeToMixer =>",
+        ] {
+            let body = production
+                .split(action)
+                .nth(1)
+                .unwrap_or_else(|| panic!("missing {action}"));
+            assert!(
+                body.contains("return Err("),
+                "{action} must never report success without a real implementation"
+            );
+        }
+
+        for (action, next) in [
+            ("Action::RedirectToMixer =>", "Action::ConnectToMixer =>"),
+            ("Action::MuteToMixer =>", "Action::UnmuteToMixer =>"),
+            ("Action::UnmuteToMixer =>", "Action::DestroyMixer =>"),
+            ("Action::DestroyMixer =>", "Action::UpdateMediaDirection"),
+            (
+                "Action::StartRecordingMixer =>",
+                "Action::StopRecordingMixer =>",
+            ),
+            (
+                "Action::StopRecordingMixer =>",
+                "Action::ReleaseAllResources =>",
+            ),
+        ] {
+            let body = production
+                .split(action)
+                .nth(1)
+                .and_then(|tail| tail.split(next).next())
+                .unwrap_or_else(|| panic!("missing {action}"));
+            assert!(
+                body.contains("SessionError::InvalidTransition"),
+                "{action} must fail closed when its optional mixer/media authority is absent"
+            );
+        }
+
+        assert_eq!(
+            production
+                .matches("release_lane_owned_resources(session, dialog_adapter, media_adapter)")
+                .count(),
+            2,
+            "ReleaseAllResources and CleanupResources must share one implementation"
+        );
+    }
+
+    #[test]
+    fn auth_actions_have_no_direct_store_writer() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+        assert_eq!(
+            production.matches(".update_session_with(").count(),
+            0,
+            "all actions must mutate only the lane-owned SessionState"
+        );
+
+        let auth_owner = production
+            .split("fn advance_tracked_auth_owner")
+            .nth(1)
+            .and_then(|tail| tail.split("pub(crate) async fn execute_action").next())
+            .expect("tracked auth owner source");
+        assert!(!auth_owner.contains("update_session"));
+
+        let auth_challenge = production
+            .split("Action::StoreAuthChallenge =>")
+            .nth(1)
+            .and_then(|tail| tail.split("Action::SendINVITEWithAuth =>").next())
+            .expect("StoreAuthChallenge source");
+        assert!(!auth_challenge.contains("update_session"));
+        assert!(!auth_challenge.contains("legacy REGISTER shortcut"));
+        assert!(!auth_challenge.contains("auth_challenge.is_some()"));
+    }
+
+    #[test]
+    fn every_builder_action_claims_its_exact_stage() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+        let executor = production
+            .split("pub(crate) async fn execute_action")
+            .nth(1)
+            .expect("action executor source");
+
+        for (action, next, claim_helper) in [
+            (
+                "Action::SendBYEWithOptions => {",
+                "Action::SendCANCELWithOptions => {",
+                "claim_builder_request_staging(",
+            ),
+            (
+                "Action::SendCANCELWithOptions => {",
+                "Action::SendREFERWithOptions => {",
+                "claim_builder_request_staging(",
+            ),
+            (
+                "Action::SendREFERWithOptions => {",
+                "Action::SendNOTIFYWithOptions => {",
+                "claim_tracked_request_staging(",
+            ),
+            (
+                "Action::SendNOTIFYWithOptions => {",
+                "Action::SendINFOWithOptions => {",
+                "claim_tracked_request_staging(",
+            ),
+            (
+                "Action::SendINFOWithOptions => {",
+                "Action::SendUPDATEWithOptions => {",
+                "claim_tracked_request_staging(",
+            ),
+            (
+                "Action::SendUPDATEWithOptions => {",
+                "Action::SendReINVITEWithOptions => {",
+                "claim_tracked_request_staging(",
+            ),
+            (
+                "Action::SendReINVITEWithOptions => {",
+                "Action::SendMESSAGEWithOptions => {",
+                "claim_tracked_request_staging(",
+            ),
+            (
+                "Action::SendMESSAGEWithOptions => {",
+                "Action::SendOPTIONSWithOptions => {",
+                "claim_builder_request_staging(",
+            ),
+            (
+                "Action::SendOPTIONSWithOptions => {",
+                "Action::SendSUBSCRIBEWithOptions => {",
+                "claim_builder_request_staging(",
+            ),
+            (
+                "Action::SendSUBSCRIBEWithOptions => {",
+                "Action::SendREGISTERWithOptions => {",
+                "claim_builder_request_staging(",
+            ),
+            (
+                "Action::SendREGISTERWithOptions => {",
+                "Action::SendINVITEWithOptions => {",
+                "execute_register_action(",
+            ),
+            (
+                "Action::SendINVITEWithOptions => {",
+                "Action::ClearPendingINVITEOptions => {",
+                "claim_builder_request_staging(",
+            ),
+        ] {
+            let action_source = executor
+                .split(action)
+                .nth(1)
+                .and_then(|tail| tail.split(next).next())
+                .unwrap_or_else(|| panic!("missing builder action source for {action}"));
+            assert!(
+                action_source.contains(claim_helper),
+                "{action} bypasses the exact staged-options claim"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_actions_defer_one_exact_notify_with_the_complete_observation_set() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+        assert!(!production.contains("fn publish_transfer_event"));
+
+        for (action, next, observations) in [
+            (
+                "Action::SendTransferNotifyRinging =>",
+                "Action::SendTransferNotifySuccess =>",
+                2,
+            ),
+            (
+                "Action::SendTransferNotifySuccess =>",
+                "Action::SendTransferNotifyFailure =>",
+                3,
+            ),
+            (
+                "Action::SendTransferNotifyFailure =>",
+                "// ──────────────────────────────────────────────────────────────",
+                2,
+            ),
+        ] {
+            let action_source = production
+                .split(action)
+                .nth(1)
+                .and_then(|tail| tail.split(next).next())
+                .expect("transfer action source");
+            assert!(!action_source.contains(".send_refer_notify("));
+            assert_eq!(
+                action_source
+                    .matches("DeferredActionEffect::TransferNotify")
+                    .count(),
+                1,
+                "{action} must admit one exact transfer operation"
+            );
+            assert_eq!(
+                action_source.matches("Event::").count(),
+                observations,
+                "{action} changed its post-wire public observation set"
+            );
+            assert!(!action_source.contains("publish_api_event"));
+            assert!(!action_source.contains("publish_observational"));
+            assert!(action_source.contains("exact_transferor_link(session)?"));
+        }
+
+        let transfer_link = production
+            .split("fn exact_transferor_link")
+            .nth(1)
+            .and_then(|tail| tail.split("enum RegisterActionMode").next())
+            .expect("exact transfer-link validator");
+        assert!(transfer_link.contains("(None, None) if !session.is_transfer_call => Ok(None)"));
+        assert!(transfer_link.contains("SessionError::InvalidTransition"));
+        assert!(transfer_link.contains("matching exact transferor lifetime"));
+
+        let trying = production
+            .split("Action::SendRefer100Trying =>")
+            .nth(1)
+            .and_then(|tail| tail.split("Action::SendTransferNotifyRinging =>").next())
+            .expect("100 Trying action source");
+        assert!(trying.contains("send_refer_notify_lane_owned"));
+        assert!(!trying.contains(".send_refer_notify("));
+    }
+
+    #[test]
+    fn retired_string_selected_response_actions_cannot_reenter_production() {
+        let source = include_str!("actions.rs");
+        let production = source
+            .split("#[cfg(test)]\nmod")
+            .next()
+            .expect("production action source");
+
+        assert!(!production.contains("\"Send180Ringing\" =>"));
+        assert!(!production.contains("\"Send200OK\" =>"));
     }
 }
 

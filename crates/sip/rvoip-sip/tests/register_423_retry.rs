@@ -21,6 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
+use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::unified::{Config, RegistrationStatus};
 use rvoip_sip::StreamPeer;
 
@@ -132,7 +133,9 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
 
     let register_count = Arc::new(AtomicU32::new(0));
     let retry_expires_seen = Arc::new(Mutex::new(None::<u32>));
-    let register_headers_seen = Arc::new(Mutex::new(Vec::<(String, u32, String)>::new()));
+    let register_headers_seen = Arc::new(Mutex::new(
+        Vec::<(String, u32, String, Option<String>)>::new(),
+    ));
 
     let sock_task = sock.clone();
     let register_count_task = register_count.clone();
@@ -167,6 +170,7 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
                 request
                     .raw_header_value(&HeaderName::Contact)
                     .expect("REGISTER Contact"),
+                request.raw_header_value(&HeaderName::Other("X-Register-423-Canary".to_string())),
             ));
 
             if count == 0 {
@@ -218,6 +222,11 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
         )
         .with_contact_uri(CLIENT_CONTACT)
         .with_expires(CLIENT_INITIAL_EXPIRES)
+        .with_raw_header(
+            HeaderName::Other("X-Register-423-Canary".to_string()),
+            "retained-across-423",
+        )
+        .expect("custom 423 retry header")
         .send()
         .await
         .expect("register");
@@ -274,9 +283,18 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
     assert!(
         headers_seen
             .iter()
-            .all(|(_, _, contact)| contact == "<sip:alice@127.0.0.1:35181>"),
+            .all(|(_, _, contact, _)| contact == "<sip:alice@127.0.0.1:35181>"),
         "REGISTER Contact should be local UA contact, got {:?}",
-        headers_seen.iter().map(|(_, _, c)| c).collect::<Vec<_>>()
+        headers_seen
+            .iter()
+            .map(|(_, _, contact, _)| contact)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        headers_seen
+            .iter()
+            .all(|(_, _, _, canary)| canary.as_deref() == Some("retained-across-423")),
+        "423 retry must retain the initial REGISTER custom-header snapshot"
     );
 
     // `is_registered` flips true on 200 OK to the retry. Currently the
@@ -617,6 +635,324 @@ async fn register_407_retry_uses_proxy_authorization() {
         "session should be marked registered after 200 OK to proxy auth retry"
     );
 
+    registrar_handle.abort();
+}
+
+#[tokio::test]
+async fn manual_refresh_auth_and_stale_retry_preserve_one_request_snapshot() {
+    let sock = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("manual refresh registrar bind"),
+    );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
+    let seen = Arc::new(Mutex::new(Vec::<(
+        String,
+        u32,
+        u32,
+        Option<String>,
+        bool,
+        Option<String>,
+    )>::new()));
+
+    let sock_task = Arc::clone(&sock);
+    let seen_task = Arc::clone(&seen);
+    let registrar_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+                continue;
+            };
+            if request.method() != Method::Register {
+                continue;
+            }
+
+            let authorization = request.raw_header_value(&HeaderName::Authorization);
+            let auth_nonce = authorization.as_ref().map(|header| {
+                DigestAuthenticator::parse_authorization(header)
+                    .expect("refresh Authorization should parse")
+                    .nonce
+            });
+            let custom = request
+                .raw_header_value(&HeaderName::Other("X-Register-Refresh-Canary".to_string()));
+            let request_index = {
+                let mut captured = seen_task.lock().await;
+                captured.push((
+                    request
+                        .call_id()
+                        .expect("REGISTER Call-ID")
+                        .value()
+                        .to_string(),
+                    extract_cseq(&request).expect("REGISTER CSeq"),
+                    extract_expires(&request).expect("REGISTER Expires"),
+                    custom,
+                    authorization.is_some(),
+                    auth_nonce,
+                ));
+                captured.len() - 1
+            };
+
+            let response = match request_index {
+                0 => response_with_contact_and_expires(&request, 300),
+                1 => {
+                    let mut response = create_response(&request, StatusCode::Unauthorized);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::WwwAuthenticate,
+                        HeaderValue::Raw(
+                            br#"Digest realm="refresh-realm", nonce="refresh-nonce-1", algorithm=MD5, qop="auth""#
+                                .to_vec(),
+                        ),
+                    ));
+                    Message::Response(response)
+                }
+                2 => {
+                    let mut response = create_response(&request, StatusCode::Unauthorized);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::WwwAuthenticate,
+                        HeaderValue::Raw(
+                            br#"Digest realm="refresh-realm", nonce="refresh-nonce-2", algorithm=MD5, qop="auth", stale=true"#
+                                .to_vec(),
+                        ),
+                    ));
+                    Message::Response(response)
+                }
+                _ => response_with_contact_and_expires(&request, 180),
+            };
+            let _ = sock_task.send_to(&response.to_bytes(), from).await;
+        }
+    });
+
+    let mut config = Config::local("alice", 0);
+    config.media_port_start = 40300;
+    config.media_port_end = 40310;
+    config.registration_auto_refresh = false;
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let handle = peer
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
+        )
+        .with_contact_uri("sip:alice@127.0.0.1:40300")
+        .with_expires(300)
+        .send()
+        .await
+        .expect("initial register");
+
+    peer.control()
+        .coordinator()
+        .refresh(&handle)
+        .with_expires(180)
+        .with_raw_header(
+            HeaderName::Other("X-Register-Refresh-Canary".to_string()),
+            "retained-across-refresh-auth",
+        )
+        .expect("custom refresh header")
+        .send()
+        .await
+        .expect("challenged manual refresh");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if seen.lock().await.len() >= 4 {
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("initial plus challenged/stale refresh attempts");
+
+    let captured = seen.lock().await;
+    assert_eq!(captured.len(), 4, "no duplicate REGISTER attempts");
+    assert!(
+        captured.windows(2).all(|pair| pair[0].0 == pair[1].0),
+        "initial and every refresh retry must reuse one Call-ID"
+    );
+    assert!(
+        captured.windows(2).all(|pair| pair[1].1 > pair[0].1),
+        "every logical REGISTER retry must advance CSeq: {:?}",
+        captured.iter().map(|entry| entry.1).collect::<Vec<_>>()
+    );
+    assert_eq!(captured[0].2, 300);
+    assert!(captured[1..].iter().all(|entry| entry.2 == 180));
+    assert!(captured[0].3.is_none());
+    assert!(captured[1..]
+        .iter()
+        .all(|entry| { entry.3.as_deref() == Some("retained-across-refresh-auth") }));
+    assert!(!captured[1].4, "first refresh should be unchallenged");
+    assert_eq!(captured[2].5.as_deref(), Some("refresh-nonce-1"));
+    assert_eq!(captured[3].5.as_deref(), Some("refresh-nonce-2"));
+    drop(captured);
+
+    assert!(
+        peer.is_registered(&handle)
+            .await
+            .expect("registered after manual refresh"),
+        "successful stale recovery must keep the registration active"
+    );
+    peer.control()
+        .coordinator()
+        .shutdown_gracefully(Some(Duration::from_secs(0)))
+        .await
+        .expect("shutdown");
+    registrar_handle.abort();
+}
+
+#[tokio::test]
+async fn challenged_unregister_retries_proxy_auth_and_stale_with_expires_zero() {
+    let sock = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("challenged unregister registrar bind"),
+    );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
+    let seen = Arc::new(Mutex::new(Vec::<(
+        String,
+        u32,
+        u32,
+        bool,
+        bool,
+        Option<String>,
+    )>::new()));
+
+    let sock_task = Arc::clone(&sock);
+    let seen_task = Arc::clone(&seen);
+    let registrar_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+                continue;
+            };
+            if request.method() != Method::Register {
+                continue;
+            }
+
+            let authorization = request.raw_header_value(&HeaderName::Authorization);
+            let proxy_authorization = request.raw_header_value(&HeaderName::ProxyAuthorization);
+            let proxy_nonce = proxy_authorization.as_ref().map(|header| {
+                DigestAuthenticator::parse_authorization(header)
+                    .expect("unregister Proxy-Authorization should parse")
+                    .nonce
+            });
+            let request_index = {
+                let mut captured = seen_task.lock().await;
+                captured.push((
+                    request
+                        .call_id()
+                        .expect("REGISTER Call-ID")
+                        .value()
+                        .to_string(),
+                    extract_cseq(&request).expect("REGISTER CSeq"),
+                    extract_expires(&request).expect("REGISTER Expires"),
+                    authorization.is_some(),
+                    proxy_authorization.is_some(),
+                    proxy_nonce,
+                ));
+                captured.len() - 1
+            };
+
+            let response = match request_index {
+                0 => response_with_contact_and_expires(&request, 300),
+                1 => {
+                    let mut response =
+                        create_response(&request, StatusCode::ProxyAuthenticationRequired);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::ProxyAuthenticate,
+                        HeaderValue::Raw(
+                            br#"Digest realm="unregister-realm", nonce="unregister-nonce-1", algorithm=MD5, qop="auth""#
+                                .to_vec(),
+                        ),
+                    ));
+                    Message::Response(response)
+                }
+                2 => {
+                    let mut response =
+                        create_response(&request, StatusCode::ProxyAuthenticationRequired);
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::ProxyAuthenticate,
+                        HeaderValue::Raw(
+                            br#"Digest realm="unregister-realm", nonce="unregister-nonce-2", algorithm=MD5, qop="auth", stale=true"#
+                                .to_vec(),
+                        ),
+                    ));
+                    Message::Response(response)
+                }
+                _ => response_with_contact_and_expires(&request, 0),
+            };
+            let _ = sock_task.send_to(&response.to_bytes(), from).await;
+        }
+    });
+
+    let mut config = Config::local("alice", 0);
+    config.media_port_start = 40320;
+    config.media_port_end = 40330;
+    config.registration_auto_refresh = false;
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let handle = peer
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
+        )
+        .with_contact_uri("sip:alice@127.0.0.1:40320")
+        .with_expires(300)
+        .send()
+        .await
+        .expect("initial register");
+
+    peer.control()
+        .coordinator()
+        .unregister_and_wait(&handle, Some(Duration::from_secs(5)))
+        .await
+        .expect("challenged unregister");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if seen.lock().await.len() >= 4 {
+                return;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("initial plus challenged/stale unregister attempts");
+
+    let captured = seen.lock().await;
+    assert_eq!(captured.len(), 4, "no duplicate unregister attempts");
+    assert!(captured.windows(2).all(|pair| pair[0].0 == pair[1].0));
+    assert!(captured.windows(2).all(|pair| pair[1].1 > pair[0].1));
+    assert_eq!(captured[0].2, 300);
+    assert!(
+        captured[1..].iter().all(|entry| entry.2 == 0),
+        "every challenged unregister retry must retain Expires: 0"
+    );
+    assert!(captured.iter().all(|entry| !entry.3));
+    assert!(!captured[1].4);
+    assert_eq!(captured[2].5.as_deref(), Some("unregister-nonce-1"));
+    assert_eq!(captured[3].5.as_deref(), Some("unregister-nonce-2"));
+    drop(captured);
+
+    assert!(
+        !peer
+            .is_registered(&handle)
+            .await
+            .expect("unregistered state"),
+        "successful challenged unregister must remove the active binding"
+    );
+    peer.control()
+        .coordinator()
+        .shutdown_gracefully(Some(Duration::from_secs(0)))
+        .await
+        .expect("shutdown");
     registrar_handle.abort();
 }
 
@@ -1149,6 +1485,151 @@ async fn automatic_registration_refresh_reuses_call_id_and_increments_cseq() {
         .await
         .expect("shutdown");
     let _ = handle;
+    registrar_handle.abort();
+}
+
+#[tokio::test]
+async fn manual_refresh_serializes_with_due_automatic_refresh_and_advances_cseq_once() {
+    let sock = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("concurrent refresh mock registrar bind"),
+    );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
+    let seen = Arc::new(Mutex::new(Vec::<(String, u32, u32)>::new()));
+    let manual_seen = Arc::new(tokio::sync::Notify::new());
+    let (release_manual, release_manual_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let sock_task = sock.clone();
+    let seen_task = seen.clone();
+    let manual_seen_task = manual_seen.clone();
+    let registrar_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        let mut release_manual_rx = Some(release_manual_rx);
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(pair) => pair,
+                Err(_) => return,
+            };
+            let Ok(Message::Request(request)) = parse_message(&buf[..n]) else {
+                continue;
+            };
+            if request.method() != Method::Register {
+                continue;
+            }
+            let observation = (
+                request.call_id().expect("Call-ID").value().to_string(),
+                extract_cseq(&request).expect("CSeq"),
+                extract_expires(&request).expect("Expires"),
+            );
+            let request_number = {
+                let mut seen = seen_task.lock().await;
+                // The deliberately delayed response crosses Timer E, so the
+                // UDP client transaction retransmits the same REGISTER. This
+                // test is about refresh ownership: count each Call-ID/CSeq
+                // transaction once and continue to reject any stale refresh,
+                // which necessarily owns a new CSeq.
+                if !seen
+                    .iter()
+                    .any(|item| item.0 == observation.0 && item.1 == observation.1)
+                {
+                    seen.push(observation);
+                }
+                seen.len()
+            };
+
+            if request_number == 2 {
+                manual_seen_task.notify_one();
+                if let Some(release) = release_manual_rx.take() {
+                    let _ = release.await;
+                }
+            }
+
+            let accepted_expires = if request_number == 1 { 2 } else { 30 };
+            let bytes = response_with_contact_and_expires(&request, accepted_expires).to_bytes();
+            let _ = sock_task.send_to(&bytes, from).await;
+        }
+    });
+
+    let mut config = Config::local("alice", 0);
+    config.media_port_start = 40221;
+    config.media_port_end = 40229;
+    config.registration_refresh_jitter_percent = 0;
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let handle = peer
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
+        )
+        .with_contact_uri("sip:alice@127.0.0.1:40221")
+        .with_expires(2)
+        .send()
+        .await
+        .expect("initial registration");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if peer.is_registered(&handle).await.expect("registered query") {
+                return;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("initial registration should succeed");
+
+    let coordinator = Arc::clone(peer.control().coordinator());
+    let manual_handle = handle.clone();
+    let manual = tokio::spawn(async move {
+        coordinator
+            .refresh(&manual_handle)
+            .with_expires(30)
+            .send()
+            .await
+    });
+    timeout(Duration::from_secs(2), manual_seen.notified())
+        .await
+        .expect("manual refresh reached registrar");
+
+    // The original two-second binding makes its automatic refresh due after
+    // one second. Keep the manual response open past that point: the automatic
+    // owner must wait behind the exact session lane and must then be replaced
+    // by the manual success's new 30-second schedule, not emit a stale CSeq.
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(seen.lock().await.len(), 2);
+    release_manual.send(()).expect("release manual response");
+    manual
+        .await
+        .expect("join manual refresh")
+        .expect("manual refresh succeeds");
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        seen.lock().await.len(),
+        2,
+        "due automatic refresh must not survive the committed manual replacement"
+    );
+
+    peer.control()
+        .coordinator()
+        .refresh(&handle)
+        .with_expires(30)
+        .send()
+        .await
+        .expect("next manual refresh");
+    let seen = seen.lock().await.clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].0, seen[1].0);
+    assert_eq!(seen[1].0, seen[2].0);
+    assert_eq!(seen[1].1, seen[0].1 + 1);
+    assert_eq!(seen[2].1, seen[1].1 + 1);
+    assert_eq!([seen[0].2, seen[1].2, seen[2].2], [2, 30, 30]);
+
+    peer.control()
+        .coordinator()
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("shutdown concurrent refresh coordinator");
     registrar_handle.abort();
 }
 

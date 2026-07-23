@@ -1,0 +1,109 @@
+{
+  "schema": "rvoip.beta-baseline-evidence",
+  "schema_version": 1,
+  "baseline_id": "20260720T055257Z",
+  "manifest_created_at_utc": "2026-07-21T05:51:48Z",
+  "immutability_policy": "This timestamped baseline is append-only. Corrections require a new manifest with a new baseline_id; do not rewrite this record.",
+  "qualification": {
+    "release_attestation": false,
+    "permitted_use": "diagnostic comparison only",
+    "reason": "The supplied evidence was captured from a dirty source tree and the supplied local summary is unavailable. The performance run also failed its monolithic soak gate."
+  },
+  "source_baseline": {
+    "git_commit": "85b932e46267e59fbdb16864f47a37bdac9ae2f5",
+    "git_rev": "85b932e4",
+    "git_dirty": true,
+    "source_fingerprint_sha256": "20f57cedfc2c6691e2f872b6aa505345cac690d34b6f4aa288bbe4f5abb41461",
+    "source_freeze": {
+      "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/source-freeze.json",
+      "available": true,
+      "bytes": 208,
+      "sha256": "52ce507f0d10051772df2c2cc2d889a6a69a348b49731b7463f04b7b2341e373"
+    },
+    "mode_source_copies": [
+      {
+        "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/interop-current/environment/source-at-beta-start.json",
+        "available": true,
+        "bytes": 208,
+        "sha256": "52ce507f0d10051772df2c2cc2d889a6a69a348b49731b7463f04b7b2341e373"
+      },
+      {
+        "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/security-current/environment/source-at-beta-start.json",
+        "available": true,
+        "bytes": 208,
+        "sha256": "52ce507f0d10051772df2c2cc2d889a6a69a348b49731b7463f04b7b2341e373"
+      },
+      {
+        "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/perf-current/environment/source-at-beta-start.json",
+        "available": true,
+        "bytes": 208,
+        "sha256": "52ce507f0d10051772df2c2cc2d889a6a69a348b49731b7463f04b7b2341e373"
+      }
+    ]
+  },
+  "supplied_evidence": [
+    {
+      "evidence_id": "J20-LOCAL-SUMMARY",
+      "kind": "local_summary",
+      "path": "/Users/jonathan/Developer/rvoip/target/beta-gate/local-20260720T024904Z/summary.md",
+      "available": false,
+      "bytes": null,
+      "sha256": null,
+      "observed_outcome": "unavailable",
+      "trust": "not_evidence"
+    },
+    {
+      "evidence_id": "J20-INTEROP-SUMMARY",
+      "kind": "interop_summary",
+      "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/interop-current/summary.md",
+      "available": true,
+      "bytes": 4260,
+      "sha256": "38756c1d10153c84246d7cda0bea46907679e8c7f1c8afd6dafb902386d959f3",
+      "observed_outcome": "passed with zero recorded failures and zero recorded skips",
+      "trust": "dirty_source_diagnostic"
+    },
+    {
+      "evidence_id": "J20-SECURITY-SUMMARY",
+      "kind": "security_summary",
+      "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/security-current/summary.md",
+      "available": true,
+      "bytes": 4419,
+      "sha256": "2b358e3f337136cd76e8e88cc13bde74c7436c85f722a7817bb111c91786f3de",
+      "observed_outcome": "passed with zero recorded failures and zero recorded skips",
+      "trust": "dirty_source_diagnostic"
+    },
+    {
+      "evidence_id": "J20-PERF-SUMMARY",
+      "kind": "performance_summary",
+      "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/perf-current/summary.md",
+      "available": true,
+      "bytes": 4771,
+      "sha256": "678ced6f356b1cca778e00ae278241965af0d7a3bdec8220da38024c349804c9",
+      "observed_outcome": "failed at the monolithic soak gate after preceding recorded performance gates passed",
+      "trust": "dirty_source_diagnostic"
+    },
+    {
+      "evidence_id": "J20-MONOLITHIC-SOAK-LOG",
+      "kind": "monolithic_soak_log",
+      "path": "/Users/jonathan/Developer/rvoip-beta-evidence/20260720T055257Z/perf-current/perf_monolithic_soak.log",
+      "available": true,
+      "bytes": 37209,
+      "sha256": "82bc63ef1c75cbaae5bbc31aa57269af367df1d65abe27f2b8ead54b92b94519",
+      "observed_outcome": "failed: call_failed=4, media_setup_failed=3, teardown_failed=1, retained_objects_after_drain=27, bob_active_audio_receivers=1, exit_status=101",
+      "trust": "dirty_source_diagnostic"
+    },
+    {
+      "evidence_id": "J20-MUTABLE-PERF-JSON",
+      "kind": "mutable_performance_json_snapshot",
+      "path": "/Users/jonathan/Developer/rvoip/target/perf-results/perf_soak_30min.json",
+      "available": true,
+      "bytes": 2391029,
+      "sha256": "638845b3bace0a8e5d48f1b7e0c1605d6d6d9667162ca73840facf84e9e45330",
+      "observed_outcome": "snapshot hash recorded; semantic association with the archived monolithic run is not established",
+      "trust": "untrusted_for_archived_monolithic_soak",
+      "archived_run_attestation_available": false,
+      "archived_attestation_hash_match": null,
+      "promotion_condition": "This JSON may be associated with an archived run only when its SHA-256 exactly matches a hash recorded in that run's immutable attestation."
+    }
+  ]
+}

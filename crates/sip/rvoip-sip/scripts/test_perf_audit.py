@@ -92,25 +92,48 @@ def write_fixture(root, mismatched=False, incomplete=False):
 
 
 class PerfAuditIdentityTests(unittest.TestCase):
-    def run_audit(self, mismatched=False, incomplete=False):
+    def run_audit(
+        self,
+        mismatched=False,
+        incomplete=False,
+        with_manifest=False,
+        missing_current=False,
+    ):
         temporary = tempfile.TemporaryDirectory()
         root = pathlib.Path(temporary.name)
         baseline, current = write_fixture(
             root, mismatched=mismatched, incomplete=incomplete
         )
+        if missing_current:
+            measured = current / SCENARIO / "2000.json"
+            measured.rename(current / SCENARIO / "1000.json")
         output = root / "audit.md"
+        arguments = [
+            "python3",
+            str(SCRIPT),
+            "--baseline",
+            str(baseline),
+            "--current",
+            str(current),
+            "--out",
+            str(output),
+            "--fail-on-regression",
+        ]
+        if with_manifest:
+            manifest = root / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema": "rvoip-perf-regression-baseline-v1",
+                        "baseline_id": "20260706T181609Z",
+                        "comparison_paths": [f"{SCENARIO}/2000.json"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            arguments.extend(["--baseline-manifest", str(manifest)])
         result = subprocess.run(
-            [
-                "python3",
-                str(SCRIPT),
-                "--baseline",
-                str(baseline),
-                "--current",
-                str(current),
-                "--out",
-                str(output),
-                "--fail-on-regression",
-            ],
+            arguments,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -126,6 +149,23 @@ class PerfAuditIdentityTests(unittest.TestCase):
         self.assertIn("status: OK", report)
         self.assertIn("legacy_complete_sweep_inference", report)
         self.assertIn("RSS active-load growth", report)
+
+    def test_reviewed_manifest_identity_is_written_to_report(self):
+        result, report = self.run_audit(with_manifest=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reviewed baseline: `20260706T181609Z`", report)
+        self.assertIn("manifest SHA-256", report)
+
+    def test_reviewed_manifest_comparison_path_is_required_in_current(self):
+        result, report = self.run_audit(
+            with_manifest=True,
+            missing_current=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(
+            f"current missing {SCENARIO}/2000.json",
+            report,
+        )
 
     def test_conditioning_difference_is_refused_not_compared(self):
         result, report = self.run_audit(mismatched=True)

@@ -1,4 +1,3 @@
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -8,6 +7,7 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 
 use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 use crate::state_table::SessionId;
 use rvoip_sip_core::Method;
 use rvoip_sip_dialog::transaction::TransactionKey;
@@ -22,6 +22,7 @@ pub(crate) enum TrackedInDialogMethod {
     Notify,
     Info,
     Update,
+    Reinvite,
 }
 
 impl TrackedInDialogMethod {
@@ -31,6 +32,7 @@ impl TrackedInDialogMethod {
             Method::Notify => Some(Self::Notify),
             Method::Info => Some(Self::Info),
             Method::Update => Some(Self::Update),
+            Method::Invite => Some(Self::Reinvite),
             _ => None,
         }
     }
@@ -41,6 +43,7 @@ impl TrackedInDialogMethod {
             "NOTIFY" => Some(Self::Notify),
             "INFO" => Some(Self::Info),
             "UPDATE" => Some(Self::Update),
+            "INVITE" => Some(Self::Reinvite),
             _ => None,
         }
     }
@@ -51,6 +54,7 @@ impl TrackedInDialogMethod {
             Self::Notify => Method::Notify,
             Self::Info => Method::Info,
             Self::Update => Method::Update,
+            Self::Reinvite => Method::Invite,
         }
     }
 }
@@ -61,6 +65,7 @@ pub(crate) enum TrackedInDialogOptions {
     Notify(Arc<rvoip_sip_dialog::api::unified::NotifyRequestOptions>),
     Info(Arc<rvoip_sip_dialog::api::unified::InfoRequestOptions>),
     Update(Arc<rvoip_sip_dialog::api::unified::UpdateRequestOptions>),
+    Reinvite(Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>),
 }
 
 impl TrackedInDialogOptions {
@@ -70,27 +75,15 @@ impl TrackedInDialogOptions {
             Self::Notify(_) => TrackedInDialogMethod::Notify,
             Self::Info(_) => TrackedInDialogMethod::Info,
             Self::Update(_) => TrackedInDialogMethod::Update,
+            Self::Reinvite(_) => TrackedInDialogMethod::Reinvite,
         }
     }
 }
 
-#[derive(Clone, Eq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 struct TrackedRequestKey {
-    session_id: SessionId,
+    handle: SessionRegistryHandle,
     method: TrackedInDialogMethod,
-}
-
-impl PartialEq for TrackedRequestKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.session_id == other.session_id && self.method == other.method
-    }
-}
-
-impl Hash for TrackedRequestKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.session_id.hash(state);
-        self.method.hash(state);
-    }
 }
 
 enum ActivationState {
@@ -148,7 +141,7 @@ pub(crate) enum ExactTransactionLookup {
 #[derive(Clone)]
 pub(crate) enum DeferredTrackedRequestEvent {
     AuthRequired {
-        session_id: SessionId,
+        handle: SessionRegistryHandle,
         transaction_id: String,
         request_uri: String,
         status: u16,
@@ -157,7 +150,7 @@ pub(crate) enum DeferredTrackedRequestEvent {
         outbound_transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
     },
     Completed {
-        session_id: SessionId,
+        handle: SessionRegistryHandle,
         transaction_id: String,
         method: String,
         outcome: rvoip_infra_common::events::cross_crate::OutboundRequestOutcome,
@@ -174,10 +167,12 @@ impl DeferredTrackedRequestEvent {
     }
 
     pub(crate) fn session_id(&self) -> &SessionId {
+        self.handle().session_id()
+    }
+
+    pub(crate) fn handle(&self) -> &SessionRegistryHandle {
         match self {
-            Self::AuthRequired { session_id, .. } | Self::Completed { session_id, .. } => {
-                session_id
-            }
+            Self::AuthRequired { handle, .. } | Self::Completed { handle, .. } => handle,
         }
     }
 
@@ -246,12 +241,12 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn prepare(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         options: TrackedInDialogOptions,
     ) -> Result<TrackedRequestLease> {
         let method = options.method();
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let (entry, lease) = self.new_prepared(key.clone(), options, 0, None);
@@ -270,13 +265,13 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn prepare_retry(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         challenged_transaction: &TransactionKey,
         challenge_nonce: Option<String>,
     ) -> Result<(TrackedRequestLease, TrackedInDialogOptions)> {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let mut occupied = match self.inner.entries.entry(key.clone()) {
@@ -322,12 +317,12 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn auth_retry_state_for_transaction(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         transaction_id: &TransactionKey,
     ) -> Result<(u8, Option<String>)> {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let entry = self
@@ -357,12 +352,12 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn request_body_for_transaction(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         transaction_id: &TransactionKey,
     ) -> Result<Option<bytes::Bytes>> {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let entry = self
@@ -398,6 +393,13 @@ impl OutboundInDialogRequestTracker {
             }
             TrackedInDialogOptions::Info(options) => Some(options.body.clone()),
             TrackedInDialogOptions::Update(options) => Some(
+                options
+                    .sdp
+                    .as_ref()
+                    .map(|sdp| bytes::Bytes::copy_from_slice(sdp.as_bytes()))
+                    .unwrap_or_default(),
+            ),
+            TrackedInDialogOptions::Reinvite(options) => Some(
                 options
                     .sdp
                     .as_ref()
@@ -443,13 +445,13 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn correlate_or_defer(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         transaction_id: &TransactionKey,
         deferred_event: DeferredTrackedRequestEvent,
     ) -> ExactTransactionLookup {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let Some(entry) = self
@@ -479,7 +481,7 @@ impl OutboundInDialogRequestTracker {
                     drop(lifecycle);
                     abort_exact(&self.inner, &key, entry.generation);
                     tracing::error!(
-                        session_id = %session_id,
+                        session_id = %handle.session_id(),
                         method = ?method,
                         "Aborted in-dialog request after deferred event capacity violation"
                     );
@@ -503,7 +505,7 @@ impl OutboundInDialogRequestTracker {
                     drop(lifecycle);
                     abort_exact(&self.inner, &key, entry.generation);
                     tracing::error!(
-                        session_id = %session_id,
+                        session_id = %handle.session_id(),
                         method = ?method,
                         "Aborted in-dialog request after replay ordering capacity violation"
                     );
@@ -521,12 +523,12 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn complete_if_matches(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         transaction_id: &TransactionKey,
     ) -> bool {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let Some(entry) = self
@@ -569,14 +571,85 @@ impl OutboundInDialogRequestTracker {
         }
     }
 
+    /// Whether the exact active UPDATE transaction is the stack-owned RFC
+    /// 4028 refresh attempt. The immutable options snapshot is the authority;
+    /// method labels or mutable session slots are never used to infer it.
+    pub(crate) fn is_session_timer_update(
+        &self,
+        handle: &SessionRegistryHandle,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        let key = TrackedRequestKey {
+            handle: handle.clone(),
+            method: TrackedInDialogMethod::Update,
+        };
+        let Some(entry) = self
+            .inner
+            .entries
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        let active = matches!(
+            &entry
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .activation,
+            ActivationState::Active(current) if current == transaction_id
+        );
+        active
+            && matches!(
+                &entry.options,
+                TrackedInDialogOptions::Update(options) if options.session_timer_refresh
+            )
+    }
+
+    /// Whether the exact active INVITE transaction is the stack-owned RFC
+    /// 4028 fallback attempt. Initial INVITEs never enter this tracker, so the
+    /// immutable options snapshot distinguishes the two without call-state
+    /// inference.
+    pub(crate) fn is_session_timer_reinvite(
+        &self,
+        handle: &SessionRegistryHandle,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        let key = TrackedRequestKey {
+            handle: handle.clone(),
+            method: TrackedInDialogMethod::Reinvite,
+        };
+        let Some(entry) = self
+            .inner
+            .entries
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            return false;
+        };
+        let active = matches!(
+            &entry
+                .lifecycle
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .activation,
+            ActivationState::Active(current) if current == transaction_id
+        );
+        active
+            && matches!(
+                &entry.options,
+                TrackedInDialogOptions::Reinvite(options) if options.session_timer_refresh
+            )
+    }
+
     pub(crate) fn abort_matching(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
         transaction_id: &TransactionKey,
     ) -> bool {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         let Some(entry) = self
@@ -603,25 +676,26 @@ impl OutboundInDialogRequestTracker {
 
     pub(crate) fn has_request(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         method: TrackedInDialogMethod,
     ) -> bool {
         let key = TrackedRequestKey {
-            session_id: session_id.clone(),
+            handle: handle.clone(),
             method,
         };
         self.inner.entries.contains_key(&key)
     }
 
-    pub(crate) fn clear_session(&self, session_id: &SessionId) {
+    pub(crate) fn clear_exact(&self, handle: &SessionRegistryHandle) {
         for method in [
             TrackedInDialogMethod::Refer,
             TrackedInDialogMethod::Notify,
             TrackedInDialogMethod::Info,
             TrackedInDialogMethod::Update,
+            TrackedInDialogMethod::Reinvite,
         ] {
             let key = TrackedRequestKey {
-                session_id: session_id.clone(),
+                handle: handle.clone(),
                 method,
             };
             if let Some((_, entry)) = self.inner.entries.remove(&key) {
@@ -638,8 +712,8 @@ impl OutboundInDialogRequestTracker {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
+    #[cfg(any(test, feature = "perf-tests"))]
+    pub(crate) fn live_request_count(&self) -> usize {
         self.inner.entries.len()
     }
 
@@ -690,7 +764,7 @@ impl OutboundInDialogRequestTracker {
             return false;
         };
         let key = TrackedRequestKey {
-            session_id: event.session_id().clone(),
+            handle: event.handle().clone(),
             method,
         };
         let Some(entry) = self
@@ -742,7 +816,7 @@ impl OutboundInDialogRequestTracker {
             return;
         };
         let key = TrackedRequestKey {
-            session_id: event.session_id().clone(),
+            handle: event.handle().clone(),
             method,
         };
         let generation = self.inner.entries.get(&key).and_then(|entry| {
@@ -761,7 +835,7 @@ impl OutboundInDialogRequestTracker {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "perf-tests"))]
     pub(crate) fn deferred_event_count(&self) -> usize {
         self.inner.deferred_event_count.load(Ordering::Acquire)
     }
@@ -842,6 +916,17 @@ fn abort_exact(inner: &TrackerInner, key: &TrackedRequestKey, generation: u64) -
 mod tests {
     use super::*;
 
+    async fn test_handle(session_id: &SessionId) -> SessionRegistryHandle {
+        let store = crate::session_store::SessionStore::new();
+        store
+            .create_session(session_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create exact tracker test lifetime");
+        store
+            .lifecycle_handle(session_id)
+            .expect("capture exact tracker test handle")
+    }
+
     fn info_options() -> TrackedInDialogOptions {
         TrackedInDialogOptions::Info(Arc::new(Default::default()))
     }
@@ -851,11 +936,11 @@ mod tests {
     }
 
     fn completed_event(
-        session: &SessionId,
+        handle: &SessionRegistryHandle,
         transaction: &TransactionKey,
     ) -> DeferredTrackedRequestEvent {
         DeferredTrackedRequestEvent::Completed {
-            session_id: session.clone(),
+            handle: handle.clone(),
             transaction_id: transaction.to_string(),
             method: "INFO".to_string(),
             outcome:
@@ -866,11 +951,11 @@ mod tests {
     }
 
     fn auth_event(
-        session: &SessionId,
+        handle: &SessionRegistryHandle,
         transaction: &TransactionKey,
     ) -> DeferredTrackedRequestEvent {
         DeferredTrackedRequestEvent::AuthRequired {
-            session_id: session.clone(),
+            handle: handle.clone(),
             transaction_id: transaction.to_string(),
             request_uri: "sip:bob@example.com".to_string(),
             status: 401,
@@ -884,26 +969,27 @@ mod tests {
     async fn response_before_activation_is_buffered_and_replayed_exactly() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-fast-response".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let transaction =
             TransactionKey::new("z9hG4bK-tracker-fast".to_string(), Method::Info, false);
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
             tracker.correlate_or_defer(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &transaction,
-                completed_event(&session, &transaction),
+                completed_event(&handle, &transaction),
             ),
             ExactTransactionLookup::Prepared
         );
-        assert_eq!(tracker.len(), 1);
+        assert_eq!(tracker.live_request_count(), 1);
         tracker.activate(lease, transaction.clone()).unwrap();
         let deferred = replay.recv().await.expect("exact replay was not queued");
         assert_eq!(deferred.transaction_id(), transaction.to_string());
         assert!(tracker.mark_deferred_replay_started(&deferred));
-        assert!(tracker.complete_if_matches(&session, TrackedInDialogMethod::Info, &transaction));
-        assert_eq!(tracker.len(), 0);
+        assert!(tracker.complete_if_matches(&handle, TrackedInDialogMethod::Info, &transaction));
+        assert_eq!(tracker.live_request_count(), 0);
         assert_eq!(tracker.deferred_event_count(), 0);
     }
 
@@ -911,16 +997,17 @@ mod tests {
     async fn activation_race_preserves_auth_before_later_completion() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-activation-order".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let transaction =
             TransactionKey::new("z9hG4bK-activation-order".to_string(), Method::Info, false);
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
             tracker.correlate_or_defer(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &transaction,
-                auth_event(&session, &transaction),
+                auth_event(&handle, &transaction),
             ),
             ExactTransactionLookup::Prepared
         );
@@ -937,16 +1024,16 @@ mod tests {
         };
         let completion_task = {
             let tracker = tracker.clone();
-            let session = session.clone();
+            let handle = handle.clone();
             let transaction = transaction.clone();
             let barrier = Arc::clone(&barrier);
             tokio::spawn(async move {
                 barrier.wait().await;
                 tracker.correlate_or_defer(
-                    &session,
+                    &handle,
                     TrackedInDialogMethod::Info,
                     &transaction,
-                    completed_event(&session, &transaction),
+                    completed_event(&handle, &transaction),
                 )
             })
         };
@@ -977,25 +1064,27 @@ mod tests {
     async fn lease_drop_aborts_prepared_request() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-drop".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
-        assert!(tracker.has_request(&session, TrackedInDialogMethod::Info));
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
+        assert!(tracker.has_request(&handle, TrackedInDialogMethod::Info));
         drop(lease);
-        assert!(!tracker.has_request(&session, TrackedInDialogMethod::Info));
+        assert!(!tracker.has_request(&handle, TrackedInDialogMethod::Info));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_same_method_prepare_admits_exactly_one_owner() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-concurrent".to_string());
+        let handle = test_handle(&session).await;
         let barrier = Arc::new(tokio::sync::Barrier::new(3));
         let mut attempts = Vec::new();
         for _ in 0..2 {
             let tracker = tracker.clone();
-            let session = session.clone();
+            let handle = handle.clone();
             let barrier = Arc::clone(&barrier);
             attempts.push(tokio::spawn(async move {
                 barrier.wait().await;
-                tracker.prepare(&session, info_options())
+                tracker.prepare(&handle, info_options())
             }));
         }
         barrier.wait().await;
@@ -1010,31 +1099,33 @@ mod tests {
     async fn activation_rejects_wrong_method_and_server_transaction() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-activation-correlation".to_string());
+        let handle = test_handle(&session).await;
 
-        let wrong_method = tracker.prepare(&session, info_options()).unwrap();
+        let wrong_method = tracker.prepare(&handle, info_options()).unwrap();
         assert!(tracker
             .activate(
                 wrong_method,
                 TransactionKey::new("z9hG4bK-wrong-method".to_string(), Method::Notify, false,),
             )
             .is_err());
-        assert!(!tracker.has_request(&session, TrackedInDialogMethod::Info));
+        assert!(!tracker.has_request(&handle, TrackedInDialogMethod::Info));
 
-        let server_transaction = tracker.prepare(&session, info_options()).unwrap();
+        let server_transaction = tracker.prepare(&handle, info_options()).unwrap();
         assert!(tracker
             .activate(
                 server_transaction,
                 TransactionKey::new("z9hG4bK-server-direction".to_string(), Method::Info, true,),
             )
             .is_err());
-        assert!(!tracker.has_request(&session, TrackedInDialogMethod::Info));
+        assert!(!tracker.has_request(&handle, TrackedInDialogMethod::Info));
     }
 
     #[tokio::test]
     async fn retry_replacement_rejects_interposition_and_stale_generation() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-retry".to_string());
-        let initial = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let initial = tracker.prepare(&handle, info_options()).unwrap();
         let challenged = TransactionKey::new(
             "z9hG4bK-tracker-challenged".to_string(),
             Method::Info,
@@ -1044,7 +1135,7 @@ mod tests {
         assert_eq!(
             tracker
                 .auth_retry_state_for_transaction(
-                    &session,
+                    &handle,
                     TrackedInDialogMethod::Info,
                     &challenged,
                 )
@@ -1054,16 +1145,16 @@ mod tests {
 
         let (retry, _) = tracker
             .prepare_retry(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &challenged,
                 Some("info-nonce-1".to_string()),
             )
             .unwrap();
-        assert!(tracker.prepare(&session, info_options()).is_err());
+        assert!(tracker.prepare(&handle, info_options()).is_err());
         assert!(tracker
             .prepare_retry(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &challenged,
                 Some("stale-interposition".to_string()),
@@ -1076,16 +1167,16 @@ mod tests {
         assert_eq!(
             tracker
                 .auth_retry_state_for_transaction(
-                    &session,
+                    &handle,
                     TrackedInDialogMethod::Info,
                     &retry_transaction,
                 )
                 .unwrap(),
             (1, Some("info-nonce-1".to_string()))
         );
-        assert!(!tracker.complete_if_matches(&session, TrackedInDialogMethod::Info, &challenged,));
+        assert!(!tracker.complete_if_matches(&handle, TrackedInDialogMethod::Info, &challenged,));
         assert!(tracker.complete_if_matches(
-            &session,
+            &handle,
             TrackedInDialogMethod::Info,
             &retry_transaction,
         ));
@@ -1095,8 +1186,9 @@ mod tests {
     async fn retry_budgets_are_independent_across_methods() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-independent-auth".to_string());
-        let info = tracker.prepare(&session, info_options()).unwrap();
-        let notify = tracker.prepare(&session, notify_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let info = tracker.prepare(&handle, info_options()).unwrap();
+        let notify = tracker.prepare(&handle, notify_options()).unwrap();
         let info_transaction =
             TransactionKey::new("z9hG4bK-info-auth".to_string(), Method::Info, false);
         let notify_transaction =
@@ -1108,7 +1200,7 @@ mod tests {
 
         let (info_retry, _) = tracker
             .prepare_retry(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &info_transaction,
                 Some("info-nonce".to_string()),
@@ -1122,7 +1214,7 @@ mod tests {
 
         let (notify_retry, _) = tracker
             .prepare_retry(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Notify,
                 &notify_transaction,
                 Some("notify-nonce".to_string()),
@@ -1139,7 +1231,7 @@ mod tests {
 
         let info_auth_state = tracker
             .auth_retry_state_for_transaction(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &info_retry_transaction,
             )
@@ -1148,7 +1240,7 @@ mod tests {
         assert_eq!(
             tracker
                 .auth_retry_state_for_transaction(
-                    &session,
+                    &handle,
                     TrackedInDialogMethod::Notify,
                     &notify_retry_transaction,
                 )
@@ -1173,6 +1265,7 @@ mod tests {
     async fn auth_int_bodies_are_read_from_exact_tracked_snapshots() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-auth-int-bodies".to_string());
+        let handle = test_handle(&session).await;
         let cases = [
             (
                 TrackedInDialogOptions::Refer(Arc::new(Default::default())),
@@ -1210,51 +1303,124 @@ mod tests {
                 Method::Update,
                 bytes::Bytes::from_static(b"v=0\r\ns=auth-int\r\n"),
             ),
+            (
+                TrackedInDialogOptions::Reinvite(Arc::new(
+                    rvoip_sip_dialog::api::unified::ReInviteRequestOptions {
+                        sdp: Some("v=0\r\ns=reinvite-auth-int\r\n".to_string()),
+                        ..Default::default()
+                    },
+                )),
+                Method::Invite,
+                bytes::Bytes::from_static(b"v=0\r\ns=reinvite-auth-int\r\n"),
+            ),
         ];
 
         for (index, (options, sip_method, expected_body)) in cases.into_iter().enumerate() {
             let tracked_method = options.method();
-            let lease = tracker.prepare(&session, options).unwrap();
+            let lease = tracker.prepare(&handle, options).unwrap();
             let transaction =
                 TransactionKey::new(format!("z9hG4bK-auth-int-{index}"), sip_method, false);
             tracker.activate(lease, transaction.clone()).unwrap();
             assert_eq!(
                 tracker
-                    .request_body_for_transaction(&session, tracked_method, &transaction)
+                    .request_body_for_transaction(&handle, tracked_method, &transaction)
                     .unwrap(),
                 Some(expected_body)
             );
-            assert!(tracker.complete_if_matches(&session, tracked_method, &transaction));
+            assert!(tracker.complete_if_matches(&handle, tracked_method, &transaction));
         }
+    }
+
+    #[tokio::test]
+    async fn session_timer_markers_are_exact_transaction_and_method_scoped() {
+        let tracker = OutboundInDialogRequestTracker::default();
+        let session = SessionId("tracker-session-timer-markers".to_string());
+        let handle = test_handle(&session).await;
+
+        let update_lease = tracker
+            .prepare(
+                &handle,
+                TrackedInDialogOptions::Update(Arc::new(
+                    rvoip_sip_dialog::api::unified::UpdateRequestOptions {
+                        session_timer_refresh: true,
+                        ..Default::default()
+                    },
+                )),
+            )
+            .unwrap();
+        let update = TransactionKey::new(
+            "z9hG4bK-session-timer-update".to_string(),
+            Method::Update,
+            false,
+        );
+        let other_update = TransactionKey::new(
+            "z9hG4bK-session-timer-other-update".to_string(),
+            Method::Update,
+            false,
+        );
+        tracker.activate(update_lease, update.clone()).unwrap();
+        assert!(tracker.is_session_timer_update(&handle, &update));
+        assert!(!tracker.is_session_timer_update(&handle, &other_update));
+        assert!(!tracker.is_session_timer_reinvite(&handle, &update));
+        assert!(tracker.complete_if_matches(&handle, TrackedInDialogMethod::Update, &update));
+
+        let reinvite_lease = tracker
+            .prepare(
+                &handle,
+                TrackedInDialogOptions::Reinvite(Arc::new(
+                    rvoip_sip_dialog::api::unified::ReInviteRequestOptions {
+                        session_timer_refresh: true,
+                        ..Default::default()
+                    },
+                )),
+            )
+            .unwrap();
+        let reinvite = TransactionKey::new(
+            "z9hG4bK-session-timer-reinvite".to_string(),
+            Method::Invite,
+            false,
+        );
+        let other_reinvite = TransactionKey::new(
+            "z9hG4bK-session-timer-other-reinvite".to_string(),
+            Method::Invite,
+            false,
+        );
+        tracker.activate(reinvite_lease, reinvite.clone()).unwrap();
+        assert!(tracker.is_session_timer_reinvite(&handle, &reinvite));
+        assert!(!tracker.is_session_timer_reinvite(&handle, &other_reinvite));
+        assert!(!tracker.is_session_timer_update(&handle, &reinvite));
+        assert!(tracker.complete_if_matches(&handle, TrackedInDialogMethod::Reinvite, &reinvite));
     }
 
     #[tokio::test(start_paused = true)]
     async fn active_owner_has_no_speculative_time_expiry() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-slow-connect".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let transaction =
             TransactionKey::new("z9hG4bK-slow-connect".to_string(), Method::Info, false);
         tracker.activate(lease, transaction.clone()).unwrap();
         tokio::time::advance(Duration::from_secs(3_600)).await;
-        assert!(tracker.has_request(&session, TrackedInDialogMethod::Info));
-        assert!(tracker.complete_if_matches(&session, TrackedInDialogMethod::Info, &transaction));
+        assert!(tracker.has_request(&handle, TrackedInDialogMethod::Info));
+        assert!(tracker.complete_if_matches(&handle, TrackedInDialogMethod::Info, &transaction));
     }
 
     #[tokio::test]
     async fn stale_prepared_transaction_is_not_replayed_after_activation() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-stale-prepared".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let stale = TransactionKey::new("z9hG4bK-stale".to_string(), Method::Info, false);
         let active = TransactionKey::new("z9hG4bK-active".to_string(), Method::Info, false);
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
             tracker.correlate_or_defer(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &stale,
-                completed_event(&session, &stale),
+                completed_event(&handle, &stale),
             ),
             ExactTransactionLookup::Prepared
         );
@@ -1267,20 +1433,21 @@ mod tests {
     async fn clear_session_drops_buffered_replay_without_a_task() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-deferred-clear".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let transaction =
             TransactionKey::new("z9hG4bK-deferred-clear".to_string(), Method::Info, false);
         assert_eq!(
             tracker.correlate_or_defer(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &transaction,
-                completed_event(&session, &transaction),
+                completed_event(&handle, &transaction),
             ),
             ExactTransactionLookup::Prepared
         );
         assert_eq!(tracker.deferred_event_count(), 1);
-        tracker.clear_session(&session);
+        tracker.clear_exact(&handle);
         assert_eq!(tracker.deferred_event_count(), 0);
         drop(lease);
     }
@@ -1289,41 +1456,43 @@ mod tests {
     async fn global_replay_overflow_aborts_exact_prepared_owner() {
         let tracker = OutboundInDialogRequestTracker::with_replay_capacity(1);
         let first_session = SessionId("tracker-cap-first".to_string());
-        let first_lease = tracker.prepare(&first_session, info_options()).unwrap();
+        let first_handle = test_handle(&first_session).await;
+        let first_lease = tracker.prepare(&first_handle, info_options()).unwrap();
         let first_transaction =
             TransactionKey::new("z9hG4bK-cap-first".to_string(), Method::Info, false);
         assert_eq!(
             tracker.correlate_or_defer(
-                &first_session,
+                &first_handle,
                 TrackedInDialogMethod::Info,
                 &first_transaction,
-                completed_event(&first_session, &first_transaction),
+                completed_event(&first_handle, &first_transaction),
             ),
             ExactTransactionLookup::Prepared
         );
 
         let overflow_session = SessionId("tracker-cap-overflow".to_string());
-        let overflow_lease = tracker.prepare(&overflow_session, info_options()).unwrap();
+        let overflow_handle = test_handle(&overflow_session).await;
+        let overflow_lease = tracker.prepare(&overflow_handle, info_options()).unwrap();
         let overflow_transaction =
             TransactionKey::new("z9hG4bK-cap-overflow".to_string(), Method::Info, false);
         assert_eq!(
             tracker.correlate_or_defer(
-                &overflow_session,
+                &overflow_handle,
                 TrackedInDialogMethod::Info,
                 &overflow_transaction,
-                completed_event(&overflow_session, &overflow_transaction),
+                completed_event(&overflow_handle, &overflow_transaction),
             ),
             ExactTransactionLookup::Rejected
         );
-        assert!(!tracker.has_request(&overflow_session, TrackedInDialogMethod::Info));
+        assert!(!tracker.has_request(&overflow_handle, TrackedInDialogMethod::Info));
         assert!(tracker
             .activate(overflow_lease, overflow_transaction)
             .is_err());
 
-        tracker.clear_session(&first_session);
+        tracker.clear_exact(&first_handle);
         drop(first_lease);
         assert_eq!(tracker.deferred_event_count(), 0);
-        let replacement = tracker.prepare(&overflow_session, info_options()).unwrap();
+        let replacement = tracker.prepare(&overflow_handle, info_options()).unwrap();
         drop(replacement);
     }
 
@@ -1331,7 +1500,8 @@ mod tests {
     async fn replay_enqueue_failure_aborts_owner_and_releases_payload() {
         let tracker = OutboundInDialogRequestTracker::default();
         let session = SessionId("tracker-replay-enqueue-failure".to_string());
-        let lease = tracker.prepare(&session, info_options()).unwrap();
+        let handle = test_handle(&session).await;
+        let lease = tracker.prepare(&handle, info_options()).unwrap();
         let transaction = TransactionKey::new(
             "z9hG4bK-replay-enqueue-failure".to_string(),
             Method::Info,
@@ -1340,10 +1510,10 @@ mod tests {
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
             tracker.correlate_or_defer(
-                &session,
+                &handle,
                 TrackedInDialogMethod::Info,
                 &transaction,
-                completed_event(&session, &transaction),
+                completed_event(&handle, &transaction),
             ),
             ExactTransactionLookup::Prepared
         );
@@ -1351,6 +1521,76 @@ mod tests {
         let deferred = replay.recv().await.expect("deferred replay missing");
         tracker.abort_deferred_replay(&deferred);
         assert_eq!(tracker.deferred_event_count(), 0);
-        assert!(!tracker.has_request(&session, TrackedInDialogMethod::Info));
+        assert!(!tracker.has_request(&handle, TrackedInDialogMethod::Info));
+    }
+
+    #[tokio::test]
+    async fn deferred_old_generation_cannot_complete_reused_session_request() {
+        let store = crate::session_store::SessionStore::new();
+        let session = SessionId("tracker-deferred-generation-reuse".to_string());
+        store
+            .create_session(session.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create generation A");
+        let generation_a = store
+            .lifecycle_handle(&session)
+            .expect("capture generation A");
+
+        let tracker = OutboundInDialogRequestTracker::default();
+        let transaction_a =
+            TransactionKey::new("z9hG4bK-generation-a".to_string(), Method::Info, false);
+        let lease_a = tracker.prepare(&generation_a, info_options()).unwrap();
+        let mut replay = tracker.take_deferred_replay_receiver().unwrap();
+        assert_eq!(
+            tracker.correlate_or_defer(
+                &generation_a,
+                TrackedInDialogMethod::Info,
+                &transaction_a,
+                completed_event(&generation_a, &transaction_a),
+            ),
+            ExactTransactionLookup::Prepared
+        );
+        tracker.activate(lease_a, transaction_a.clone()).unwrap();
+        let delayed_a = replay.recv().await.expect("generation A replay");
+
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(store.authority().elapse_reuse_horizon_for_test(&session));
+        store
+            .create_session(session.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&session)
+            .expect("capture generation B");
+        assert_ne!(generation_a.key(), generation_b.key());
+
+        let transaction_b =
+            TransactionKey::new("z9hG4bK-generation-b".to_string(), Method::Info, false);
+        let lease_b = tracker.prepare(&generation_b, info_options()).unwrap();
+        tracker.activate(lease_b, transaction_b.clone()).unwrap();
+
+        assert_eq!(delayed_a.handle(), &generation_a);
+        assert!(tracker.mark_deferred_replay_started(&delayed_a));
+        assert!(tracker.complete_if_matches(
+            &generation_a,
+            TrackedInDialogMethod::Info,
+            &transaction_a,
+        ));
+        assert!(tracker.has_request(&generation_b, TrackedInDialogMethod::Info));
+        assert!(!tracker.complete_if_matches(
+            &generation_b,
+            TrackedInDialogMethod::Info,
+            &transaction_a,
+        ));
+        assert!(tracker.complete_if_matches(
+            &generation_b,
+            TrackedInDialogMethod::Info,
+            &transaction_b,
+        ));
+        assert_eq!(tracker.live_request_count(), 0);
+        assert_eq!(tracker.deferred_event_count(), 0);
     }
 }

@@ -2299,6 +2299,20 @@ enum KeepAliveFrame {
     Ping,
 }
 
+/// Select the workspace's canonical rustls provider before using rustls's
+/// process-default builders.
+///
+/// A full-workspace test binary can legitimately unify dependencies that
+/// compile both rustls provider features (for example, MoQ currently brings
+/// `aws-lc-rs` while SIP transport is pinned to `ring`). In that configuration
+/// rustls cannot infer a provider and its otherwise-convenient `builder()`
+/// functions panic. Installing `ring` here keeps provider selection at the TLS
+/// transport boundary. If another subsystem already selected a provider, the
+/// failed installation is harmless and the established process default wins.
+fn ensure_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Strip a leading RFC 5626 §3.5.1 keep-alive frame (pong / ping) off
 /// `buffer` if present. Mirrors the logic in
 /// `transport::tcp::connection::TcpConnection::receive_frame` so TCP
@@ -2322,6 +2336,7 @@ pub(crate) fn build_server_config(
     client_auth: &TlsServerClientAuthConfig,
     transport_label: &str,
 ) -> Result<ServerConfig> {
+    ensure_rustls_crypto_provider();
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
     let builder = ServerConfig::builder();
@@ -2404,6 +2419,7 @@ pub(crate) fn verified_peer_metadata(
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
 pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
+    ensure_rustls_crypto_provider();
     if cfg.client_cert_path.is_some() ^ cfg.client_key_path.is_some() {
         return Err(Error::InvalidState(
             "TLS client certificate and key must be provided together".to_string(),

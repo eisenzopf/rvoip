@@ -31,7 +31,9 @@ use support::soak::{
     sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler, MemoryDiagnosticSampler,
     RssGrowthGate,
 };
-use support::{LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
+use support::{
+    CallSetupDiagnostics, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport,
+};
 
 const BOB_PORT_ENV: &str = "RVOIP_PERF_BURST_BOB_PORT";
 const ALICE_PORT_ENV: &str = "RVOIP_PERF_BURST_ALICE_PORT";
@@ -111,6 +113,7 @@ async fn perf_burst_receiver() {
         bob_port,
         &scenario.server_profile,
         scenario.capacity,
+        Some(scenario.retained_lifecycle_capacity()),
         BOB_MEDIA_START,
         BOB_MEDIA_END,
     );
@@ -119,6 +122,7 @@ async fn perf_burst_receiver() {
         alice_port,
         &scenario.client_profile,
         scenario.capacity.div_ceil(scenario.alice_shards).max(1),
+        None,
         ALICE_MEDIA_START,
         ALICE_MEDIA_END,
     );
@@ -153,7 +157,7 @@ async fn perf_burst_receiver() {
     let retention_sampler = EndpointRetentionSampler::start(
         "burst_receiver",
         receiver.coordinator.clone(),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler = MemoryDiagnosticSampler::start(
         "burst_receiver",
@@ -499,6 +503,7 @@ fn burst_config(
     sip_port: u16,
     profile: &str,
     capacity: usize,
+    retained_lifecycle_capacity: Option<usize>,
     media_start: u16,
     media_end: u16,
 ) -> Config {
@@ -512,11 +517,16 @@ fn burst_config(
     {
         performance = performance.with_recipe_path(path);
     }
-    Config::local(name, sip_port)
+    let config = Config::local(name, sip_port)
         .try_with_performance_config(performance)
         .unwrap_or_else(|err| panic!("burst performance profile '{profile}' failed: {err}"))
         .with_media_port_capacity(media_start, media_capacity)
-        .with_media_session_capacity(capacity.min(media_capacity))
+        .with_media_session_capacity(capacity.min(media_capacity));
+    let config = CallSetupDiagnostics::from_env().configure(config);
+    match retained_lifecycle_capacity {
+        Some(retained) => config.with_server_retained_lifecycle_capacity(retained),
+        None => config,
+    }
 }
 
 fn config_snapshot(config: &Config) -> Value {
@@ -660,6 +670,10 @@ fn config_snapshot(config: &Config) -> Value {
     snapshot.insert(
         "server_call_capacity".to_string(),
         json!(config.server_call_capacity),
+    );
+    snapshot.insert(
+        "server_retained_lifecycle_capacity".to_string(),
+        json!(config.server_retained_lifecycle_capacity),
     );
     snapshot.insert(
         "server_call_admission_limit".to_string(),

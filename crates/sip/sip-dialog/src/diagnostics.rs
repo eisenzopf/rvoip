@@ -1478,10 +1478,6 @@ pub(crate) fn record_uac_invite_2xx_ack_failure() {
     increment(&UAC_INVITE_2XX_ACK_FAILURE);
 }
 
-pub(crate) fn record_uac_invite_2xx_call_answered_emit() {
-    increment(&UAC_INVITE_2XX_CALL_ANSWERED_EMIT);
-}
-
 pub(crate) fn record_hub_response_invite_2xx_session(found: bool) {
     increment(&HUB_RESPONSE_INVITE_2XX);
     if found {
@@ -1497,15 +1493,6 @@ pub(crate) fn record_hub_call_answered_session(found: bool) {
         increment(&HUB_CALL_ANSWERED_SESSION_FOUND);
     } else {
         increment(&HUB_CALL_ANSWERED_SESSION_MISSING);
-    }
-}
-
-pub(crate) fn record_hub_ack_sent_session(found: bool) {
-    increment(&HUB_ACK_SENT);
-    if found {
-        increment(&HUB_ACK_SENT_SESSION_FOUND);
-    } else {
-        increment(&HUB_ACK_SENT_SESSION_MISSING);
     }
 }
 

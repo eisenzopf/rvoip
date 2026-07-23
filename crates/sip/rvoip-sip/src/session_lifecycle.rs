@@ -24,6 +24,7 @@ use tokio::sync::{oneshot, watch, Notify, OwnedSemaphorePermit, Semaphore};
 
 const DEFAULT_LIFECYCLE_CAPACITY: usize = 65_536;
 const DEFAULT_ANTI_REUSE_HORIZON: Duration = Duration::from_secs(64);
+#[cfg(test)]
 const DEFAULT_SUPERVISOR_ABORT_GRACE: Duration = Duration::from_secs(5);
 const DEFAULT_RESOURCE_CAPACITY_PER_SESSION: usize = 1_024;
 /// Maximum eager reservation for the two active-lifetime lookup indexes.
@@ -87,6 +88,7 @@ pub(crate) struct SessionLifecycleConfig {
     capacity: NonZeroUsize,
     retained_capacity: NonZeroUsize,
     anti_reuse_horizon: Duration,
+    #[cfg(test)]
     supervisor_abort_grace: Duration,
     resource_capacity_per_session: NonZeroUsize,
 }
@@ -109,13 +111,14 @@ impl SessionLifecycleConfig {
             ))
             .expect("active capacity makes retained capacity nonzero"),
             anti_reuse_horizon,
+            #[cfg(test)]
             supervisor_abort_grace: DEFAULT_SUPERVISOR_ABORT_GRACE,
             resource_capacity_per_session: NonZeroUsize::new(DEFAULT_RESOURCE_CAPACITY_PER_SESSION)
                 .expect("default resource capacity is nonzero"),
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn with_supervisor_abort_grace(
         mut self,
         supervisor_abort_grace: Duration,
@@ -127,7 +130,7 @@ impl SessionLifecycleConfig {
         Ok(self)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn with_resource_capacity_per_session(
         mut self,
         capacity: usize,
@@ -137,7 +140,6 @@ impl SessionLifecycleConfig {
         Ok(self)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn with_retained_capacity(
         mut self,
         retained_capacity: usize,
@@ -163,6 +165,7 @@ impl Default for SessionLifecycleConfig {
             ))
             .expect("default retained lifecycle capacity is nonzero"),
             anti_reuse_horizon: DEFAULT_ANTI_REUSE_HORIZON,
+            #[cfg(test)]
             supervisor_abort_grace: DEFAULT_SUPERVISOR_ABORT_GRACE,
             resource_capacity_per_session: NonZeroUsize::new(DEFAULT_RESOURCE_CAPACITY_PER_SESSION)
                 .expect("default resource capacity is nonzero"),
@@ -183,10 +186,10 @@ pub(crate) enum SessionLifecycleConfigError {
     #[error("session anti-reuse horizon must be nonzero")]
     ZeroAntiReuseHorizon,
     #[error("session supervisor abort grace must be nonzero")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     ZeroSupervisorAbortGrace,
     #[error("per-session managed resource capacity must be nonzero")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     ZeroResourceCapacity,
 }
 
@@ -248,7 +251,7 @@ pub(crate) enum SessionOperationKind {
     Signaling,
     Media,
     EventDispatch,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     Test(&'static str),
 }
 
@@ -257,9 +260,9 @@ pub(crate) struct OperationId(NonZeroU64);
 
 #[derive(Clone, Debug)]
 struct OperationMeta {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "perf-tests"))]
     kind: SessionOperationKind,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "perf-tests"))]
     hard_deadline: Option<Instant>,
     commit_revision: Option<CommitRevision>,
     resource_ids: HashSet<ResourceId>,
@@ -311,11 +314,6 @@ impl ResourceSpec {
             release_dependencies,
             release_timeout,
         })
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn descriptor(&self) -> &ResourceDescriptor {
-        &self.descriptor
     }
 }
 
@@ -523,6 +521,7 @@ pub(crate) enum AuthorityFatalReason {
     SupervisorRegistryPoisoned = 3,
     RetirementDeadlineOverflow = 4,
     InvariantViolation = 5,
+    #[cfg(test)]
     DrainDeadlineOverflow = 6,
     ResourceDeadlineOverflow = 7,
 }
@@ -535,6 +534,7 @@ impl AuthorityFatalReason {
             3 => Some(Self::SupervisorRegistryPoisoned),
             4 => Some(Self::RetirementDeadlineOverflow),
             5 => Some(Self::InvariantViolation),
+            #[cfg(test)]
             6 => Some(Self::DrainDeadlineOverflow),
             7 => Some(Self::ResourceDeadlineOverflow),
             _ => None,
@@ -550,8 +550,6 @@ pub(crate) enum QuarantineReason {
     CommittedAfterCancellation,
     SupervisorAbandoned,
     QuiesceDeadline,
-    #[allow(dead_code)]
-    AuthorityFatal,
     ResourceInstallOrphaned,
     ResourceDescriptorMismatch,
     ResourceCancelPanicked,
@@ -820,11 +818,12 @@ pub(crate) enum SessionAdmissionError {
     #[error("session generation sequence exhausted")]
     GenerationExhausted,
     #[error("session lifetime is no longer current")]
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     StaleGeneration,
     #[error("session lifecycle authority failed closed: {0:?}")]
     AuthorityFatal(AuthorityFatalReason),
     #[error("session lifecycle authority is draining")]
+    #[cfg(test)]
     AuthorityDraining,
 }
 
@@ -843,6 +842,7 @@ pub(crate) enum SessionOperationError {
     #[error("session lifecycle authority failed closed: {0:?}")]
     AuthorityFatal(AuthorityFatalReason),
     #[error("session lifecycle authority is draining")]
+    #[cfg(test)]
     AuthorityDraining,
     #[error("session operation still owns unresolved managed resources")]
     ResourcesUnresolved,
@@ -999,11 +999,12 @@ enum SupervisorKind {
 
 #[derive(Debug)]
 struct SupervisorEntry {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     key: SessionKey,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "perf-tests"))]
     kind: SupervisorKind,
     abort: Option<tokio::task::AbortHandle>,
+    #[cfg(test)]
     abort_requested: bool,
 }
 
@@ -1018,7 +1019,7 @@ tokio::task_local! {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) struct SupervisorDrainReport {
     pub(crate) deadline_reached: bool,
     pub(crate) abort_requested: usize,
@@ -1091,7 +1092,7 @@ pub(crate) struct ResourceInstallAttempt {
 }
 
 impl ResourceInstallAttempt {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn id(&self) -> ResourceId {
         self.resource_id
     }
@@ -1127,7 +1128,7 @@ impl ResourceInstallAttempt {
         })
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn confirm_unused(mut self) -> Result<(), ResourceRegistryError> {
         self.authority
             .confirm_resource_unused(&self.key, self.operation_id, self.resource_id)?;
@@ -1160,11 +1161,6 @@ pub(crate) struct ResourceDispatchPermit {
 }
 
 impl ResourceDispatchPermit {
-    #[allow(dead_code)]
-    pub(crate) fn id(&self) -> ResourceId {
-        self.resource_id
-    }
-
     /// Transfer the single-use dispatch proof into the lower-layer install
     /// callback. The lower layer must call `capture_at_install` at the exact
     /// point where its externally visible mutation succeeds; callers must not
@@ -1207,7 +1203,7 @@ pub(crate) struct ResourceInstallationSink {
 }
 
 impl ResourceInstallationSink {
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn id(&self) -> ResourceId {
         self.resource_id
     }
@@ -1232,7 +1228,6 @@ impl ResourceInstallationSink {
 
     /// Resolve the attempted install only when the lower layer can prove that
     /// it made no external mutation and created no resource.
-    #[allow(dead_code)]
     pub(crate) fn confirm_unused(mut self) -> Result<(), ResourceRegistryError> {
         self.authority
             .confirm_resource_unused(&self.key, self.operation_id, self.resource_id)?;
@@ -1260,12 +1255,6 @@ pub(crate) struct OwnedOperation {
 }
 
 impl OwnedOperation {
-    #[allow(dead_code)]
-    pub(crate) fn key(&self) -> &SessionKey {
-        &self.context.key
-    }
-
-    #[allow(dead_code)]
     pub(crate) fn cancellation(&self) -> Option<watch::Receiver<bool>> {
         self.context.cancellation()
     }
@@ -1286,7 +1275,7 @@ impl OwnedOperation {
             .record_operation_commit(&self.context.key, self.context.operation_id)
         {
             Ok(revision) => Ok(CommittedOperation {
-                context: self.context,
+                _context: self.context,
                 revision,
             }),
             Err(error) => Err(OwnedCommitFailure {
@@ -1317,11 +1306,6 @@ pub(crate) struct OwnedCommitFailure {
 }
 
 impl OwnedCommitFailure {
-    #[allow(dead_code)]
-    pub(crate) fn error(&self) -> SessionOperationError {
-        self.error
-    }
-
     pub(crate) fn into_operation(self) -> OwnedOperation {
         self.operation
     }
@@ -1339,8 +1323,9 @@ impl std::fmt::Debug for OwnedCommitFailure {
 /// Proof that operation commit and Captured->Live promotion linearized while
 /// the session was Active. Completion may safely arrive after quiescing.
 pub(crate) struct CommittedOperation {
-    #[allow(dead_code)]
-    context: OperationContext,
+    // Retain the exact authority and generation until the caller consumes the
+    // commit proof, even though completion only needs the revision value.
+    _context: OperationContext,
     revision: CommitRevision,
 }
 
@@ -1361,17 +1346,6 @@ pub(crate) struct OperationContext {
 }
 
 impl OperationContext {
-    #[allow(dead_code)]
-    pub(crate) fn key(&self) -> &SessionKey {
-        &self.key
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn operation_id(&self) -> OperationId {
-        self.operation_id
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cancellation(&self) -> Option<watch::Receiver<bool>> {
         self.authority.require_healthy().ok()?;
         self.authority
@@ -1385,7 +1359,7 @@ impl OperationContext {
             .ensure_operation_current(&self.key, self.operation_id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn prepare_commit(&self) -> Result<CommitPermit, SessionOperationError> {
         self.ensure_current()?;
         Ok(CommitPermit {
@@ -1395,14 +1369,14 @@ impl OperationContext {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) struct CommitPermit {
     operation: OperationContext,
     _not_send: std::marker::PhantomData<Rc<()>>,
 }
 
+#[cfg(test)]
 impl CommitPermit {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn finish(self) -> Result<(), SessionOperationError> {
         self.operation
             .authority
@@ -1508,8 +1482,8 @@ impl Drop for OwnedTaskRegistration {
 /// A synchronous-only operation guard.
 ///
 /// The `Rc` marker deliberately makes this type `!Send`; side-effectful or
-/// awaited work must use [`SessionLease::spawn_owned`] so caller cancellation
-/// cannot masquerade as successful completion.
+/// awaited work must use [`SessionLeaseAuthority::spawn_owned_exact`] so
+/// caller cancellation cannot masquerade as successful completion.
 pub(crate) struct OperationGuard {
     registered: Option<RegisteredOperation>,
     _not_send: std::marker::PhantomData<Rc<()>>,
@@ -1540,21 +1514,6 @@ impl std::fmt::Debug for OperationFinishFailure {
 }
 
 impl OperationGuard {
-    #[allow(dead_code)]
-    pub(crate) fn key(&self) -> &SessionKey {
-        &self.registered.as_ref().expect("live guard").context.key
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn operation_id(&self) -> OperationId {
-        self.registered
-            .as_ref()
-            .expect("live guard")
-            .context
-            .operation_id
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn cancellation(&self) -> Option<watch::Receiver<bool>> {
         self.registered
             .as_ref()
@@ -1571,7 +1530,7 @@ impl OperationGuard {
             .ensure_current()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn prepare_commit(&self) -> Result<CommitPermit, SessionOperationError> {
         self.registered
             .as_ref()
@@ -1607,8 +1566,8 @@ impl OperationGuard {
 
 #[derive(Clone)]
 pub(crate) struct SessionLease {
-    #[cfg_attr(not(test), allow(dead_code))]
-    authority: Arc<SessionLeaseAuthority>,
+    // A lease keeps its issuing authority alive for the entire exact lifetime.
+    _authority: Arc<SessionLeaseAuthority>,
     key: SessionKey,
 }
 
@@ -1617,20 +1576,20 @@ impl SessionLease {
         &self.key
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn is_current(&self) -> bool {
-        self.authority.is_current(&self.key)
+        self._authority.is_current(&self.key)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn try_operation(
         &self,
         kind: SessionOperationKind,
     ) -> Result<OperationGuard, SessionOperationError> {
-        self.authority.try_operation_exact(&self.key, kind)
+        self._authority.try_operation_exact(&self.key, kind)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn spawn_owned<T, F, Fut>(
         &self,
         kind: SessionOperationKind,
@@ -1642,13 +1601,13 @@ impl SessionLease {
         F: FnOnce(OwnedOperation) -> Fut + Send + 'static,
         Fut: Future<Output = OwnedOperationCompletion<T>> + Send + 'static,
     {
-        self.authority
+        self._authority
             .spawn_owned(&self.key, kind, hard_timeout, operation)
     }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, feature = "perf-tests"))]
 pub(crate) struct OperationDiagnostics {
     pub(crate) total: usize,
     pub(crate) with_hard_deadline: usize,
@@ -1656,11 +1615,12 @@ pub(crate) struct OperationDiagnostics {
     pub(crate) signaling: usize,
     pub(crate) media: usize,
     pub(crate) event_dispatch: usize,
+    #[cfg(test)]
     pub(crate) test: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, feature = "perf-tests"))]
 pub(crate) struct QuarantineDiagnostics {
     pub(crate) operation_deadline: usize,
     pub(crate) operation_panicked: usize,
@@ -1668,7 +1628,6 @@ pub(crate) struct QuarantineDiagnostics {
     pub(crate) committed_after_cancellation: usize,
     pub(crate) supervisor_abandoned: usize,
     pub(crate) quiesce_deadline: usize,
-    pub(crate) authority_fatal: usize,
     pub(crate) resource_install_orphaned: usize,
     pub(crate) resource_descriptor_mismatch: usize,
     pub(crate) resource_cancel_panicked: usize,
@@ -1680,6 +1639,7 @@ pub(crate) struct QuarantineDiagnostics {
     pub(crate) resource_rollback_incomplete: usize,
 }
 
+#[cfg(any(test, feature = "perf-tests"))]
 impl QuarantineDiagnostics {
     fn record(&mut self, reason: QuarantineReason) {
         match reason {
@@ -1691,7 +1651,6 @@ impl QuarantineDiagnostics {
             }
             QuarantineReason::SupervisorAbandoned => self.supervisor_abandoned += 1,
             QuarantineReason::QuiesceDeadline => self.quiesce_deadline += 1,
-            QuarantineReason::AuthorityFatal => self.authority_fatal += 1,
             QuarantineReason::ResourceInstallOrphaned => self.resource_install_orphaned += 1,
             QuarantineReason::ResourceDescriptorMismatch => {
                 self.resource_descriptor_mismatch += 1;
@@ -1710,7 +1669,7 @@ impl QuarantineDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, feature = "perf-tests"))]
 pub(crate) struct ResourceOrphanDiagnostics {
     pub(crate) install_attempt_dropped: usize,
     pub(crate) dispatch_permit_dropped: usize,
@@ -1724,7 +1683,7 @@ pub(crate) struct ResourceOrphanDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, feature = "perf-tests"))]
 pub(crate) struct ResourceDiagnostics {
     /// All registry states remain charged and are included in `total`.
     pub(crate) total: usize,
@@ -1739,7 +1698,7 @@ pub(crate) struct ResourceDiagnostics {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(any(test, feature = "perf-tests"))]
 pub(crate) struct SessionLifecycleDiagnostics {
     /// False means a poisoned authority prevented a complete snapshot.
     pub(crate) complete: bool,
@@ -1794,6 +1753,7 @@ pub(crate) struct SessionLeaseAuthority {
     reuse_pruner_changed: Arc<Notify>,
     fatal: AtomicU8,
     fatal_changed: Notify,
+    #[cfg(test)]
     draining: AtomicBool,
 }
 
@@ -1879,6 +1839,7 @@ impl SessionLeaseAuthority {
             reuse_pruner_changed: Arc::new(Notify::new()),
             fatal: AtomicU8::new(0),
             fatal_changed: Notify::new(),
+            #[cfg(test)]
             draining: AtomicBool::new(false),
         })
     }
@@ -2191,6 +2152,7 @@ impl SessionLeaseAuthority {
         self: &Arc<Self>,
         session_id: SessionId,
     ) -> Result<SessionLease, SessionAdmissionError> {
+        #[cfg(test)]
         if self.draining.load(Ordering::Acquire) {
             return Err(SessionAdmissionError::AuthorityDraining);
         }
@@ -2198,6 +2160,7 @@ impl SessionLeaseAuthority {
         let mut index = self
             .lock_index()
             .map_err(SessionAdmissionError::AuthorityFatal)?;
+        #[cfg(test)]
         if self.draining.load(Ordering::Acquire) {
             return Err(SessionAdmissionError::AuthorityDraining);
         }
@@ -2271,7 +2234,7 @@ impl SessionLeaseAuthority {
             }
         }
         Ok(SessionLease {
-            authority: Arc::clone(self),
+            _authority: Arc::clone(self),
             key,
         })
     }
@@ -2441,8 +2404,8 @@ impl SessionLeaseAuthority {
     fn register_operation(
         self: &Arc<Self>,
         key: &SessionKey,
-        kind: SessionOperationKind,
-        hard_deadline: Option<Instant>,
+        _kind: SessionOperationKind,
+        _hard_deadline: Option<Instant>,
     ) -> Result<RegisteredOperation, SessionOperationError> {
         let cell = self
             .cells
@@ -2467,8 +2430,10 @@ impl SessionLeaseAuthority {
         state.operations.insert(
             operation_id,
             OperationMeta {
-                kind,
-                hard_deadline,
+                #[cfg(any(test, feature = "perf-tests"))]
+                kind: _kind,
+                #[cfg(any(test, feature = "perf-tests"))]
+                hard_deadline: _hard_deadline,
                 commit_revision: None,
                 resource_ids: HashSet::new(),
             },
@@ -2710,7 +2675,6 @@ impl SessionLeaseAuthority {
         Ok(())
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn confirm_resource_unused(
         &self,
         key: &SessionKey,
@@ -3154,7 +3118,7 @@ impl SessionLeaseAuthority {
         let _ = self.mark_quarantined(key, Self::resource_quarantine_reason(orphan_reason));
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn retry_orphaned_resources(
         &self,
         key: &SessionKey,
@@ -3467,9 +3431,10 @@ impl SessionLeaseAuthority {
 
     fn register_supervisor(
         self: &Arc<Self>,
-        key: &SessionKey,
-        kind: SupervisorKind,
+        _key: &SessionKey,
+        _kind: SupervisorKind,
     ) -> Result<SupervisorRegistration, SessionOperationError> {
+        #[cfg(test)]
         if self.draining.load(Ordering::Acquire) {
             return Err(SessionOperationError::AuthorityDraining);
         }
@@ -3485,15 +3450,19 @@ impl SessionLeaseAuthority {
         let mut supervisors = self
             .lock_supervisors()
             .map_err(SessionOperationError::AuthorityFatal)?;
+        #[cfg(test)]
         if self.draining.load(Ordering::Acquire) {
             return Err(SessionOperationError::AuthorityDraining);
         }
         supervisors.insert(
             id,
             SupervisorEntry {
-                key: key.clone(),
-                kind,
+                #[cfg(test)]
+                key: _key.clone(),
+                #[cfg(any(test, feature = "perf-tests"))]
+                kind: _kind,
                 abort: None,
+                #[cfg(test)]
                 abort_requested: false,
             },
         );
@@ -3507,13 +3476,18 @@ impl SessionLeaseAuthority {
     ) -> Result<(), AuthorityFatalReason> {
         let mut supervisors = self.lock_supervisors_for_cleanup()?;
         // A very short task can unregister before its JoinHandle is returned.
+        #[cfg(test)]
         let mut abort_now = false;
         if let Some(entry) = supervisors.get_mut(&id) {
-            abort_now = entry.abort_requested;
+            #[cfg(test)]
+            {
+                abort_now = entry.abort_requested;
+            }
             entry.abort = Some(abort.clone());
         }
         drop(supervisors);
         self.supervisors_changed.notify_waiters();
+        #[cfg(test)]
         if abort_now {
             abort.abort();
         }
@@ -3533,7 +3507,7 @@ impl SessionLeaseAuthority {
     /// been destroyed. This is the authority-local hook a later coordinator
     /// drain must await. It does not yet prove cleanup of external SIP/media
     /// resources; that requires the separate exact-resource registry gate.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) async fn wait_for_supervisors(&self) -> Result<(), SessionOperationError> {
         let current = CURRENT_LIFECYCLE_SUPERVISOR
             .try_with(|current| *current)
@@ -3573,7 +3547,7 @@ impl SessionLeaseAuthority {
     /// remaining lifecycle task except the caller itself, then join through
     /// registry removal. The current task is excluded when drain is invoked
     /// from a supervised operation, preventing a self-join deadlock.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) async fn drain_supervisors(&self, deadline: Instant) -> SupervisorDrainReport {
         self.draining.store(true, Ordering::Release);
         let current = CURRENT_LIFECYCLE_SUPERVISOR
@@ -4181,7 +4155,7 @@ impl SessionLeaseAuthority {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(any(test, feature = "perf-tests"))]
     pub(crate) fn diagnostics(&self) -> SessionLifecycleDiagnostics {
         let now = self.clock.now();
         let mut snapshot = SessionLifecycleDiagnostics {
@@ -4329,6 +4303,7 @@ impl SessionLeaseAuthority {
                     SessionOperationKind::Signaling => snapshot.operations.signaling += 1,
                     SessionOperationKind::Media => snapshot.operations.media += 1,
                     SessionOperationKind::EventDispatch => snapshot.operations.event_dispatch += 1,
+                    #[cfg(test)]
                     SessionOperationKind::Test(_) => snapshot.operations.test += 1,
                 }
             }

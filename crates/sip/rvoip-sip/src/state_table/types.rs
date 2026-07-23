@@ -603,14 +603,15 @@ pub enum Action {
     /// 5 redirects per RFC-recommended loop breaker.
     RetryWithContact,
     /// RFC 3261 §14.1 — after receiving 491 Request Pending on a re-INVITE,
-    /// sleep a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
-    /// re-issue whatever re-INVITE kind was pending. Caps at 3 retries.
+    /// schedule a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
+    /// re-issue whatever re-INVITE kind was pending. The exact lifecycle owns
+    /// the delay outside the state-machine lane. Caps at 3 retries.
     ScheduleReinviteRetry,
     /// RFC 3261 §14.1 glare resolution: when the peer's re-INVITE arrives
     /// while our own is pending and we accept theirs, cancel our scheduled
     /// retry by clearing `pending_reinvite` + `reinvite_retry_attempts`.
-    /// Any sleeping retry noops at wake-up because `ScheduleReinviteRetry`
-    /// reads `pending_reinvite` and returns early when it's `None`.
+    /// Any scheduled retry noops at wake-up because it revalidates the exact
+    /// generation, pending kind, and attempt before dispatch.
     ClearPendingReinvite,
 
     // Call control actions
@@ -647,12 +648,12 @@ pub enum Action {
     /// outside the bounded protection-space and stale-refresh policy.
     SendINVITEWithAuth,
     /// SIP_API_DESIGN_2 R2 — auth-retry for non-INVITE/non-REGISTER
-    /// methods. Reads `session.pending_auth_method` to discriminate
+    /// methods and tracked re-INVITEs. Reads `session.pending_auth_method` to discriminate
     /// which `pending_<method>_options` to re-issue (falls back to
     /// inspecting which stash is set when method is missing), computes
     /// the selected auth header, and dispatches via the matching
     /// `DialogAdapter::send_<method>_with_auth` mirror. Covers BYE,
-    /// REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS, SUBSCRIBE.
+    /// REFER, NOTIFY, INFO, UPDATE, re-INVITE, MESSAGE, OPTIONS, SUBSCRIBE.
     SendRequestWithAuth,
     /// RFC 4028 §6 — resend the INVITE with a bumped `Session-Expires` /
     /// `Min-SE` header derived from `session.session_timer_min_se` after a
@@ -789,10 +790,10 @@ pub enum Action {
     //
     // `SendRefer100Trying` fires on the REFER-receiver's own dialog when
     // the REFER is accepted (alongside `SendReferAccepted`). The other
-    // three fire from the transfer-leg's UAC transitions and are no-ops
-    // when `session.transferor_session_id == None`, so appending them to
-    // shared `Dialog180Ringing` / `Dialog200OK` / `Dialog{4,5,6}xxFailure`
-    // rows is safe for non-transfer calls.
+    // three are conditional projections from shared transfer-leg/UAC rows:
+    // an ordinary call requests no transfer operation, while any session
+    // carrying a partial or stale transfer marker fails closed unless its
+    // generation-qualified transferor handle is exact.
     SendRefer100Trying,
     SendTransferNotifyRinging,
     SendTransferNotifySuccess,

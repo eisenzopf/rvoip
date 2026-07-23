@@ -25,12 +25,19 @@ pub const RETENTION_DRAIN_MARGIN_SECS: usize = 5;
 pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
     RETAINED_INVITE_STATE_TTL_SECS + RETENTION_DRAIN_MARGIN_SECS;
 pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
+/// Full endpoint-retention snapshots walk and serialize every owned runtime
+/// index. Keep that diagnostic off the 5-second RSS sampling hot path so the
+/// leak gate does not measure allocator page growth caused by its own report.
+/// The sampler still records an exact final `after_drain` snapshot on stop.
+pub const RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const BOB_PORT_ENV: &str = "RVOIP_PERF_SOAK_BOB_PORT";
 pub const ALICE_PORT_ENV: &str = "RVOIP_PERF_SOAK_ALICE_PORT";
 pub const READY_FILE_ENV: &str = "RVOIP_PERF_SOAK_READY_FILE";
 pub const STOP_FILE_ENV: &str = "RVOIP_PERF_SOAK_STOP_FILE";
 pub const RUN_DIR_ENV: &str = "RVOIP_PERF_SOAK_RUN_DIR";
 pub const ACTIVE_PHASES_ENV: &str = "RVOIP_PERF_SOAK_ACTIVE_CALL_PHASES";
+pub const MEDIA_PORT_START_ENV: &str = "RVOIP_PERF_MEDIA_PORT_START";
+pub const MEDIA_PORT_END_ENV: &str = "RVOIP_PERF_MEDIA_PORT_END";
 pub const DISABLE_IN_PROCESS_RESOURCE_SAMPLER_ENV: &str =
     "RVOIP_PERF_DISABLE_IN_PROCESS_RESOURCE_SAMPLER";
 pub const EXTERNAL_RESOURCE_DIAGNOSTICS_DIR_ENV: &str = "RVOIP_PERF_PROFILE_EXTERNAL_RESOURCE_DIR";
@@ -1068,6 +1075,14 @@ pub fn perf_config(name: &str, port: u16) -> Config {
     if let Some(seconds) = read_nonnegative_u64_env("RVOIP_PERF_SETUP_TEARDOWN_TIMEOUT_SECS") {
         config = config.with_setup_teardown_timeout_secs(seconds);
     }
+    match (
+        read_optional_u16_env(MEDIA_PORT_START_ENV),
+        read_optional_u16_env(MEDIA_PORT_END_ENV),
+    ) {
+        (Some(start), Some(end)) => config = config.with_media_ports(start, end),
+        (None, None) => {}
+        _ => panic!("{MEDIA_PORT_START_ENV} and {MEDIA_PORT_END_ENV} must be set together"),
+    }
     config
 }
 
@@ -1827,7 +1842,11 @@ pub fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
         "session_store": snapshot["session_store"].clone(),
         "session_registry": snapshot["session_registry"].clone(),
         "lifecycle": snapshot["lifecycle"].clone(),
+        "app_event_publisher": snapshot["app_event_publisher"].clone(),
+        "global_event_bus": snapshot["global_event_bus"].clone(),
         "state_machine_helpers": snapshot["state_machine_helpers"].clone(),
+        "exact_response_supervisor": snapshot["exact_response_supervisor"].clone(),
+        "retained_tasks": snapshot["retained_tasks"].clone(),
         "transaction_manager": snapshot["transaction_manager"].clone(),
         "dialog_manager": snapshot["dialog_manager"].clone(),
         "dialog_adapter": snapshot["dialog_adapter"].clone(),
@@ -1846,22 +1865,42 @@ pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
     const POINTERS: &[&str] = &[
         "/session_store/total",
         "/session_registry/sessions",
+        "/session_registry/dialog_mappings",
+        "/session_registry/media_mappings",
+        "/session_store/lifecycle/live_indexes/dialog",
+        "/session_store/lifecycle/live_indexes/call_id",
+        "/session_store/lifecycle/live_indexes/media",
         "/state_machine_helpers/active_sessions",
         "/state_machine_helpers/subscriber_sessions",
-        "/dialog_adapter/session_to_dialog",
-        "/dialog_adapter/dialog_to_session",
-        "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
         "/dialog_adapter/outgoing_bye_tx",
         "/dialog_adapter/outgoing_bye_generation_watch",
         "/dialog_adapter/outgoing_bye_wait_intents",
+        "/dialog_adapter/outbound_initial_invites",
+        "/dialog_adapter/outbound_request_tracker/live_requests",
+        "/dialog_adapter/outbound_request_tracker/deferred_events",
         "/dialog_adapter/registration_refresh_tasks",
+        "/dialog_adapter/registration_refresh_retained_tasks",
+        "/exact_response_supervisor/pending_obligations",
+        "/exact_response_supervisor/retry_attempts",
+        "/exact_response_supervisor/pending_deadlines",
+        "/exact_response_supervisor/fire_in_flight",
+        "/cleanup/setup_teardown_watchdog/pending_deadlines",
+        "/cleanup/setup_teardown_watchdog/fire_in_flight",
+        "/app_event_publisher/dispatcher/queued_current",
+        "/app_event_publisher/dispatcher/in_flight_current",
+        "/global_event_bus/broadcast_retained_total",
+        "/global_event_bus/subscriber_queued_total",
+        "/global_event_bus/observational_handlers/queued_current",
+        "/global_event_bus/observational_handlers/in_flight_current",
+        "/lifecycle/waiters",
         "/transaction_manager/total",
         "/transaction_manager/server_invite_dialog_index",
         "/transaction_manager/server_invite_dialog_keys_by_tx",
         "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
+        "/transaction_manager/event_subscribers",
         "/transaction_manager/pending_inbound_bytes",
         "/transaction_manager/pending_inbound_timing",
         "/dialog_manager/dialogs",
@@ -1883,7 +1922,9 @@ pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_manager/outbound_flow_tasks",
         "/dialog_manager/flow_by_destination",
         "/dialog_manager/flow_by_aor",
-        "/media_adapter/session_to_dialog",
+        "/media_adapter/media_resources",
+        "/media_adapter/media_create_reservations",
+        "/media_adapter/registry_media_bindings",
         "/media_adapter/dialog_to_session",
         "/media_adapter/media_sessions",
         "/media_adapter/audio_receivers",
@@ -1908,7 +1949,10 @@ pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
 
 pub fn endpoint_bounded_tombstone_total(snapshot: &serde_json::Value) -> u64 {
     const POINTERS: &[&str] = &[
-        "/lifecycle/expired_terminal_entries",
+        "/lifecycle/entries",
+        "/lifecycle/storage/terminal_deadline_records",
+        "/app_event_publisher/exact_terminal_claims/slots",
+        "/app_event_publisher/exact_terminal_claims/deadlines",
         "/transaction_manager/terminated_transactions",
         "/transaction_manager/invite_2xx_response_cache",
         "/transaction_manager/invite_2xx_response_due_queue",
@@ -2399,6 +2443,18 @@ pub fn read_required_u16_env(name: &str) -> u16 {
     let raw = std::env::var(name).unwrap_or_else(|err| panic!("{name} must be set: {err}"));
     raw.parse()
         .unwrap_or_else(|_| panic!("{name} must be a valid u16 port, got {raw:?}"))
+}
+
+fn read_optional_u16_env(name: &str) -> Option<u16> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(err) => panic!("{name} could not be read: {err}"),
+    };
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{name} must be a valid u16 port, got {raw:?}")),
+    )
 }
 
 fn read_bool_env(name: &str) -> bool {

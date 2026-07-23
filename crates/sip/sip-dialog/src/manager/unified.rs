@@ -431,6 +431,7 @@ impl std::fmt::Debug for InitialInviteDispatch {
 
 struct InitialInviteInstallRecord {
     token: Uuid,
+    owner: InitialInviteOwner,
     phase: Arc<AtomicU8>,
     /// Admission is owned by the exact installation record. Removing the
     /// exact record drops the permit; stale cleanup cannot release a newer
@@ -1169,6 +1170,7 @@ impl UnifiedDialogManager {
 
         let record = Arc::new(InitialInviteInstallRecord {
             token: owner.token,
+            owner: owner.clone(),
             phase: Arc::new(AtomicU8::new(INITIAL_INVITE_INSTALLING)),
             _capacity_permit: capacity_permit,
         });
@@ -1790,21 +1792,34 @@ impl UnifiedDialogManager {
                 {
                     return true;
                 }
-                // `send_cancel` does not expose a wire receipt on error. Once
-                // invoked, an Err is therefore ambiguous and must not create a
-                // second CANCEL. Keep the exact owner/capacity charged while
-                // watching for a terminal or confirmed dialog transition.
                 if *cancel_attempted {
                     return false;
                 }
-                *cancel_attempted = true;
-                let _ = self.send_cancel(owner.dialog_id()).await;
+                match self.send_cancel_for_teardown(owner.dialog_id()).await {
+                    Ok(_) => *cancel_attempted = true,
+                    Err(_) => {
+                        // Only a transaction-classified zero-wire failure may
+                        // return the shared author to Idle and be retried. A
+                        // write-started error remains fenced at at-most-once.
+                        *cancel_attempted = !self
+                            .core
+                            .invite_cancel_is_retryable(owner.dialog_id())
+                            .await;
+                    }
+                }
                 // A 200 response to CANCEL only settles the CANCEL transaction;
                 // it does not settle the original INVITE. The next supervisor
                 // pass verifies the retained INVITE's terminal response.
                 false
             }
             DialogState::Confirmed | DialogState::Recovering => {
+                if !self
+                    .core
+                    .invite_cancel_bye_is_causally_ready(owner.dialog_id())
+                    .await
+                {
+                    return false;
+                }
                 // Apply the same at-most-once rule to BYE: a lower-layer Err
                 // can occur after bytes crossed the transport boundary.
                 if *bye_attempted {
@@ -2457,26 +2472,17 @@ impl UnifiedDialogManager {
 
         info!("Handling incoming INVITE from {}", source);
 
-        // Process the INVITE through core dialog manager
-        self.core
-            .handle_invite(request.clone(), source)
+        // This public method directly owns the manually supplied INVITE. The
+        // core returns its exact transaction-owned dialog; ordinary transport
+        // ingress continues through the acknowledged session route.
+        let dialog_id = self
+            .core
+            .handle_direct_invite(request, source)
             .await
             .map_err(|_error| {
                 error!("Failed to process incoming INVITE from {}", source);
                 ApiError::Dialog {
                     message: "Incoming INVITE processing failed".to_string(),
-                }
-            })?;
-
-        // Find the dialog that was created for this INVITE
-        let dialog_id = self
-            .core
-            .find_dialog_for_request(&request)
-            .await
-            .ok_or_else(|| {
-                error!("Failed to find dialog for INVITE request from {}", source);
-                ApiError::Dialog {
-                    message: "Failed to find dialog for INVITE request".to_string(),
                 }
             })?;
 
@@ -2492,33 +2498,6 @@ impl UnifiedDialogManager {
 
         info!("Created incoming call with dialog ID: {}", dialog_id);
         Ok(call_handle)
-    }
-
-    /// Send automatic response to OPTIONS request (Server/Hybrid modes)
-    ///
-    /// Automatically responds to OPTIONS requests if auto_options is enabled.
-    /// This method is intended for future use when request routing is implemented.
-    #[allow(dead_code)]
-    async fn handle_auto_options(&self, request: Request, source: SocketAddr) -> ApiResult<()> {
-        if !self.config.auto_options_enabled() {
-            return Ok(()); // Not enabled, skip
-        }
-
-        info!("Sending automatic OPTIONS response to {}", source);
-
-        // Process through core dialog manager
-        self.core
-            .handle_options(request, source)
-            .await
-            .map_err(ApiError::from)?;
-
-        // Update stats
-        {
-            let mut stats = self.stats.write().await;
-            stats.auto_responses += 1;
-        }
-
-        Ok(())
     }
 
     // ========================================
@@ -2794,68 +2773,23 @@ impl UnifiedDialogManager {
             !event.is_empty(),
             subscription_state.is_some()
         );
-
-        // Update dialog's event_package and subscription_state before building request
-        {
-            let mut dialog = self.core.get_dialog_mut(dialog_id)?;
-
-            // Set event package if not already set or if different
-            if dialog.event_package.as_ref() != Some(&event) {
-                dialog.event_package = Some(event.clone());
-            }
-
-            // Set subscription state if provided
-            if let Some(state_str) = subscription_state {
-                use crate::dialog::subscription_state::{
-                    SubscriptionState, SubscriptionTerminationReason,
-                };
-                use std::time::Duration;
-
-                // Parse simple subscription state strings to SubscriptionState enum
-                let sub_state = if state_str.starts_with("active") {
-                    // Extract expires value if present
-                    let expires = if let Some(pos) = state_str.find("expires=") {
-                        let exp_str = &state_str[pos + 8..];
-                        exp_str
-                            .split(';')
-                            .next()
-                            .and_then(|s| s.parse::<u64>().ok())
-                            .unwrap_or(3600)
-                    } else {
-                        3600
-                    };
-                    SubscriptionState::Active {
-                        remaining_duration: Duration::from_secs(expires),
-                        original_duration: Duration::from_secs(expires),
-                    }
-                } else if state_str.starts_with("pending") {
-                    SubscriptionState::Pending
-                } else if state_str.starts_with("terminated") {
-                    // Extract reason if present
-                    let reason = if state_str.contains("noresource") {
-                        Some(SubscriptionTerminationReason::NoResource)
-                    } else if state_str.contains("deactivated") {
-                        Some(SubscriptionTerminationReason::ClientRequested)
-                    } else if state_str.contains("rejected") {
-                        Some(SubscriptionTerminationReason::Rejected)
-                    } else if state_str.contains("timeout") {
-                        Some(SubscriptionTerminationReason::Expired)
-                    } else {
-                        None
-                    };
-                    SubscriptionState::Terminated { reason }
-                } else {
-                    // Default to terminated if can't parse
-                    SubscriptionState::Terminated { reason: None }
-                };
-
-                dialog.subscription_state = Some(sub_state);
-            }
-        }
-
-        let notify_body = body.map(|b| bytes::Bytes::from(b));
-        self.send_request_in_dialog(dialog_id, Method::Notify, notify_body)
+        let state = subscription_state
+            .map(|value| {
+                super::transaction_integration::NotifySubscriptionState::Explicit(Some(value))
+            })
+            .unwrap_or(super::transaction_integration::NotifySubscriptionState::Tracked);
+        self.core
+            .send_notify_request_snapshot(
+                dialog_id,
+                super::transaction_integration::NotifyRequestSnapshot::legacy(
+                    Some(event),
+                    state,
+                    body.map(bytes::Bytes::from),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// Send NOTIFY for REFER implicit subscription (RFC 3515)
@@ -2928,8 +2862,16 @@ impl UnifiedDialogManager {
         dialog_id: &DialogId,
         info_body: String,
     ) -> ApiResult<TransactionKey> {
-        self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body)))
+        self.core
+            .send_info_request_snapshot(
+                dialog_id,
+                super::transaction_integration::InfoRequestSnapshot::legacy(
+                    Some(bytes::Bytes::from(info_body)),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// RFC 3261 §22.2 — resend an INVITE with a digest authorization header
@@ -3050,6 +2992,28 @@ impl UnifiedDialogManager {
         dialog_id: &DialogId,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<TransactionKey> {
+        let invite_tx_id = self
+            .resolve_cancellable_invite_transaction(dialog_id)
+            .await?;
+
+        let retained_owner = self
+            .initial_invite_installs
+            .get(dialog_id)
+            .map(|record| record.owner.clone());
+        if let Some(owner) = retained_owner {
+            return self
+                .dispatch_owned_initial_invite_cancel(owner, invite_tx_id, extra_headers)
+                .await;
+        }
+
+        self.dispatch_cancel_for_transaction(dialog_id, &invite_tx_id, extra_headers)
+            .await
+    }
+
+    async fn resolve_cancellable_invite_transaction(
+        &self,
+        dialog_id: &DialogId,
+    ) -> ApiResult<TransactionKey> {
         // Get the dialog state to verify it can be cancelled
         let dialog_state = self.get_dialog_state(dialog_id).await?;
 
@@ -3074,8 +3038,7 @@ impl UnifiedDialogManager {
         // Find the currently pending outbound INVITE transaction for this dialog.
         // Auth/session-timer retries create newer INVITE transactions under the
         // same dialog, and RFC 3261 CANCEL must target that latest transaction.
-        let invite_tx_id = self
-            .core
+        self.core
             .find_latest_invite_transaction_for_dialog(dialog_id)
             .await
             .ok_or_else(|| {
@@ -3083,8 +3046,15 @@ impl UnifiedDialogManager {
                 ApiError::Protocol {
                     message: "No INVITE transaction found to cancel".to_string(),
                 }
-            })?;
+            })
+    }
 
+    async fn dispatch_cancel_for_transaction(
+        &self,
+        dialog_id: &DialogId,
+        invite_tx_id: &TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<TransactionKey> {
         // Cancel the INVITE transaction. Application extras ride
         // alongside the RFC 3261-mandated copies — appended after the
         // stack-managed slice per §5.2.
@@ -3104,6 +3074,133 @@ impl UnifiedDialogManager {
 
         info!("Successfully sent CANCEL for dialog {}", dialog_id);
         Ok(cancel_tx_id)
+    }
+
+    /// Run the exact initial-INVITE CANCEL in a manager-owned task. The task
+    /// is the sole bridge from the classified transaction send to retained
+    /// terminal supervision, so dropping an API waiter cannot strand a sent
+    /// or wire-unknown CANCEL between those two ownership steps.
+    async fn dispatch_owned_initial_invite_cancel(
+        &self,
+        owner: InitialInviteOwner,
+        invite_tx_id: TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<TransactionKey> {
+        use dashmap::mapref::entry::Entry;
+
+        let (inserted, result_rx) = {
+            let accepting = self
+                .initial_invite_cleanup_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !*accepting {
+                return Err(ApiError::Dialog {
+                    message: "Initial INVITE cleanup admission is closed".to_string(),
+                });
+            }
+
+            let task_token = Uuid::new_v4();
+            let manager = self.clone();
+            let task_dialog_id = owner.dialog_id().clone();
+            let map_dialog_id = task_dialog_id.clone();
+            let task_owner = owner.clone();
+            let task_invite_tx_id = invite_tx_id.clone();
+            let task_extra_headers = extra_headers.clone();
+            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let (completion_tx, completion_rx) = tokio::sync::watch::channel(false);
+            let task = tokio::spawn(async move {
+                let _completion = InitialInviteCleanupCompletion {
+                    sender: Some(completion_tx),
+                };
+                if start_rx.await.is_err() {
+                    return;
+                }
+
+                let result = manager
+                    .dispatch_cancel_for_transaction(
+                        &task_dialog_id,
+                        &task_invite_tx_id,
+                        task_extra_headers,
+                    )
+                    .await;
+                let requires_terminal_supervision = result.is_ok()
+                    || manager
+                        .core
+                        .invite_cancel_requires_terminal_supervision(&task_dialog_id)
+                        .await;
+
+                if !requires_terminal_supervision {
+                    // Publish a proven zero-wire result only after releasing
+                    // the cleanup slot. An immediate retry must install its
+                    // own retained task rather than racing this task's final
+                    // map removal.
+                    manager
+                        .initial_invite_cleanup_tasks
+                        .remove_if(&task_dialog_id, |_, task| task.token == task_token);
+                    let _ = result_tx.send(result);
+                    return;
+                }
+
+                let _ = manager.supervise_initial_invite_teardown(&task_owner);
+                let _ = result_tx.send(result);
+
+                // `supervise_initial_invite_teardown` cannot install a second
+                // task while this exact task occupies the cleanup slot. This
+                // retained task therefore becomes the lifecycle-owned
+                // terminal supervisor itself.
+                manager.run_wire_unknown_cleanup(task_owner).await;
+                manager
+                    .initial_invite_cleanup_tasks
+                    .remove_if(&task_dialog_id, |_, task| task.token == task_token);
+            });
+            let abort = task.abort_handle();
+            drop(task);
+
+            let inserted = match self.initial_invite_cleanup_tasks.entry(map_dialog_id) {
+                Entry::Vacant(entry) => {
+                    entry.insert(InitialInviteCleanupTask {
+                        token: task_token,
+                        abort,
+                        completion: completion_rx,
+                    });
+                    let _ = start_tx.send(());
+                    true
+                }
+                Entry::Occupied(_) => {
+                    abort.abort();
+                    false
+                }
+            };
+            (inserted, result_rx)
+        };
+
+        if inserted {
+            return result_rx.await.unwrap_or_else(|_| {
+                Err(ApiError::Dialog {
+                    message: "INVITE cancellation task failed".to_string(),
+                })
+            });
+        }
+
+        // A retained supervisor or another exact CANCEL already owns the
+        // cleanup slot. The failover-plan mutex/state is the shared wire
+        // author, so this call either waits for and returns the same CANCEL,
+        // retries a proven zero-wire attempt, or reports the fixed
+        // wire-unknown state without emitting a duplicate.
+        self.dispatch_cancel_for_transaction(owner.dialog_id(), &invite_tx_id, extra_headers)
+            .await
+    }
+
+    /// Raw lifecycle-supervisor entry point. It deliberately bypasses the
+    /// public task wrapper because the caller is already the retained cleanup
+    /// task for this exact owner.
+    async fn send_cancel_for_teardown(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
+        let invite_tx_id = self
+            .resolve_cancellable_invite_transaction(dialog_id)
+            .await?;
+        self.dispatch_cancel_for_transaction(dialog_id, &invite_tx_id, Vec::new())
+            .await
     }
 
     // ========================================
@@ -3201,12 +3298,31 @@ mod staged_initial_invite_tests {
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::sync::atomic::{AtomicBool, AtomicUsize};
 
+    #[derive(Clone)]
+    struct AcceptingSessionHandler;
+
+    #[async_trait::async_trait]
+    impl rvoip_infra_common::events::coordinator::CrossCrateEventHandler for AcceptingSessionHandler {
+        async fn handle(
+            &self,
+            _event: Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
     #[derive(Debug)]
     struct CountingTransport {
         addr: SocketAddr,
         sends: AtomicUsize,
         cancel_sends: AtomicUsize,
+        ack_sends: AtomicUsize,
+        bye_sends: AtomicUsize,
         failures_remaining: AtomicUsize,
+        cancel_prepare_failures_remaining: AtomicUsize,
+        block_cancel_send: AtomicBool,
+        cancel_send_gate: tokio::sync::Semaphore,
+        wire_methods: std::sync::Mutex<Vec<Method>>,
         closed: AtomicBool,
     }
 
@@ -3216,7 +3332,13 @@ mod staged_initial_invite_tests {
                 addr: "127.0.0.1:5060".parse().expect("test address"),
                 sends: AtomicUsize::new(0),
                 cancel_sends: AtomicUsize::new(0),
+                ack_sends: AtomicUsize::new(0),
+                bye_sends: AtomicUsize::new(0),
                 failures_remaining: AtomicUsize::new(0),
+                cancel_prepare_failures_remaining: AtomicUsize::new(0),
+                block_cancel_send: AtomicBool::new(false),
+                cancel_send_gate: tokio::sync::Semaphore::new(0),
+                wire_methods: std::sync::Mutex::new(Vec::new()),
                 closed: AtomicBool::new(false),
             })
         }
@@ -3232,6 +3354,35 @@ mod staged_initial_invite_tests {
         fn cancel_sends(&self) -> usize {
             self.cancel_sends.load(Ordering::SeqCst)
         }
+
+        fn ack_sends(&self) -> usize {
+            self.ack_sends.load(Ordering::SeqCst)
+        }
+
+        fn bye_sends(&self) -> usize {
+            self.bye_sends.load(Ordering::SeqCst)
+        }
+
+        fn wire_methods(&self) -> Vec<Method> {
+            self.wire_methods
+                .lock()
+                .expect("wire method observation lock")
+                .clone()
+        }
+
+        fn fail_next_cancel_prepares(&self, count: usize) {
+            self.cancel_prepare_failures_remaining
+                .store(count, Ordering::SeqCst);
+        }
+
+        fn block_cancel_send(&self) {
+            self.block_cancel_send.store(true, Ordering::Release);
+        }
+
+        fn release_cancel_send(&self) {
+            self.block_cancel_send.store(false, Ordering::Release);
+            self.cancel_send_gate.add_permits(1);
+        }
     }
 
     #[async_trait::async_trait]
@@ -3246,11 +3397,37 @@ mod staged_initial_invite_tests {
             _destination: SocketAddr,
         ) -> TransportResult<()> {
             self.sends.fetch_add(1, Ordering::SeqCst);
+            if let rvoip_sip_core::Message::Request(request) = &message {
+                self.wire_methods
+                    .lock()
+                    .expect("wire method observation lock")
+                    .push(request.method().clone());
+            }
             if matches!(
                 &message,
                 rvoip_sip_core::Message::Request(request) if request.method() == Method::Cancel
             ) {
                 self.cancel_sends.fetch_add(1, Ordering::SeqCst);
+                if self.block_cancel_send.load(Ordering::Acquire) {
+                    let permit = self
+                        .cancel_send_gate
+                        .acquire()
+                        .await
+                        .map_err(|_| rvoip_sip_transport::error::Error::TransportClosed)?;
+                    permit.forget();
+                }
+            }
+            if matches!(
+                &message,
+                rvoip_sip_core::Message::Request(request) if request.method() == Method::Ack
+            ) {
+                self.ack_sends.fetch_add(1, Ordering::SeqCst);
+            }
+            if matches!(
+                &message,
+                rvoip_sip_core::Message::Request(request) if request.method() == Method::Bye
+            ) {
+                self.bye_sends.fetch_add(1, Ordering::SeqCst);
             }
             if self
                 .failures_remaining
@@ -3262,6 +3439,30 @@ mod staged_initial_invite_tests {
                 return Err(rvoip_sip_transport::error::Error::TransportClosed);
             }
             Ok(())
+        }
+
+        async fn prepare_message_route(
+            &self,
+            message: &rvoip_sip_core::Message,
+            route: rvoip_sip_transport::TransportRoute,
+        ) -> TransportResult<rvoip_sip_transport::TransportRoute> {
+            let is_cancel = matches!(
+                message,
+                rvoip_sip_core::Message::Request(request) if request.method() == Method::Cancel
+            );
+            if is_cancel
+                && self
+                    .cancel_prepare_failures_remaining
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        (remaining > 0).then(|| remaining - 1)
+                    })
+                    .is_ok()
+            {
+                return Err(rvoip_sip_transport::error::Error::InvalidState(
+                    "injected CANCEL route preparation failure".into(),
+                ));
+            }
+            Ok(route)
         }
 
         async fn close(&self) -> TransportResult<()> {
@@ -3314,6 +3515,42 @@ mod staged_initial_invite_tests {
             call_id: Some(call_id.to_string()),
             ..Default::default()
         }
+    }
+
+    async fn dispatch_retained_initial_invite(
+        manager: &UnifiedDialogManager,
+        session_id: &str,
+        call_id: &str,
+    ) -> (InitialInviteOwner, TransactionKey) {
+        let plan = manager
+            .plan_initial_invite(Some(session_id.to_string()), options(call_id))
+            .await
+            .expect("plan retained initial INVITE");
+        let installed = manager
+            .install_initial_invite(plan)
+            .expect("install retained initial INVITE");
+        let owner = installed.owner().clone();
+        let completion = manager.dispatch_initial_invite(installed).wait().await;
+        assert_eq!(completion.wire_outcome(), InitialInviteWireOutcome::Sent);
+        let transaction = completion
+            .transaction_id()
+            .cloned()
+            .expect("sent INVITE transaction");
+        (owner, transaction)
+    }
+
+    async fn release_test_initial_invite(
+        manager: &UnifiedDialogManager,
+        owner: &InitialInviteOwner,
+    ) {
+        assert!(manager.finish_initial_invite_teardown(owner).await);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !manager.initial_invite_cleanup_tasks.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cleanup task release");
     }
 
     async fn expect_incomplete_protocol_drain(manager: &UnifiedDialogManager) {
@@ -3464,6 +3701,234 @@ mod staged_initial_invite_tests {
             available_before
         );
         assert!(!manager.finish_initial_invite_teardown(&owner).await);
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_zero_wire_restores_plan_and_exact_retry_sends_once() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let (owner, _invite_transaction) = dispatch_retained_initial_invite(
+            &manager,
+            "session-cancel-zero-wire",
+            "call-cancel-zero-wire",
+        )
+        .await;
+        transport.fail_next_cancel_prepares(1);
+
+        assert!(manager.send_cancel(owner.dialog_id()).await.is_err());
+        assert_eq!(transport.cancel_sends(), 0);
+        assert!(manager.initial_invite_cleanup_tasks.is_empty());
+        assert!(manager
+            .initial_invite_installs
+            .get(owner.dialog_id())
+            .is_some_and(|record| { record.phase.load(Ordering::Acquire) == INITIAL_INVITE_SENT }));
+        assert!(
+            manager
+                .core
+                .invite_cancel_is_retryable(owner.dialog_id())
+                .await
+        );
+
+        let first = manager
+            .send_cancel(owner.dialog_id())
+            .await
+            .expect("retry proven zero-wire CANCEL");
+        let second = manager
+            .send_cancel(owner.dialog_id())
+            .await
+            .expect("same exact CANCEL author is idempotent");
+        assert_eq!(first, second);
+        assert_eq!(transport.cancel_sends(), 1);
+        assert!(manager
+            .initial_invite_installs
+            .get(owner.dialog_id())
+            .is_some_and(|record| {
+                record.phase.load(Ordering::Acquire) == INITIAL_INVITE_WIRE_UNKNOWN
+            }));
+
+        release_test_initial_invite(&manager, &owner).await;
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn explicit_cancel_write_error_is_fenced_and_never_duplicated() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let (owner, _invite_transaction) = dispatch_retained_initial_invite(
+            &manager,
+            "session-cancel-write-unknown",
+            "call-cancel-write-unknown",
+        )
+        .await;
+        transport.fail_next_sends(1);
+
+        assert!(manager.send_cancel(owner.dialog_id()).await.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !manager
+                .core
+                .invite_cancel_requires_terminal_supervision(owner.dialog_id())
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("wire-unknown CANCEL ownership handoff");
+        assert!(manager.send_cancel(owner.dialog_id()).await.is_err());
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(transport.cancel_sends(), 1);
+
+        release_test_initial_invite(&manager, &owner).await;
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn dropping_explicit_cancel_waiter_keeps_one_owned_wire_attempt() {
+        let (manager, transport, _events) = make_test_manager().await;
+        let (owner, _invite_transaction) = dispatch_retained_initial_invite(
+            &manager,
+            "session-cancel-waiter-drop",
+            "call-cancel-waiter-drop",
+        )
+        .await;
+        transport.block_cancel_send();
+        let task_manager = manager.clone();
+        let task_dialog_id = owner.dialog_id().clone();
+        let waiter = tokio::spawn(async move { task_manager.send_cancel(&task_dialog_id).await });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while transport.cancel_sends() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("CANCEL crossed conservative write boundary");
+        waiter.abort();
+        assert!(waiter.await.expect_err("waiter abort").is_cancelled());
+        transport.release_cancel_send();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !manager
+                .core
+                .invite_cancel_requires_terminal_supervision(owner.dialog_id())
+                .await
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached CANCEL completed ownership handoff");
+        manager
+            .send_cancel(owner.dialog_id())
+            .await
+            .expect("same retained CANCEL result");
+        assert_eq!(transport.cancel_sends(), 1);
+
+        release_test_initial_invite(&manager, &owner).await;
+        manager.stop().await.expect("stop manager");
+    }
+
+    #[tokio::test]
+    async fn late_cancelled_invite_success_gets_ack_then_one_supervised_bye() {
+        use crate::manager::transaction_integration::InviteFailoverEventDisposition;
+
+        let (manager, transport, _events) = make_test_manager().await;
+        let coordinator = Arc::new(
+            rvoip_infra_common::events::coordinator::GlobalEventCoordinator::new(
+                rvoip_infra_common::events::EventCoordinatorConfig::monolithic(),
+            )
+            .await
+            .expect("late-success event coordinator"),
+        );
+        coordinator
+            .register_handler("dialog_to_session", AcceptingSessionHandler)
+            .await
+            .expect("late-success authoritative session handler");
+        let event_hub =
+            crate::events::DialogEventHub::new(coordinator, Arc::new(manager.core.clone()))
+                .await
+                .expect("late-success dialog event hub");
+        manager.core.set_event_hub(event_hub).await;
+        let (owner, invite_transaction) = dispatch_retained_initial_invite(
+            &manager,
+            "session-cancel-late-success",
+            "call-cancel-late-success",
+        )
+        .await;
+        manager
+            .send_cancel(owner.dialog_id())
+            .await
+            .expect("send exact CANCEL");
+
+        let invite = manager
+            .core
+            .transaction_manager()
+            .original_request(&invite_transaction)
+            .await
+            .expect("INVITE lookup")
+            .expect("retained INVITE request");
+        let response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &invite,
+            StatusCode::Ok,
+            Some("OK"),
+        )
+        .to("Bob", "sip:bob@127.0.0.1:5099", Some("late-cancel-success"))
+        .contact("sip:bob@127.0.0.1:5099", None)
+        .build();
+        let event = TransactionEvent::SuccessResponse {
+            transaction_id: invite_transaction.clone(),
+            response: response.clone(),
+            need_ack: true,
+            source: "127.0.0.1:5099".parse().expect("peer address"),
+        };
+        let claim = match manager.core.handle_invite_failover_event(&event).await {
+            InviteFailoverEventDisposition::ContinueSelectedSuccess(claim) => claim,
+            InviteFailoverEventDisposition::ContinueCancelTerminal(_) => {
+                panic!("late INVITE success was classified as a CANCEL terminal response")
+            }
+            InviteFailoverEventDisposition::Continue => {
+                panic!("late accepted CANCEL race lost selected-success authority")
+            }
+            InviteFailoverEventDisposition::Consumed => {
+                panic!("late accepted CANCEL race was consumed as a non-selected fork")
+            }
+        };
+        manager
+            .core
+            .process_transaction_event_with_causal_delivery(
+                &invite_transaction,
+                owner.dialog_id(),
+                event,
+                Some(claim),
+                None,
+            )
+            .await
+            .expect("canonical late-success delivery");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while transport.ack_sends() == 0 || transport.bye_sends() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ACK then lifecycle-owned BYE");
+        assert_eq!(transport.cancel_sends(), 1);
+        assert_eq!(transport.ack_sends(), 1);
+        assert_eq!(transport.bye_sends(), 1);
+        let wire_methods = transport.wire_methods();
+        let ack_position = wire_methods
+            .iter()
+            .position(|method| method == &Method::Ack)
+            .expect("ACK wire attempt");
+        let bye_position = wire_methods
+            .iter()
+            .position(|method| method == &Method::Bye)
+            .expect("BYE wire attempt");
+        assert!(
+            ack_position < bye_position,
+            "late 2xx must send ACK before supervised BYE: {wire_methods:?}"
+        );
+
+        release_test_initial_invite(&manager, &owner).await;
         manager.stop().await.expect("stop manager");
     }
 

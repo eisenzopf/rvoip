@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
 > **Maturity tiers (plain numeric — no `-alpha`/`-beta` suffixes):** `0.1.x` = alpha,
-> `0.2.x` = beta, `1.0` = stable. The **`sip`** surface is **beta (`0.2.2`)**; the other
+> `0.2.x` = beta, `1.0` = stable. The **`sip`** surface is **beta (`0.2.5`)**; the other
 > surfaces (`app`, `webrtc`, `uctp`, the `voip-3` extensions, `client`) are **alpha (`0.1.0`)** —
 > expect breaking changes before `1.0`. Pin exact versions.
 
@@ -19,7 +19,7 @@ extensions behind cargo features — defaulting to the SIP product. One process,
 
 ```toml
 [dependencies]
-rvoip = "0.2.2"   # default feature: sip
+rvoip = "0.2.5"   # default feature: sip
 ```
 
 ```rust
@@ -49,7 +49,7 @@ For a compact cross-transport gateway, enable `app` and declare roles,
 transports, assignment, and callbacks through `rvoip::app`:
 
 ```toml
-rvoip = { version = "0.2.2", features = ["app"] }
+rvoip = { version = "0.2.5", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -94,7 +94,7 @@ backends, and the **AI harness** — are reachable only through the `voip-3` fea
 
 ```toml
 # e.g. the full multi-transport rvoip-3 experience
-rvoip = { version = "0.2.2", features = ["voip-3"] }
+rvoip = { version = "0.2.5", features = ["voip-3"] }
 ```
 
 ## Module layout
@@ -113,7 +113,7 @@ rvoip = { version = "0.2.2", features = ["voip-3"] }
 
 ## Crate map
 
-**Beta — published at `0.2.2`** (the SIP product + shared spine): `rvoip` (facade),
+**Beta release candidate in this checkout: `0.2.5`** (the SIP product + shared spine): `rvoip` (facade),
 [`rvoip-core`](../foundation/rvoip-core), [`rvoip-core-traits`](../foundation/rvoip-core-traits),
 [`rvoip-infra-common`](../foundation/infra-common), the media engine
 ([`rvoip-media-core`](../media/media-core) · [`rvoip-rtp-core`](../media/rtp-core) · [`rvoip-codec-core`](../media/codec-core)),

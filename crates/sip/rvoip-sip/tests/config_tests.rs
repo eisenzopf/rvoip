@@ -233,6 +233,23 @@ fn test_config_signaling_only_server_high_performance_recipe() {
 }
 
 #[test]
+fn test_carrier_burst_recipes_provision_dialog_causal_lanes() {
+    let balanced = Config::local("bob", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-balanced").with_capacity(8_500),
+        )
+        .unwrap();
+    let high_density = Config::local("bob", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-high-density").with_capacity(12_500),
+        )
+        .unwrap();
+
+    assert_eq!(balanced.sip_dialog_dispatch_workers, Some(16));
+    assert_eq!(high_density.sip_dialog_dispatch_workers, Some(32));
+}
+
+#[test]
 fn test_config_profile_defaults_can_be_overridden_after_profile() {
     let c = Config::local("alice", 5060)
         .with_pbx_media_server_performance(2_000)

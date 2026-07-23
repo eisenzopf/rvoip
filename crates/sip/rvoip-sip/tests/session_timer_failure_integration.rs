@@ -4,10 +4,10 @@
 //! Alice calls Bob with a 4-second `Session-Expires`. Bob accepts the
 //! call and then exits its process at t≈1.5 s — before Alice's first
 //! refresh at t≈2 s. Alice's UPDATE then lands on a closed UDP port;
-//! dialog-core's `session_timer` task awaits the transaction outcome,
-//! sees a `TransactionTimeout`, falls back to a re-INVITE which also
-//! times out, and tears the dialog down with a `Reason: SIP ;cause=408`
-//! BYE. The session layer surfaces `Event::SessionRefreshFailed`.
+//! rvoip-sip's exact-lifecycle timer observes the transaction timeout,
+//! drives the YAML-owned re-INVITE fallback, and tears the dialog down with a
+//! `Reason: SIP ;cause=408` BYE when that fallback also times out. The session
+//! layer surfaces `Event::SessionRefreshFailed`.
 //!
 //! Alice's binary asserts it sees `SessionRefreshFailed` within 15 s.
 //! `RVOIP_TEST_TRANSACTION_TIMEOUT_MS=2500` shortens Timer F (default
@@ -15,10 +15,12 @@
 //! send-to-dead-port is silent, so we can't rely on ICMP port
 //! unreachable and need the transaction-layer timeout to do the work.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35073;
 const BOB_PORT: u16 = 35074;
@@ -29,27 +31,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
@@ -69,20 +50,10 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
 
 #[test]
 fn session_timer_refresh_failure_emits_event() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_session_timer_failure_alice",
-            "--example",
-            "regression_session_timer_failure_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "regression_session_timer_failure_alice",
+        "regression_session_timer_failure_bob",
+    ]);
 
     let env_vars: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

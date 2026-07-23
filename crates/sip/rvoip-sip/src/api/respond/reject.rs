@@ -9,12 +9,15 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use crate::errors::SessionError;
+use crate::session_registry::SessionRegistryHandle;
 
 /// Builds and sends a non-2xx final response rejecting an inbound
 /// INVITE (default 486 Busy Here).
 pub struct RejectBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     status: u16,
     reason: Option<String>,
     retry_after: Option<u32>,
@@ -27,9 +30,19 @@ pub struct RejectBuilder {
 
 impl RejectBuilder {
     pub(crate) fn new(coord: Arc<UnifiedCoordinator>, call_id: CallId) -> Self {
+        let lifecycle_handle = coord.helpers.state_machine.store.lifecycle_handle(&call_id);
+        Self::new_captured(coord, call_id, lifecycle_handle)
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             coord,
             call_id,
+            lifecycle_handle,
             status: 486,
             reason: None,
             retry_after: None,
@@ -74,6 +87,12 @@ impl RejectBuilder {
             .reason
             .clone()
             .unwrap_or_else(|| default_reason_for(self.status).to_string());
+        let lifecycle_handle = self.lifecycle_handle.as_ref().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Inbound INVITE {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
         let mut extras = take_staged(&mut self.state);
 
         // Stamp Retry-After / Warning into the extras list. These are
@@ -92,27 +111,19 @@ impl RejectBuilder {
             ));
         }
 
-        if !extras.is_empty() {
-            // SIP_API_DESIGN_2 §3.4 — stash extras on the session so
-            // `Action::SendRejectResponse` picks them up on its single
-            // wire dispatch. We previously sent the response twice
-            // (once via `send_response_with_options`, once via
-            // `reject_call → SendRejectResponse`); the second response
-            // overwrote the first on the wire and dropped the staged
-            // extras. The stash-then-dispatch pattern guarantees one
-            // wire response with the right extras.
-            let session = self.coord.session_state(&self.call_id).await.map_err(|_| {
-                crate::errors::SessionError::SessionNotFound(self.call_id.to_string())
-            })?;
-            let mut session = session;
-            session.reject_response_extras = Some(extras);
-            self.coord.update_session_state(session).await?;
+        if extras.is_empty() {
+            self.coord
+                .helpers
+                .reject_call_exact(lifecycle_handle, self.status, &reason)
+                .await
+        } else {
+            // Carry extras through the exact transition lane so there is one
+            // response and no pre-dispatch session snapshot write.
+            self.coord
+                .helpers
+                .reject_call_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
+                .await
         }
-
-        self.coord
-            .helpers
-            .reject_call(&self.call_id, self.status, &reason)
-            .await
     }
 }
 

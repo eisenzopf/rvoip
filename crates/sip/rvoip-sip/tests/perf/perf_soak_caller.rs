@@ -128,7 +128,7 @@ async fn perf_soak_caller() {
     let retention_sampler = support::soak::EndpointRetentionSampler::start(
         "caller",
         Arc::clone(&caller),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler =
         MemoryDiagnosticSampler::start("caller", &settings, memory_diagnostic_interval());

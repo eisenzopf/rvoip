@@ -1,8 +1,8 @@
 //! Regression for a peer that answers BYE before the initiating state-machine
 //! action has unwound.
 //!
-//! Cleanup is response-driven (with the coordinator's retained exact-release
-//! fallback), never a second action in the transition that sends BYE.
+//! Cleanup is driven by the exact outbound-transaction completion, which
+//! commits the YAML terminal transition before one retained exact release.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -23,7 +23,9 @@ use tokio::sync::oneshot;
 const CALLER_PORT: u16 = 17_602;
 const CONCURRENT_CALLER_PORT: u16 = 17_603;
 const DELAYED_FAILURE_CALLER_PORT: u16 = 17_604;
+#[cfg(feature = "perf-tests")]
 const CANCELLED_BUILDER_CALLER_PORT: u16 = 17_605;
+const PEER_TERMINATED_CALLER_PORT: u16 = 17_606;
 
 fn caller_config() -> Config {
     let mut config = Config::local("fast-bye-caller", CALLER_PORT);
@@ -46,6 +48,14 @@ fn delayed_failure_caller_config() -> Config {
     config
 }
 
+fn peer_terminated_caller_config() -> Config {
+    let mut config = Config::local("peer-terminated-bye-caller", PEER_TERMINATED_CALLER_PORT);
+    config.media_port_start = 28_001;
+    config.media_port_end = 28_100;
+    config
+}
+
+#[cfg(feature = "perf-tests")]
 fn cancelled_builder_caller_config() -> Config {
     let mut config = Config::local(
         "cancelled-builder-bye-caller",
@@ -97,8 +107,9 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
                 Method::Ack => {}
                 Method::Bye => {
                     // Send the final response before notifying the test task.
-                    // Dialog-core can therefore publish DialogTerminated while
-                    // the caller is still awaiting SendBYE.
+                    // The exact completion can therefore enter the terminal
+                    // YAML transition while the caller is still awaiting the
+                    // BYE action.
                     let response = create_response(&request, StatusCode::Ok);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
@@ -123,11 +134,15 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
         .await
         .expect("caller coordinator");
     let target = format!("sip:callee@127.0.0.1:{uas_port}");
-    let session_id = caller
-        .invite(Some("sip:caller@127.0.0.1".to_string()), &target)
-        .send()
-        .await
-        .expect("INVITE dispatch");
+    let session_id = tokio::time::timeout(
+        Duration::from_secs(5),
+        caller
+            .invite(Some("sip:caller@127.0.0.1".to_string()), &target)
+            .send(),
+    )
+    .await
+    .expect("INVITE dispatch timed out after fast 200 OK")
+    .expect("INVITE dispatch");
 
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -242,6 +257,127 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
         .shutdown_gracefully(Some(Duration::from_secs(1)))
         .await
         .expect("terminal BYE must retire the retained initial-INVITE owner");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn bye_481_after_peer_termination_is_graceful_and_cleans_exactly_once() {
+    let uas = UdpSocket::bind("127.0.0.1:0")
+        .await
+        .expect("peer-terminated UAS bind");
+    let uas_port = uas
+        .local_addr()
+        .expect("peer-terminated UAS address")
+        .port();
+    let (bye_seen_tx, bye_seen_rx) = oneshot::channel();
+
+    let uas_task = tokio::spawn(async move {
+        let mut bye_seen_tx = Some(bye_seen_tx);
+        let mut packet = vec![0u8; 8_192];
+        loop {
+            let (bytes, peer) = uas
+                .recv_from(&mut packet)
+                .await
+                .expect("peer-terminated UAS receive");
+            let Message::Request(request) =
+                parse_message(&packet[..bytes]).expect("parse peer-terminated request")
+            else {
+                continue;
+            };
+
+            match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    if let Some(TypedHeader::To(to)) = response
+                        .headers
+                        .iter_mut()
+                        .find(|header| matches!(header, TypedHeader::To(_)))
+                    {
+                        to.set_tag("peer-terminated-bye-uas");
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
+                    ));
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send peer-terminated INVITE 200");
+                }
+                Method::Ack => {}
+                Method::Bye => {
+                    // RFC 3261 §15.1.1: 481 is the expected crossed-BYE
+                    // outcome when this peer has already removed the dialog.
+                    let response =
+                        create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send peer-terminated BYE 481");
+                    if let Some(sender) = bye_seen_tx.take() {
+                        let _ = sender.send(());
+                    }
+                    return;
+                }
+                _ => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    uas.send_to(&Message::Response(response).to_bytes(), peer)
+                        .await
+                        .expect("send peer-terminated generic response");
+                }
+            }
+        }
+    });
+
+    let cleanup_before = cleanup_session_diag::cleaned_total();
+    let caller = UnifiedCoordinator::new(peer_terminated_caller_config())
+        .await
+        .expect("peer-terminated caller coordinator");
+    let target = format!("sip:callee@127.0.0.1:{uas_port}");
+    let session_id = caller
+        .invite(Some("sip:caller@127.0.0.1".to_string()), &target)
+        .send()
+        .await
+        .expect("peer-terminated INVITE dispatch");
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(caller.get_state(&session_id).await, Ok(CallState::Active)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer-terminated caller never became active");
+
+    tokio::time::timeout(Duration::from_secs(5), caller.hangup(&session_id))
+        .await
+        .expect("peer-terminated hangup timed out")
+        .expect("an exact BYE 481 must be graceful terminal completion");
+    bye_seen_rx
+        .await
+        .expect("peer-terminated UAS never observed BYE");
+
+    assert!(
+        caller.list_sessions().await.is_empty(),
+        "BYE 481 returned before exact session cleanup"
+    );
+    assert_eq!(
+        cleanup_session_diag::cleaned_total(),
+        cleanup_before + 1,
+        "BYE 481 must release media exactly once"
+    );
+    #[cfg(feature = "perf-tests")]
+    assert_eq!(
+        caller.perf_diagnostic_snapshot().await["dialog_adapter"]["outgoing_bye_tx"].as_u64(),
+        Some(0),
+        "BYE 481 retained its exact transaction owner"
+    );
+
+    uas_task.await.expect("peer-terminated UAS task");
+    caller
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await
+        .expect("peer-terminated BYE cleanup must retire the exact session");
 }
 
 #[cfg(feature = "perf-tests")]

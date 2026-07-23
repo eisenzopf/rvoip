@@ -31,7 +31,94 @@ use crate::api::headers::view::{
 use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::session_lifecycle::{OwnedOperation, OwnedOperationCompletion, SessionOperationKind};
+use crate::session_registry::SessionRegistryHandle;
+use crate::state_table::EventType;
 use crate::types::CallState;
+
+const INCOMING_GUARD_RESPONSE_COMPLETION_GRACE: Duration = Duration::from_secs(2);
+const INCOMING_RESOLUTION_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn wait_for_incoming_guard_cancellation(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow_and_update() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn rollback_owned_incoming_guard<T>(
+    operation: OwnedOperation,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    operation
+        .rollback(value)
+        .await
+        .unwrap_or_else(|_| panic!("incoming-call guard exact rollback failed"))
+}
+
+async fn commit_owned_incoming_guard<T>(
+    operation: OwnedOperation,
+    value: T,
+) -> OwnedOperationCompletion<T> {
+    match operation.commit() {
+        Ok(committed) => committed.complete(value),
+        Err(failure) => rollback_owned_incoming_guard(failure.into_operation(), value).await,
+    }
+}
+
+fn spawn_exact_incoming_reject(
+    coordinator: Arc<UnifiedCoordinator>,
+    lifecycle_handle: Option<SessionRegistryHandle>,
+    status: u16,
+    reason: String,
+) {
+    let Some(lifecycle_handle) = lifecycle_handle else {
+        tracing::warn!(
+            status,
+            "incoming-call rejection suppressed because exact lifecycle authority is absent"
+        );
+        return;
+    };
+    let authority = Arc::clone(coordinator.helpers.state_machine.store.authority());
+    let state_machine = Arc::clone(&coordinator.helpers.state_machine);
+    let operation_key = lifecycle_handle.key().clone();
+    let log_call_id = lifecycle_handle.session_id().clone();
+    let scheduled = authority.spawn_owned_exact(
+        &operation_key,
+        SessionOperationKind::Signaling,
+        INCOMING_RESOLUTION_OPERATION_TIMEOUT,
+        move |operation| async move {
+            let committed = match operation.commit() {
+                Ok(committed) => committed,
+                Err(failure) => {
+                    return rollback_owned_incoming_guard(failure.into_operation(), ()).await;
+                }
+            };
+            if let Err(error) = state_machine
+                .process_event_exact(&lifecycle_handle, EventType::RejectCall { status, reason })
+                .await
+            {
+                tracing::debug!(
+                    session_id = %lifecycle_handle.session_id(),
+                    %error,
+                    "exact incoming-call rejection did not dispatch"
+                );
+            }
+            committed.complete(())
+        },
+    );
+    if let Err(error) = scheduled {
+        tracing::debug!(
+            session_id = %log_call_id,
+            %error,
+            "exact incoming-call rejection was not admitted"
+        );
+    }
+}
 
 /// An incoming SIP INVITE that must be handled.
 ///
@@ -89,6 +176,9 @@ pub struct IncomingCall {
     pub(crate) transport: crate::auth::SipTransportSecurityContext,
     /// Internal — coordinator for performing accept/reject.
     pub(crate) coordinator: Arc<UnifiedCoordinator>,
+    /// Causal authority for the exact registry lifetime that emitted this
+    /// inbound INVITE. It is never reconstructed by delayed work.
+    lifecycle_handle: Option<SessionRegistryHandle>,
     /// Whether this call has already been resolved (to catch double-resolve).
     resolved: bool,
 }
@@ -121,12 +211,29 @@ impl std::fmt::Debug for IncomingCall {
 }
 
 impl IncomingCall {
+    #[cfg(test)]
     pub(crate) fn new(
         call_id: CallId,
         from: String,
         to: String,
         sdp: Option<String>,
         coordinator: Arc<UnifiedCoordinator>,
+    ) -> Self {
+        let lifecycle_handle = coordinator
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(&call_id);
+        Self::new_captured(call_id, from, to, sdp, coordinator, lifecycle_handle)
+    }
+
+    pub(crate) fn new_captured(
+        call_id: CallId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
     ) -> Self {
         Self {
             call_id,
@@ -138,26 +245,40 @@ impl IncomingCall {
             request: None,
             transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator,
+            lifecycle_handle,
             resolved: false,
         }
     }
 
-    /// Construct an `IncomingCall` with a parsed inbound INVITE
-    /// retained. Populates [`Self::headers`] from the request for
-    /// back-compat with the legacy field.
-    pub(crate) fn with_request(
+    #[cfg(test)]
+    pub(crate) fn new_exact(
+        call_id: CallId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: SessionRegistryHandle,
+    ) -> Self {
+        debug_assert_eq!(&call_id, lifecycle_handle.session_id());
+        Self::new_captured(call_id, from, to, sdp, coordinator, Some(lifecycle_handle))
+    }
+
+    /// Construct an `IncomingCall` with a parsed inbound INVITE retained.
+    /// Populates [`Self::headers`] from the request for compatibility with the
+    /// legacy field while preserving the captured exact lifecycle.
+    pub(crate) fn with_request_captured(
         call_id: CallId,
         from: String,
         to: String,
         sdp: Option<String>,
         coordinator: Arc<UnifiedCoordinator>,
         request: Arc<Request>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
     ) -> Self {
         let mut headers: HashMap<String, String> = HashMap::new();
         for hdr in &request.headers {
             let name = hdr.name();
             let key = legacy_header_key(&name);
-            // Keep first-seen wire value for the legacy HashMap.
             headers.entry(key).or_insert_with(|| hdr.to_string());
         }
         Self {
@@ -170,6 +291,7 @@ impl IncomingCall {
             request: Some(request),
             transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator,
+            lifecycle_handle,
             resolved: false,
         }
     }
@@ -304,7 +426,16 @@ impl IncomingCall {
     /// [`reject()`]: IncomingCall::reject
     /// [`PeerControl::send_early_media`]: crate::api::stream_peer::PeerControl::send_early_media
     pub async fn send_early_media(&self, sdp: Option<String>) -> Result<()> {
-        self.coordinator.send_early_media(&self.call_id, sdp).await
+        let lifecycle_handle = self.lifecycle_handle.as_ref().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Incoming call {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
+        self.coordinator
+            .helpers
+            .send_early_media_exact(lifecycle_handle, sdp)
+            .await
     }
 
     /// Send a reliable 183 Session Progress and immediately swap the
@@ -342,11 +473,18 @@ impl IncomingCall {
         sdp: Option<String>,
         source: crate::api::unified::AudioSource,
     ) -> Result<()> {
+        let lifecycle_handle = self.lifecycle_handle.as_ref().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Incoming call {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
         self.coordinator
-            .send_early_media(&self.call_id, sdp)
+            .helpers
+            .send_early_media_exact(lifecycle_handle, sdp)
             .await?;
         self.coordinator
-            .set_audio_source(&self.call_id, source)
+            .set_audio_source_exact(lifecycle_handle, source)
             .await
     }
 
@@ -363,21 +501,12 @@ impl IncomingCall {
     /// ```
     pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;
-        let coordinator = self.coordinator.clone();
-        let call_id = self.call_id.clone();
-        let reason = reason.to_string();
-        tokio::spawn(async move {
-            if coordinator
-                .reject(&call_id)
-                .with_status(status)
-                .with_reason(reason)
-                .send()
-                .await
-                .is_err()
-            {
-                tracing::warn!(call_id = %call_id, "[IncomingCall] reject failed");
-            }
-        });
+        spawn_exact_incoming_reject(
+            self.coordinator.clone(),
+            self.lifecycle_handle.clone(),
+            status,
+            reason.to_string(),
+        );
     }
 
     /// Reject with **486 Busy Here**.
@@ -445,12 +574,15 @@ impl IncomingCall {
             ));
         }
         self.resolved = true;
-        self.coordinator
-            .redirect(&self.call_id)
-            .with_status(status)
-            .with_contacts(contacts)
-            .send()
-            .await
+        crate::api::respond::RedirectBuilder::new_captured(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
+        .with_status(status)
+        .with_contacts(contacts)
+        .send()
+        .await
     }
 
     /// Defer the accept/reject decision, keeping the call in `Ringing` state
@@ -476,9 +608,18 @@ impl IncomingCall {
     pub fn defer(mut self, timeout: Duration) -> IncomingCallGuard {
         self.resolved = true; // prevent Drop from also rejecting
         if self.coordinator.fast_auto_accept_incoming_calls() {
-            return IncomingCallGuard::resolved(self.call_id.clone(), self.coordinator.clone());
+            return IncomingCallGuard::resolved(
+                self.call_id.clone(),
+                self.coordinator.clone(),
+                self.lifecycle_handle.clone(),
+            );
         }
-        IncomingCallGuard::new(self.call_id.clone(), self.coordinator.clone(), timeout)
+        IncomingCallGuard::new_captured(
+            self.call_id.clone(),
+            self.coordinator.clone(),
+            timeout,
+            self.lifecycle_handle.clone(),
+        )
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -489,26 +630,39 @@ impl IncomingCall {
     /// staged before sending 200 OK.
     pub fn accept_builder(mut self) -> crate::api::respond::AcceptBuilder {
         self.resolved = true;
-        crate::api::respond::AcceptBuilder::new(self.coordinator.clone(), self.call_id.clone())
+        crate::api::respond::AcceptBuilder::new_captured(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin a `RejectBuilder` for a custom 4xx/5xx/6xx response.
     pub fn reject_builder(mut self) -> crate::api::respond::RejectBuilder {
         self.resolved = true;
-        crate::api::respond::RejectBuilder::new(self.coordinator.clone(), self.call_id.clone())
+        crate::api::respond::RejectBuilder::new_captured(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin a `RedirectBuilder` for a custom 3xx response.
     pub fn redirect_builder(mut self) -> crate::api::respond::RedirectBuilder {
         self.resolved = true;
-        crate::api::respond::RedirectBuilder::new(self.coordinator.clone(), self.call_id.clone())
+        crate::api::respond::RedirectBuilder::new_captured(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin a `ProvisionalBuilder` for a 1xx reliable provisional.
     pub fn send_provisional_builder(&self, code: u16) -> crate::api::respond::ProvisionalBuilder {
-        crate::api::respond::ProvisionalBuilder::new(
+        crate::api::respond::ProvisionalBuilder::new_captured(
             self.coordinator.clone(),
             self.call_id.clone(),
+            self.lifecycle_handle.clone(),
             code,
         )
     }
@@ -518,11 +672,12 @@ impl IncomingCall {
         &self,
         scheme: crate::api::respond::AuthScheme,
     ) -> crate::api::respond::AuthChallengeBuilder {
-        crate::api::respond::AuthChallengeBuilder::new(
+        crate::api::respond::AuthChallengeBuilder::new_captured(
             self.coordinator.clone(),
             self.call_id.clone(),
             rvoip_sip_core::types::Method::Invite,
             scheme,
+            self.lifecycle_handle.clone(),
         )
     }
 
@@ -533,9 +688,10 @@ impl IncomingCall {
         status: u16,
     ) -> Result<crate::api::respond::GenericResponseBuilder> {
         self.resolved = true;
-        crate::api::respond::GenericResponseBuilder::new(
+        crate::api::respond::GenericResponseBuilder::new_captured(
             self.coordinator.clone(),
             self.call_id.clone(),
+            self.lifecycle_handle.clone(),
             rvoip_sip_core::types::Method::Invite,
             status,
         )
@@ -614,18 +770,12 @@ impl Drop for IncomingCall {
             "[IncomingCall] handler panicked for call {} — sending 500 Server Internal Error",
             call_id
         );
-        tokio::spawn(async move {
-            if coordinator
-                .reject(&call_id)
-                .with_status(500)
-                .with_reason("Server Internal Error")
-                .send()
-                .await
-                .is_err()
-            {
-                tracing::error!(call_id = %call_id, "[IncomingCall] panic-path reject failed");
-            }
-        });
+        spawn_exact_incoming_reject(
+            coordinator,
+            self.lifecycle_handle.clone(),
+            500,
+            "Server Internal Error".to_string(),
+        );
     }
 }
 
@@ -643,45 +793,108 @@ impl Drop for IncomingCall {
 pub struct IncomingCallGuard {
     call_id: CallId,
     coordinator: Arc<UnifiedCoordinator>,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     deadline: Instant,
     resolved: Arc<AtomicBool>,
 }
 
 impl IncomingCallGuard {
+    #[cfg(test)]
     fn new(call_id: CallId, coordinator: Arc<UnifiedCoordinator>, timeout: Duration) -> Self {
+        let lifecycle_handle = coordinator
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(&call_id);
+        Self::new_captured(call_id, coordinator, timeout, lifecycle_handle)
+    }
+
+    fn new_captured(
+        call_id: CallId,
+        coordinator: Arc<UnifiedCoordinator>,
+        timeout: Duration,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         let deadline = Instant::now() + timeout;
         let resolved = Arc::new(AtomicBool::new(false));
 
-        // Spawn a watchdog that auto-rejects if the deadline passes
-        let coordinator_clone = coordinator.clone();
-        let call_id_clone = call_id.clone();
-        let watchdog_resolved = resolved.clone();
-        tokio::spawn(async move {
+        // The watchdog is retained by the exact session lifecycle rather than
+        // a detached raw-ID task. Quiesce cancels it, drain joins it, and the
+        // retained registry handle prevents a later admission with the same
+        // application identifier from receiving this rejection.
+        let state_machine = Arc::clone(&coordinator.helpers.state_machine);
+        if let Some(lifecycle_handle) = lifecycle_handle.clone() {
+            let authority = Arc::clone(state_machine.store.authority());
+            let operation_key = lifecycle_handle.key().clone();
+            let watchdog_resolved = Arc::clone(&resolved);
             let remaining = deadline.saturating_duration_since(Instant::now());
-            tokio::time::sleep(remaining).await;
-            if !watchdog_resolved.swap(true, Ordering::SeqCst) {
-                // The coordinator will silently ignore this if the session is already gone
-                let _ = coordinator_clone
-                    .reject(&call_id_clone)
-                    .with_status(503)
-                    .with_reason("Service Unavailable")
-                    .send()
-                    .await;
+            let hard_timeout = remaining.saturating_add(INCOMING_GUARD_RESPONSE_COMPLETION_GRACE);
+            let scheduled = authority.spawn_owned_exact(
+                &operation_key,
+                SessionOperationKind::Signaling,
+                hard_timeout,
+                move |operation| async move {
+                    let Some(mut cancellation) = operation.cancellation() else {
+                        return rollback_owned_incoming_guard(operation, ()).await;
+                    };
+                    tokio::select! {
+                        _ = tokio::time::sleep(remaining) => {}
+                        () = wait_for_incoming_guard_cancellation(&mut cancellation) => {
+                            return rollback_owned_incoming_guard(operation, ()).await;
+                        }
+                    }
+
+                    if watchdog_resolved.swap(true, Ordering::SeqCst) {
+                        return rollback_owned_incoming_guard(operation, ()).await;
+                    }
+
+                    let dispatch = state_machine
+                        .process_event_exact(
+                            &lifecycle_handle,
+                            EventType::RejectCall {
+                                status: 503,
+                                reason: "Service Unavailable".to_string(),
+                            },
+                        )
+                        .await;
+                    if let Err(error) = dispatch {
+                        tracing::debug!(
+                            session_id = %lifecycle_handle.session_id(),
+                            %error,
+                            "incoming-call guard timeout did not target a current exact lifetime"
+                        );
+                        return rollback_owned_incoming_guard(operation, ()).await;
+                    }
+                    commit_owned_incoming_guard(operation, ()).await
+                },
+            );
+            if let Err(error) = scheduled {
+                tracing::debug!(
+                    session_id = %call_id,
+                    %error,
+                    "incoming-call guard watchdog was not admitted for exact lifecycle ownership"
+                );
             }
-        });
+        }
 
         Self {
             call_id,
             coordinator,
+            lifecycle_handle,
             deadline,
             resolved,
         }
     }
 
-    fn resolved(call_id: CallId, coordinator: Arc<UnifiedCoordinator>) -> Self {
+    fn resolved(
+        call_id: CallId,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             call_id,
             coordinator,
+            lifecycle_handle,
             deadline: Instant::now(),
             resolved: Arc::new(AtomicBool::new(true)),
         }
@@ -720,11 +933,18 @@ impl IncomingCallGuard {
     /// # }
     /// ```
     pub async fn accept(self) -> Result<SessionHandle> {
+        let lifecycle_handle = self.lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Deferred incoming call {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
         if self.coordinator.fast_auto_accept_incoming_calls() {
             self.resolved.store(true, Ordering::SeqCst);
-            return Ok(SessionHandle::new(
+            return Ok(SessionHandle::new_exact(
                 self.call_id.clone(),
                 self.coordinator.clone(),
+                lifecycle_handle,
             ));
         }
 
@@ -739,10 +959,14 @@ impl IncomingCallGuard {
                 self.call_id
             )));
         }
-        self.coordinator.accept_call(&self.call_id).await?;
-        Ok(SessionHandle::new(
+        self.coordinator
+            .helpers
+            .accept_call_exact(&lifecycle_handle)
+            .await?;
+        Ok(SessionHandle::new_exact(
             self.call_id.clone(),
             self.coordinator.clone(),
+            lifecycle_handle,
         ))
     }
 
@@ -762,17 +986,12 @@ impl IncomingCallGuard {
         if self.coordinator.fast_auto_accept_incoming_calls() {
             return;
         }
-        let coordinator = self.coordinator.clone();
-        let call_id = self.call_id.clone();
-        let reason = reason.to_string();
-        tokio::spawn(async move {
-            let _ = coordinator
-                .reject(&call_id)
-                .with_status(status)
-                .with_reason(reason)
-                .send()
-                .await;
-        });
+        spawn_exact_incoming_reject(
+            self.coordinator.clone(),
+            self.lifecycle_handle.clone(),
+            status,
+            reason.to_string(),
+        );
     }
 
     /// Abandon the deferred call locally without sending a SIP response.
@@ -823,11 +1042,15 @@ impl IncomingCallGuard {
         }
 
         let mut events = self.coordinator.events_for_session(&self.call_id).await?;
+        let lifecycle_handle = self.lifecycle_handle.as_ref().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Deferred incoming call {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
         self.coordinator
-            .reject(&self.call_id)
-            .with_status(status)
-            .with_reason(reason.to_string())
-            .send()
+            .helpers
+            .reject_call_exact(lifecycle_handle, status, reason)
             .await?;
 
         let fut = async {
@@ -1014,16 +1237,12 @@ fn cancellation_result_from_snapshot(snapshot: &CallLifecycleSnapshot) -> Option
 impl Drop for IncomingCallGuard {
     fn drop(&mut self) {
         if !self.resolved.swap(true, Ordering::SeqCst) {
-            let coordinator = self.coordinator.clone();
-            let call_id = self.call_id.clone();
-            tokio::spawn(async move {
-                let _ = coordinator
-                    .reject(&call_id)
-                    .with_status(503)
-                    .with_reason("Service Unavailable")
-                    .send()
-                    .await;
-            });
+            spawn_exact_incoming_reject(
+                self.coordinator.clone(),
+                self.lifecycle_handle.clone(),
+                503,
+                "Service Unavailable".to_string(),
+            );
         }
     }
 }
@@ -1069,17 +1288,34 @@ pub struct IncomingRequest {
     /// repopulates this on dispatch so response builders can resolve
     /// the dialog/transaction.
     pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
+    /// Exact session generation carried by the causal event envelope. A
+    /// missing sidecar stays missing so delayed requests never re-resolve a
+    /// reused application Call-ID.
+    lifecycle_handle: Option<SessionRegistryHandle>,
 }
 
 const EXACT_RESPONSE_AVAILABLE: u8 = 0;
 const EXACT_RESPONSE_IN_FLIGHT: u8 = 1;
 const EXACT_RESPONSE_COMPLETE: u8 = 2;
 
+/// One cancellation-safe final-response authority retained by the
+/// coordinator deadline registry.
+///
+/// INFO binds this owner to an exact session generation before registration;
+/// REGISTER uses a standalone exact server-transaction scope.
 pub(crate) struct ExactResponseObligation {
     state: AtomicU8,
     coordinator: OnceLock<Weak<UnifiedCoordinator>>,
-    call_id: CallId,
+    scope: OnceLock<ExactResponseScope>,
+    call_id: Option<CallId>,
     transaction: rvoip_sip_dialog::transaction::TransactionKey,
+    fallback_status: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ExactResponseScope {
+    Session(SessionRegistryHandle),
+    StandaloneTransaction,
 }
 
 impl ExactResponseObligation {
@@ -1090,21 +1326,61 @@ impl ExactResponseObligation {
         Self {
             state: AtomicU8::new(EXACT_RESPONSE_AVAILABLE),
             coordinator: OnceLock::new(),
-            call_id,
+            scope: OnceLock::new(),
+            call_id: Some(call_id),
             transaction,
+            fallback_status: 501,
         }
     }
 
-    fn attach_coordinator(&self, coordinator: &Arc<UnifiedCoordinator>) {
+    pub(crate) fn new_standalone(
+        transaction: rvoip_sip_dialog::transaction::TransactionKey,
+        fallback_status: u16,
+    ) -> Self {
+        debug_assert!((200..=699).contains(&fallback_status));
+        let scope = OnceLock::new();
+        let _ = scope.set(ExactResponseScope::StandaloneTransaction);
+        Self {
+            state: AtomicU8::new(EXACT_RESPONSE_AVAILABLE),
+            coordinator: OnceLock::new(),
+            scope,
+            call_id: None,
+            transaction,
+            fallback_status,
+        }
+    }
+
+    pub(crate) fn attach_coordinator(&self, coordinator: &Arc<UnifiedCoordinator>) {
         let _ = self.coordinator.set(Arc::downgrade(coordinator));
     }
 
-    pub(crate) fn call_id(&self) -> &CallId {
-        &self.call_id
+    pub(crate) fn bind_lifecycle_handle(&self, handle: &SessionRegistryHandle) -> bool {
+        if self.call_id.as_ref() != Some(handle.session_id()) {
+            return false;
+        }
+        match self.scope.set(ExactResponseScope::Session(handle.clone())) {
+            Ok(()) => true,
+            Err(_) => self.scope.get() == Some(&ExactResponseScope::Session(handle.clone())),
+        }
+    }
+
+    pub(crate) fn lifecycle_handle(&self) -> Option<&SessionRegistryHandle> {
+        match self.scope.get() {
+            Some(ExactResponseScope::Session(handle)) => Some(handle),
+            Some(ExactResponseScope::StandaloneTransaction) | None => None,
+        }
+    }
+
+    pub(crate) fn has_owner_scope(&self) -> bool {
+        self.scope.get().is_some()
     }
 
     pub(crate) fn transaction(&self) -> &rvoip_sip_dialog::transaction::TransactionKey {
         &self.transaction
+    }
+
+    pub(crate) fn fallback_status(&self) -> u16 {
+        self.fallback_status
     }
 
     pub(crate) fn claim(self: &Arc<Self>) -> Result<ExactResponseClaim> {
@@ -1129,7 +1405,7 @@ impl ExactResponseObligation {
     fn complete(&self) {
         self.state.store(EXACT_RESPONSE_COMPLETE, Ordering::Release);
         if let Some(coordinator) = self.coordinator.get().and_then(Weak::upgrade) {
-            coordinator.complete_exact_response_obligation(&self.transaction);
+            coordinator.complete_exact_response_obligation(self);
         }
     }
 
@@ -1236,10 +1512,10 @@ impl IncomingRequest {
     /// Borrow a [`SessionHandle`] for the dialog this inbound request
     /// belongs to.
     ///
-    /// Returns `Err(SessionError::InvalidInput)` when the bus path has
-    /// not yet rehydrated the coordinator hook (only possible while an
-    /// `IncomingRequest` is in flight between the event bus and the
-    /// surface consumer).
+    /// Returns `Err(SessionError::InvalidInput)` when the event has not
+    /// supplied both the coordinator hook and exact lifecycle authority.
+    /// A missing generation is never recovered from the raw Call-ID because
+    /// that identifier may already belong to a later session lifetime.
     ///
     /// Use this from `on_refer_received` / `on_notify_received` trait
     /// impls when you need to drive in-dialog actions on the session
@@ -1252,16 +1528,22 @@ impl IncomingRequest {
                     .to_string(),
             )
         })?;
-        Ok(crate::api::handle::SessionHandle::new(
+        let lifecycle_handle = self.lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.session_handle() requires exact lifecycle authority".to_string(),
+            )
+        })?;
+        Ok(crate::api::handle::SessionHandle::new_exact(
             self.call_id.clone(),
             coord,
+            lifecycle_handle,
         ))
     }
 
     /// Begin a `GenericResponseBuilder` for the inbound request.
     /// Returns `Err(SessionError::InvalidInput)` when this
-    /// `IncomingRequest` was constructed without a coordinator hook
-    /// (bus path before the surface consumer rehydrates it).
+    /// `IncomingRequest` lacks the coordinator hook or exact lifecycle
+    /// authority carried by its causal event.
     pub fn respond_builder(
         &self,
         status: u16,
@@ -1303,9 +1585,15 @@ impl IncomingRequest {
                     .to_string(),
             )
         })?;
-        crate::api::respond::GenericResponseBuilder::new(
+        let lifecycle_handle = self.lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.respond_builder() requires exact lifecycle authority".to_string(),
+            )
+        })?;
+        crate::api::respond::GenericResponseBuilder::new_exact(
             coord,
             self.call_id.clone(),
+            lifecycle_handle,
             self.method.clone(),
             status,
         )
@@ -1379,11 +1667,18 @@ impl IncomingRequest {
                 "IncomingRequest.challenge_builder() requires a coordinator hook".to_string(),
             )
         })?;
-        Ok(crate::api::respond::AuthChallengeBuilder::new(
+        let lifecycle_handle = self.lifecycle_handle.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.challenge_builder() requires exact lifecycle authority"
+                    .to_string(),
+            )
+        })?;
+        Ok(crate::api::respond::AuthChallengeBuilder::new_exact(
             coord,
             self.call_id.clone(),
             self.method.clone(),
             scheme,
+            lifecycle_handle,
         ))
     }
 
@@ -1428,11 +1723,21 @@ impl IncomingRequest {
     /// dispatch. Called by the surface consumer (CallbackPeer /
     /// StreamPeer) on every inbound event before exposing the
     /// `IncomingRequest` to application code.
-    pub(crate) fn set_coordinator(
+    pub(crate) fn set_coordinator_captured(
         &mut self,
         coord: Arc<UnifiedCoordinator>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
     ) -> crate::api::unified::ExactResponseRegistration {
+        if lifecycle_handle.is_some() {
+            self.lifecycle_handle = lifecycle_handle;
+        }
         if let Some(obligation) = &self.response_obligation {
+            let Some(lifecycle_handle) = self.lifecycle_handle.as_ref() else {
+                return crate::api::unified::ExactResponseRegistration::Collision;
+            };
+            if !obligation.bind_lifecycle_handle(lifecycle_handle) {
+                return crate::api::unified::ExactResponseRegistration::Collision;
+            }
             obligation.attach_coordinator(&coord);
             let registration = coord.register_exact_response_obligation(Arc::clone(obligation));
             self.coordinator = Some(coord);
@@ -1463,6 +1768,7 @@ impl IncomingRequest {
         self.response_transaction = None;
         self.response_obligation = None;
         self.coordinator = None;
+        self.lifecycle_handle = None;
     }
 
     /// SIP_API_DESIGN_2 Phase E — construct an `IncomingRequest` from
@@ -1487,6 +1793,7 @@ impl IncomingRequest {
             response_transaction: None,
             response_obligation: None,
             coordinator: None,
+            lifecycle_handle: None,
         }
     }
 
@@ -1764,12 +2071,22 @@ pub struct IncomingRegister {
     pub(crate) request: Option<Arc<Request>>,
     /// Transport context for auth policy decisions.
     pub(crate) transport: crate::auth::SipTransportSecurityContext,
-    /// SIP_API_DESIGN_2 Phase D — optional hook back into the
-    /// coordinator so `RegisterResponseBuilder.send()` can publish a
-    /// `SessionToDialogEvent::SendRegisterResponse` to rvoip-sip-dialog.
-    /// `None` when the wrapper was synthesized for tests or by the
-    /// legacy registrar crate that authors responses directly.
+    /// Optional hook back into the coordinator so
+    /// `RegisterResponseBuilder.send()` can answer the exact inbound
+    /// REGISTER transaction. `None` when the wrapper was synthesized for
+    /// tests or by an external registrar that authors responses directly.
     pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
+    /// Single-writer deadline owner for an application-authored REGISTER
+    /// response. Only the private causal control copy retains it.
+    pub(crate) response_obligation: Option<Arc<ExactResponseObligation>>,
+    /// Whether an owning API receiver may attach response authority. Public
+    /// observational projections clear this bit so cloning or redispatching
+    /// an observation cannot recreate a second REGISTER response owner.
+    response_capability: bool,
+    /// Marks the stripped public copy emitted beside a private control
+    /// delivery. The owning receiver suppresses only this copy; ordinary
+    /// built-in-registrar observations remain visible to applications.
+    control_observation: bool,
 }
 
 impl std::fmt::Debug for IncomingRegister {
@@ -1812,13 +2129,13 @@ impl IncomingRegister {
             self.transaction_id.clone(),
             self.coordinator.clone(),
         )
+        .with_response_obligation(self.response_obligation.clone())
     }
 
     /// Begin a 401 / 407 auth challenge for the inbound REGISTER.
-    /// The matching dispatch happens via the same
-    /// `SessionToDialogEvent::SendRegisterResponse` channel that
-    /// `accept_builder` uses, so a registrar can author both 200 OK
-    /// and 401 through one consistent surface.
+    /// The matching dispatch uses the same exact transaction path as
+    /// `accept_builder`, so a registrar can author both 200 OK and 401
+    /// through one consistent surface.
     pub fn challenge_builder(
         &self,
         scheme: crate::api::respond::AuthScheme,
@@ -1828,6 +2145,7 @@ impl IncomingRegister {
             self.coordinator.clone(),
             scheme,
         )
+        .with_response_obligation(self.response_obligation.clone())
     }
 
     /// Authenticate this inbound REGISTER with a UAS SIP auth service.
@@ -1883,6 +2201,7 @@ impl IncomingRegister {
             self.coordinator.clone(),
             status,
         )
+        .with_response_obligation(self.response_obligation.clone())
     }
 
     /// Synthesize without a parsed request. Used by the legacy bus
@@ -1909,6 +2228,9 @@ impl IncomingRegister {
             request: None,
             transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: None,
+            response_obligation: None,
+            response_capability: true,
+            control_observation: false,
         }
     }
 
@@ -1936,13 +2258,15 @@ impl IncomingRegister {
             request: Some(request),
             transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: None,
+            response_obligation: None,
+            response_capability: true,
+            control_observation: false,
         }
     }
 
-    /// Same as [`with_request`] but threads the coordinator handle so
-    /// the response builder can publish a
-    /// `SessionToDialogEvent::SendRegisterResponse` back to
-    /// rvoip-sip-dialog.
+    /// Same as [`with_request`] but threads the coordinator handle so the
+    /// response builder can answer through rvoip-sip-dialog's exact server
+    /// transaction.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn with_request_and_coordinator(
         transaction_id: String,
@@ -1967,6 +2291,9 @@ impl IncomingRegister {
             request: Some(request),
             transport: crate::auth::SipTransportSecurityContext::unknown(),
             coordinator: Some(coordinator),
+            response_obligation: None,
+            response_capability: true,
+            control_observation: false,
         }
     }
 
@@ -2000,13 +2327,90 @@ impl IncomingRegister {
         headers_named_slice(slice, name)
     }
 
-    /// SIP_API_DESIGN_2 Phase D — set the coordinator hook so
-    /// `accept_builder()` / `challenge_builder()` / `reject_builder()`
-    /// can dispatch a `SessionToDialogEvent::SendRegisterResponse`.
-    /// Called by the dispatch path right before handing the
-    /// `IncomingRegister` to the application handler.
+    /// Set the coordinator hook so `accept_builder()` /
+    /// `challenge_builder()` / `reject_builder()` can dispatch through the
+    /// exact inbound REGISTER transaction. Called immediately before the
+    /// `IncomingRegister` reaches the application handler.
     pub fn set_coordinator(&mut self, coordinator: Arc<UnifiedCoordinator>) {
-        self.coordinator = Some(coordinator);
+        if self.response_capability {
+            self.coordinator = Some(coordinator);
+        }
+    }
+
+    /// Install the standalone exact-transaction owner before the causal
+    /// delivery is positively acknowledged. Its managed deadline authors 503
+    /// if an accepted application handler never claims a response builder.
+    pub(crate) fn install_response_obligation(
+        &mut self,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) -> Result<crate::api::unified::ExactResponseRegistration> {
+        if !self.response_capability {
+            return Err(SessionError::InvalidInput(
+                "observational REGISTER cannot acquire response authority".to_string(),
+            ));
+        }
+        let transaction = self
+            .transaction_id
+            .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
+            .map_err(|_| {
+                SessionError::InvalidInput(
+                    "IncomingRegister has an invalid exact transaction identifier".to_string(),
+                )
+            })?;
+        if !transaction.is_server()
+            || transaction.method() != &rvoip_sip_core::types::Method::Register
+        {
+            return Err(SessionError::InvalidInput(
+                "IncomingRegister response authority requires a server REGISTER transaction"
+                    .to_string(),
+            ));
+        }
+        if let Some(request) = self.request.as_ref() {
+            let wire_transaction = rvoip_sip_dialog::transaction::TransactionKey::from_request(
+                request,
+            )
+            .ok_or_else(|| {
+                SessionError::InvalidInput(
+                    "IncomingRegister wire request has no exact transaction".to_string(),
+                )
+            })?;
+            if wire_transaction != transaction {
+                return Err(SessionError::InvalidInput(
+                    "IncomingRegister event transaction does not match the wire request"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let obligation = Arc::new(ExactResponseObligation::new_standalone(transaction, 503));
+        obligation.attach_coordinator(&coordinator);
+        let registration = coordinator.register_exact_response_obligation(Arc::clone(&obligation));
+        if matches!(
+            registration,
+            crate::api::unified::ExactResponseRegistration::Registered
+        ) {
+            self.coordinator = Some(coordinator);
+            self.response_obligation = Some(obligation);
+        }
+        Ok(registration)
+    }
+
+    /// Permanently strip response authority from an observational copy.
+    pub(crate) fn clear_response_capability(&mut self) {
+        self.coordinator = None;
+        self.response_obligation = None;
+        self.response_capability = false;
+    }
+
+    /// Identify the stripped observation paired with a private control event.
+    pub(crate) fn mark_control_observation(&mut self) {
+        self.clear_response_capability();
+        self.control_observation = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_control_observation(&self) -> bool {
+        self.control_observation
     }
 }
 
@@ -2165,6 +2569,32 @@ mod tests {
     }
 
     #[test]
+    fn register_observation_permanently_strips_response_authority() {
+        let mut incoming = IncomingRegister::synthetic(
+            "z9hG4bK-register-observation:REGISTER:server".into(),
+            "sip:alice@example.test".into(),
+            "sip:alice@example.test".into(),
+            "sip:alice@192.0.2.10".into(),
+            300,
+            None,
+            "register-observation@example.test".into(),
+        );
+        incoming.response_obligation = Some(Arc::new(ExactResponseObligation::new_standalone(
+            rvoip_sip_dialog::transaction::TransactionKey::new(
+                "z9hG4bK-register-observation".into(),
+                rvoip_sip_core::Method::Register,
+                true,
+            ),
+            503,
+        )));
+
+        incoming.mark_control_observation();
+        assert!(incoming.response_obligation.is_none());
+        assert!(!incoming.response_capability);
+        assert!(incoming.is_control_observation());
+    }
+
+    #[test]
     fn incoming_response_rejects_wrong_branch_before_dispatch() {
         let raw = b"INFO sip:bob@example.test SIP/2.0\r\n\
                     Via: SIP/2.0/UDP 127.0.0.1:5060;branch=z9hG4bK-wire-branch\r\n\
@@ -2320,6 +2750,303 @@ mod tests {
             resolved.load(Ordering::SeqCst),
             "accept should resolve the guard before the watchdog can auto-reject"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_watchdog_is_cancelled_and_cannot_cross_raw_id_reuse() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35989))
+            .await
+            .expect("coordinator starts");
+        let call_id = CallId::from("deferred-guard-reuse");
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:callee@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("create original exact incoming lifetime");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let original = store
+            .lifecycle_handle(&call_id)
+            .expect("original exact registry handle");
+        store
+            .update_session_exact_with(&original, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark original call ringing");
+
+        let guard = IncomingCallGuard::new(
+            call_id.clone(),
+            Arc::clone(&coordinator),
+            Duration::from_millis(200),
+        );
+        let resolved = Arc::clone(&guard.resolved);
+
+        store
+            .remove_session_exact(&original)
+            .await
+            .expect("teardown cancels and joins the exact watchdog");
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "lifecycle cancellation must not resolve the application guard"
+        );
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&call_id),
+            "expire the production anti-reuse fence through the test clock seam"
+        );
+
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:replacement@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("reuse the raw identifier for a later exact lifetime");
+        let replacement = store
+            .lifecycle_handle(&call_id)
+            .expect("replacement exact registry handle");
+        assert_ne!(original, replacement);
+        store
+            .update_session_exact_with(&replacement, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark replacement call ringing");
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "the cancelled watchdog must stay inert after its old deadline"
+        );
+        assert_eq!(
+            store
+                .get_session_exact(&replacement)
+                .await
+                .expect("replacement remains live")
+                .call_state,
+            CallState::Ringing,
+            "the old watchdog must not reject the reused identifier"
+        );
+
+        guard.abandon();
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn retired_incoming_objects_cannot_resolve_reused_generation() {
+        let coordinator = UnifiedCoordinator::new(Config::local("incoming-reuse-test", 35988))
+            .await
+            .expect("coordinator starts");
+        let call_id = CallId::from("incoming-object-reuse");
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:callee@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("create generation A");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let generation_a = store
+            .lifecycle_handle(&call_id)
+            .expect("generation A exact handle");
+        store
+            .update_session_exact_with(&generation_a, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark generation A ringing");
+
+        let make_incoming = || {
+            IncomingCall::new_exact(
+                call_id.clone(),
+                "sip:caller@example.test".to_string(),
+                "sip:callee@example.test".to_string(),
+                None,
+                Arc::clone(&coordinator),
+                generation_a.clone(),
+            )
+        };
+        let accept_a = make_incoming();
+        let redirect_a = make_incoming();
+        let reject_a = make_incoming();
+        let panic_drop_a = make_incoming();
+        let accept_guard_a = make_incoming().defer(Duration::from_secs(5));
+        let reject_guard_a = make_incoming().defer(Duration::from_secs(5));
+
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A and cancel its deferred watchdogs");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&call_id),
+            "expire anti-reuse horizon"
+        );
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:replacement@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&call_id)
+            .expect("generation B exact handle");
+        assert_ne!(generation_a, generation_b);
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark generation B ringing");
+
+        assert!(accept_a.accept().await.is_err());
+        assert!(redirect_a
+            .redirect_to("sip:elsewhere@example.test")
+            .await
+            .is_err());
+        assert!(accept_guard_a.accept().await.is_err());
+        reject_a.reject(486, "Busy Here");
+        reject_guard_a.reject(503, "Service Unavailable");
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _owned = panic_drop_a;
+            panic!("exercise IncomingCall panic-drop safety net");
+        }));
+        assert!(panic_result.is_err());
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            store
+                .get_session_exact(&generation_b)
+                .await
+                .expect("generation B remains live")
+                .call_state,
+            CallState::Ringing,
+            "generation-A accept/reject/redirect/guard/drop work must not mutate generation B"
+        );
+
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn retired_incoming_request_cannot_resolve_or_reject_reused_generation() {
+        let coordinator =
+            UnifiedCoordinator::new(Config::local("incoming-request-reuse-test", 35987))
+                .await
+                .expect("coordinator starts");
+        let call_id = CallId::from("incoming-request-reuse");
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:callee@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("create generation A");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let generation_a = store
+            .lifecycle_handle(&call_id)
+            .expect("generation A exact handle");
+        store
+            .update_session_exact_with(&generation_a, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark generation A ringing");
+
+        let request = Request::new(
+            rvoip_sip_core::types::Method::Options,
+            rvoip_sip_core::types::Uri::sip("callee.example.test"),
+        );
+        let mut incoming = IncomingRequest::from_bus_request(
+            call_id.clone(),
+            "sip:caller@example.test".to_string(),
+            "sip:callee@example.test".to_string(),
+            rvoip_sip_core::types::Method::Options,
+            Arc::new(request),
+        );
+        assert!(matches!(
+            incoming.set_coordinator_captured(Arc::clone(&coordinator), Some(generation_a.clone())),
+            crate::api::unified::ExactResponseRegistration::Registered
+        ));
+
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&call_id),
+            "expire anti-reuse horizon"
+        );
+        coordinator
+            .helpers
+            .create_session(
+                call_id.clone(),
+                "sip:replacement@example.test".to_string(),
+                "sip:caller@example.test".to_string(),
+                crate::state_table::types::Role::UAS,
+            )
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&call_id)
+            .expect("generation B exact handle");
+        assert_ne!(generation_a, generation_b);
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark generation B ringing");
+
+        assert!(
+            incoming
+                .session_handle()
+                .expect("request retains generation A authority")
+                .state()
+                .await
+                .is_err(),
+            "the request-derived session handle must not re-resolve generation B"
+        );
+        assert!(
+            incoming
+                .respond_builder(486)
+                .expect("exact generic response builder")
+                .send()
+                .await
+                .is_err(),
+            "a delayed generic response must fail against retired generation A"
+        );
+        assert!(
+            incoming
+                .challenge_builder(crate::api::respond::AuthScheme::Digest)
+                .expect("exact challenge builder")
+                .with_realm("example.test")
+                .with_nonce("generation-a-nonce")
+                .send()
+                .await
+                .is_err(),
+            "a delayed auth challenge must fail against retired generation A"
+        );
+        assert_eq!(
+            store
+                .get_session_exact(&generation_b)
+                .await
+                .expect("generation B remains live")
+                .call_state,
+            CallState::Ringing,
+            "generation-A request objects must not mutate generation B"
+        );
+
+        coordinator.shutdown();
     }
 
     #[tokio::test]

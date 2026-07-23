@@ -44,7 +44,7 @@ DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 ## Conventions
 
 - **Self-contained projects.** Each example is its own Cargo workspace and
-  depends on the local crate via `rvoip-sip = { version = "0.2.2", path =
+  depends on the local crate via `rvoip-sip = { version = "0.2.5", path =
   "../../crates/sip/rvoip-sip" }`. That builds against the live tree today and
   records the crates.io version for when you copy it into your own project
   (drop the `path`, keep the `version`).

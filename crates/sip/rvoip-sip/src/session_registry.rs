@@ -6,7 +6,6 @@
 //! or generation policy of its own.
 
 use std::collections::HashMap;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex as StdMutex, MutexGuard as StdMutexGuard};
 
@@ -127,6 +126,11 @@ struct RegistryEntry {
     slot_revision: RegistrySlotRevision,
     mutation_gate: Arc<MutationGate>,
     dialog_id: Option<DialogId>,
+    /// SIP wire Call-ID bound to `dialog_id` for optional observational
+    /// correlation. This is deliberately stored on the exact slot without a
+    /// second reverse index: signaling routes by Dialog-ID, while trace
+    /// reporting may scan the registry and fail closed on ambiguity.
+    sip_call_id: Option<String>,
     dialog_mutation_revision: u64,
     media_id: Option<MediaSessionId>,
     media_mutation_revision: u64,
@@ -157,35 +161,14 @@ pub(crate) enum SessionRegistryError {
     RevisionExhausted,
     #[error("dialog identifier is already owned by another registry slot")]
     DialogCollision,
+    #[error("session registry slot already owns a dialog identifier")]
+    DialogAlreadyMapped,
     #[error("media identifier is already owned by another registry slot")]
     MediaCollision,
+    #[error("session registry slot already owns a media identifier")]
+    MediaAlreadyMapped,
     #[error("session registry authority operation failed: {0}")]
     AuthorityOperation(SessionOperationError),
-    #[error("session registry external-map compensation panicked")]
-    ExternalCompensationPanicked,
-}
-
-/// Exact compensation returned by an external compatibility-map commit.
-///
-/// Production mutations should return a closure that removes only the values
-/// installed by that commit. The `()` implementation exists solely to keep
-/// legacy call sites source-compatible while they migrate; it cannot undo
-/// external publication and must not be used on production authority paths.
-pub(crate) trait ExternalMapCompensation {
-    fn compensate(self);
-}
-
-impl ExternalMapCompensation for () {
-    fn compensate(self) {}
-}
-
-impl<F> ExternalMapCompensation for F
-where
-    F: FnOnce(),
-{
-    fn compensate(self) {
-        self();
-    }
 }
 
 /// Exact, concurrent mappings for admitted SIP sessions.
@@ -223,6 +206,7 @@ pub(crate) struct InboundDialogCommitReceipt {
     installed_dialog: DialogId,
     installed_mutation_revision: u64,
     previous_dialog: Option<DialogId>,
+    previous_sip_call_id: Option<String>,
     previous_dialog_mutation_revision: u64,
     previous_info: Option<IncomingCallInfo>,
     previous_pending_mutation_revision: u64,
@@ -232,18 +216,7 @@ pub(crate) struct InboundDialogCommitReceipt {
 }
 
 impl InboundDialogCommitReceipt {
-    #[allow(dead_code)]
-    pub(crate) fn finalize(self) -> Result<(), SessionRegistryError> {
-        self.finalize_with_compensation(())
-    }
-
-    pub(crate) fn finalize_with_compensation<C>(
-        mut self,
-        compensation: C,
-    ) -> Result<(), SessionRegistryError>
-    where
-        C: ExternalMapCompensation,
-    {
+    pub(crate) fn finalize(mut self) -> Result<(), SessionRegistryError> {
         let guard = self.guard.take().expect("armed receipt authority guard");
         match guard.finish() {
             Ok(()) => {
@@ -258,54 +231,17 @@ impl InboundDialogCommitReceipt {
                     self.installed_dialog,
                     self.installed_mutation_revision,
                     self.previous_dialog,
+                    self.previous_sip_call_id.take(),
                     self.previous_dialog_mutation_revision,
                     self.previous_info.take(),
                     self.previous_pending_mutation_revision,
                 );
-                let external = catch_unwind(AssertUnwindSafe(|| compensation.compensate()));
                 failure.into_guard().finish_rollback();
                 self.armed = false;
                 rollback?;
-                if external.is_err() {
-                    return Err(SessionRegistryError::ExternalCompensationPanicked);
-                }
                 Err(SessionRegistryError::AuthorityOperation(error))
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn rollback(self) -> Result<bool, SessionRegistryError> {
-        self.rollback_with_compensation(())
-    }
-
-    pub(crate) fn rollback_with_compensation<C>(
-        mut self,
-        compensation: C,
-    ) -> Result<bool, SessionRegistryError>
-    where
-        C: ExternalMapCompensation,
-    {
-        self.armed = false;
-        let rollback = self.registry.rollback_inbound_commit(
-            &self.key,
-            self.revision,
-            self.installed_dialog,
-            self.installed_mutation_revision,
-            self.previous_dialog,
-            self.previous_dialog_mutation_revision,
-            self.previous_info.take(),
-            self.previous_pending_mutation_revision,
-        );
-        let external = catch_unwind(AssertUnwindSafe(|| compensation.compensate()));
-        if let Some(guard) = self.guard.take() {
-            guard.finish_rollback();
-        }
-        let rolled_back = rollback?;
-        if external.is_err() {
-            return Err(SessionRegistryError::ExternalCompensationPanicked);
-        }
-        Ok(rolled_back)
     }
 }
 
@@ -318,6 +254,7 @@ impl Drop for InboundDialogCommitReceipt {
                 self.installed_dialog,
                 self.installed_mutation_revision,
                 self.previous_dialog,
+                self.previous_sip_call_id.take(),
                 self.previous_dialog_mutation_revision,
                 self.previous_info.take(),
                 self.previous_pending_mutation_revision,
@@ -487,6 +424,20 @@ impl SessionRegistry {
         owner.key == *key && owner.slot_revision == revision
     }
 
+    fn unique_retained_sip_call_id_handle(
+        state: &RegistryState,
+        sip_call_id: &str,
+    ) -> Option<SessionRegistryHandle> {
+        let mut matches = state.entries.iter().filter_map(|(key, entry)| {
+            (entry.sip_call_id.as_deref() == Some(sip_call_id)).then(|| SessionRegistryHandle {
+                key: key.clone(),
+                slot_revision: entry.slot_revision,
+            })
+        });
+        let only = matches.next()?;
+        matches.next().is_none().then_some(only)
+    }
+
     fn authority_start_error(error: SessionOperationError) -> SessionRegistryError {
         match error {
             SessionOperationError::StaleGeneration => SessionRegistryError::StaleSession,
@@ -529,6 +480,7 @@ impl SessionRegistry {
                 slot_revision,
                 mutation_gate: Arc::new(MutationGate::default()),
                 dialog_id: None,
+                sip_call_id: None,
                 dialog_mutation_revision: 0,
                 media_id: None,
                 media_mutation_revision: 0,
@@ -570,12 +522,55 @@ impl SessionRegistry {
             })
     }
 
+    #[cfg(test)]
     pub(crate) fn map_dialog_handle(
         &self,
         handle: &SessionRegistryHandle,
         dialog_id: DialogId,
     ) -> Result<(), SessionRegistryError> {
         self.map_dialog_exact(&handle.key, handle.slot_revision, dialog_id)
+    }
+
+    /// Atomically bind one exact outbound dialog and its SIP wire Call-ID.
+    ///
+    /// The Call-ID is observational metadata, not a routing key. Keeping it
+    /// in the same registry revision as the Dialog-ID prevents trace
+    /// correlation from observing a partially installed session identity.
+    #[cfg(test)]
+    pub(crate) fn map_dialog_identity_handle(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_id: DialogId,
+        sip_call_id: String,
+    ) -> Result<(), SessionRegistryError> {
+        self.map_dialog_identity_exact(
+            &handle.key,
+            handle.slot_revision,
+            dialog_id,
+            Some(sip_call_id),
+            true,
+        )
+    }
+
+    /// Install the first outbound dialog identity for one exact session slot.
+    ///
+    /// Initial-INVITE ownership is insert-only: replacing an existing dialog
+    /// in the same slot would orphan the prior lower-layer owner. Redirects
+    /// must first retire the old exact mapping, after which a fresh resource
+    /// may install its replacement.
+    pub(crate) fn install_dialog_identity_handle(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_id: DialogId,
+        sip_call_id: String,
+    ) -> Result<(), SessionRegistryError> {
+        self.map_dialog_identity_exact(
+            &handle.key,
+            handle.slot_revision,
+            dialog_id,
+            Some(sip_call_id),
+            false,
+        )
     }
 
     /// Clear only the exact dialog mapping installed for a retained slot.
@@ -606,17 +601,53 @@ impl SessionRegistry {
         }
         let entry = Self::validate_entry_mut(&mut state, &handle.key, handle.slot_revision)?;
         entry.dialog_id = None;
+        entry.sip_call_id = None;
         entry.dialog_mutation_revision = mutation_revision;
         Ok(true)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn map_media_handle(
+    /// Install the first media resource identity for one exact session slot.
+    ///
+    /// A second allocation must retire the old exact resource and registry
+    /// association before publishing its replacement. Silently overwriting a
+    /// live media identifier would detach cleanup from the lower allocation.
+    pub(crate) fn install_media_handle(
         &self,
         handle: &SessionRegistryHandle,
         media_id: MediaSessionId,
     ) -> Result<(), SessionRegistryError> {
-        self.map_media_exact(&handle.key, handle.slot_revision, media_id)
+        self.map_media_identity_exact(&handle.key, handle.slot_revision, media_id, false)
+    }
+
+    /// Clear only the exact media association installed for a retained slot.
+    ///
+    /// Managed media release runs after quiesce as well as during an active
+    /// cleanup transition, so this validates the retained slot revision and
+    /// expected lower identifier without reopening lifecycle admission.
+    pub(crate) fn clear_media_handle_retained(
+        &self,
+        handle: &SessionRegistryHandle,
+        expected_media_id: &MediaSessionId,
+    ) -> Result<bool, SessionRegistryError> {
+        let _mutation_permit = self.acquire_mutation_permit(&handle.key, handle.slot_revision)?;
+        let mut state = self.lock_state()?;
+        let current = Self::validate_entry(&state, &handle.key, handle.slot_revision)?;
+        if current.media_id.as_ref() != Some(expected_media_id) {
+            return Ok(false);
+        }
+
+        let mutation_revision = Self::allocate_mutation_revision_locked(&mut state)?;
+        if state
+            .by_media
+            .get(expected_media_id)
+            .is_some_and(|owner| Self::owner_matches(owner, &handle.key, handle.slot_revision))
+        {
+            state.by_media.remove(expected_media_id);
+        }
+        let entry = Self::validate_entry_mut(&mut state, &handle.key, handle.slot_revision)?;
+        entry.media_id = None;
+        entry.media_mutation_revision = mutation_revision;
+        Ok(true)
     }
 
     pub(crate) fn remove_handle(
@@ -661,6 +692,17 @@ impl SessionRegistry {
         revision: RegistrySlotRevision,
         dialog_id: DialogId,
     ) -> Result<(), SessionRegistryError> {
+        self.map_dialog_identity_exact(key, revision, dialog_id, None, true)
+    }
+
+    fn map_dialog_identity_exact(
+        &self,
+        key: &SessionKey,
+        revision: RegistrySlotRevision,
+        dialog_id: DialogId,
+        sip_call_id: Option<String>,
+        replace_existing: bool,
+    ) -> Result<(), SessionRegistryError> {
         let guard = self
             .authority
             .try_operation_exact(key, SessionOperationKind::Signaling)
@@ -679,15 +721,29 @@ impl SessionRegistry {
         let mutation = (|| {
             let mut state = self.lock_state()?;
             Self::validate_entry(&state, key, revision)?;
+            if !replace_existing
+                && state
+                    .entries
+                    .get(key)
+                    .is_some_and(|entry| entry.dialog_id.is_some())
+            {
+                return Err(SessionRegistryError::DialogAlreadyMapped);
+            }
             if let Some(owner) = state.by_dialog.get(&dialog_id) {
                 if !Self::owner_matches(owner, key, revision) {
                     return Err(SessionRegistryError::DialogCollision);
                 }
             }
-            let (previous, previous_mutation_revision) = state
+            let (previous, previous_sip_call_id, previous_mutation_revision) = state
                 .entries
                 .get(key)
-                .map(|entry| (entry.dialog_id, entry.dialog_mutation_revision))
+                .map(|entry| {
+                    (
+                        entry.dialog_id,
+                        entry.sip_call_id.clone(),
+                        entry.dialog_mutation_revision,
+                    )
+                })
                 .expect("entry was validated under the same mutex");
             let installed_revision = Self::allocate_mutation_revision_locked(&mut state)?;
             if let Some(previous) = previous.filter(|previous| *previous != dialog_id) {
@@ -708,16 +764,23 @@ impl SessionRegistry {
             );
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
             entry.dialog_id = Some(dialog_id);
+            entry.sip_call_id = sip_call_id;
             entry.dialog_mutation_revision = installed_revision;
-            Ok((previous, previous_mutation_revision, installed_revision))
+            Ok((
+                previous,
+                previous_sip_call_id,
+                previous_mutation_revision,
+                installed_revision,
+            ))
         })();
-        let (previous, previous_mutation_revision, installed_revision) = match mutation {
-            Ok(result) => result,
-            Err(error) => {
-                guard.finish_rollback();
-                return Err(error);
-            }
-        };
+        let (previous, previous_sip_call_id, previous_mutation_revision, installed_revision) =
+            match mutation {
+                Ok(result) => result,
+                Err(error) => {
+                    guard.finish_rollback();
+                    return Err(error);
+                }
+            };
         self.dialog_mapped_total.fetch_add(1, Ordering::Relaxed);
         let rollback_key = key.clone();
         let result = self.finish_exact_mutation(guard, (), move |state| {
@@ -749,6 +812,7 @@ impl SessionRegistry {
             }
             let entry = Self::validate_entry_mut(state, &rollback_key, revision)?;
             entry.dialog_id = restored;
+            entry.sip_call_id = previous_sip_call_id;
             entry.dialog_mutation_revision = previous_mutation_revision;
             Ok(())
         });
@@ -761,6 +825,16 @@ impl SessionRegistry {
         key: &SessionKey,
         revision: RegistrySlotRevision,
         media_id: MediaSessionId,
+    ) -> Result<(), SessionRegistryError> {
+        self.map_media_identity_exact(key, revision, media_id, true)
+    }
+
+    fn map_media_identity_exact(
+        &self,
+        key: &SessionKey,
+        revision: RegistrySlotRevision,
+        media_id: MediaSessionId,
+        replace_existing: bool,
     ) -> Result<(), SessionRegistryError> {
         let guard = self
             .authority
@@ -780,6 +854,14 @@ impl SessionRegistry {
         let mutation = (|| {
             let mut state = self.lock_state()?;
             Self::validate_entry(&state, key, revision)?;
+            if !replace_existing
+                && state
+                    .entries
+                    .get(key)
+                    .is_some_and(|entry| entry.media_id.is_some())
+            {
+                return Err(SessionRegistryError::MediaAlreadyMapped);
+            }
             if let Some(owner) = state.by_media.get(&media_id) {
                 if !Self::owner_matches(owner, key, revision) {
                     return Err(SessionRegistryError::MediaCollision);
@@ -888,6 +970,7 @@ impl SessionRegistry {
             }
             let (
                 previous_dialog,
+                previous_sip_call_id,
                 previous_dialog_mutation_revision,
                 previous_info,
                 previous_pending_mutation_revision,
@@ -897,6 +980,7 @@ impl SessionRegistry {
                 .map(|entry| {
                     (
                         entry.dialog_id,
+                        entry.sip_call_id.clone(),
                         entry.dialog_mutation_revision,
                         entry.pending.info.clone(),
                         entry.pending_mutation_revision,
@@ -922,12 +1006,14 @@ impl SessionRegistry {
             );
             let entry = Self::validate_entry_mut(&mut state, key, revision)?;
             entry.dialog_id = Some(dialog_id);
+            entry.sip_call_id = Some(info.call_id.clone());
             entry.dialog_mutation_revision = installed_mutation_revision;
             entry.pending.info = Some(info);
             entry.pending_mutation_revision = installed_mutation_revision;
             self.dialog_mapped_total.fetch_add(1, Ordering::Relaxed);
             Ok((
                 previous_dialog,
+                previous_sip_call_id,
                 previous_dialog_mutation_revision,
                 previous_info,
                 previous_pending_mutation_revision,
@@ -936,6 +1022,7 @@ impl SessionRegistry {
         })();
         let (
             previous_dialog,
+            previous_sip_call_id,
             previous_dialog_mutation_revision,
             previous_info,
             previous_pending_mutation_revision,
@@ -954,6 +1041,7 @@ impl SessionRegistry {
             installed_dialog: dialog_id,
             installed_mutation_revision,
             previous_dialog,
+            previous_sip_call_id,
             previous_dialog_mutation_revision,
             previous_info,
             previous_pending_mutation_revision,
@@ -973,6 +1061,7 @@ impl SessionRegistry {
         installed_dialog: DialogId,
         installed_mutation_revision: u64,
         previous_dialog: Option<DialogId>,
+        previous_sip_call_id: Option<String>,
         previous_dialog_mutation_revision: u64,
         previous_info: Option<IncomingCallInfo>,
         previous_pending_mutation_revision: u64,
@@ -1013,6 +1102,7 @@ impl SessionRegistry {
         let entry = Self::validate_entry_mut(&mut state, key, revision)?;
         if rollback_dialog {
             entry.dialog_id = restored_dialog;
+            entry.sip_call_id = previous_sip_call_id;
             entry.dialog_mutation_revision = previous_dialog_mutation_revision;
         }
         if rollback_pending {
@@ -1102,7 +1192,14 @@ impl SessionRegistry {
         Ok(Self::validate_entry(&state, key, revision)?.pending.clone())
     }
 
-    pub(crate) fn get_key_by_dialog_exact(&self, dialog_id: &DialogId) -> Option<SessionKey> {
+    /// Resolve the complete generation- and slot-qualified owner of a live
+    /// dialog mapping. Callers that cross an await must retain this handle and
+    /// revalidate the same dialog afterward; returning only a raw session ID
+    /// would allow a replacement lifetime to be selected accidentally.
+    pub(crate) fn get_handle_by_dialog_exact(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Option<SessionRegistryHandle> {
         let owner = self.lock_state().ok()?.by_dialog.get(dialog_id).cloned()?;
         if !self.authority.is_current(&owner.key) {
             return None;
@@ -1110,7 +1207,38 @@ impl SessionRegistry {
         let state = self.lock_state().ok()?;
         let entry = state.entries.get(&owner.key)?;
         (entry.slot_revision == owner.slot_revision && entry.dialog_id.as_ref() == Some(dialog_id))
-            .then_some(owner.key)
+            .then_some(SessionRegistryHandle {
+                key: owner.key,
+                slot_revision: owner.slot_revision,
+            })
+    }
+
+    /// Resolve observational SIP wire correlation to one exact live session.
+    ///
+    /// Call-ID alone is not a signaling route: forked dialogs and delayed
+    /// traces can legitimately make it ambiguous. The optional trace path
+    /// therefore scans retained exact slots instead of maintaining another
+    /// reverse index, returns no owner unless exactly one slot matches, and
+    /// then requires that same generation to remain current.
+    pub(crate) fn get_handle_by_sip_call_id_exact(
+        &self,
+        sip_call_id: &str,
+    ) -> Option<SessionRegistryHandle> {
+        let candidate = {
+            let state = self.lock_state().ok()?;
+            Self::unique_retained_sip_call_id_handle(&state, sip_call_id)?
+        };
+        if !self.authority.is_current(candidate.key()) {
+            return None;
+        }
+        let state = self.lock_state().ok()?;
+        (Self::unique_retained_sip_call_id_handle(&state, sip_call_id)? == candidate)
+            .then_some(candidate)
+    }
+
+    pub(crate) fn get_key_by_dialog_exact(&self, dialog_id: &DialogId) -> Option<SessionKey> {
+        self.get_handle_by_dialog_exact(dialog_id)
+            .map(|handle| handle.key)
     }
 
     pub(crate) fn get_key_by_media_exact(&self, media_id: &MediaSessionId) -> Option<SessionKey> {
@@ -1129,11 +1257,54 @@ impl SessionRegistry {
         key: &SessionKey,
         revision: RegistrySlotRevision,
     ) -> Option<DialogId> {
-        if !self.authority.is_current(key) {
+        self.get_dialog_handle_exact(&SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        })
+    }
+
+    /// Resolve the canonical forward dialog mapping for one exact live slot.
+    ///
+    /// Both the slot entry and reverse index must identify the same owner. A
+    /// caller retains `handle` across any later await and re-resolves afterward
+    /// when it needs to prove that cleanup or raw-ID reuse did not intervene.
+    pub(crate) fn get_dialog_handle_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<DialogId> {
+        if !self.authority.is_current(handle.key()) {
             return None;
         }
         let state = self.lock_state().ok()?;
-        Self::validate_entry(&state, key, revision).ok()?.dialog_id
+        let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
+        let dialog_id = entry.dialog_id?;
+        state
+            .by_dialog
+            .get(&dialog_id)
+            .is_some_and(|owner| Self::owner_matches(owner, handle.key(), handle.slot_revision()))
+            .then_some(dialog_id)
+    }
+
+    /// Read the dialog mapping retained by one exact registry slot during
+    /// lifecycle cleanup.
+    ///
+    /// Unlike [`Self::get_dialog_exact`], this lookup deliberately does not
+    /// require the authority generation to remain active: cleanup begins only
+    /// after quiesce. The retained handle still fences both generation and
+    /// slot revision, and the reverse index must name that same exact owner,
+    /// so a removed slot or raw-ID replacement fails closed.
+    pub(crate) fn get_dialog_retained_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<DialogId> {
+        let state = self.lock_state().ok()?;
+        let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
+        let dialog_id = entry.dialog_id?;
+        state
+            .by_dialog
+            .get(&dialog_id)
+            .is_some_and(|owner| Self::owner_matches(owner, handle.key(), handle.slot_revision()))
+            .then_some(dialog_id)
     }
 
     pub(crate) fn get_media_exact(
@@ -1141,14 +1312,45 @@ impl SessionRegistry {
         key: &SessionKey,
         revision: RegistrySlotRevision,
     ) -> Option<MediaSessionId> {
-        if !self.authority.is_current(key) {
+        self.get_media_handle_exact(&SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        })
+    }
+
+    /// Resolve the canonical forward media association for one exact live
+    /// slot, requiring the forward slot and reverse index to agree.
+    pub(crate) fn get_media_handle_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<MediaSessionId> {
+        if !self.authority.is_current(handle.key()) {
             return None;
         }
         let state = self.lock_state().ok()?;
-        Self::validate_entry(&state, key, revision)
-            .ok()?
-            .media_id
-            .clone()
+        let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
+        let media_id = entry.media_id.clone()?;
+        state
+            .by_media
+            .get(&media_id)
+            .is_some_and(|owner| Self::owner_matches(owner, handle.key(), handle.slot_revision()))
+            .then_some(media_id)
+    }
+
+    /// Read the media association retained by one exact registry slot during
+    /// lifecycle cleanup, after ordinary current-generation reads are closed.
+    pub(crate) fn get_media_retained_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<MediaSessionId> {
+        let state = self.lock_state().ok()?;
+        let entry = Self::validate_entry(&state, handle.key(), handle.slot_revision()).ok()?;
+        let media_id = entry.media_id.clone()?;
+        state
+            .by_media
+            .get(&media_id)
+            .is_some_and(|owner| Self::owner_matches(owner, handle.key(), handle.slot_revision()))
+            .then_some(media_id)
     }
 
     /// Remove only the exact slot observed by its caller. This is valid after
@@ -1241,140 +1443,6 @@ impl SessionRegistry {
         self.map_dialog_exact(&key, revision, dialog_id).is_ok()
     }
 
-    /// Legacy source-compatible external-map commit.
-    ///
-    /// Because the compensator is produced *after* the callback returns, a
-    /// callback panic cannot compensate partial external mutation. Production
-    /// authority paths must use [`Self::commit_inbound_dialog_compensated`],
-    /// which arms the exact compensator before invoking external code.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn commit_inbound_dialog<F, C>(
-        &self,
-        session_id: SessionId,
-        dialog_id: DialogId,
-        info: IncomingCallInfo,
-        commit_external_maps: F,
-    ) -> bool
-    where
-        F: FnOnce() -> C,
-        C: ExternalMapCompensation,
-    {
-        let Ok((key, revision)) = self.current_handle(&session_id) else {
-            return false;
-        };
-        let Ok(receipt) = self.commit_inbound_dialog_exact(&key, revision, dialog_id, info) else {
-            return false;
-        };
-        match catch_unwind(AssertUnwindSafe(commit_external_maps)) {
-            Ok(compensation) => match receipt.finalize_with_compensation(compensation) {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "session registry authority rejected external inbound-map finalize"
-                    );
-                    false
-                }
-            },
-            Err(_) => {
-                drop(receipt);
-                tracing::error!(
-                    "session registry external inbound-map commit panicked; exact registry mutation was compensated"
-                );
-                false
-            }
-        }
-    }
-
-    /// Commit an inbound dialog with a pre-armed exact external compensator.
-    ///
-    /// `compensation` must remove only the external values installed by
-    /// `commit_external_maps`. It runs on callback panic and whenever
-    /// authority commit loses to quiesce, while the authority operation guard
-    /// is still retained.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn commit_inbound_dialog_compensated<F, C>(
-        &self,
-        session_id: SessionId,
-        dialog_id: DialogId,
-        info: IncomingCallInfo,
-        commit_external_maps: F,
-        compensation: C,
-    ) -> bool
-    where
-        F: FnOnce(),
-        C: ExternalMapCompensation,
-    {
-        let Ok((key, revision)) = self.current_handle(&session_id) else {
-            return false;
-        };
-        let Ok(receipt) = self.commit_inbound_dialog_exact(&key, revision, dialog_id, info) else {
-            return false;
-        };
-        match catch_unwind(AssertUnwindSafe(commit_external_maps)) {
-            Ok(()) => match receipt.finalize_with_compensation(compensation) {
-                Ok(()) => true,
-                Err(error) => {
-                    tracing::warn!(
-                        error = %error,
-                        "session registry authority rejected compensated inbound-map finalize"
-                    );
-                    false
-                }
-            },
-            Err(_) => {
-                if let Err(error) = receipt.rollback_with_compensation(compensation) {
-                    tracing::error!(
-                        error = %error,
-                        "session registry failed to compensate panicked external inbound-map commit"
-                    );
-                }
-                false
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn with_live_session<R, C>(
-        &self,
-        session_id: &SessionId,
-        commit: impl FnOnce() -> (R, C),
-    ) -> Option<R>
-    where
-        C: ExternalMapCompensation,
-    {
-        let (key, revision) = self.existing_current_handle(session_id).ok()?;
-        let guard = self
-            .authority
-            .try_operation_exact(&key, SessionOperationKind::StateTransition)
-            .ok()?;
-        {
-            let Ok(state) = self.lock_state() else {
-                guard.finish_rollback();
-                return None;
-            };
-            if Self::validate_entry(&state, &key, revision).is_err() {
-                drop(state);
-                guard.finish_rollback();
-                return None;
-            }
-        }
-        match catch_unwind(AssertUnwindSafe(commit)) {
-            Ok((value, compensation)) => match guard.finish() {
-                Ok(()) => Some(value),
-                Err(failure) => {
-                    let _ = catch_unwind(AssertUnwindSafe(|| compensation.compensate()));
-                    failure.into_guard().finish_rollback();
-                    None
-                }
-            },
-            Err(_) => {
-                guard.finish_rollback();
-                None
-            }
-        }
-    }
-
     pub async fn map_media(&self, session_id: SessionId, media_id: MediaSessionId) {
         if !self.map_media_checked(session_id, media_id).await {
             tracing::warn!("session registry rejected non-current media mapping");
@@ -1420,28 +1488,6 @@ impl SessionRegistry {
         let _ = self.remove_if(&key, revision);
     }
 
-    /// Transitional compatibility wrapper. Retirement now belongs solely to
-    /// `SessionLeaseAuthority`; this method only conditionally removes the
-    /// current registry slot and reports whether it owned that removal.
-    #[allow(dead_code)]
-    pub(crate) fn retire_session_for_cleanup(&self, session_id: &SessionId) -> Option<bool> {
-        match self.existing_current_handle(session_id) {
-            Ok((key, revision)) => self.remove_if(&key, revision).ok(),
-            Err(SessionRegistryError::Poisoned) => None,
-            Err(_) => Some(false),
-        }
-    }
-
-    /// No-op compatibility wrapper. Cleanup ownership moved to the authority.
-    #[allow(dead_code)]
-    pub(crate) fn release_cleanup_retirement(&self, _session_id: &SessionId) {}
-
-    /// The registry has no retirement records by design.
-    #[allow(dead_code)]
-    pub(crate) fn retired_session_count(&self) -> usize {
-        0
-    }
-
     #[cfg(feature = "perf-tests")]
     pub(crate) fn perf_lifecycle_counts(&self) -> serde_json::Value {
         serde_json::json!({
@@ -1450,6 +1496,35 @@ impl SessionRegistry {
             "removed_total": self.removed_total.load(Ordering::Relaxed),
             "remove_missing_total": self.remove_missing_total.load(Ordering::Relaxed),
         })
+    }
+
+    /// Live canonical media associations, exposed only to the release-gate
+    /// diagnostic snapshot. This is a registry count, not another projection.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn media_mapping_count(&self) -> usize {
+        self.lock_state()
+            .map(|state| state.by_media.len())
+            .unwrap_or_default()
+    }
+
+    /// Live registry-owned slots and exact protocol associations. The values
+    /// are private release-gate diagnostics, not a second routing index.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_retention_counts(&self) -> serde_json::Value {
+        match self.lock_state() {
+            Ok(state) => serde_json::json!({
+                "entries": state.entries.len(),
+                "dialog_mappings": state.by_dialog.len(),
+                "media_mappings": state.by_media.len(),
+                "lock_poisoned": false,
+            }),
+            Err(_) => serde_json::json!({
+                "entries": null,
+                "dialog_mappings": null,
+                "media_mappings": null,
+                "lock_poisoned": true,
+            }),
+        }
     }
 
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
@@ -1528,21 +1603,6 @@ impl SessionRegistry {
         .is_ok()
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn store_pending_incoming_principal(
-        &self,
-        session_id: &SessionId,
-        principal: AuthenticatedPrincipal,
-    ) -> bool {
-        let Ok((key, revision)) = self.existing_current_handle(session_id) else {
-            return false;
-        };
-        self.mutate_pending_exact(&key, revision, move |pending| {
-            pending.principal = Some(principal)
-        })
-        .is_ok()
-    }
-
     pub async fn peek_pending_incoming_request(&self) -> Option<Arc<rvoip_sip_core::Request>> {
         let (key, revision) = self.unique_active_handle()?;
         self.pending_bundle_exact(&key, revision).ok()?.request
@@ -1553,12 +1613,6 @@ impl SessionRegistry {
     ) -> Option<Arc<SipTransportSecurityContext>> {
         let (key, revision) = self.unique_active_handle()?;
         self.pending_bundle_exact(&key, revision).ok()?.transport
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn peek_pending_incoming_principal(&self) -> Option<AuthenticatedPrincipal> {
-        let (key, revision) = self.unique_active_handle()?;
-        self.pending_bundle_exact(&key, revision).ok()?.principal
     }
 
     pub async fn take_pending_incoming_request(&self) -> Option<Arc<rvoip_sip_core::Request>> {
@@ -1573,14 +1627,6 @@ impl SessionRegistry {
     ) -> Option<Arc<SipTransportSecurityContext>> {
         let (key, revision) = self.unique_active_handle()?;
         self.mutate_pending_exact(&key, revision, |pending| pending.transport.take())
-            .ok()
-            .flatten()
-    }
-
-    #[allow(dead_code)]
-    pub(crate) async fn take_pending_incoming_principal(&self) -> Option<AuthenticatedPrincipal> {
-        let (key, revision) = self.unique_active_handle()?;
-        self.mutate_pending_exact(&key, revision, |pending| pending.principal.take())
             .ok()
             .flatten()
     }
@@ -1732,6 +1778,248 @@ mod tests {
         );
     }
 
+    #[test]
+    fn exact_sip_call_id_correlation_clears_with_its_dialog() {
+        let (fixture, keys) = Admitted::sessions(&["sip-call-id-clear"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        let dialog_id = DialogId::new();
+        registry
+            .map_dialog_identity_handle(&handle, dialog_id, "wire-call".into())
+            .expect("bind dialog identity");
+
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("wire-call"),
+            Some(handle.clone())
+        );
+        assert!(registry
+            .clear_dialog_handle_retained(&handle, dialog_id)
+            .expect("clear exact dialog identity"));
+        assert_eq!(registry.get_handle_by_sip_call_id_exact("wire-call"), None);
+    }
+
+    #[test]
+    fn outbound_dialog_identity_install_is_insert_only_for_one_exact_slot() {
+        let (fixture, keys) = Admitted::sessions(&["dialog-install-only"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        let first = DialogId::new();
+        let replacement = DialogId::new();
+
+        registry
+            .install_dialog_identity_handle(&handle, first, "first-wire-call".into())
+            .expect("install first outbound dialog identity");
+        assert_eq!(registry.get_dialog_handle_exact(&handle), Some(first));
+        assert_eq!(
+            registry.install_dialog_identity_handle(
+                &handle,
+                replacement,
+                "replacement-wire-call".into(),
+            ),
+            Err(SessionRegistryError::DialogAlreadyMapped)
+        );
+        assert_eq!(registry.get_dialog_handle_exact(&handle), Some(first));
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("first-wire-call"),
+            Some(handle.clone())
+        );
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("replacement-wire-call"),
+            None
+        );
+        assert_eq!(registry.get_key_by_dialog_exact(&replacement), None);
+
+        assert!(registry
+            .clear_dialog_handle_retained(&handle, first)
+            .expect("retire first outbound dialog identity"));
+        registry
+            .install_dialog_identity_handle(&handle, replacement, "replacement-wire-call".into())
+            .expect("install redirect replacement after exact retirement");
+        assert_eq!(registry.get_dialog_handle_exact(&handle), Some(replacement));
+    }
+
+    #[tokio::test]
+    async fn retained_call_id_ambiguity_fails_closed_until_old_slot_is_removed() {
+        let (mut fixture, keys) = Admitted::sessions(&["wire-old", "wire-current"]);
+        let revision_old = fixture.registry.register_exact(&keys[0]).expect("old slot");
+        let revision_current = fixture
+            .registry
+            .register_exact(&keys[1])
+            .expect("current slot");
+        let old_handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision_old,
+        };
+        let current_handle = SessionRegistryHandle {
+            key: keys[1].clone(),
+            slot_revision: revision_current,
+        };
+        fixture
+            .registry
+            .map_dialog_identity_handle(&old_handle, DialogId::new(), "shared-wire-call".into())
+            .expect("old dialog identity");
+        let teardown = fixture
+            .authority
+            .teardown(&keys[0], std::time::Duration::from_secs(1))
+            .expect("quiesce old exact generation");
+        fixture
+            .registry
+            .map_dialog_identity_handle(&current_handle, DialogId::new(), "shared-wire-call".into())
+            .expect("current dialog identity");
+
+        assert_eq!(
+            fixture
+                .registry
+                .get_handle_by_sip_call_id_exact("shared-wire-call"),
+            None,
+            "a retained old owner must make late trace attribution ambiguous"
+        );
+        assert!(fixture
+            .registry
+            .remove_if(&keys[0], revision_old)
+            .expect("remove old retained slot"));
+        assert_eq!(
+            fixture
+                .registry
+                .get_handle_by_sip_call_id_exact("shared-wire-call"),
+            Some(current_handle)
+        );
+
+        fixture._leases.clear();
+        teardown.wait().await.expect("finish old teardown");
+    }
+
+    #[tokio::test]
+    async fn taking_incoming_info_does_not_remove_canonical_sip_call_id() {
+        let (fixture, keys) = Admitted::sessions(&["incoming-call-id"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        let dialog_id = DialogId::new();
+        registry
+            .commit_inbound_dialog_exact(
+                &keys[0],
+                revision,
+                dialog_id,
+                incoming(keys[0].session_id.clone(), dialog_id, "incoming-wire"),
+            )
+            .expect("commit inbound identity")
+            .finalize()
+            .expect("finalize inbound identity");
+
+        assert!(registry
+            .take_pending_incoming_call(handle.session_id())
+            .await
+            .is_some());
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("incoming-wire@example.test"),
+            Some(handle)
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_dialog_lookup_survives_quiesce_and_rejects_removed_slot() {
+        let (mut fixture, keys) = Admitted::sessions(&["retained-dialog-lookup"]);
+        let key = &keys[0];
+        let revision = fixture.registry.register_exact(key).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        };
+        let dialog_id = DialogId::new();
+        fixture
+            .registry
+            .map_dialog_handle(&handle, dialog_id)
+            .expect("map retained dialog");
+
+        let teardown = fixture
+            .authority
+            .teardown(key, std::time::Duration::from_secs(1))
+            .expect("quiesce exact generation");
+        assert_eq!(
+            fixture.registry.get_dialog_exact(key, revision),
+            None,
+            "active-only lookup must close when quiesce starts"
+        );
+        assert_eq!(
+            fixture.registry.get_dialog_retained_exact(&handle),
+            Some(dialog_id),
+            "retained cleanup must still resolve its exact dialog"
+        );
+
+        assert!(fixture
+            .registry
+            .remove_if(key, revision)
+            .expect("remove exact retained slot"));
+        assert_eq!(fixture.registry.get_dialog_retained_exact(&handle), None);
+
+        fixture._leases.clear();
+        teardown.wait().await.expect("finish exact teardown");
+    }
+
+    #[test]
+    fn retained_dialog_lookup_rejects_raw_id_replacement() {
+        let raw_id = SessionId::from("retained-dialog-reused-id");
+        let old_authority = SessionLeaseAuthority::new();
+        let old_lease = old_authority.admit(raw_id.clone()).expect("old admission");
+        let old_key = old_lease.key().clone();
+        let old_registry = SessionRegistry::with_authority(Arc::clone(&old_authority));
+        let old_revision = old_registry.register_exact(&old_key).expect("old slot");
+        let old_handle = SessionRegistryHandle {
+            key: old_key.clone(),
+            slot_revision: old_revision,
+        };
+        let old_dialog = DialogId::new();
+        old_registry
+            .map_dialog_handle(&old_handle, old_dialog)
+            .expect("old dialog mapping");
+        assert!(old_registry
+            .remove_if(&old_key, old_revision)
+            .expect("remove old exact slot"));
+
+        // Model a process authority restart while retaining the registry
+        // storage. The raw ID repeats, but the generation key and slot
+        // revision identify only the replacement lifetime.
+        let new_authority = SessionLeaseAuthority::new();
+        let new_lease = new_authority.admit(raw_id).expect("new admission");
+        let new_key = new_lease.key().clone();
+        let new_registry = SessionRegistry {
+            authority: Arc::clone(&new_authority),
+            state: Arc::clone(&old_registry.state),
+            dialog_mapped_total: Arc::clone(&old_registry.dialog_mapped_total),
+            media_mapped_total: Arc::clone(&old_registry.media_mapped_total),
+            removed_total: Arc::clone(&old_registry.removed_total),
+            remove_missing_total: Arc::clone(&old_registry.remove_missing_total),
+            after_exact_mutation: Arc::clone(&old_registry.after_exact_mutation),
+        };
+        let new_revision = new_registry.register_exact(&new_key).expect("new slot");
+        let new_handle = SessionRegistryHandle {
+            key: new_key,
+            slot_revision: new_revision,
+        };
+        let new_dialog = DialogId::new();
+        new_registry
+            .map_dialog_handle(&new_handle, new_dialog)
+            .expect("new dialog mapping");
+
+        assert_eq!(new_registry.get_dialog_retained_exact(&old_handle), None);
+        assert_eq!(
+            new_registry.get_dialog_retained_exact(&new_handle),
+            Some(new_dialog)
+        );
+    }
+
     #[tokio::test]
     async fn removing_a_leaves_b_intact() {
         let (fixture, keys) = Admitted::sessions(&["remove-a", "remove-b"]);
@@ -1805,120 +2093,90 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compatibility_external_commit_is_reentrant_and_panic_safe() {
-        let (fixture, keys) = Admitted::sessions(&["commit-callback"]);
+    async fn exact_inbound_commit_receipt_restores_superseded_identity_when_dropped() {
+        let (fixture, keys) = Admitted::sessions(&["commit-receipt"]);
         let registry = &fixture.registry;
         let key = &keys[0];
         let revision = registry.register_exact(key).expect("slot");
         let first_dialog = DialogId::new();
-        let first_info = incoming(key.session_id.clone(), first_dialog, "first");
-        let callback_registry = registry.clone();
-        let callback_key = key.clone();
-        assert!(registry.commit_inbound_dialog(
-            key.session_id.clone(),
-            first_dialog,
-            first_info,
-            move || {
-                assert_eq!(
-                    callback_registry.get_key_by_dialog_exact(&first_dialog),
-                    Some(callback_key)
-                );
-            },
-        ));
-
-        let panic_dialog = DialogId::new();
-        let panic_info = incoming(key.session_id.clone(), panic_dialog, "panic");
-        assert!(!registry.commit_inbound_dialog(
-            key.session_id.clone(),
-            panic_dialog,
-            panic_info,
-            || -> () { panic!("external mapping panic") },
-        ));
-        assert_eq!(registry.get_dialog_exact(key, revision), Some(first_dialog));
-        assert_eq!(
-            registry.get_key_by_dialog_exact(&panic_dialog),
-            None,
-            "panicked external commit must compensate its registry mapping"
-        );
         registry
-            .map_dialog_exact(key, revision, DialogId::new())
-            .expect("registry mutex remains usable");
-
-        let published = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let publish_for_commit = Arc::clone(&published);
-        let publish_for_rollback = Arc::clone(&published);
-        let compensated_dialog = DialogId::new();
-        assert!(!registry.commit_inbound_dialog_compensated(
-            key.session_id.clone(),
-            compensated_dialog,
-            incoming(
-                key.session_id.clone(),
-                compensated_dialog,
-                "compensated-panic",
-            ),
-            move || {
-                publish_for_commit.store(true, std::sync::atomic::Ordering::SeqCst);
-                panic!("panic after external publication");
-            },
-            move || {
-                publish_for_rollback.store(false, std::sync::atomic::Ordering::SeqCst);
-            },
-        ));
-        assert!(
-            !published.load(std::sync::atomic::Ordering::SeqCst),
-            "pre-armed compensation must remove publication after callback panic"
+            .commit_inbound_dialog_exact(
+                key,
+                revision,
+                first_dialog,
+                incoming(key.session_id.clone(), first_dialog, "first"),
+            )
+            .expect("first exact commit")
+            .finalize()
+            .expect("first exact finalize");
+        let exact_handle = SessionRegistryHandle {
+            key: key.clone(),
+            slot_revision: revision,
+        };
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("first@example.test"),
+            Some(exact_handle)
         );
-        assert_eq!(registry.get_key_by_dialog_exact(&compensated_dialog), None);
+
+        let superseded_dialog = DialogId::new();
+        let receipt = registry
+            .commit_inbound_dialog_exact(
+                key,
+                revision,
+                superseded_dialog,
+                incoming(key.session_id.clone(), superseded_dialog, "superseded"),
+            )
+            .expect("superseding exact commit");
+        drop(receipt);
+
+        assert_eq!(registry.get_dialog_exact(key, revision), Some(first_dialog));
+        assert!(registry
+            .get_handle_by_sip_call_id_exact("first@example.test")
+            .is_some());
+        assert_eq!(
+            registry.get_handle_by_sip_call_id_exact("superseded@example.test"),
+            None,
+            "dropping an unfinalized exact receipt restores prior Call-ID correlation"
+        );
+        assert_eq!(
+            registry.get_key_by_dialog_exact(&superseded_dialog),
+            None,
+            "dropping an unfinalized exact receipt restores the prior dialog index"
+        );
     }
 
     #[tokio::test]
-    async fn quiesce_during_external_commit_compensates_publication() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-
+    async fn quiesce_before_exact_inbound_finalize_rolls_back_registry_identity() {
         let (fixture, keys) = Admitted::sessions(&["commit-quiesce"]);
         let registry = &fixture.registry;
         let key = &keys[0];
         let revision = registry.register_exact(key).expect("slot");
         let dialog_id = DialogId::new();
         let info = incoming(key.session_id.clone(), dialog_id, "quiesce");
-        let published = Arc::new(AtomicBool::new(false));
-        let publish_for_commit = Arc::clone(&published);
-        let publish_for_rollback = Arc::clone(&published);
-        let authority = Arc::clone(&fixture.authority);
-        let teardown_key = key.clone();
-        let teardown_slot = Arc::new(StdMutex::new(None));
-        let teardown_slot_for_commit = Arc::clone(&teardown_slot);
-
-        assert!(!registry.commit_inbound_dialog_compensated(
-            key.session_id.clone(),
-            dialog_id,
-            info,
-            move || {
-                publish_for_commit.store(true, Ordering::SeqCst);
-                let teardown = authority
-                    .teardown(&teardown_key, std::time::Duration::from_secs(1))
-                    .expect("quiesce during external commit");
-                *teardown_slot_for_commit.lock().expect("teardown slot") = Some(teardown);
-            },
-            move || publish_for_rollback.store(false, Ordering::SeqCst),
-        ));
-        assert!(
-            !published.load(Ordering::SeqCst),
-            "external publication must be compensated when authority finalize loses to quiesce"
-        );
+        let receipt = registry
+            .commit_inbound_dialog_exact(key, revision, dialog_id, info)
+            .expect("exact inbound commit");
+        let teardown = fixture
+            .authority
+            .teardown(key, std::time::Duration::from_secs(1))
+            .expect("quiesce before exact finalize");
+        assert!(receipt.finalize().is_err());
         {
             let state = registry.lock_state().expect("registry state");
             assert_eq!(
                 state.entries.get(key).and_then(|entry| entry.dialog_id),
                 None,
-                "registry mutation must be compensated with the external publication"
+                "registry mutation must be rolled back when exact finalize loses to quiesce"
+            );
+            assert_eq!(
+                state
+                    .entries
+                    .get(key)
+                    .and_then(|entry| entry.sip_call_id.as_deref()),
+                None,
+                "Call-ID correlation must roll back with the dialog identity"
             );
         }
-        let teardown = teardown_slot
-            .lock()
-            .expect("teardown slot")
-            .take()
-            .expect("teardown waiter");
         teardown.wait().await.expect("finish teardown");
         assert!(registry
             .remove_if(key, revision)
@@ -1980,7 +2238,13 @@ mod tests {
         }));
 
         assert!(matches!(
-            registry.map_dialog_exact(key, revision, dialog_id),
+            registry.map_dialog_identity_exact(
+                key,
+                revision,
+                dialog_id,
+                Some("rollback-wire-call".into()),
+                true,
+            ),
             Err(SessionRegistryError::AuthorityOperation(_))
         ));
         {
@@ -1989,6 +2253,14 @@ mod tests {
                 state.entries.get(key).and_then(|entry| entry.dialog_id),
                 None,
                 "the slot must restore its prior dialog value"
+            );
+            assert_eq!(
+                state
+                    .entries
+                    .get(key)
+                    .and_then(|entry| entry.sip_call_id.as_deref()),
+                None,
+                "the slot must restore its prior Call-ID value"
             );
             assert!(
                 !state.by_dialog.contains_key(&dialog_id),
@@ -2053,6 +2325,44 @@ mod tests {
             registry.get_key_by_media_exact(&replacement_media),
             Some(keys[0].clone())
         );
+    }
+
+    #[test]
+    fn media_resource_install_is_insert_only_and_exactly_clearable() {
+        let (fixture, keys) = Admitted::sessions(&["media-install-only"]);
+        let registry = &fixture.registry;
+        let revision = registry.register_exact(&keys[0]).expect("slot");
+        let handle = SessionRegistryHandle {
+            key: keys[0].clone(),
+            slot_revision: revision,
+        };
+        let first = MediaSessionId::new_v4();
+        let replacement = MediaSessionId::new_v4();
+
+        registry
+            .install_media_handle(&handle, first.clone())
+            .expect("install first exact media identity");
+        assert_eq!(
+            registry.get_media_handle_exact(&handle),
+            Some(first.clone())
+        );
+        assert_eq!(
+            registry.install_media_handle(&handle, replacement.clone()),
+            Err(SessionRegistryError::MediaAlreadyMapped)
+        );
+        assert_eq!(
+            registry.get_media_handle_exact(&handle),
+            Some(first.clone())
+        );
+        assert_eq!(registry.get_key_by_media_exact(&replacement), None);
+
+        assert!(registry
+            .clear_media_handle_retained(&handle, &first)
+            .expect("clear first exact media identity"));
+        registry
+            .install_media_handle(&handle, replacement.clone())
+            .expect("install replacement after exact retirement");
+        assert_eq!(registry.get_media_handle_exact(&handle), Some(replacement));
     }
 
     #[tokio::test]
@@ -2157,6 +2467,10 @@ mod tests {
         assert!(fixture
             .registry
             .get_key_by_dialog_exact(&DialogId::new())
+            .is_none());
+        assert!(fixture
+            .registry
+            .get_handle_by_sip_call_id_exact("poisoned-wire-call")
             .is_none());
     }
 }

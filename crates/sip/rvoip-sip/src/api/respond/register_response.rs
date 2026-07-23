@@ -4,9 +4,7 @@
 //! 4xx-6xx) for an inbound REGISTER request. Stamps the RFC 3327
 //! `Path`, RFC 3608 `Service-Route`, RFC 3455 `P-Associated-URI`,
 //! RFC 3261 `Min-Expires`, and application-staged extras onto the
-//! response, then publishes a `SessionToDialogEvent::SendRegisterResponse`
-//! that rvoip-sip-dialog's `event_hub` consumes to send the response on the
-//! wire.
+//! response, then sends it through the exact dialog transaction API.
 
 use std::sync::Arc;
 
@@ -14,6 +12,7 @@ use rvoip_sip_core::types::headers::TypedHeader;
 use rvoip_sip_core::types::Method;
 
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
+use crate::api::incoming::ExactResponseObligation;
 use crate::api::respond::AuthScheme;
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
@@ -32,6 +31,7 @@ enum RegisterResponseKind {
 pub struct RegisterResponseBuilder {
     transaction_id: String,
     coordinator: Option<Arc<UnifiedCoordinator>>,
+    response_obligation: Option<Arc<ExactResponseObligation>>,
     kind: RegisterResponseKind,
     expires: u32,
     min_expires: Option<u32>,
@@ -61,6 +61,7 @@ impl RegisterResponseBuilder {
         Self {
             transaction_id: transaction_id.into(),
             coordinator,
+            response_obligation: None,
             kind: RegisterResponseKind::Accept,
             expires: 3600,
             min_expires: None,
@@ -97,6 +98,14 @@ impl RegisterResponseBuilder {
         let mut s = Self::new(transaction_id, coordinator);
         s.kind = RegisterResponseKind::Reject(status);
         s
+    }
+
+    pub(crate) fn with_response_obligation(
+        mut self,
+        response_obligation: Option<Arc<ExactResponseObligation>>,
+    ) -> Self {
+        self.response_obligation = response_obligation;
+        self
     }
 
     /// Set the granted registration lifetime, in seconds, stamped as
@@ -235,9 +244,8 @@ impl RegisterResponseBuilder {
         Ok(out)
     }
 
-    /// Build the cross-crate `SendRegisterResponse` event payload
-    /// fields without sending. Useful for tests and for the registrar
-    /// crate's migration path.
+    /// Build the exact REGISTER response fields without sending. Useful for
+    /// tests and custom registrar integrations.
     pub fn build_event_fields(mut self) -> Result<RegisterResponseEventFields> {
         let extras = take_staged(&mut self.state);
         let extra_headers_wire = extras
@@ -357,7 +365,7 @@ impl RegisterResponseBuilder {
         })
     }
 
-    /// Publish the response via `SessionToDialogEvent::SendRegisterResponse`.
+    /// Send the response through the exact inbound REGISTER transaction.
     /// Requires the builder to have been constructed from an
     /// `IncomingRegister` that carries a coordinator handle; otherwise
     /// returns `Err(InvalidInput)` so test / synthesized paths get a
@@ -372,38 +380,53 @@ impl RegisterResponseBuilder {
             )
         })?;
 
+        let response_obligation = self.response_obligation.clone();
         let fields = self.build_event_fields()?;
-        let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(
-            rvoip_infra_common::events::cross_crate::SessionToDialogEvent::SendRegisterResponse {
-                transaction_id: fields.transaction_id,
-                status_code: fields.status_code,
-                reason: fields.reason,
-                www_authenticate: fields.www_authenticate,
-                contact: fields.contact,
-                expires: fields.expires,
-                min_expires: fields.min_expires,
-                service_route: fields.service_route,
-                path_echo: fields.path_echo,
-                associated_uri: fields.associated_uri,
-                extra_headers: fields.extra_headers,
-            },
-        );
-
-        coordinator
-            .global_coordinator
-            .publish(std::sync::Arc::new(event))
-            .await
-            .map_err(|_error| {
-                SessionError::DialogError("failed to publish REGISTER response".to_string())
-            })?;
-
-        Ok(())
+        let Some(obligation) = response_obligation else {
+            return coordinator.send_register_response_fields(&fields).await;
+        };
+        let claim = obligation.claim()?;
+        let result = coordinator
+            .dialog_adapter()
+            .send_register_response_fields_classified(&fields)
+            .await;
+        match result {
+            Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal)
+            | Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => {
+                claim.complete();
+                Ok(())
+            }
+            Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+                claim.release_after_failure();
+                Err(SessionError::DialogError(
+                    "failed to send exact REGISTER response before transport write".to_string(),
+                ))
+            }
+            Err(error)
+                if error.disposition
+                    == rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable =>
+            {
+                claim.release_after_failure();
+                Err(SessionError::DialogError(
+                    "failed to send exact REGISTER response before transport write".to_string(),
+                ))
+            }
+            Err(error) => {
+                claim.complete();
+                tracing::warn!(
+                    status_code = fields.status_code,
+                    disposition = ?error.disposition,
+                    "REGISTER response became wire-unknown; retiring its exact response obligation"
+                );
+                Ok(())
+            }
+        }
     }
 }
 
-/// SIP_API_DESIGN_2 Phase D — wire-format snapshot of every field a
-/// `RegisterResponseBuilder` would publish. Returned by
-/// `build_event_fields()` for test inspection.
+/// Wire-format snapshot of every field a `RegisterResponseBuilder` sends
+/// through the exact server transaction. Returned by `build_event_fields()`
+/// for test inspection.
 #[derive(Clone)]
 pub struct RegisterResponseEventFields {
     /// Transaction the response belongs to.
@@ -522,5 +545,21 @@ mod tests {
             .extra_headers
             .iter()
             .all(|(name, _)| !name.contains("HeaderName")));
+    }
+
+    #[test]
+    fn application_register_response_completes_single_writer_obligation() {
+        let source = include_str!("register_response.rs");
+        let send = source
+            .split("pub async fn send(self) -> Result<()> {")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Wire-format snapshot").next())
+            .expect("RegisterResponseBuilder::send source");
+        assert!(send.contains("obligation.claim()?"));
+        assert!(send.contains("send_register_response_fields_classified"));
+        assert!(send.contains("claim.complete()"));
+        assert!(send.contains("claim.release_after_failure()"));
+        assert!(send.contains("ZeroWireRetryable"));
+        assert!(send.contains("WireUnknownErrorTerminal"));
     }
 }

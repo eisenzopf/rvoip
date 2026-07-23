@@ -584,12 +584,18 @@ impl RvoipPeerConnection {
             .store(false, Ordering::Release);
         *self.outbound_dtmf_negotiation.lock() = OutboundDtmfNegotiation::Unsupported;
         *self.outbound_audio_mid.lock() = None;
+        if let Some(writer) = self.outbound_audio_writer() {
+            writer.set_mid(None);
+        }
     }
 
     fn begin_outbound_dtmf_renegotiation(&self) {
         if self.outbound_dtmf_send_capable.load(Ordering::Acquire) {
             *self.outbound_dtmf_negotiation.lock() = OutboundDtmfNegotiation::Pending;
             *self.outbound_audio_mid.lock() = None;
+            if let Some(writer) = self.outbound_audio_writer() {
+                writer.set_mid(None);
+            }
         }
     }
 
@@ -620,6 +626,9 @@ impl RvoipPeerConnection {
             // track's codec binding. Update diagnostics only at this commit
             // boundary; a failed same-clock PT remap retains the old value.
             *self.local_dtmf_codec.lock() = Some(codec);
+        }
+        if let Some(writer) = self.outbound_audio_writer() {
+            writer.set_mid(audio_mid.as_ref().map(|binding| binding.value.clone()));
         }
         *self.outbound_dtmf_negotiation.lock() = state;
         *self.outbound_audio_mid.lock() = audio_mid;
@@ -1230,11 +1239,7 @@ impl RvoipPeerConnection {
         receiver: &Arc<Self>,
         timeout: Duration,
     ) -> Option<Arc<dyn TrackRemote>> {
-        use webrtc::media_stream::track_local::TrackLocal;
-
-        let local = sender.local_audio_track()?;
-        let ssrc = sender.local_audio_ssrc()?;
-        let mut seq: u16 = 1;
+        let writer = sender.outbound_audio_writer()?;
         let deadline = tokio::time::Instant::now() + timeout;
 
         while tokio::time::Instant::now() < deadline {
@@ -1242,9 +1247,13 @@ impl RvoipPeerConnection {
                 return Some(track);
             }
 
-            let pkt = crate::media::pump::silent_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
-            let _ = local.write_rtp(pkt).await;
-            seq = seq.wrapping_add(1);
+            let _ = writer
+                .write_audio(
+                    crate::peer::builder::OPUS_PAYLOAD_TYPE,
+                    0,
+                    crate::media::pump::silent_opus_payload(),
+                )
+                .await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
@@ -1260,8 +1269,7 @@ impl RvoipPeerConnection {
     ) -> (Option<Arc<dyn TrackRemote>>, Option<Arc<dyn TrackRemote>>) {
         use webrtc::media_stream::track_local::TrackLocal;
 
-        let audio_local = sender.local_audio_track();
-        let audio_ssrc = sender.local_audio_ssrc();
+        let audio_writer = sender.outbound_audio_writer();
         let video_local = if include_video {
             sender.local_video_track()
         } else {
@@ -1278,10 +1286,14 @@ impl RvoipPeerConnection {
                 break;
             }
 
-            if let (Some(track), Some(ssrc)) = (&audio_local, audio_ssrc) {
-                let pkt =
-                    crate::media::pump::silent_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
-                let _ = track.write_rtp(pkt).await;
+            if let Some(writer) = &audio_writer {
+                let _ = writer
+                    .write_audio(
+                        crate::peer::builder::OPUS_PAYLOAD_TYPE,
+                        0,
+                        crate::media::pump::silent_opus_payload(),
+                    )
+                    .await;
             }
             if let (Some(track), Some(ssrc)) = (&video_local, video_ssrc) {
                 let pkt = crate::media::pump::silent_vp8_rtp_packet_for_ssrc(

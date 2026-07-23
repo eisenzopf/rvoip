@@ -3,10 +3,11 @@
 Date: 2026-06-16
 
 This report summarizes the current beta-candidate performance evidence and the
-claim policy for the next release. The current reference report is the latest
-full beta gate selected by `crates/sip/rvoip-sip/beta-report/latest.txt`.
-It passed all gates, but it ran from a dirty tree and is not a clean-tree
-publish attestation.
+claim policy for the next release. The current reference report is pinned
+below. `beta-report/latest.txt` is informational only; new publish evidence is
+selected through `beta-report/latest-full-clean.txt` and verified against its
+attestation. The pinned report passed all gates, but it ran from a dirty tree
+and is not a clean-tree publish attestation.
 
 Current reference report:
 
@@ -17,7 +18,7 @@ Current reference report:
 - Git status at run time: `dirty`
 - Environment: `crates/sip/rvoip-sip/beta-report/20260616T014649Z/environment/environment.md`
 - Raw performance artifacts: `crates/sip/rvoip-sip/beta-report/20260616T014649Z/perf-results/`
-- Current release train and runtime crate version: `0.2.2`
+- Current release train and runtime crate version: `0.2.5`
 
 ## Claim Policy
 

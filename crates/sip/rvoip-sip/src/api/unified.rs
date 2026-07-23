@@ -55,7 +55,8 @@
 
 #![deny(missing_docs)]
 
-use crate::adapters::{DialogAdapter, MediaAdapter};
+use crate::adapters::dialog_adapter::StandaloneRequestOptions;
+use crate::adapters::{CausalDialogToSessionIngress, DialogAdapter, MediaAdapter};
 use crate::api::lifecycle::{
     CallLifecycleSnapshot, ExactTerminalClaim, ExactTerminalCompletion, LifecycleIndex,
     SessionEventPublisher,
@@ -80,9 +81,9 @@ use rvoip_rtp_core::transport::{
 use rvoip_sip_core::types::sdp::CryptoSuite;
 use rvoip_sip_core::types::{headers::HeaderAccess, headers::HeaderName, Method};
 use rvoip_sip_core::{Request, Response};
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
@@ -100,6 +101,17 @@ const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed 
 type OutboundDispatchResult =
     std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
 
+fn map_state_machine_dispatch_error(
+    error: Box<dyn std::error::Error + Send + Sync>,
+) -> SessionError {
+    match error.downcast::<SessionError>() {
+        Ok(error) => *error,
+        Err(_) => SessionError::InternalError(
+            "SIP outbound dispatch failed (class=state-machine)".to_string(),
+        ),
+    }
+}
+
 /// Owns a spawned outbound state-machine dispatch until it is joined.
 ///
 /// The state-machine to dialog to transport poll chain is intentionally run
@@ -114,7 +126,10 @@ struct AbortOutboundDispatchTaskOnDrop {
 
 #[cfg(test)]
 mod guarded_outbound_dispatch_tests {
-    use super::{AbortOutboundDispatchTaskOnDrop, OutboundDispatchResult};
+    use super::{
+        map_state_machine_dispatch_error, AbortOutboundDispatchTaskOnDrop, OutboundDispatchResult,
+    };
+    use crate::errors::SessionError;
     use crate::session_store::SessionState;
     use crate::state_machine::executor::{
         PendingOptionsSlot, ProcessEventResult, StageDispatchClaim,
@@ -123,6 +138,30 @@ mod guarded_outbound_dispatch_tests {
     use crate::types::CallState;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn outbound_dispatch_preserves_typed_conflict() {
+        let error = map_state_machine_dispatch_error(Box::new(SessionError::Conflict {
+            method: rvoip_sip_core::Method::Info,
+        }));
+        assert!(matches!(
+            error,
+            SessionError::Conflict {
+                method: rvoip_sip_core::Method::Info
+            }
+        ));
+    }
+
+    #[test]
+    fn outbound_dispatch_redacts_unknown_state_machine_error() {
+        let error =
+            map_state_machine_dispatch_error("lower-layer request and credential detail".into());
+        assert!(matches!(
+            error,
+            SessionError::InternalError(detail)
+                if detail == "SIP outbound dispatch failed (class=state-machine)"
+        ));
+    }
 
     fn completed_dispatch() -> OutboundDispatchResult {
         Ok(ProcessEventResult {
@@ -445,6 +484,9 @@ impl Ord for SetupTeardownDeadline {
 
 struct SetupTeardownDeadlineQueue {
     deadlines: BinaryHeap<SetupTeardownDeadline>,
+    live_sequences_by_lifetime: HashMap<SessionRegistryHandle, Vec<u64>>,
+    cancelled_sequences: HashSet<u64>,
+    closing_lifetimes: HashSet<SessionRegistryHandle>,
     next_sequence: u64,
     accepting: bool,
 }
@@ -453,6 +495,9 @@ impl Default for SetupTeardownDeadlineQueue {
     fn default() -> Self {
         Self {
             deadlines: BinaryHeap::new(),
+            live_sequences_by_lifetime: HashMap::new(),
+            cancelled_sequences: HashSet::new(),
+            closing_lifetimes: HashSet::new(),
             next_sequence: 0,
             accepting: true,
         }
@@ -467,9 +512,14 @@ impl SetupTeardownDeadlineQueue {
         entered_state_at: Instant,
         kind: SetupTeardownWatchdogKind,
     ) -> bool {
+        self.prune_cancelled_head();
         let previous = self.deadlines.peek().map(|entry| entry.deadline);
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
+        self.live_sequences_by_lifetime
+            .entry(handle.clone())
+            .or_default()
+            .push(sequence);
         self.deadlines.push(SetupTeardownDeadline {
             deadline,
             sequence,
@@ -480,8 +530,85 @@ impl SetupTeardownDeadlineQueue {
         previous.is_none_or(|previous| deadline < previous)
     }
 
-    fn next_deadline(&self) -> Option<Instant> {
+    fn next_deadline(&mut self) -> Option<Instant> {
+        self.prune_cancelled_head();
         self.deadlines.peek().map(|entry| entry.deadline)
+    }
+
+    fn begin_lifetime_close(&mut self, handle: &SessionRegistryHandle) -> usize {
+        self.closing_lifetimes.insert(handle.clone());
+        let sequences = self
+            .live_sequences_by_lifetime
+            .remove(handle)
+            .unwrap_or_default();
+        let cancelled = sequences.len();
+        self.cancelled_sequences.extend(sequences);
+        self.prune_cancelled_records();
+        cancelled
+    }
+
+    fn finish_lifetime_close(&mut self, handle: &SessionRegistryHandle) {
+        self.closing_lifetimes.remove(handle);
+    }
+
+    fn is_lifetime_closing(&self, handle: &SessionRegistryHandle) -> bool {
+        self.closing_lifetimes.contains(handle)
+    }
+
+    fn consume_live_sequence(&mut self, handle: &SessionRegistryHandle, sequence: u64) -> bool {
+        let mut remove_lifetime = false;
+        let found = self
+            .live_sequences_by_lifetime
+            .get_mut(handle)
+            .is_some_and(|sequences| {
+                let Some(index) = sequences.iter().position(|current| *current == sequence) else {
+                    return false;
+                };
+                sequences.swap_remove(index);
+                remove_lifetime = sequences.is_empty();
+                true
+            });
+        if remove_lifetime {
+            self.live_sequences_by_lifetime.remove(handle);
+        }
+        found
+    }
+
+    fn live_deadline_count(&self) -> usize {
+        self.live_sequences_by_lifetime.values().map(Vec::len).sum()
+    }
+
+    fn prune_cancelled_head(&mut self) {
+        while self
+            .deadlines
+            .peek()
+            .is_some_and(|entry| self.cancelled_sequences.contains(&entry.sequence))
+        {
+            let cancelled = self
+                .deadlines
+                .pop()
+                .expect("peeked cancelled setup timeout deadline");
+            self.cancelled_sequences.remove(&cancelled.sequence);
+        }
+    }
+
+    fn prune_cancelled_records(&mut self) {
+        let live = self.live_deadline_count();
+        if live == 0 {
+            self.deadlines.clear();
+            self.cancelled_sequences.clear();
+            return;
+        }
+        self.prune_cancelled_head();
+        // Rebuilding only after tombstones reach the number of live records
+        // amortizes cancellation to O(1) while bounding retained heap storage
+        // to less than twice the active deadline population.
+        if self.cancelled_sequences.len() >= live {
+            let cancelled = &self.cancelled_sequences;
+            self.deadlines
+                .retain(|entry| !cancelled.contains(&entry.sequence));
+            self.cancelled_sequences.clear();
+        }
     }
 
     fn take_due(&mut self, now: Instant, limit: usize) -> Vec<SetupTeardownDeadline> {
@@ -492,13 +619,31 @@ impl SetupTeardownDeadlineQueue {
                 .peek()
                 .is_some_and(|entry| entry.deadline <= now)
         {
-            due.push(self.deadlines.pop().expect("peeked setup timeout deadline"));
+            let entry = self.deadlines.pop().expect("peeked setup timeout deadline");
+            if self.cancelled_sequences.remove(&entry.sequence) {
+                continue;
+            }
+            if self.consume_live_sequence(&entry.handle, entry.sequence) {
+                due.push(entry);
+            }
         }
         due
     }
 
     fn drain(&mut self) -> Vec<SetupTeardownDeadline> {
-        self.deadlines.drain().collect()
+        let mut live = Vec::with_capacity(self.live_deadline_count());
+        while let Some(entry) = self.deadlines.pop() {
+            if self.cancelled_sequences.remove(&entry.sequence) {
+                continue;
+            }
+            if self.consume_live_sequence(&entry.handle, entry.sequence) {
+                live.push(entry);
+            }
+        }
+        self.live_sequences_by_lifetime.clear();
+        self.cancelled_sequences.clear();
+        self.closing_lifetimes.clear();
+        live
     }
 }
 
@@ -510,6 +655,7 @@ struct SetupTeardownDeadlineScheduler {
     closed: tokio::sync::Notify,
     fire_slots: Arc<tokio::sync::Semaphore>,
     tasks: Arc<RetainedTasks>,
+    session_store: OnceLock<Weak<SessionStore>>,
     #[cfg(test)]
     fire_test_gate: SetupTeardownFireTestGate,
     #[cfg(test)]
@@ -546,6 +692,7 @@ impl Default for SetupTeardownDeadlineScheduler {
                 SETUP_TEARDOWN_TIMEOUT_CONCURRENCY,
             )),
             tasks: RetainedTasks::new(),
+            session_store: OnceLock::new(),
             #[cfg(test)]
             fire_test_gate: SetupTeardownFireTestGate::default(),
             #[cfg(test)]
@@ -557,6 +704,10 @@ impl Default for SetupTeardownDeadlineScheduler {
 }
 
 impl SetupTeardownDeadlineScheduler {
+    fn attach_session_store(&self, session_store: &Arc<SessionStore>) {
+        let _ = self.session_store.set(Arc::downgrade(session_store));
+    }
+
     fn schedule(
         &self,
         deadline: Instant,
@@ -569,7 +720,13 @@ impl SetupTeardownDeadlineScheduler {
                 .queue
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !queue.accepting {
+            let exact_lifetime_is_current = self
+                .session_store
+                .get()
+                .and_then(Weak::upgrade)
+                .is_none_or(|store| store.get_session_retained_snapshot_exact(&handle).is_ok());
+            if !queue.accepting || queue.is_lifetime_closing(&handle) || !exact_lifetime_is_current
+            {
                 return false;
             }
             crate::cleanup_diag::record_setup_teardown_watchdog_armed();
@@ -581,8 +738,29 @@ impl SetupTeardownDeadlineScheduler {
         true
     }
 
+    fn begin_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        let cancelled = self
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .begin_lifetime_close(handle);
+        for _ in 0..cancelled {
+            crate::cleanup_diag::record_setup_teardown_watchdog_disarmed();
+        }
+        if cancelled != 0 {
+            self.changed.notify_one();
+        }
+    }
+
+    fn finish_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        self.queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .finish_lifetime_close(handle);
+    }
+
     fn next_deadline_if_accepting(&self) -> Option<Option<Instant>> {
-        let queue = self
+        let mut queue = self
             .queue
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -752,13 +930,74 @@ impl SetupTeardownDeadlineScheduler {
         }
     }
 
-    #[cfg(any(test, feature = "perf-tests"))]
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.queue
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .deadlines
-            .len()
+            .live_deadline_count()
+    }
+
+    #[cfg(any(test, feature = "perf-tests"))]
+    fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        let queue = self
+            .queue
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut accepted_call = 0_usize;
+        let mut accepted_call_with_sdp = 0_usize;
+        let mut cancellation = 0_usize;
+        let mut outbound_setup = 0_usize;
+        let mut inbound_setup = 0_usize;
+        for deadline in queue.deadlines.iter() {
+            if queue.cancelled_sequences.contains(&deadline.sequence) {
+                continue;
+            }
+            match deadline.kind {
+                SetupTeardownWatchdogKind::AcceptedCall => accepted_call += 1,
+                SetupTeardownWatchdogKind::AcceptedCallWithSdp => accepted_call_with_sdp += 1,
+                SetupTeardownWatchdogKind::Cancellation => cancellation += 1,
+                SetupTeardownWatchdogKind::OutboundSetup => outbound_setup += 1,
+                SetupTeardownWatchdogKind::InboundSetup => inbound_setup += 1,
+            }
+        }
+        serde_json::json!({
+            "pending_deadlines": queue.live_deadline_count(),
+            "retained_deadline_records": queue.deadlines.len(),
+            "cancelled_deadline_records": queue.cancelled_sequences.len(),
+            "closing_lifetimes": queue.closing_lifetimes.len(),
+            "fire_in_flight": SETUP_TEARDOWN_TIMEOUT_CONCURRENCY
+                .saturating_sub(self.fire_slots.available_permits()),
+            "retained_tasks": self.tasks.count(),
+            "retained_task_panicked": self.tasks.panicked(),
+            "accepting": queue.accepting,
+            "fire_concurrency_limit": SETUP_TEARDOWN_TIMEOUT_CONCURRENCY,
+            "deadline_record_bytes": std::mem::size_of::<SetupTeardownDeadline>(),
+            "pending_by_owner": {
+                "accepted_call": accepted_call,
+                "accepted_call_with_sdp": accepted_call_with_sdp,
+                "cancellation": cancellation,
+                "outbound_setup": outbound_setup,
+                "inbound_setup": inbound_setup,
+            },
+        })
+    }
+}
+
+/// Generation-scoped admission fence for setup/teardown deadlines during
+/// exact terminal reclamation.
+#[derive(Clone)]
+pub(crate) struct SetupTeardownDeadlineCancellation {
+    scheduler: Arc<SetupTeardownDeadlineScheduler>,
+}
+
+impl SetupTeardownDeadlineCancellation {
+    fn begin_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        self.scheduler.begin_lifetime_close(handle);
+    }
+
+    fn finish_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        self.scheduler.finish_lifetime_close(handle);
     }
 }
 
@@ -807,6 +1046,7 @@ struct ExactResponseDeadlineQueue {
     deadlines: BinaryHeap<ExactResponseDeadline>,
     next_sequence: u64,
     accepting: bool,
+    closing_lifetimes: HashSet<SessionRegistryHandle>,
 }
 
 impl Default for ExactResponseDeadlineQueue {
@@ -815,11 +1055,14 @@ impl Default for ExactResponseDeadlineQueue {
             deadlines: BinaryHeap::new(),
             next_sequence: 0,
             accepting: true,
+            closing_lifetimes: HashSet::new(),
         }
     }
 }
 
-struct PendingExactResponseRegistry {
+/// Single-writer owners for generation-scoped INFO and standalone REGISTER
+/// final responses.
+pub(crate) struct PendingExactResponseRegistry {
     entries: dashmap::DashMap<
         rvoip_sip_dialog::transaction::TransactionKey,
         Arc<crate::api::incoming::ExactResponseObligation>,
@@ -827,6 +1070,18 @@ struct PendingExactResponseRegistry {
     retry_attempts: dashmap::DashMap<rvoip_sip_dialog::transaction::TransactionKey, u8>,
     deadlines: StdMutex<ExactResponseDeadlineQueue>,
     changed: tokio::sync::Notify,
+    fire_in_flight: Arc<AtomicUsize>,
+    session_store: OnceLock<Weak<SessionStore>>,
+}
+
+struct ExactResponseFireGuard {
+    fire_in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for ExactResponseFireGuard {
+    fn drop(&mut self) {
+        self.fire_in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub(crate) enum ExactResponseRegistration {
@@ -860,21 +1115,51 @@ impl Default for PendingExactResponseRegistry {
             retry_attempts: dashmap::DashMap::new(),
             deadlines: StdMutex::new(ExactResponseDeadlineQueue::default()),
             changed: tokio::sync::Notify::new(),
+            fire_in_flight: Arc::new(AtomicUsize::new(0)),
+            session_store: OnceLock::new(),
         }
     }
 }
 
 impl PendingExactResponseRegistry {
+    fn attach_session_store(&self, session_store: &Arc<SessionStore>) {
+        let _ = self.session_store.set(Arc::downgrade(session_store));
+    }
+
+    fn begin_fire(&self) -> ExactResponseFireGuard {
+        self.fire_in_flight.fetch_add(1, Ordering::AcqRel);
+        ExactResponseFireGuard {
+            fire_in_flight: Arc::clone(&self.fire_in_flight),
+        }
+    }
+
     fn register(
         &self,
         obligation: Arc<crate::api::incoming::ExactResponseObligation>,
     ) -> ExactResponseRegistration {
+        if !obligation.has_owner_scope()
+            || !obligation.transaction().is_server()
+            || !(200..=699).contains(&obligation.fallback_status())
+        {
+            return ExactResponseRegistration::Collision;
+        }
         let transaction = obligation.transaction().clone();
         let mut deadlines = self
             .deadlines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !deadlines.accepting {
+        let exact_lifetime_is_current = obligation.lifecycle_handle().is_none_or(|handle| {
+            self.session_store
+                .get()
+                .and_then(Weak::upgrade)
+                .is_some_and(|store| store.get_session_retained_snapshot_exact(handle).is_ok())
+        });
+        if !deadlines.accepting
+            || !exact_lifetime_is_current
+            || obligation
+                .lifecycle_handle()
+                .is_some_and(|handle| deadlines.closing_lifetimes.contains(handle))
+        {
             return ExactResponseRegistration::Closed;
         }
         if let Some(existing) = self.entries.get(&transaction) {
@@ -901,9 +1186,17 @@ impl PendingExactResponseRegistry {
         ExactResponseRegistration::Registered
     }
 
-    fn remove(&self, transaction: &rvoip_sip_dialog::transaction::TransactionKey) {
-        self.entries.remove(transaction);
-        self.retry_attempts.remove(transaction);
+    fn remove_owner(&self, obligation: &crate::api::incoming::ExactResponseObligation) {
+        let transaction = obligation.transaction();
+        if self
+            .entries
+            .remove_if(transaction, |_, current| {
+                std::ptr::eq(current.as_ref(), obligation)
+            })
+            .is_some()
+        {
+            self.retry_attempts.remove(transaction);
+        }
     }
 
     fn retry_plan(
@@ -942,7 +1235,14 @@ impl PendingExactResponseRegistry {
             .deadlines
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !deadlines.accepting || !self.entries.contains_key(transaction) {
+        let Some(obligation) = self.entries.get(transaction) else {
+            return;
+        };
+        let generation_is_closing = obligation
+            .lifecycle_handle()
+            .is_some_and(|handle| deadlines.closing_lifetimes.contains(handle));
+        drop(obligation);
+        if !deadlines.accepting || generation_is_closing {
             return;
         }
         let previous = deadlines.deadlines.peek().map(|entry| entry.deadline);
@@ -993,7 +1293,16 @@ impl PendingExactResponseRegistry {
                 .deadlines
                 .pop()
                 .expect("peeked exact-response deadline");
-            if self.entries.contains_key(&entry.transaction) {
+            let eligible = self
+                .entries
+                .get(&entry.transaction)
+                .is_some_and(|obligation| {
+                    obligation.lifecycle_handle().map_or_else(
+                        || obligation.has_owner_scope(),
+                        |handle| !deadlines.closing_lifetimes.contains(handle),
+                    )
+                });
+            if eligible {
                 due.push(entry.transaction);
             }
         }
@@ -1016,6 +1325,94 @@ impl PendingExactResponseRegistry {
             .collect()
     }
 
+    fn snapshot_lifetime(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Vec<Arc<crate::api::incoming::ExactResponseObligation>> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
+            .map(|entry| Arc::clone(entry.value()))
+            .collect()
+    }
+
+    fn begin_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closing_lifetimes
+            .insert(handle.clone());
+        self.changed.notify_waiters();
+    }
+
+    fn finish_lifetime_close(&self, handle: &SessionRegistryHandle) {
+        self.deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .closing_lifetimes
+            .remove(handle);
+    }
+
+    async fn drain_lifetime(
+        &self,
+        handle: &SessionRegistryHandle,
+        dialog_adapter: &DialogAdapter,
+    ) -> Result<()> {
+        let deadline = Instant::now() + EXACT_RESPONSE_SHUTDOWN_DRAIN_TIMEOUT;
+        loop {
+            let pending = self.snapshot_lifetime(handle);
+            if pending.is_empty() {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SessionError::InternalError(format!(
+                    "exact response lifetime drain timed out for {} with {} pending obligations",
+                    handle.session_id(),
+                    pending.len()
+                )));
+            }
+            let attempt_timeout = remaining.min(EXACT_RESPONSE_SEND_ATTEMPT_TIMEOUT);
+            let batch = run_bounded_exact_response_batch(
+                pending,
+                EXACT_RESPONSE_DEADLINE_CONCURRENCY,
+                |obligation| async move {
+                    let _fire = self.begin_fire();
+                    let owner = Arc::clone(&obligation);
+                    if matches!(
+                        tokio::time::timeout(
+                            attempt_timeout,
+                            author_pending_exact_response_with_adapter(
+                                dialog_adapter,
+                                obligation,
+                                503,
+                            ),
+                        )
+                        .await,
+                        Ok(ManagedExactResponseOutcome::Completed)
+                    ) {
+                        // `ExactResponseClaim::complete` normally removes via
+                        // the coordinator weak reference. Exact teardown also
+                        // removes directly so draining remains correct while
+                        // the coordinator itself is being released.
+                        self.remove_owner(owner.as_ref());
+                    }
+                },
+            );
+            let _ = tokio::time::timeout(remaining, batch).await;
+            if self.snapshot_lifetime(handle).is_empty() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(SessionError::InternalError(format!(
+                    "exact response lifetime drain timed out for {} with pending obligations",
+                    handle.session_id()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     fn begin_close(&self) {
         self.deadlines
             .lock()
@@ -1027,11 +1424,30 @@ impl PendingExactResponseRegistry {
     fn clear(&self) {
         self.entries.clear();
         self.retry_attempts.clear();
-        self.deadlines
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        let mut deadlines = self
             .deadlines
-            .clear();
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        deadlines.deadlines.clear();
+        deadlines.closing_lifetimes.clear();
+    }
+
+    #[cfg(any(test, feature = "perf-tests"))]
+    fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        let deadlines = self
+            .deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        serde_json::json!({
+            "pending_obligations": self.entries.len(),
+            "retry_attempts": self.retry_attempts.len(),
+            "pending_deadlines": deadlines.deadlines.len(),
+            "closing_lifetimes": deadlines.closing_lifetimes.len(),
+            "fire_in_flight": self.fire_in_flight.load(Ordering::Acquire),
+            "accepting": deadlines.accepting,
+            "fire_concurrency_limit": EXACT_RESPONSE_DEADLINE_CONCURRENCY,
+            "deadline_record_bytes": std::mem::size_of::<ExactResponseDeadline>(),
+        })
     }
 
     #[cfg(test)]
@@ -1154,6 +1570,30 @@ struct CoordinatorConstructionGuard {
     coordinator: Option<Arc<UnifiedCoordinator>>,
 }
 
+struct CausalIngressConstructionGuard {
+    ingress: Option<CausalDialogToSessionIngress>,
+}
+
+impl CausalIngressConstructionGuard {
+    fn new(ingress: CausalDialogToSessionIngress) -> Self {
+        Self {
+            ingress: Some(ingress),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.ingress = None;
+    }
+}
+
+impl Drop for CausalIngressConstructionGuard {
+    fn drop(&mut self) {
+        if let Some(ingress) = self.ingress.take() {
+            ingress.close_pending();
+        }
+    }
+}
+
 impl CoordinatorConstructionGuard {
     fn new(coordinator: Arc<UnifiedCoordinator>) -> Self {
         Self {
@@ -1181,16 +1621,12 @@ impl Drop for CoordinatorConstructionGuard {
 #[cfg(test)]
 fn exact_terminal_completion_result(completion: ExactTerminalCompletion) -> Result<()> {
     match completion {
-        ExactTerminalCompletion::PublishedAndReleased
-        | ExactTerminalCompletion::PublicationFailed => Ok(()),
+        ExactTerminalCompletion::Released => Ok(()),
         ExactTerminalCompletion::ReleaseFailed => Err(SessionError::InternalError(
             "exact terminal resource release failed".to_string(),
         )),
-        ExactTerminalCompletion::PublicationAndReleaseFailed => Err(SessionError::InternalError(
-            "exact terminal publication and resource release failed".to_string(),
-        )),
         ExactTerminalCompletion::OwnerDropped => Err(SessionError::InternalError(
-            "exact terminal publication owner stopped before completion".to_string(),
+            "exact terminal release owner stopped before completion".to_string(),
         )),
     }
 }
@@ -1214,6 +1650,94 @@ where
         Err(_) if retained_new_bye => confirmation.await,
         Err(error) => Err(error),
     }
+}
+
+/// Committed session-lifecycle result for one exact outbound BYE wire
+/// completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalByeLifecycleCommit {
+    Ended,
+    Cancelled,
+    AlreadyReleased,
+}
+
+fn local_bye_terminal_kind(state: CallState) -> LocalByeLifecycleCommit {
+    if matches!(
+        state,
+        CallState::CancelPending | CallState::Cancelling | CallState::Cancelled
+    ) {
+        LocalByeLifecycleCommit::Cancelled
+    } else {
+        LocalByeLifecycleCommit::Ended
+    }
+}
+
+/// Feed an exact outbound-BYE transaction outcome into the YAML lifecycle.
+///
+/// The transaction layer owns response correlation and authentication retry;
+/// this helper owns only the application-visible state transition. It is safe
+/// for both the causal completion handler and a public waiter to call: the
+/// per-session executor lane admits one transition, while a later caller sees
+/// the already-final state or the already-released exact lifetime.
+pub(crate) async fn commit_local_bye_lifecycle_exact(
+    state_machine: Arc<StateMachine>,
+    handle: &SessionRegistryHandle,
+) -> Result<LocalByeLifecycleCommit> {
+    if state_machine
+        .store
+        .get_session_snapshot_exact(handle)
+        .is_err()
+    {
+        return Ok(LocalByeLifecycleCommit::AlreadyReleased);
+    }
+    let task_handle = handle.clone();
+    let task_state_machine = Arc::clone(&state_machine);
+    let task = AbortOutboundDispatchTaskOnDrop::new(tokio::spawn(async move {
+        task_state_machine
+            .process_event_exact(&task_handle, EventType::DialogTerminated)
+            .await
+    }));
+    let result = match task.join().await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            let error = SessionError::from(error);
+            let current = state_machine.store.get_session_snapshot_exact(handle).ok();
+            let Some(current) = current else {
+                return Ok(LocalByeLifecycleCommit::AlreadyReleased);
+            };
+            if current.call_state.is_final() {
+                tracing::debug!(
+                    session = %handle.session_id(),
+                    %error,
+                    state = ?current.call_state,
+                    "local BYE transition reached a terminal state before an action error"
+                );
+                return Ok(local_bye_terminal_kind(current.call_state));
+            }
+            return Err(error);
+        }
+        Err(_) => {
+            return Err(SessionError::InternalError(
+                "local BYE lifecycle dispatch task failed (class=join)".to_string(),
+            ));
+        }
+    };
+
+    let committed_state = result.next_state.unwrap_or(result.old_state);
+    if result.transition.is_none() && !result.old_state.is_final() {
+        return Err(SessionError::InvalidTransition(format!(
+            "outbound BYE completion has no lifecycle transition from {:?}",
+            result.old_state
+        )));
+    }
+    if !committed_state.is_final() {
+        return Err(SessionError::InvalidTransition(format!(
+            "outbound BYE completion remained in non-terminal state {:?}",
+            committed_state
+        )));
+    }
+
+    Ok(local_bye_terminal_kind(committed_state))
 }
 
 fn shared_hangup_completion_result(succeeded: bool) -> Result<()> {
@@ -4074,6 +4598,7 @@ mod config_tests {
         UnifiedCoordinator, EXACT_RESPONSE_MAX_RETRIES, EXACT_RESPONSE_RETRY_DELAY,
         EXACT_RESPONSE_SLOW_RETRY_DELAY, SETUP_TEARDOWN_TIMEOUT_CONCURRENCY,
     };
+    use crate::api::events::Event;
     use crate::api::handle::CallId;
     use crate::api::incoming::ExactResponseObligation;
     use crate::api::lifecycle::{ExactTerminalClaim, ExactTerminalCompletion};
@@ -4081,12 +4606,607 @@ mod config_tests {
     use crate::errors::SessionError;
     use crate::session_store::SessionStore;
     use crate::state_table::types::{Role, SessionId};
+    use crate::types::CallState;
+    use rvoip_infra_common::events::coordinator::CrossCrateEventHandler;
+    use rvoip_infra_common::events::cross_crate::{DialogToSessionEvent, RvoipCrossCrateEvent};
     use rvoip_sip_core::types::headers::HeaderName;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     struct CanaryTracePolicy(&'static str);
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_registration_start_receives_one_typed_request_without_bus_copy() {
+        let coordinator = UnifiedCoordinator::new(Config::local("registration-ingress", 0))
+            .await
+            .expect("start registration ingress coordinator");
+        let mut observer = coordinator
+            .global_coordinator
+            .subscribe("dialog_to_session")
+            .await
+            .unwrap();
+        let mut events = coordinator.events().await.unwrap();
+        let subscriptions_before = coordinator
+            .global_coordinator
+            .stats()
+            .await
+            .active_subscriptions;
+        let registrar = coordinator
+            .start_registration_server("registrar.example", std::collections::HashMap::new())
+            .await
+            .expect("install registration adapter");
+        assert_eq!(
+            coordinator
+                .global_coordinator
+                .stats()
+                .await
+                .active_subscriptions,
+            subscriptions_before,
+            "production registration start subscribed to dialog_to_session"
+        );
+
+        let event = RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
+            transaction_id: "registration-ingress:REGISTER:server".to_string(),
+            from_uri: "sip:alice@registrar.example".to_string(),
+            to_uri: "sip:alice@registrar.example".to_string(),
+            contact_uri: "sip:alice@127.0.0.1:5060".to_string(),
+            expires: 300,
+            authorization: None,
+            call_id: "registration-ingress@example.invalid".to_string(),
+            raw_request: None,
+            transport: None,
+        });
+        let dispatched = coordinator
+            .global_coordinator
+            .dispatch_authoritative_handler(Arc::new(event))
+            .await
+            .unwrap_or(false);
+        // The built-in registrar may reject an unauthenticated synthetic
+        // request, but the typed observation must still be projected exactly
+        // once through the installed handler.
+        let _ = dispatched;
+        let projected = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("installed registrar did not process the typed request")
+            .expect("registration observation stream closed unexpectedly");
+        match projected {
+            crate::api::events::Event::IncomingRegister { register } => {
+                assert_eq!(
+                    register.transaction_id,
+                    "registration-ingress:REGISTER:server"
+                );
+                assert_eq!(register.from_uri, "sip:alice@registrar.example");
+            }
+            other => panic!("unexpected registration observation: {other:?}"),
+        }
+        assert!(matches!(
+            observer.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        registrar.shutdown().await.unwrap();
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .unwrap();
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn standalone_terminal_handler_releases_without_coordinator_backreference() {
+        let coordinator = UnifiedCoordinator::new(Config::local("standalone-terminal-owner", 0))
+            .await
+            .expect("start standalone terminal fixture");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("standalone-terminal-session");
+        let created = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create standalone terminal session");
+        let handle = created
+            .lifecycle_handle
+            .expect("capture standalone terminal lifetime");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("place standalone terminal session in Active");
+        let mut events = coordinator.events().await.expect("subscribe app events");
+
+        let handler = crate::adapters::SessionCrossCrateEventHandler::new(
+            Arc::clone(&coordinator.helpers.state_machine),
+            Arc::clone(&coordinator.global_coordinator),
+            Arc::clone(&coordinator.dialog_adapter),
+            Arc::clone(&coordinator.media_adapter),
+            Arc::clone(&coordinator.session_registry),
+        );
+        handler
+            .handle(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallStateChanged {
+                    session_id: session_id.0.clone(),
+                    new_state: rvoip_infra_common::events::cross_crate::CallState::Terminated,
+                    reason: Some("lower dialog observation".to_string()),
+                },
+            )))
+            .await
+            .expect("observational terminal state was accepted");
+        assert_eq!(
+            store
+                .get_session_snapshot_exact(&handle)
+                .expect("observation retained exact session")
+                .call_state,
+            CallState::Active,
+            "observational terminal state committed the lifecycle"
+        );
+        let premature = tokio::time::timeout(Duration::from_millis(75), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { call_id, .. } | Event::CallCancelled { call_id })
+                        if call_id == session_id =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            !matches!(premature, Ok(Some(_))),
+            "observational terminal state projected an app terminal event"
+        );
+        handler
+            .handle(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallTerminated {
+                    session_id: session_id.0.clone(),
+                    reason:
+                        rvoip_infra_common::events::cross_crate::TerminationReason::RemoteHangup,
+                },
+            )))
+            .await
+            .expect("standalone handler accepted terminal event");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { call_id, .. }) if call_id == session_id => break,
+                    Some(Event::CallCancelled { call_id }) if call_id == session_id => {
+                        panic!("ordinary DialogTerminated projected CallCancelled")
+                    }
+                    Some(_) => {}
+                    None => panic!("app event stream closed before CallEnded"),
+                }
+            }
+        })
+        .await
+        .expect("committed termination did not publish CallEnded");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store.lifecycle_handle(&session_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("standalone terminal task released exact session");
+
+        let duplicate = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { call_id, .. } | Event::CallCancelled { call_id })
+                        if call_id == session_id =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            !matches!(duplicate, Ok(Some(_))),
+            "committed termination projected more than one terminal app event"
+        );
+        drop(handler);
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("shutdown standalone terminal fixture");
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn invalid_dialog_termination_retains_exact_session_without_app_terminal() {
+        let coordinator = UnifiedCoordinator::new(Config::local("invalid-terminal-owner", 0))
+            .await
+            .expect("start invalid terminal fixture");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("invalid-terminal-session");
+        let created = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create invalid terminal session");
+        let handle = created
+            .lifecycle_handle
+            .expect("capture invalid terminal lifetime");
+        let mut events = coordinator.events().await.expect("subscribe app events");
+        let handler = crate::adapters::SessionCrossCrateEventHandler::new(
+            Arc::clone(&coordinator.helpers.state_machine),
+            Arc::clone(&coordinator.global_coordinator),
+            Arc::clone(&coordinator.dialog_adapter),
+            Arc::clone(&coordinator.media_adapter),
+            Arc::clone(&coordinator.session_registry),
+        );
+
+        let error = handler
+            .handle(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallTerminated {
+                    session_id: session_id.0.clone(),
+                    reason:
+                        rvoip_infra_common::events::cross_crate::TerminationReason::RemoteHangup,
+                },
+            )))
+            .await
+            .expect_err("Idle has no DialogTerminated YAML transition");
+        assert!(matches!(
+            error.downcast_ref::<SessionError>(),
+            Some(SessionError::InvalidTransition(detail))
+                if detail.contains("had no YAML transition")
+        ));
+        assert!(
+            store.get_session_snapshot_exact(&handle).is_ok(),
+            "invalid termination released the exact session"
+        );
+
+        let terminal = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { call_id, .. } | Event::CallCancelled { call_id })
+                        if call_id == session_id =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            !matches!(terminal, Ok(Some(_))),
+            "invalid termination projected an app terminal event"
+        );
+        drop(handler);
+        store
+            .remove_session_exact(&handle)
+            .await
+            .expect("clean up retained invalid terminal fixture");
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("shutdown invalid terminal fixture");
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn late_answer_cancellation_requires_committed_uac_yaml_outcome() {
+        let coordinator = UnifiedCoordinator::new(Config::local("cancel-terminal-owner", 0))
+            .await
+            .expect("start cancellation terminal fixture");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let handler = crate::adapters::SessionCrossCrateEventHandler::new(
+            Arc::clone(&coordinator.helpers.state_machine),
+            Arc::clone(&coordinator.global_coordinator),
+            Arc::clone(&coordinator.dialog_adapter),
+            Arc::clone(&coordinator.media_adapter),
+            Arc::clone(&coordinator.session_registry),
+        );
+        let mut events = coordinator.events().await.expect("subscribe app events");
+
+        let cancelled_id = SessionId::from("committed-cancel-terminal");
+        let cancelled = store
+            .create_session(cancelled_id.clone(), Role::UAC, false)
+            .await
+            .expect("create committed cancellation session");
+        let cancelled_handle = cancelled
+            .lifecycle_handle
+            .expect("capture committed cancellation lifetime");
+        store
+            .update_session_exact_with(&cancelled_handle, None, |session| {
+                session.call_state = CallState::Cancelling;
+            })
+            .expect("place UAC cancellation in Cancelling");
+        handler
+            .handle(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallTerminated {
+                    session_id: cancelled_id.0.clone(),
+                    reason: rvoip_infra_common::events::cross_crate::TerminationReason::LocalHangup,
+                },
+            )))
+            .await
+            .expect("UAC Cancelling committed its terminal YAML outcome");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallCancelled { call_id }) if call_id == cancelled_id => break,
+                    Some(Event::CallEnded { call_id, .. }) if call_id == cancelled_id => {
+                        panic!("committed cancellation projected CallEnded")
+                    }
+                    Some(_) => {}
+                    None => panic!("app event stream closed before CallCancelled"),
+                }
+            }
+        })
+        .await
+        .expect("committed cancellation did not publish CallCancelled");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store.lifecycle_handle(&cancelled_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("committed cancellation did not release its exact session");
+
+        let rejected_id = SessionId::from("rejected-uas-cancel-terminal");
+        let rejected = store
+            .create_session(rejected_id.clone(), Role::UAS, false)
+            .await
+            .expect("create rejected cancellation session");
+        let rejected_handle = rejected
+            .lifecycle_handle
+            .expect("capture rejected cancellation lifetime");
+        store
+            .update_session_exact_with(&rejected_handle, None, |session| {
+                session.call_state = CallState::Cancelling;
+            })
+            .expect("place UAS cancellation in Cancelling");
+        handler
+            .handle(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::CallTerminated {
+                    session_id: rejected_id.0.clone(),
+                    reason: rvoip_infra_common::events::cross_crate::TerminationReason::LocalHangup,
+                },
+            )))
+            .await
+            .expect_err("UAS Cancelling has no late-answer cancellation YAML row");
+        assert!(
+            store.get_session_snapshot_exact(&rejected_handle).is_ok(),
+            "uncommitted cancellation released its exact session"
+        );
+
+        let terminal = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { call_id, .. } | Event::CallCancelled { call_id })
+                        if call_id == rejected_id =>
+                    {
+                        return Some(());
+                    }
+                    Some(_) => {}
+                    None => return None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            !matches!(terminal, Ok(Some(_))),
+            "uncommitted cancellation projected an app terminal event"
+        );
+        drop(handler);
+        store
+            .remove_session_exact(&rejected_handle)
+            .await
+            .expect("clean up retained rejected cancellation fixture");
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("shutdown cancellation terminal fixture");
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_shutdown_drains_terminal_child_admitted_by_retained_parent() {
+        let coordinator = UnifiedCoordinator::new(Config::local("terminal-child-drain", 0))
+            .await
+            .expect("start terminal child drain coordinator");
+        let retained = Arc::clone(&coordinator.setup_teardown_scheduler.tasks);
+        let (parent_started_tx, parent_started_rx) = tokio::sync::oneshot::channel();
+        let (allow_child_tx, allow_child_rx) = tokio::sync::oneshot::channel();
+        let (child_started_tx, child_started_rx) = tokio::sync::oneshot::channel();
+        let (release_child_tx, release_child_rx) = tokio::sync::oneshot::channel();
+        let parent_retained = Arc::clone(&retained);
+        assert!(retained.spawn(async move {
+            let _ = parent_started_tx.send(());
+            let _ = allow_child_rx.await;
+            assert!(parent_retained.spawn_or_child(async move {
+                let _ = child_started_tx.send(());
+                let _ = release_child_rx.await;
+            }));
+        }));
+        parent_started_rx.await.expect("retained parent started");
+
+        let shutdown_coordinator = Arc::clone(&coordinator);
+        let shutdown = tokio::spawn(async move {
+            shutdown_coordinator
+                .shutdown_gracefully(Some(Duration::ZERO))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while coordinator.setup_teardown_scheduler.is_accepting_for_test() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown closed retained admission");
+
+        let _ = allow_child_tx.send(());
+        child_started_rx
+            .await
+            .expect("terminal child admitted after close");
+        tokio::task::yield_now().await;
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown passed the retained terminal child"
+        );
+
+        let _ = release_child_tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown drained terminal child")
+            .expect("shutdown driver joined")
+            .expect("shutdown succeeded after terminal child");
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn graceful_shutdown_drains_all_retained_session_event_loops() {
+        let coordinator = UnifiedCoordinator::new(Config::local("session-event-loop-drain", 0))
+            .await
+            .expect("start retained session-event loop coordinator");
+        let retained = Arc::clone(&coordinator.setup_teardown_scheduler.tasks);
+        let minimum_expected =
+            crate::adapters::session_event_handler::dialog_dispatch_worker_count() + 6;
+        assert!(
+            retained.count() >= minimum_expected,
+            "retained registry is missing a scheduler, shard, or session-event loop: count={}, expected_at_least={minimum_expected}",
+            retained.count()
+        );
+        let active_diagnostics = coordinator
+            .setup_teardown_scheduler
+            .perf_diagnostic_counts();
+        assert_eq!(
+            active_diagnostics["retained_tasks"],
+            retained.count(),
+            "runtime diagnostics must expose every retained coordinator task"
+        );
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("shutdown drained retained session-event loops");
+        assert_eq!(retained.count(), 0);
+        assert!(!retained.panicked());
+        let drained_scheduler = coordinator
+            .setup_teardown_scheduler
+            .perf_diagnostic_counts();
+        assert_eq!(drained_scheduler["pending_deadlines"], 0);
+        assert_eq!(drained_scheduler["fire_in_flight"], 0);
+        assert_eq!(drained_scheduler["retained_tasks"], 0);
+        assert_eq!(drained_scheduler["retained_task_panicked"], false);
+        assert_eq!(drained_scheduler["accepting"], false);
+        let drained_responses = coordinator.pending_exact_responses.perf_diagnostic_counts();
+        assert_eq!(drained_responses["pending_obligations"], 0);
+        assert_eq!(drained_responses["pending_deadlines"], 0);
+        assert_eq!(drained_responses["fire_in_flight"], 0);
+        assert_eq!(drained_responses["accepting"], false);
+        coordinator.global_coordinator.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn shutdown_drains_retained_tasks_before_dialog_and_publisher_stop() {
+        fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            source
+                .split(start)
+                .nth(1)
+                .and_then(|tail| tail.split(end).next())
+                .expect("shutdown function source")
+        }
+
+        fn assert_ordered(section: &str) {
+            let signal = section
+                .find("self.shutdown_tx.send(true)")
+                .expect("shutdown signal");
+            let retained_drain = section
+                .find("close_and_wait(SETUP_TEARDOWN_SCHEDULER_DRAIN_TIMEOUT)")
+                .expect("retained task drain");
+            let dialog_stop = section
+                .find("self.dialog_adapter.stop().await")
+                .expect("dialog stop");
+            let publisher_stop = section
+                .find("self.app_event_publisher.shutdown().await")
+                .expect("publisher stop");
+            assert!(signal < retained_drain);
+            assert!(retained_drain < dialog_stop);
+            assert!(dialog_stop < publisher_stop);
+        }
+
+        let source = include_str!("unified.rs");
+        assert_ordered(section(
+            source,
+            concat!("async fn cleanup_failed_", "construction"),
+            concat!("/// Shut down this ", "coordinator"),
+        ));
+        assert_ordered(section(
+            source,
+            concat!("async fn run_shutdown_", "sequence"),
+            concat!("async fn unregister_registered_", "sessions"),
+        ));
+    }
+
+    #[test]
+    fn watchdog_exact_release_is_independent_of_observational_publication() {
+        fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            source
+                .split(start)
+                .nth(1)
+                .and_then(|tail| tail.split(end).next())
+                .unwrap_or_else(|| panic!("missing watchdog source section after {start}"))
+        }
+
+        fn assert_nonblocking_observation_before_release(body: &str, label: &str) {
+            let observation = body
+                .find("publish_terminal_best_effort")
+                .unwrap_or_else(|| panic!("{label} lost terminal observation"));
+            let release = body
+                .find("release_exact_local_resources(")
+                .unwrap_or_else(|| panic!("{label} lost exact release"));
+            assert!(
+                observation < release,
+                "{label} must record the committed observation before exact release"
+            );
+            assert!(
+                !body[observation..release].contains(".await"),
+                "{label} must not await observational publication"
+            );
+        }
+
+        let source = include_str!("unified.rs");
+        assert!(
+            !source.contains(concat!("publish_terminal_then_", "release")),
+            "terminal release must not be combined with observational publication"
+        );
+        let active_media_watchdog = section(
+            source,
+            concat!(
+                "pub(crate) async fn schedule_active_call_",
+                "media_timeout_if_current"
+            ),
+            concat!("pub(crate) fn setup_teardown_", "timeout_duration"),
+        );
+        assert!(
+            active_media_watchdog.contains("hangup_exact_with_reason(&handle, reason)"),
+            "active-media watchdog must delegate observation and release to exact hangup"
+        );
+        assert!(
+            !active_media_watchdog.contains("publish_terminal_best_effort")
+                && !active_media_watchdog.contains("release_exact_local_resources("),
+            "active-media watchdog must not retain its former publication/release bypass"
+        );
+        assert_nonblocking_observation_before_release(
+            section(
+                source,
+                concat!("async fn fire_setup_", "teardown_deadline"),
+                concat!("/// Complete local ", "BYE teardown"),
+            ),
+            "setup/teardown watchdog",
+        );
+    }
 
     #[test]
     fn exact_response_registry_retains_one_owner_and_rejects_key_collision() {
@@ -4096,9 +5216,9 @@ mod config_tests {
             rvoip_sip_core::Method::Info,
             true,
         );
-        let owner = Arc::new(ExactResponseObligation::new(
-            CallId::new(),
+        let owner = Arc::new(ExactResponseObligation::new_standalone(
             transaction.clone(),
+            503,
         ));
         assert!(matches!(
             registry.register(Arc::clone(&owner)),
@@ -4106,8 +5226,17 @@ mod config_tests {
         ));
         drop(owner);
         assert_eq!(registry.len(), 1, "registry did not retain exact owner");
+        let retained = registry.perf_diagnostic_counts();
+        assert_eq!(retained["pending_obligations"], 1);
+        assert_eq!(retained["pending_deadlines"], 1);
+        assert_eq!(retained["retry_attempts"], 0);
+        assert_eq!(retained["fire_in_flight"], 0);
+        let fire = registry.begin_fire();
+        assert_eq!(registry.perf_diagnostic_counts()["fire_in_flight"], 1);
+        drop(fire);
+        assert_eq!(registry.perf_diagnostic_counts()["fire_in_flight"], 0);
 
-        let collision = Arc::new(ExactResponseObligation::new(CallId::new(), transaction));
+        let collision = Arc::new(ExactResponseObligation::new_standalone(transaction, 503));
         assert!(matches!(
             registry.register(collision),
             ExactResponseRegistration::Collision
@@ -4115,6 +5244,116 @@ mod config_tests {
         registry.begin_close();
         registry.clear();
         assert_eq!(registry.len(), 0);
+        let drained = registry.perf_diagnostic_counts();
+        assert_eq!(drained["pending_obligations"], 0);
+        assert_eq!(drained["pending_deadlines"], 0);
+        assert_eq!(drained["retry_attempts"], 0);
+        assert_eq!(drained["fire_in_flight"], 0);
+        assert_eq!(drained["accepting"], false);
+    }
+
+    #[tokio::test]
+    async fn exact_response_lifetime_close_fences_only_that_generation() {
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("exact-response-close-owner".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create exact response owner");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("capture exact response owner");
+        let registry = PendingExactResponseRegistry::default();
+        registry.attach_session_store(&store);
+        let transaction = |label: &str| {
+            rvoip_sip_dialog::transaction::TransactionKey::new(
+                label.to_string(),
+                rvoip_sip_core::Method::Info,
+                true,
+            )
+        };
+
+        let unbound = Arc::new(ExactResponseObligation::new(
+            session_id.clone(),
+            transaction("z9hG4bK-unbound-owner"),
+        ));
+        assert!(matches!(
+            registry.register(unbound),
+            ExactResponseRegistration::Collision
+        ));
+
+        let owner = Arc::new(ExactResponseObligation::new(
+            session_id.clone(),
+            transaction("z9hG4bK-bound-owner"),
+        ));
+        assert!(owner.bind_lifecycle_handle(&handle));
+        assert!(matches!(
+            registry.register(owner),
+            ExactResponseRegistration::Registered
+        ));
+        registry.begin_lifetime_close(&handle);
+        assert_eq!(registry.snapshot_lifetime(&handle).len(), 1);
+        assert_eq!(registry.perf_diagnostic_counts()["closing_lifetimes"], 1);
+
+        let late = Arc::new(ExactResponseObligation::new(
+            session_id.clone(),
+            transaction("z9hG4bK-late-owner"),
+        ));
+        assert!(late.bind_lifecycle_handle(&handle));
+        assert!(matches!(
+            registry.register(late),
+            ExactResponseRegistration::Closed
+        ));
+
+        let standalone = Arc::new(ExactResponseObligation::new_standalone(
+            transaction("z9hG4bK-standalone-owner"),
+            503,
+        ));
+        assert!(matches!(
+            registry.register(standalone),
+            ExactResponseRegistration::Registered
+        ));
+        store
+            .remove_session_exact(&handle)
+            .await
+            .expect("retire exact response owner");
+        registry.finish_lifetime_close(&handle);
+
+        let stale = Arc::new(ExactResponseObligation::new(
+            session_id,
+            transaction("z9hG4bK-stale-owner"),
+        ));
+        assert!(stale.bind_lifecycle_handle(&handle));
+        assert!(matches!(
+            registry.register(stale),
+            ExactResponseRegistration::Closed
+        ));
+    }
+
+    #[test]
+    fn exact_terminal_release_drains_generation_before_dialog_cleanup() {
+        let source = include_str!("unified.rs");
+        let release = source
+            .rsplit("pub(crate) async fn release_exact_local_resources(")
+            .next()
+            .and_then(|tail| {
+                tail.split("pub(crate) async fn release_exact_local_resources_with_retry(")
+                    .next()
+            })
+            .expect("exact terminal release helper source");
+        let close = release
+            .find("deadlines.begin_lifetime_close(&handle)")
+            .expect("generation close fence");
+        let drain = release
+            .find("drain_lifetime(&handle")
+            .expect("generation response drain");
+        let dialog_cleanup = release
+            .find("dialog_adapter.cleanup_session_exact(&handle)")
+            .expect("dialog cleanup");
+        assert!(close < drain);
+        assert!(drain < dialog_cleanup);
+        assert!(release.contains("if removal.is_ok()"));
+        assert!(release.contains("finish_lifetime_close(&handle)"));
     }
 
     #[test]
@@ -4125,9 +5364,9 @@ mod config_tests {
             rvoip_sip_core::Method::Info,
             true,
         );
-        let owner = Arc::new(ExactResponseObligation::new(
-            CallId::new(),
+        let owner = Arc::new(ExactResponseObligation::new_standalone(
             transaction.clone(),
+            503,
         ));
         assert!(matches!(
             registry.register(owner),
@@ -4203,15 +5442,10 @@ mod config_tests {
     }
 
     #[test]
-    fn observational_terminal_publication_failure_does_not_fail_protocol_completion() {
-        assert!(
-            exact_terminal_completion_result(ExactTerminalCompletion::PublicationFailed).is_ok()
-        );
+    fn terminal_completion_depends_only_on_exact_release() {
+        assert!(exact_terminal_completion_result(ExactTerminalCompletion::Released).is_ok());
         assert!(exact_terminal_completion_result(ExactTerminalCompletion::ReleaseFailed).is_err());
-        assert!(exact_terminal_completion_result(
-            ExactTerminalCompletion::PublicationAndReleaseFailed
-        )
-        .is_err());
+        assert!(exact_terminal_completion_result(ExactTerminalCompletion::OwnerDropped).is_err());
     }
 
     #[tokio::test]
@@ -4347,6 +5581,290 @@ mod config_tests {
         assert_eq!(scheduler.tasks.count(), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn exact_terminal_release_cancels_future_deadline_without_crossing_reuse() {
+        let coordinator = UnifiedCoordinator::new(
+            Config::local("terminal-release-deadline-cancel", 0)
+                .with_setup_teardown_timeout_secs(120),
+        )
+        .await
+        .expect("start deadline-cancellation coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("terminal-release-reused-deadline-id");
+
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create deadline generation A");
+        let generation_a = store
+            .lifecycle_handle(&session_id)
+            .expect("capture deadline generation A");
+        let entered_a = Instant::now();
+        store
+            .update_session_exact_with(&generation_a, None, |session| {
+                session.call_state = CallState::Initiating;
+                session.entered_state_at = entered_a;
+            })
+            .expect("arm deadline generation A");
+        let original_deadline = Instant::now() + Duration::from_secs(120);
+        assert!(coordinator.setup_teardown_scheduler.schedule(
+            original_deadline,
+            generation_a.clone(),
+            entered_a,
+            SetupTeardownWatchdogKind::OutboundSetup,
+        ));
+        assert_eq!(
+            coordinator.setup_teardown_scheduler.len(),
+            1,
+            "generation A owns one future deadline"
+        );
+
+        coordinator
+            .release_after_observed_terminal_exact(&generation_a)
+            .await;
+        assert!(
+            Instant::now() < original_deadline,
+            "release must cancel instead of waiting for the original deadline"
+        );
+        assert_eq!(
+            coordinator.setup_teardown_scheduler.len(),
+            0,
+            "exact terminal release must immediately drain pending_deadlines"
+        );
+        assert!(store.lifecycle_handle(&session_id).is_none());
+
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&session_id),
+            "expire the generation-A raw-ID reuse fence"
+        );
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create deadline generation B");
+        let generation_b = store
+            .lifecycle_handle(&session_id)
+            .expect("capture deadline generation B");
+        assert_ne!(generation_a, generation_b);
+        let entered_b = Instant::now();
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Initiating;
+                session.entered_state_at = entered_b;
+            })
+            .expect("arm deadline generation B");
+        assert!(coordinator.setup_teardown_scheduler.schedule(
+            Instant::now() + Duration::from_secs(120),
+            generation_b.clone(),
+            entered_b,
+            SetupTeardownWatchdogKind::OutboundSetup,
+        ));
+
+        let stale_generation_a = coordinator.setup_teardown_deadline_cancellation();
+        stale_generation_a.begin_lifetime_close(&generation_a);
+        stale_generation_a.finish_lifetime_close(&generation_a);
+        assert_eq!(
+            coordinator.setup_teardown_scheduler.len(),
+            1,
+            "stale generation-A cancellation must not remove generation B"
+        );
+        assert_eq!(
+            store.lifecycle_handle(&session_id),
+            Some(generation_b.clone())
+        );
+
+        coordinator
+            .release_after_observed_terminal_exact(&generation_b)
+            .await;
+        assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("deadline-cancellation coordinator shut down");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_deadline_paused_before_dispatch_rejects_raw_id_reuse() {
+        let coordinator = UnifiedCoordinator::new(Config::local("setup-timeout-exact", 0))
+            .await
+            .expect("start setup-timeout exact coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("setup-timeout-reused-id");
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create original setup-timeout lifetime");
+        let original = store
+            .lifecycle_handle(&session_id)
+            .expect("original setup-timeout handle");
+        let entered_state_at = Instant::now();
+        store
+            .update_session_exact_with(&original, None, |session| {
+                session.call_state = crate::types::CallState::Initiating;
+                session.entered_state_at = entered_state_at;
+            })
+            .expect("arm original setup-timeout lifetime");
+
+        coordinator
+            .setup_teardown_scheduler
+            .pause_next_fire_for_test();
+        let firing_coordinator = Arc::clone(&coordinator);
+        let stale_deadline = SetupTeardownDeadline {
+            deadline: Instant::now(),
+            sequence: 0,
+            handle: original.clone(),
+            entered_state_at,
+            kind: SetupTeardownWatchdogKind::OutboundSetup,
+        };
+        let fire = tokio::spawn(async move {
+            firing_coordinator
+                .fire_setup_teardown_deadline(stale_deadline)
+                .await;
+        });
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            coordinator
+                .setup_teardown_scheduler
+                .wait_for_paused_fire_for_test(),
+        )
+        .await
+        .expect("setup timeout reached its pre-dispatch pause");
+
+        store
+            .remove_session_exact(&original)
+            .await
+            .expect("retire original setup-timeout lifetime while fire is paused");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&session_id),
+            "expire the setup-timeout raw-ID reuse fence"
+        );
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("reuse setup-timeout raw identifier");
+        let replacement = store
+            .lifecycle_handle(&session_id)
+            .expect("replacement setup-timeout handle");
+        assert_ne!(original, replacement);
+        store
+            .update_session_exact_with(&replacement, None, |session| {
+                session.call_state = crate::types::CallState::Initiating;
+                session.entered_state_at = Instant::now();
+            })
+            .expect("arm replacement setup-timeout lifetime");
+
+        coordinator
+            .setup_teardown_scheduler
+            .resume_paused_fire_for_test();
+        tokio::time::timeout(Duration::from_secs(2), fire)
+            .await
+            .expect("stale setup-timeout fire completed")
+            .expect("stale setup-timeout fire task joined");
+
+        assert_eq!(
+            store.lifecycle_handle(&session_id),
+            Some(replacement.clone())
+        );
+        assert_eq!(
+            store
+                .get_session_exact(&replacement)
+                .await
+                .expect("replacement setup-timeout lifetime remains live")
+                .call_state,
+            crate::types::CallState::Initiating,
+            "stale setup timeout crossed raw-ID reuse"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn active_media_timeout_paused_before_dispatch_rejects_raw_id_reuse() {
+        let coordinator = UnifiedCoordinator::new(Config::local("media-timeout-exact", 0))
+            .await
+            .expect("start active-media exact coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("media-timeout-reused-id");
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create original active-media lifetime");
+        let original = store
+            .lifecycle_handle(&session_id)
+            .expect("original active-media handle");
+        store
+            .update_session_exact_with(&original, None, |session| {
+                session.call_state = crate::types::CallState::Active;
+                session.entered_state_at = Instant::now();
+            })
+            .expect("arm original active-media lifetime");
+        assert!(
+            store.get_session_snapshot_exact(&original).is_ok(),
+            "active-media preflight must accept the original exact lifetime"
+        );
+
+        let retained_coordinator = Arc::clone(&coordinator);
+        let stale_handle = original.clone();
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let fire = tokio::spawn(async move {
+            let _ = paused_tx.send(());
+            let _ = resume_rx.await;
+            retained_coordinator
+                .hangup_exact_with_reason(&stale_handle, "Active call released after media timeout")
+                .await
+        });
+        paused_rx
+            .await
+            .expect("active-media timeout reached its pre-dispatch pause");
+
+        store
+            .remove_session_exact(&original)
+            .await
+            .expect("retire original active-media lifetime while fire is paused");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&session_id),
+            "expire the active-media raw-ID reuse fence"
+        );
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("reuse active-media raw identifier");
+        let replacement = store
+            .lifecycle_handle(&session_id)
+            .expect("replacement active-media handle");
+        assert_ne!(original, replacement);
+        store
+            .update_session_exact_with(&replacement, None, |session| {
+                session.call_state = crate::types::CallState::Active;
+                session.entered_state_at = Instant::now();
+            })
+            .expect("arm replacement active-media lifetime");
+
+        let _ = resume_tx.send(());
+        let dispatch_error = tokio::time::timeout(Duration::from_secs(2), fire)
+            .await
+            .expect("stale active-media fire completed")
+            .expect("stale active-media fire task joined")
+            .expect_err("stale active-media handle must fail closed");
+        assert!(
+            dispatch_error.to_string().contains("not current")
+                || dispatch_error.to_string().contains("not found")
+                || dispatch_error.to_string().contains("stale"),
+            "unexpected stale active-media error: {dispatch_error}"
+        );
+        assert_eq!(
+            store.lifecycle_handle(&session_id),
+            Some(replacement.clone())
+        );
+        assert_eq!(
+            store
+                .get_session_exact(&replacement)
+                .await
+                .expect("replacement active-media lifetime remains live")
+                .call_state,
+            crate::types::CallState::Active,
+            "stale active-media timeout crossed raw-ID reuse"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn earlier_deadline_wakes_runner_without_waking_media_waiter() {
         let coordinator = UnifiedCoordinator::new(Config::local("split-watchdog-notifies", 0))
@@ -4415,7 +5933,7 @@ mod config_tests {
         let early_handle = store
             .lifecycle_handle(&early)
             .expect("early-deadline exact handle");
-        let mut early_lifecycle = coordinator.lifecycle_watcher(&early);
+        let mut early_lifecycle = coordinator.lifecycle_watcher_exact(&early_handle);
         assert!(coordinator.setup_teardown_scheduler.schedule(
             Instant::now() + Duration::from_millis(50),
             early_handle.clone(),
@@ -4478,7 +5996,7 @@ mod config_tests {
         let firing_handle = store
             .lifecycle_handle(&firing)
             .expect("firing fixture handle");
-        let mut firing_lifecycle = coordinator.lifecycle_watcher(&firing);
+        let mut firing_lifecycle = coordinator.lifecycle_watcher_exact(&firing_handle);
         coordinator
             .schedule_setup_teardown_timeout_if_current(
                 &firing,
@@ -4521,12 +6039,15 @@ mod config_tests {
             .lifecycle_handle(&stale)
             .expect("stale fixture current handle")
             .with_next_slot_revision_for_test();
-        assert!(coordinator.setup_teardown_scheduler.schedule(
-            Instant::now() + Duration::from_millis(100),
-            stale_handle,
-            Instant::now(),
-            SetupTeardownWatchdogKind::OutboundSetup,
-        ));
+        assert!(
+            !coordinator.setup_teardown_scheduler.schedule(
+                Instant::now() + Duration::from_millis(100),
+                stale_handle,
+                Instant::now(),
+                SetupTeardownWatchdogKind::OutboundSetup,
+            ),
+            "stale exact lifetime must be rejected at deadline admission"
+        );
 
         tokio::time::timeout(Duration::from_secs(4), firing_lifecycle.changed())
             .await
@@ -4542,7 +6063,7 @@ mod config_tests {
                     .expect("firing watchdog exact release deadline")
             }
             ExactTerminalClaim::Owner(_) => {
-                panic!("terminal lifecycle publication must already own the exact release")
+                panic!("terminal lifecycle path must already own the exact release")
             }
         };
         exact_terminal_completion_result(completion)
@@ -4742,6 +6263,206 @@ mod config_tests {
             .shutdown_gracefully(Some(Duration::ZERO))
             .await
             .expect("hangup reuse coordinator shut down");
+    }
+
+    #[test]
+    fn coordinator_in_dialog_builder_facades_capture_at_construction() {
+        let source = include_str!("unified.rs");
+        for (method, builder) in [
+            ("bye", "ByeBuilder"),
+            ("cancel", "CancelBuilder"),
+            ("refer", "ReferBuilder"),
+            ("notify", "NotifyBuilder"),
+            ("info", "InfoBuilder"),
+            ("update", "UpdateBuilder"),
+            ("reinvite", "ReInviteBuilder"),
+        ] {
+            let start = format!("    pub fn {method}(");
+            let body = source
+                .split(&start)
+                .nth(1)
+                .and_then(|tail| tail.split("\n    /// Begin building").next())
+                .unwrap_or_else(|| panic!("missing UnifiedCoordinator::{method} source"));
+            assert!(
+                body.contains("store.lifecycle_handle(session)"),
+                "UnifiedCoordinator::{method} did not capture the exact lifetime at builder construction"
+            );
+            assert!(
+                body.contains(&format!("{builder}::new_captured")),
+                "UnifiedCoordinator::{method} did not pass captured authority to {builder}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_in_dialog_builders_cannot_target_a_reused_generation() {
+        fn assert_generation_unchanged(
+            store: &SessionStore,
+            handle: &crate::session_registry::SessionRegistryHandle,
+            expected_state: CallState,
+            expected_revision: u64,
+            label: &str,
+        ) {
+            let snapshot = store
+                .get_session_snapshot_exact(handle)
+                .unwrap_or_else(|_| panic!("generation B disappeared after stale {label}"));
+            assert_eq!(
+                snapshot.call_state, expected_state,
+                "generation-A {label} builder changed generation B state"
+            );
+            assert_eq!(
+                snapshot.revision(),
+                expected_revision,
+                "generation-A {label} builder committed against generation B"
+            );
+        }
+
+        let coordinator = UnifiedCoordinator::new(Config::local("builder-reuse-fence", 0))
+            .await
+            .expect("start builder reuse coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let call_id = CallId::from("coordinator-builder-reused-id");
+        store
+            .create_session(call_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation A");
+        let generation_a = store
+            .lifecycle_handle(&call_id)
+            .expect("capture generation A");
+
+        // Every facade is intentionally deferred here. The exact authority
+        // must be captured now, before application option staging and await.
+        let bye = coordinator.bye(&call_id);
+        let cancel = coordinator.cancel(&call_id);
+        let refer = coordinator.refer(&call_id, "sip:transfer@example.test");
+        let notify = coordinator.notify(&call_id, "refer");
+        let info = coordinator.info(&call_id, "application/dtmf-relay");
+        let update = coordinator.update(&call_id);
+        let reinvite = coordinator.reinvite(&call_id);
+
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&call_id),
+            "expire the raw-id reuse horizon"
+        );
+        store
+            .create_session(call_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&call_id)
+            .expect("capture generation B");
+        assert_ne!(generation_a, generation_b);
+
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Initiating;
+            })
+            .expect("make generation B eligible for CANCEL");
+        let before_cancel = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale CANCEL")
+            .revision();
+        assert!(cancel.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Initiating,
+            before_cancel,
+            "CANCEL",
+        );
+
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("make generation B eligible for confirmed in-dialog methods");
+
+        let before_bye = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale BYE")
+            .revision();
+        assert!(bye.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_bye,
+            "BYE",
+        );
+
+        let before_refer = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale REFER")
+            .revision();
+        assert!(refer.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_refer,
+            "REFER",
+        );
+
+        let before_notify = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale NOTIFY")
+            .revision();
+        assert!(notify.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_notify,
+            "NOTIFY",
+        );
+
+        let before_info = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale INFO")
+            .revision();
+        assert!(info.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_info,
+            "INFO",
+        );
+
+        let before_update = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale UPDATE")
+            .revision();
+        assert!(update.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_update,
+            "UPDATE",
+        );
+
+        let before_reinvite = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B before stale re-INVITE")
+            .revision();
+        assert!(reinvite.send().await.is_err());
+        assert_generation_unchanged(
+            store.as_ref(),
+            &generation_b,
+            CallState::Active,
+            before_reinvite,
+            "re-INVITE",
+        );
+
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("builder reuse coordinator shut down");
     }
 
     impl std::fmt::Debug for CanaryTracePolicy {
@@ -5057,6 +6778,7 @@ mod config_tests {
 #[cfg(all(test, feature = "perf-tests"))]
 mod perf_config_tests {
     use super::{dialog_manager_retention_snapshot, Config};
+    use crate::errors::SessionError;
     use rvoip_sip_dialog::manager::core::DialogManagerRetentionCounts;
 
     #[test]
@@ -5077,14 +6799,23 @@ mod perf_config_tests {
 
     #[test]
     fn perf_rss_growth_rejects_invalid_values() {
+        let expected_detail = "perf_max_rss_growth_mb_per_hr must be finite and greater than 0";
         for limit in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let config = Config::local("alice", 5060).with_perf_max_rss_growth_mb_per_hr(limit);
             let error = config
                 .validate()
                 .expect_err("invalid perf rss threshold should fail");
             assert!(
-                error.to_string().contains("perf_max_rss_growth_mb_per_hr"),
-                "unexpected error: {error}"
+                matches!(
+                    &error,
+                    SessionError::ConfigError(detail)
+                        if detail == expected_detail
+                ),
+                "unexpected error variant: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("Config error: redacted(bytes={})", expected_detail.len())
             );
         }
     }
@@ -5219,7 +6950,8 @@ pub struct UnifiedCoordinator {
     pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
 
     /// Single response owner for application-controlled inbound requests.
-    session_control_rx: tokio::sync::Mutex<Option<mpsc::Receiver<crate::api::events::Event>>>,
+    session_control_rx:
+        tokio::sync::Mutex<Option<mpsc::UnboundedReceiver<crate::adapters::SessionControlEvent>>>,
 
     /// Becomes true only after a public peer surface claims the control queue.
     session_control_claimed: Arc<AtomicBool>,
@@ -5244,8 +6976,10 @@ pub struct UnifiedCoordinator {
     setup_teardown_scheduler: Arc<SetupTeardownDeadlineScheduler>,
 
     /// Strong ownership and one shared deadline queue for application-owned
-    /// exact in-dialog responses. This keeps an unanswered request resolvable
-    /// even if every application clone is dropped off-runtime.
+    /// exact INFO and REGISTER responses. Session-scoped entries carry an
+    /// exact generation; standalone REGISTER entries carry only their server
+    /// transaction. This keeps an unanswered request resolvable even if every
+    /// application clone is dropped off-runtime.
     pending_exact_responses: Arc<PendingExactResponseRegistry>,
 
     /// SIP_API_DESIGN_2 Phase A: shared session registry so the four
@@ -5460,12 +7194,15 @@ async fn run_exact_response_deadline_scheduler(
                 let coordinator = Arc::clone(&coordinator);
                 let registry = Arc::clone(&registry);
                 async move {
+                    let _fire = registry.begin_fire();
                     let Some(obligation) = registry.obligation(&transaction) else {
                         return;
                     };
+                    let fallback_status = obligation.fallback_status();
                     let outcome = tokio::time::timeout(
                         EXACT_RESPONSE_SEND_ATTEMPT_TIMEOUT,
-                        coordinator.author_pending_exact_response(obligation, 501),
+                        coordinator
+                            .author_pending_exact_response(obligation, fallback_status),
                     )
                     .await;
                     let cause = match outcome {
@@ -5512,6 +7249,70 @@ async fn run_bounded_exact_response_batch<T, F, Fut>(
         .await;
 }
 
+async fn author_pending_exact_response_with_adapter(
+    dialog_adapter: &DialogAdapter,
+    obligation: Arc<crate::api::incoming::ExactResponseObligation>,
+    status: u16,
+) -> ManagedExactResponseOutcome {
+    let Ok(claim) = obligation.claim() else {
+        return ManagedExactResponseOutcome::Busy;
+    };
+    let retire_dialog_pending_index = obligation.lifecycle_handle().is_some();
+    let transaction = obligation.transaction().clone();
+    let Ok(status_code) = rvoip_sip_core::StatusCode::from_u16(status) else {
+        claim.release_after_failure();
+        return ManagedExactResponseOutcome::ZeroWireRetryable;
+    };
+    let result = dialog_adapter
+        .dialog_api
+        .send_status_response_classified(&transaction, status_code, None)
+        .await;
+    match result {
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal)
+        | Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => {
+            if retire_dialog_pending_index {
+                let _ = dialog_adapter
+                    .dialog_api
+                    .retire_terminal_response_pending_index(&transaction);
+            }
+            claim.complete();
+            ManagedExactResponseOutcome::Completed
+        }
+        Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
+            claim.release_after_failure();
+            ManagedExactResponseOutcome::ZeroWireRetryable
+        }
+        Err(error)
+            if error.disposition
+                == rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable =>
+        {
+            tracing::warn!(
+                method = %crate::api::incoming::safe_incoming_method_debug_label(transaction.method()),
+                status_code = status,
+                "Managed exact final response failed before transport write: {}",
+                error.source
+            );
+            claim.release_after_failure();
+            ManagedExactResponseOutcome::ZeroWireRetryable
+        }
+        Err(error) => {
+            if retire_dialog_pending_index {
+                let _ = dialog_adapter
+                    .dialog_api
+                    .retire_terminal_response_pending_index(&transaction);
+            }
+            tracing::warn!(
+                method = %crate::api::incoming::safe_incoming_method_debug_label(transaction.method()),
+                status_code = status,
+                "Managed exact final response became wire-unknown and will not be retried: {}",
+                error.source
+            );
+            claim.complete();
+            ManagedExactResponseOutcome::Completed
+        }
+    }
+}
+
 /// Quiesce one exact lifetime, release its lower resources, and remove only
 /// the registry/store slot captured by the caller. Every delayed terminal
 /// path uses this helper so a reused raw SessionId can never redirect cleanup.
@@ -5520,8 +7321,25 @@ pub(crate) async fn release_exact_local_resources(
     helpers: Arc<StateMachineHelpers>,
     dialog_adapter: Arc<DialogAdapter>,
     media_adapter: Arc<MediaAdapter>,
+    pending_exact_responses: Option<Arc<PendingExactResponseRegistry>>,
+    setup_teardown_deadlines: Option<SetupTeardownDeadlineCancellation>,
     handle: SessionRegistryHandle,
 ) -> Result<()> {
+    if let Some(deadlines) = setup_teardown_deadlines.as_ref() {
+        // Fence the exact generation before any asynchronous drain or store
+        // cleanup. A racing scheduler either admits before this lock and is
+        // cancelled here, or observes the closing generation and rejects it.
+        deadlines.begin_lifetime_close(&handle);
+    }
+    if let Some(pending) = pending_exact_responses.as_ref() {
+        // Close admission under the same lock used by registration before
+        // looking at the pending set. Once this returns, no request from this
+        // exact generation can appear behind terminal cleanup.
+        pending.begin_lifetime_close(&handle);
+        pending
+            .drain_lifetime(&handle, dialog_adapter.as_ref())
+            .await?;
+    }
     // A racing exact owner may already have completed removal. Treat absence
     // of this generation as idempotent success; never redirect cleanup to a
     // newer lifetime that reused the raw SessionId.
@@ -5529,6 +7347,12 @@ pub(crate) async fn release_exact_local_resources(
         .get_session_retained_snapshot_exact(&handle)
         .is_err()
     {
+        if let Some(pending) = pending_exact_responses.as_ref() {
+            pending.finish_lifetime_close(&handle);
+        }
+        if let Some(deadlines) = setup_teardown_deadlines.as_ref() {
+            deadlines.finish_lifetime_close(&handle);
+        }
         return Ok(());
     }
     let teardown = match session_store.quiesce_session_exact(&handle).await {
@@ -5538,6 +7362,12 @@ pub(crate) async fn release_exact_local_resources(
                 .get_session_retained_snapshot_exact(&handle)
                 .is_err() =>
         {
+            if let Some(pending) = pending_exact_responses.as_ref() {
+                pending.finish_lifetime_close(&handle);
+            }
+            if let Some(deadlines) = setup_teardown_deadlines.as_ref() {
+                deadlines.finish_lifetime_close(&handle);
+            }
             return Ok(());
         }
         Err(error) => {
@@ -5567,7 +7397,7 @@ pub(crate) async fn release_exact_local_resources(
     if let Err(error) = media_result {
         return Err(error);
     }
-    match session_store.remove_quiesced_session_exact(&handle) {
+    let removal = match session_store.remove_quiesced_session_exact(&handle) {
         Ok(()) => Ok(()),
         Err(_)
             if session_store
@@ -5579,7 +7409,16 @@ pub(crate) async fn release_exact_local_resources(
         Err(error) => Err(SessionError::InternalError(format!(
             "exact session removal failed (class=lifecycle): {error}"
         ))),
+    };
+    if removal.is_ok() {
+        if let Some(pending) = pending_exact_responses.as_ref() {
+            pending.finish_lifetime_close(&handle);
+        }
+        if let Some(deadlines) = setup_teardown_deadlines.as_ref() {
+            deadlines.finish_lifetime_close(&handle);
+        }
     }
+    removal
 }
 
 /// Retry one exact terminal release after a cooperative scheduling turn.
@@ -5592,6 +7431,8 @@ pub(crate) async fn release_exact_local_resources_with_retry(
     helpers: Arc<StateMachineHelpers>,
     dialog_adapter: Arc<DialogAdapter>,
     media_adapter: Arc<MediaAdapter>,
+    pending_exact_responses: Option<Arc<PendingExactResponseRegistry>>,
+    setup_teardown_deadlines: Option<SetupTeardownDeadlineCancellation>,
     handle: SessionRegistryHandle,
 ) -> Result<()> {
     let first = release_exact_local_resources(
@@ -5599,6 +7440,8 @@ pub(crate) async fn release_exact_local_resources_with_retry(
         Arc::clone(&helpers),
         Arc::clone(&dialog_adapter),
         Arc::clone(&media_adapter),
+        pending_exact_responses.as_ref().map(Arc::clone),
+        setup_teardown_deadlines.clone(),
         handle.clone(),
     )
     .await;
@@ -5615,6 +7458,8 @@ pub(crate) async fn release_exact_local_resources_with_retry(
         helpers,
         dialog_adapter,
         media_adapter,
+        pending_exact_responses,
+        setup_teardown_deadlines,
         handle,
     )
     .await
@@ -5627,6 +7472,8 @@ pub(crate) struct ForcedLocalSessionCleanup {
     helpers: Arc<StateMachineHelpers>,
     dialog_adapter: Arc<DialogAdapter>,
     media_adapter: Arc<MediaAdapter>,
+    pending_exact_responses: Arc<PendingExactResponseRegistry>,
+    setup_teardown_deadlines: SetupTeardownDeadlineCancellation,
     session_store: Arc<SessionStore>,
 }
 
@@ -5642,6 +7489,8 @@ impl ForcedLocalSessionCleanup {
             self.helpers,
             self.dialog_adapter,
             self.media_adapter,
+            Some(self.pending_exact_responses),
+            Some(self.setup_teardown_deadlines),
             handle,
         )
         .await
@@ -5786,6 +7635,15 @@ impl UnifiedCoordinator {
         let session_stats = self.helpers.state_machine.store.get_stats().await;
         let helper_counts = self.helpers.perf_diagnostic_counts().await;
         let registry_sessions = self.session_registry.session_count().await;
+        let registry_retention = self.session_registry.perf_retention_counts();
+        let setup_teardown = self.setup_teardown_scheduler.perf_diagnostic_counts();
+        let exact_responses = self.pending_exact_responses.perf_diagnostic_counts();
+        let dialog_adapter_counts = self.dialog_adapter.perf_diagnostic_counts();
+        let inbound_invite_observers = self
+            .inbound_invite_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
         let cleanup = crate::cleanup_diag::snapshot();
         let admission = crate::admission_diag::snapshot();
         let dialog_diag = rvoip_sip_dialog::diagnostics::snapshot();
@@ -5839,12 +7697,26 @@ impl UnifiedCoordinator {
             },
             "session_registry": {
                 "sessions": registry_sessions,
+                "entries": registry_retention["entries"].clone(),
+                "dialog_mappings": registry_retention["dialog_mappings"].clone(),
+                "media_mappings": registry_retention["media_mappings"].clone(),
+                "lock_poisoned": registry_retention["lock_poisoned"].clone(),
                 "lifecycle": self.session_registry.perf_lifecycle_counts(),
             },
             "lifecycle": self.lifecycle.perf_diagnostic_counts(),
             "app_event_publisher": self.app_event_publisher.perf_diagnostic_counts(),
             "global_event_bus": self.global_coordinator.event_bus_diagnostic_snapshot(),
+            "coordinator_observers": {
+                "inbound_invite": inbound_invite_observers,
+                "session_control_claimed": self.session_control_claimed.load(Ordering::Acquire),
+            },
             "state_machine_helpers": helper_counts,
+            "exact_response_supervisor": exact_responses,
+            "retained_tasks": {
+                "coordinator_runtime": setup_teardown["retained_tasks"].clone(),
+                "coordinator_runtime_panicked": setup_teardown["retained_task_panicked"].clone(),
+                "registration_refresh": dialog_adapter_counts["registration_refresh_retained_tasks"].clone(),
+            },
             "transaction_manager": {
                 "client_transactions": transaction_counts.client_transactions,
                 "server_transactions": transaction_counts.server_transactions,
@@ -5865,7 +7737,7 @@ impl UnifiedCoordinator {
             },
             "dialog_manager": dialog_manager_retention_snapshot(dialog_counts),
             "dialog_manager_storage": dialog_breakdown,
-            "dialog_adapter": self.dialog_adapter.perf_diagnostic_counts(),
+            "dialog_adapter": dialog_adapter_counts,
             "media_adapter": self.media_adapter.perf_diagnostic_counts(),
             "memory_diagnostics": memory_diagnostics,
             "allocator_diagnostics": allocator_diagnostics,
@@ -5913,11 +7785,14 @@ impl UnifiedCoordinator {
                     "transition_failed": cleanup.setup_teardown_watchdog_transition_failed,
                     "release_completed": cleanup.setup_teardown_watchdog_release_completed,
                     "release_failed": cleanup.setup_teardown_watchdog_release_failed,
-                    "pending_deadlines": self.setup_teardown_scheduler.len(),
-                    "fire_in_flight": SETUP_TEARDOWN_TIMEOUT_CONCURRENCY
-                        .saturating_sub(self.setup_teardown_scheduler.fire_slots.available_permits()),
-                    "fire_concurrency_limit": SETUP_TEARDOWN_TIMEOUT_CONCURRENCY,
-                    "deadline_record_bytes": std::mem::size_of::<SetupTeardownDeadline>(),
+                    "pending_deadlines": setup_teardown["pending_deadlines"].clone(),
+                    "fire_in_flight": setup_teardown["fire_in_flight"].clone(),
+                    "retained_tasks": setup_teardown["retained_tasks"].clone(),
+                    "retained_task_panicked": setup_teardown["retained_task_panicked"].clone(),
+                    "accepting": setup_teardown["accepting"].clone(),
+                    "fire_concurrency_limit": setup_teardown["fire_concurrency_limit"].clone(),
+                    "deadline_record_bytes": setup_teardown["deadline_record_bytes"].clone(),
+                    "pending_by_owner": setup_teardown["pending_by_owner"].clone(),
                 },
                 "session_event_dispatch": {
                     "saturated": cleanup.session_event_dispatch_saturated,
@@ -5948,54 +7823,8 @@ impl UnifiedCoordinator {
         opts: rvoip_sip_dialog::api::unified::MessageRequestOptions,
         auth: Option<SipClientAuth>,
     ) -> Result<Response> {
-        let response = self
-            .dialog_adapter
-            .send_message_oob_with_options(opts.clone())
-            .await?;
-        let body = if opts.body.is_empty() {
-            None
-        } else {
-            Some(opts.body.as_ref())
-        };
-        let Some(retry) = self.build_oob_auth_retry_header(
-            Method::Message,
-            &response,
-            &opts.to_uri,
-            body,
-            auth.as_ref(),
-        )?
-        else {
-            return Ok(response);
-        };
-
-        let mut retry_opts = opts.clone();
-        retry_opts.cseq = Some(retry.cseq);
-        retry_opts.call_id = retry.call_id.clone();
-        retry_opts.from_tag = retry.from_tag.clone();
-        let retry_response = self
-            .dialog_adapter
-            .send_message_oob_with_auth(retry_opts, &retry.header_name, retry.header_value.clone())
-            .await?;
-        self.maybe_retry_oob_stale(
-            Method::Message,
-            retry_response,
-            retry,
-            || opts.to_uri.clone(),
-            body,
-            auth.as_ref(),
-            |cseq, call_id, from_tag, header_name, header_value| {
-                let mut opts = opts.clone();
-                opts.cseq = Some(cseq);
-                opts.call_id = call_id;
-                opts.from_tag = from_tag;
-                async move {
-                    self.dialog_adapter
-                        .send_message_oob_with_auth(opts, &header_name, header_value)
-                        .await
-                }
-            },
-        )
-        .await
+        self.send_standalone_oob_with_optional_auth(StandaloneRequestOptions::Message(opts), auth)
+            .await
     }
 
     /// Send out-of-dialog OPTIONS and retry when a configured UAC auth option
@@ -6005,49 +7834,8 @@ impl UnifiedCoordinator {
         opts: rvoip_sip_dialog::api::unified::OptionsRequestOptions,
         auth: Option<SipClientAuth>,
     ) -> Result<Response> {
-        let response = self
-            .dialog_adapter
-            .send_options_oob_with_options(opts.clone())
-            .await?;
-        let Some(retry) = self.build_oob_auth_retry_header(
-            Method::Options,
-            &response,
-            &opts.to_uri,
-            None,
-            auth.as_ref(),
-        )?
-        else {
-            return Ok(response);
-        };
-
-        let mut retry_opts = opts.clone();
-        retry_opts.cseq = Some(retry.cseq);
-        retry_opts.call_id = retry.call_id.clone();
-        retry_opts.from_tag = retry.from_tag.clone();
-        let retry_response = self
-            .dialog_adapter
-            .send_options_oob_with_auth(retry_opts, &retry.header_name, retry.header_value.clone())
-            .await?;
-        self.maybe_retry_oob_stale(
-            Method::Options,
-            retry_response,
-            retry,
-            || opts.to_uri.clone(),
-            None,
-            auth.as_ref(),
-            |cseq, call_id, from_tag, header_name, header_value| {
-                let mut opts = opts.clone();
-                opts.cseq = Some(cseq);
-                opts.call_id = call_id;
-                opts.from_tag = from_tag;
-                async move {
-                    self.dialog_adapter
-                        .send_options_oob_with_auth(opts, &header_name, header_value)
-                        .await
-                }
-            },
-        )
-        .await
+        self.send_standalone_oob_with_optional_auth(StandaloneRequestOptions::Options(opts), auth)
+            .await
     }
 
     /// Send out-of-dialog SUBSCRIBE and retry when a configured UAC auth option
@@ -6058,54 +7846,88 @@ impl UnifiedCoordinator {
         opts: rvoip_sip_dialog::api::unified::SubscribeRequestOptions,
         auth: Option<SipClientAuth>,
     ) -> Result<Response> {
+        self.send_standalone_oob_with_optional_auth(
+            StandaloneRequestOptions::Subscribe {
+                target: target.to_string(),
+                options: opts,
+            },
+            auth,
+        )
+        .await
+    }
+
+    /// Send a standalone request and perform the bounded 401/407 retry flow
+    /// from one immutable request snapshot.
+    async fn send_standalone_oob_with_optional_auth(
+        &self,
+        request: StandaloneRequestOptions,
+        auth: Option<SipClientAuth>,
+    ) -> Result<Response> {
         let response = self
             .dialog_adapter
-            .send_subscribe_oob_with_options(target, opts.clone())
+            .send_standalone_request(request.clone(), None)
             .await?;
+        let method = request.method();
+        let request_uri = request.request_uri().to_string();
+        let body = request.body();
         let Some(retry) = self.build_oob_auth_retry_header(
-            Method::Subscribe,
+            method.clone(),
             &response,
-            target,
-            None,
+            &request_uri,
+            body,
             auth.as_ref(),
         )?
         else {
             return Ok(response);
         };
 
-        let mut retry_opts = opts.clone();
-        retry_opts.cseq = Some(retry.cseq);
-        retry_opts.call_id = retry.call_id.clone();
-        retry_opts.from_tag = retry.from_tag.clone();
+        let retry_request = request.clone().with_request_identity(
+            retry.cseq,
+            retry.call_id.clone(),
+            retry.from_tag.clone(),
+        );
         let retry_response = self
             .dialog_adapter
-            .send_subscribe_oob_with_auth(
-                target,
-                retry_opts,
-                &retry.header_name,
-                retry.header_value.clone(),
+            .send_standalone_request(
+                retry_request,
+                Some((&retry.header_name, retry.header_value.clone())),
             )
             .await?;
-        self.maybe_retry_oob_stale(
-            Method::Subscribe,
-            retry_response,
-            retry,
-            || target.to_string(),
-            None,
+        if retry_response.status_code() != 401 && retry_response.status_code() != 407 {
+            return Ok(retry_response);
+        }
+
+        let Some(stale_retry) = self.build_oob_auth_retry_header(
+            method.clone(),
+            &retry_response,
+            &request_uri,
+            body,
             auth.as_ref(),
-            |cseq, call_id, from_tag, header_name, header_value| {
-                let mut opts = opts.clone();
-                opts.cseq = Some(cseq);
-                opts.call_id = call_id;
-                opts.from_tag = from_tag;
-                async move {
-                    self.dialog_adapter
-                        .send_subscribe_oob_with_auth(target, opts, &header_name, header_value)
-                        .await
-                }
-            },
-        )
-        .await
+        )?
+        else {
+            ensure_retry_not_challenged(method, &retry_response)?;
+            return Ok(retry_response);
+        };
+
+        if !stale_retry.stale || stale_retry.nonce == retry.nonce {
+            ensure_retry_not_challenged(method, &retry_response)?;
+            return Ok(retry_response);
+        }
+
+        let stale_request = request.with_request_identity(
+            stale_retry.cseq,
+            stale_retry.call_id.clone(),
+            stale_retry.from_tag.clone(),
+        );
+        let stale_response = self
+            .dialog_adapter
+            .send_standalone_request(
+                stale_request,
+                Some((&stale_retry.header_name, stale_retry.header_value)),
+            )
+            .await?;
+        ensure_retry_not_challenged(method, &stale_response)?;
+        Ok(stale_response)
     }
 
     fn build_oob_auth_retry_header(
@@ -6191,55 +8013,6 @@ impl UnifiedCoordinator {
         }))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn maybe_retry_oob_stale<F, Fut>(
-        &self,
-        method: Method,
-        retry_response: Response,
-        previous_retry: OobAuthRetry,
-        request_uri: impl FnOnce() -> String,
-        body: Option<&[u8]>,
-        auth: Option<&SipClientAuth>,
-        send_retry: F,
-    ) -> Result<Response>
-    where
-        F: FnOnce(u32, Option<String>, Option<String>, String, String) -> Fut,
-        Fut: std::future::Future<Output = Result<Response>>,
-    {
-        if retry_response.status_code() != 401 && retry_response.status_code() != 407 {
-            return Ok(retry_response);
-        }
-
-        let request_uri = request_uri();
-        let Some(stale_retry) = self.build_oob_auth_retry_header(
-            method.clone(),
-            &retry_response,
-            &request_uri,
-            body,
-            auth,
-        )?
-        else {
-            ensure_retry_not_challenged(method, &retry_response)?;
-            return Ok(retry_response);
-        };
-
-        if !stale_retry.stale || stale_retry.nonce == previous_retry.nonce {
-            ensure_retry_not_challenged(method, &retry_response)?;
-            return Ok(retry_response);
-        }
-
-        let second_retry_response = send_retry(
-            stale_retry.cseq,
-            stale_retry.call_id.clone(),
-            stale_retry.from_tag.clone(),
-            stale_retry.header_name,
-            stale_retry.header_value,
-        )
-        .await?;
-        ensure_retry_not_challenged(method, &second_retry_response)?;
-        Ok(second_retry_response)
-    }
-
     // ──────────────────────────────────────────────────────────────────
     // SIP_API_DESIGN_2 Phase C — builder entry points.
     //
@@ -6264,7 +8037,8 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         session: &crate::api::handle::CallId,
     ) -> crate::api::send::ByeBuilder {
-        crate::api::send::ByeBuilder::new(self.clone(), session.clone())
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::ByeBuilder::new_captured(self.clone(), session.clone(), lifecycle_handle)
     }
 
     /// Begin building an outbound CANCEL.
@@ -6272,7 +8046,12 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         session: &crate::api::handle::CallId,
     ) -> crate::api::send::CancelBuilder {
-        crate::api::send::CancelBuilder::new(self.clone(), session.clone())
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::CancelBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an outbound REFER.
@@ -6281,7 +8060,13 @@ impl UnifiedCoordinator {
         session: &crate::api::handle::CallId,
         refer_to: impl Into<String>,
     ) -> crate::api::send::ReferBuilder {
-        crate::api::send::ReferBuilder::new(self.clone(), session.clone(), refer_to)
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::ReferBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            refer_to,
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an outbound NOTIFY.
@@ -6290,7 +8075,13 @@ impl UnifiedCoordinator {
         session: &crate::api::handle::CallId,
         event_package: impl Into<String>,
     ) -> crate::api::send::NotifyBuilder {
-        crate::api::send::NotifyBuilder::new(self.clone(), session.clone(), event_package)
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::NotifyBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            event_package,
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an outbound INFO.
@@ -6299,7 +8090,13 @@ impl UnifiedCoordinator {
         session: &crate::api::handle::CallId,
         content_type: impl Into<String>,
     ) -> crate::api::send::InfoBuilder {
-        crate::api::send::InfoBuilder::new(self.clone(), session.clone(), content_type)
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::InfoBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            content_type,
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an outbound UPDATE.
@@ -6307,7 +8104,12 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         session: &crate::api::handle::CallId,
     ) -> crate::api::send::UpdateBuilder {
-        crate::api::send::UpdateBuilder::new(self.clone(), session.clone())
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::UpdateBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an outbound re-INVITE.
@@ -6315,7 +8117,12 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         session: &crate::api::handle::CallId,
     ) -> crate::api::send::ReInviteBuilder {
-        crate::api::send::ReInviteBuilder::new(self.clone(), session.clone())
+        let lifecycle_handle = self.helpers.state_machine.store.lifecycle_handle(session);
+        crate::api::send::ReInviteBuilder::new_captured(
+            self.clone(),
+            session.clone(),
+            lifecycle_handle,
+        )
     }
 
     /// Begin building an out-of-dialog SUBSCRIBE.
@@ -6585,8 +8392,27 @@ impl UnifiedCoordinator {
                     ))
                 })?,
         );
-        let (session_control_tx, session_control_rx) =
-            mpsc::channel(config.session_event_dispatcher_channel_capacity);
+        // Register and acknowledge the stable causal ingress before transport
+        // construction can bind a socket or accept a fast loopback packet.
+        // The existing sharded session router is installed into this slot
+        // later in the same constructor; early publishers wait without
+        // falling through to the observational bus.
+        let causal_dialog_ingress = CausalDialogToSessionIngress::new();
+        global_coordinator
+            .register_handler("dialog_to_session", causal_dialog_ingress.clone())
+            .await
+            .map_err(|error| {
+                SessionError::InternalError(format!(
+                    "Failed to register causal dialog ingress before transport startup: {error}"
+                ))
+            })?;
+        let mut causal_ingress_guard =
+            CausalIngressConstructionGuard::new(causal_dialog_ingress.clone());
+        // Exact application authority uses one claimed, coordinator-owned
+        // channel. It is deliberately independent of bounded observational
+        // dispatch so a full/stalled event bus cannot drop a lifecycle handle.
+        // The channel is closed and drained with this coordinator/peer.
+        let (session_control_tx, session_control_rx) = mpsc::unbounded_channel();
         let session_control_claimed = Arc::new(AtomicBool::new(false));
 
         // Create core components
@@ -6807,6 +8633,7 @@ impl UnifiedCoordinator {
             config.session_event_dispatcher_channel_capacity,
         )
         .with_control_sink(session_control_tx, Arc::clone(&session_control_claimed));
+        state_machine.init_exact_api_event_publisher(app_event_publisher.clone());
         media_adapter
             .set_app_event_publisher(app_event_publisher.clone())
             .await;
@@ -6816,6 +8643,8 @@ impl UnifiedCoordinator {
         let server_call_admission_soft_limit = config.server_call_admission_soft_limit;
         let server_call_admission_pacing_delay_ms = config.server_call_admission_pacing_delay_ms;
         let server_overload_retry_after_secs = config.server_overload_retry_after_secs;
+        let pending_exact_responses = Arc::new(PendingExactResponseRegistry::default());
+        pending_exact_responses.attach_session_store(&store);
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -6831,13 +8660,16 @@ impl UnifiedCoordinator {
             lifecycle: lifecycle.clone(),
             app_event_publisher: app_event_publisher.clone(),
             setup_teardown_scheduler: Arc::new(SetupTeardownDeadlineScheduler::default()),
-            pending_exact_responses: Arc::new(PendingExactResponseRegistry::default()),
+            pending_exact_responses,
             session_registry: registry.clone(),
             inbound_invite_observers: StdMutex::new(HashMap::new()),
             next_inbound_invite_observer_id: AtomicU64::new(1),
             registered_credentials: std::sync::Mutex::new(None),
             self_weak: OnceLock::new(),
         });
+        coordinator
+            .setup_teardown_scheduler
+            .attach_session_store(&store);
         let _ = coordinator.self_weak.set(Arc::downgrade(&coordinator));
         let mut construction_guard = CoordinatorConstructionGuard::new(Arc::clone(&coordinator));
         let setup_teardown_scheduler = Arc::clone(&coordinator.setup_teardown_scheduler);
@@ -6898,6 +8730,10 @@ impl UnifiedCoordinator {
                 app_event_publisher.clone(),
                 sip_trace_owner_id,
             )
+            .with_runtime_owners(
+                Arc::clone(&coordinator.helpers),
+                Arc::clone(&setup_teardown_tasks),
+            )
             .with_fast_auto_accept_incoming_calls(
                 fast_auto_accept_incoming_calls,
                 fast_auto_accept_queue_capacity,
@@ -6907,10 +8743,11 @@ impl UnifiedCoordinator {
                 server_call_admission_soft_limit,
                 server_call_admission_pacing_delay_ms,
                 server_overload_retry_after_secs,
-            );
+            )
+            .with_causal_dialog_ingress(causal_dialog_ingress);
 
         // SIP_API_DESIGN_2 Phase D — give the handler a weak handle
-        // back to the coordinator so the bus-path `IncomingRegister`
+        // back to the coordinator so the typed `IncomingRegister`
         // branch can build a response-capable wrapper. Weak avoids
         // the circular ownership loop.
         event_handler.set_coordinator(&coordinator);
@@ -6925,6 +8762,7 @@ impl UnifiedCoordinator {
             return Err(start_error);
         }
 
+        causal_ingress_guard.disarm();
         construction_guard.disarm();
         Ok(coordinator)
     }
@@ -6935,7 +8773,7 @@ impl UnifiedCoordinator {
 
     pub(crate) async fn claim_session_control_events(
         &self,
-    ) -> Result<mpsc::Receiver<crate::api::events::Event>> {
+    ) -> Result<mpsc::UnboundedReceiver<crate::adapters::SessionControlEvent>> {
         let mut receiver = self.session_control_rx.lock().await;
         let receiver = receiver.take().ok_or_else(|| {
             SessionError::InvalidInput(
@@ -6953,11 +8791,23 @@ impl UnifiedCoordinator {
         self.pending_exact_responses.register(obligation)
     }
 
+    pub(crate) fn pending_exact_response_registry(&self) -> Arc<PendingExactResponseRegistry> {
+        Arc::clone(&self.pending_exact_responses)
+    }
+
+    /// Return the generation-scoped setup/teardown deadline cancellation
+    /// capability used by exact terminal cleanup outside this module.
+    pub(crate) fn setup_teardown_deadline_cancellation(&self) -> SetupTeardownDeadlineCancellation {
+        SetupTeardownDeadlineCancellation {
+            scheduler: Arc::clone(&self.setup_teardown_scheduler),
+        }
+    }
+
     pub(crate) fn complete_exact_response_obligation(
         &self,
-        transaction: &rvoip_sip_dialog::transaction::TransactionKey,
+        obligation: &crate::api::incoming::ExactResponseObligation,
     ) {
-        self.pending_exact_responses.remove(transaction);
+        self.pending_exact_responses.remove_owner(obligation);
     }
 
     async fn author_pending_exact_response(
@@ -6965,53 +8815,7 @@ impl UnifiedCoordinator {
         obligation: Arc<crate::api::incoming::ExactResponseObligation>,
         status: u16,
     ) -> ManagedExactResponseOutcome {
-        let Ok(claim) = obligation.claim() else {
-            return ManagedExactResponseOutcome::Busy;
-        };
-        let transaction = obligation.transaction().clone();
-        let result = self
-            .dialog_adapter()
-            .send_response_for_transaction_classified(
-                obligation.call_id(),
-                &transaction,
-                status,
-                None,
-            )
-            .await;
-        match result {
-            Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal)
-            | Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::WireUnknownErrorTerminal) => {
-                claim.complete();
-                ManagedExactResponseOutcome::Completed
-            }
-            Ok(rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable) => {
-                claim.release_after_failure();
-                ManagedExactResponseOutcome::ZeroWireRetryable
-            }
-            Err(error)
-                if error.disposition
-                    == rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable =>
-            {
-                tracing::warn!(
-                    method = %crate::api::incoming::safe_incoming_method_debug_label(transaction.method()),
-                    status_code = status,
-                    "Managed exact final response failed before transport write: {}",
-                    error.source
-                );
-                claim.release_after_failure();
-                ManagedExactResponseOutcome::ZeroWireRetryable
-            }
-            Err(error) => {
-                tracing::warn!(
-                    method = %crate::api::incoming::safe_incoming_method_debug_label(transaction.method()),
-                    status_code = status,
-                    "Managed exact final response became wire-unknown and will not be retried: {}",
-                    error.source
-                );
-                claim.complete();
-                ManagedExactResponseOutcome::Completed
-            }
-        }
+        author_pending_exact_response_with_adapter(self.dialog_adapter(), obligation, status).await
     }
 
     async fn drain_exact_responses_for_shutdown(&self) -> Result<()> {
@@ -7030,15 +8834,21 @@ impl UnifiedCoordinator {
                 )));
             }
             let attempt_timeout = remaining.min(EXACT_RESPONSE_SEND_ATTEMPT_TIMEOUT);
+            let pending_registry = Arc::clone(&self.pending_exact_responses);
             let batch = run_bounded_exact_response_batch(
                 pending,
                 EXACT_RESPONSE_DEADLINE_CONCURRENCY,
-                |obligation| async move {
-                    let _ = tokio::time::timeout(
-                        attempt_timeout,
-                        self.author_pending_exact_response(obligation, 503),
-                    )
-                    .await;
+                |obligation| {
+                    let pending_registry = Arc::clone(&pending_registry);
+                    async move {
+                        let _fire = pending_registry.begin_fire();
+                        let fallback_status = obligation.fallback_status();
+                        let _ = tokio::time::timeout(
+                            attempt_timeout,
+                            self.author_pending_exact_response(obligation, fallback_status),
+                        )
+                        .await;
+                    }
                 },
             );
             let _ = tokio::time::timeout(remaining, batch).await;
@@ -7351,10 +9161,10 @@ impl UnifiedCoordinator {
     /// merge it with the ordinary public observations.
     ///
     /// Only one control owner may exist. Response-bearing inbound requests
-    /// such as SIP INFO are yielded once through the private stream; their
-    /// public observational copies are sanitized and suppressed by this
-    /// receiver. Further calls return an error. Libraries that only monitor
-    /// calls should continue to use [`events`](Self::events).
+    /// such as SIP INFO and exact session handles are yielded once through the
+    /// private stream. All public observational copies are sanitized and
+    /// suppressed by this owner. Further calls return an error. Libraries
+    /// that only monitor calls should continue to use [`events`](Self::events).
     pub async fn events_with_control(
         self: &Arc<Self>,
     ) -> Result<crate::api::stream_peer::EventReceiver> {
@@ -7475,13 +9285,67 @@ impl UnifiedCoordinator {
         snapshot
     }
 
-    pub(crate) fn lifecycle_watcher(&self, id: &SessionId) -> tokio::sync::watch::Receiver<u64> {
-        self.lifecycle.watcher(id)
+    pub(crate) fn lifecycle_index(&self) -> LifecycleIndex {
+        self.lifecycle.clone()
+    }
+
+    pub(crate) async fn lifecycle_snapshot_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<CallLifecycleSnapshot> {
+        let current = self
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .ok();
+        let state = current.as_ref().map(|session| session.call_state.clone());
+        let media_security = current
+            .as_ref()
+            .and_then(|session| session.media_security.clone());
+        let mut snapshot = self.lifecycle.snapshot_exact(handle, state);
+        if snapshot.media_security.is_none() {
+            snapshot.media_security = media_security;
+        }
+        let has_exact_evidence = current.is_some()
+            || !snapshot.progress.is_empty()
+            || snapshot.answered.is_some()
+            || snapshot.media_security.is_some()
+            || snapshot.terminal.is_some()
+            || snapshot.latest_transfer_outcome.is_some();
+        has_exact_evidence.then_some(snapshot).ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Session {} exact lifecycle is unavailable",
+                handle.session_id()
+            ))
+        })
+    }
+
+    pub(crate) fn lifecycle_watcher_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> tokio::sync::watch::Receiver<u64> {
+        self.lifecycle.watcher_exact(handle)
     }
 
     #[doc(hidden)]
     pub async fn publish_app_event_for_test(&self, event: crate::api::events::Event) -> Result<()> {
         self.app_event_publisher.publish_now(event).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_app_event_exact_for_test(
+        &self,
+        handle: &SessionRegistryHandle,
+        event: crate::api::events::Event,
+    ) -> Result<()> {
+        self.helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .map_err(|_| SessionError::SessionNotFound(handle.session_id().to_string()))?;
+        self.app_event_publisher.publish_exact(handle, event);
+        Ok(())
     }
 
     // ===== Simple Call Operations =====
@@ -7585,6 +9449,29 @@ impl UnifiedCoordinator {
         result
     }
 
+    /// Internal exact-lifetime accept path used by `AcceptBuilder` after its
+    /// complete response envelope has been frozen.
+    pub(crate) async fn accept_call_with_response(
+        &self,
+        session_id: &SessionId,
+        lifecycle_handle: &SessionRegistryHandle,
+        sdp: Option<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        let watchdog_kind = if sdp.is_some() {
+            SetupTeardownWatchdogKind::AcceptedCallWithSdp
+        } else {
+            SetupTeardownWatchdogKind::AcceptedCall
+        };
+        let result = self
+            .helpers
+            .accept_call_with_response(session_id, lifecycle_handle, sdp, extras)
+            .await;
+        self.schedule_setup_teardown_timeout_exact_if_current(lifecycle_handle, watchdog_kind)
+            .await;
+        result
+    }
+
     /// Hang up or cancel a call.
     ///
     /// Established calls send BYE. Ringing or early-media outbound calls send
@@ -7607,15 +9494,47 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!(
+                    "Session {} has no current exact hangup lifetime",
+                    session_id.0
+                ))
+            })?;
+        self.hangup_exact(&handle).await
+    }
+
+    pub(crate) async fn hangup_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        self.hangup_exact_with_reason(handle, "Local hangup").await
+    }
+
+    /// Join the one exact hangup authority while supplying the terminal reason
+    /// used by its eventual committed release. Automatic lifecycle owners use
+    /// this same path as public hangup so BYE dispatch, final-response
+    /// confirmation, lifecycle commit, and resource release cannot diverge.
+    async fn hangup_exact_with_reason(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        let reason = reason.into();
         // One exact SessionStateCell owns one retained hangup operation. The
         // public caller is only a waiter: dropping it cannot cancel dispatch,
         // wire confirmation, or finalization, and another caller joins the
         // same completion instead of crossing a shared generation fence.
-        let hangup_control = self.helpers.state_machine.store.hangup_control(session_id);
-        let Some((handle, control)) = hangup_control else {
+        let Some(control) = self
+            .helpers
+            .state_machine
+            .store
+            .hangup_control_exact(handle)
+        else {
             return Err(SessionError::SessionNotFound(format!(
                 "Session {} has no current exact hangup lifetime",
-                session_id.0
+                handle.session_id().0
             )));
         };
         let coordinator = self
@@ -7631,36 +9550,22 @@ impl UnifiedCoordinator {
         }
 
         let retained_control = Arc::clone(&control);
-        let retained_session_id = session_id.clone();
+        let retained_handle = handle.clone();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let completion_guard = RetainedHangupTaskCompletion::new(retained_control);
         let hangup_scheduler = Arc::clone(&self.setup_teardown_scheduler);
         let spawned = hangup_scheduler.spawn_lifecycle_task(async move {
             let mut completion_guard = completion_guard;
-            let result = if coordinator
-                .helpers
-                .state_machine
-                .store
-                .lifecycle_handle(&retained_session_id)
-                .as_ref()
-                != Some(&handle)
+            let result = match std::panic::AssertUnwindSafe(
+                coordinator.hangup_serialized_exact(&retained_handle, reason),
+            )
+            .catch_unwind()
+            .await
             {
-                Err(SessionError::SessionNotFound(format!(
-                    "Session {} exact lifetime is no longer current",
-                    retained_session_id.0
-                )))
-            } else {
-                match std::panic::AssertUnwindSafe(
-                    coordinator.hangup_serialized(&retained_session_id),
-                )
-                .catch_unwind()
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(SessionError::InternalError(
-                        "exact hangup operation stopped unexpectedly".to_string(),
-                    )),
-                }
+                Ok(result) => result,
+                Err(_) => Err(SessionError::InternalError(
+                    "exact hangup operation stopped unexpectedly".to_string(),
+                )),
             };
             completion_guard.finish(result.is_ok());
             let _ = result_tx.send(result);
@@ -7675,14 +9580,19 @@ impl UnifiedCoordinator {
         }
     }
 
-    async fn hangup_serialized(&self, session_id: &SessionId) -> Result<()> {
-        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait(session_id);
+    async fn hangup_serialized_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: String,
+    ) -> Result<()> {
+        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
         let initial_state = self
             .helpers
             .state_machine
             .store
-            .with_session(session_id, |session| session.call_state.clone())
-            .ok();
+            .get_session_snapshot_exact(handle)
+            .ok()
+            .map(|session| session.call_state.clone());
         // Fence the per-session retained transaction before dispatch. A BYE
         // send can complete and retain its exact transaction, then lose the
         // final state-store revision race to a synchronous peer response. In
@@ -7690,13 +9600,13 @@ impl UnifiedCoordinator {
         // operation must still be joined and reclaimed below.
         let bye_generation_before_dispatch = self
             .dialog_adapter
-            .outgoing_bye_generation(session_id)
+            .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
-        let dispatch = self.helpers.hangup(session_id).await;
+        let dispatch = self.helpers.hangup_exact(handle).await;
         let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
                 .dialog_adapter
-                .has_outgoing_bye_after(session_id, bye_generation_before_dispatch);
+                .has_outgoing_bye_after_exact(handle, bye_generation_before_dispatch);
 
         if dispatch.is_ok() || retained_new_bye {
             // The coordinator/state machine is now the sole protocol teardown
@@ -7706,31 +9616,36 @@ impl UnifiedCoordinator {
             // retire local ownership without starting a competing CANCEL/BYE
             // loop.
             self.dialog_adapter
-                .mark_initial_invite_protocol_teardown(session_id);
+                .mark_initial_invite_protocol_teardown_exact(handle);
         }
         // An established local hangup is not acknowledged merely because a
         // concurrent dialog event has already published terminal lifecycle
-        // evidence. The peer still owes this exact BYE transaction a
-        // successful final response (including during simultaneous-BYE
-        // glare). Await that response before the generic observed-terminal
-        // shortcut below can convert teardown into success. The confirmation
-        // helper always performs exact local reclamation on timeout/non-2xx,
-        // while preserving the wire failure for the caller.
+        // evidence. Join this exact BYE transaction before the generic
+        // observed-terminal shortcut can convert teardown into success. A
+        // 2xx confirms receipt; RFC 3261 §15.1.1 also makes an exact 481 a
+        // graceful terminal result because it proves the peer no longer has
+        // the dialog (the ordinary simultaneous-BYE race). The confirmation
+        // helper always performs exact local reclamation on any other
+        // timeout/non-2xx while preserving that wire failure for the caller.
         if matches!(initial_state, Some(CallState::Active)) {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,
-                self.finalize_confirmed_local_bye(session_id, "Local hangup"),
+                self.finalize_confirmed_local_bye_exact(handle, reason),
             )
             .await;
         }
         dispatch?;
-        if self.lifecycle_snapshot(session_id).await.terminal.is_some() {
-            self.release_after_observed_terminal(session_id).await;
+        if self
+            .lifecycle_snapshot_exact(handle)
+            .await
+            .is_ok_and(|snapshot| snapshot.terminal.is_some())
+        {
+            self.release_after_observed_terminal_exact(handle).await;
             return Ok(());
         }
-        self.schedule_setup_teardown_timeout_if_current(
-            session_id,
+        self.schedule_setup_teardown_timeout_exact_if_current(
+            handle,
             SetupTeardownWatchdogKind::Cancellation,
         )
         .await;
@@ -7746,6 +9661,11 @@ impl UnifiedCoordinator {
         else {
             return;
         };
+        self.release_after_observed_terminal_exact(&handle).await;
+    }
+
+    async fn release_after_observed_terminal_exact(&self, handle: &SessionRegistryHandle) {
+        let session_id = handle.session_id();
         let release_guard = crate::cleanup_diag::stage_guard(
             crate::cleanup_diag::CleanupStage::TerminalRelease,
             &session_id.0,
@@ -7755,7 +9675,9 @@ impl UnifiedCoordinator {
             Arc::clone(&self.helpers),
             Arc::clone(&self.dialog_adapter),
             Arc::clone(&self.media_adapter),
-            handle,
+            Some(Arc::clone(&self.pending_exact_responses)),
+            Some(self.setup_teardown_deadline_cancellation()),
+            handle.clone(),
         )
         .await
         {
@@ -7830,10 +9752,8 @@ impl UnifiedCoordinator {
 
         let session_id = session_id.clone();
         let state_machine = Arc::clone(&self.helpers.state_machine);
-        let helpers = Arc::clone(&self.helpers);
-        let dialog_adapter = Arc::clone(&self.dialog_adapter);
         let media_adapter = Arc::clone(&self.media_adapter);
-        let publisher = self.app_event_publisher.clone();
+        let coordinator = self.self_weak.get().cloned();
         let watchdog_scheduler = Arc::clone(&self.setup_teardown_scheduler);
         let task_scheduler = Arc::clone(&watchdog_scheduler);
         let _ = watchdog_scheduler.spawn_lifecycle_task(async move {
@@ -7904,72 +9824,20 @@ impl UnifiedCoordinator {
                     saw_media
                 );
 
-                if let Err(err) = state_machine
-                    .process_event(&session_id, EventType::HangupCall)
+                let Some(coordinator) = coordinator.as_ref().and_then(Weak::upgrade) else {
+                    return;
+                };
+                if let Err(err) = coordinator
+                    .hangup_exact_with_reason(&handle, reason)
                     .await
                 {
                     tracing::warn!(
-                        "active call media watchdog failed to process HangupCall for {} in state {:?}: {}",
+                        "active call media watchdog failed exact confirmed hangup for {} in state {:?}: {}",
                         session_id,
                         current.call_state,
                         err
                     );
                 }
-
-                let release_guard = crate::cleanup_diag::stage_guard(
-                    crate::cleanup_diag::CleanupStage::TerminalRelease,
-                    &session_id.0,
-                );
-                let claim_owner = match publisher.claim_exact_terminal(&handle) {
-                    ExactTerminalClaim::Owner(owner) => owner,
-                    ExactTerminalClaim::Observer(_) => {
-                        release_guard.finish_success();
-                        return;
-                    }
-                };
-                let api_event = crate::api::events::Event::CallEnded {
-                    call_id: session_id.clone(),
-                    reason,
-                };
-                let outcome = publisher
-                    .publish_terminal_then_release(
-                        api_event,
-                        release_exact_local_resources(
-                            Arc::clone(&state_machine.store),
-                            helpers,
-                            dialog_adapter,
-                            media_adapter,
-                            handle,
-                        ),
-                    )
-                    .await;
-                let publication_succeeded = match outcome.publication {
-                    Ok(()) => true,
-                    Err(err) => {
-                        tracing::warn!(
-                            "active call media watchdog failed to publish terminal event for {}: {}",
-                            session_id,
-                            err
-                        );
-                        false
-                    }
-                };
-                if let Err(error) = outcome.release {
-                    tracing::debug!(%error, "active media watchdog exact release was incomplete");
-                    release_guard.finish_failure();
-                    claim_owner.finish(if publication_succeeded {
-                        ExactTerminalCompletion::ReleaseFailed
-                    } else {
-                        ExactTerminalCompletion::PublicationAndReleaseFailed
-                    });
-                    return;
-                }
-                release_guard.finish_success();
-                claim_owner.finish(if publication_succeeded {
-                    ExactTerminalCompletion::PublishedAndReleased
-                } else {
-                    ExactTerminalCompletion::PublicationFailed
-                });
                 return;
             }
         });
@@ -8020,6 +9888,43 @@ impl UnifiedCoordinator {
         let _ = self
             .setup_teardown_scheduler
             .schedule(deadline, handle, entered_state_at, kind);
+    }
+
+    async fn schedule_setup_teardown_timeout_exact_if_current(
+        &self,
+        handle: &SessionRegistryHandle,
+        kind: SetupTeardownWatchdogKind,
+    ) {
+        let timeout = Duration::from_secs(self.config.setup_teardown_timeout_secs);
+        if timeout.is_zero() {
+            return;
+        }
+
+        let Ok(current) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+        else {
+            return;
+        };
+        if !kind.watched_states().contains(&current.call_state) {
+            return;
+        }
+        let Some(deadline) = Instant::now().checked_add(timeout) else {
+            tracing::error!(
+                timeout_secs = self.config.setup_teardown_timeout_secs,
+                "setup teardown watchdog deadline overflow"
+            );
+            return;
+        };
+
+        let _ = self.setup_teardown_scheduler.schedule(
+            deadline,
+            handle.clone(),
+            current.entered_state_at,
+            kind,
+        );
     }
 
     fn setup_teardown_deadline_is_current(&self, deadline: &SetupTeardownDeadline) -> bool {
@@ -8088,9 +9993,10 @@ impl UnifiedCoordinator {
         let helpers = Arc::clone(&self.helpers);
         let dialog_adapter = Arc::clone(&self.dialog_adapter);
         let media_adapter = Arc::clone(&self.media_adapter);
+        let pending_exact_responses = Arc::clone(&self.pending_exact_responses);
         let publisher = self.app_event_publisher.clone();
         if let Err(err) = state_machine
-            .process_event(&session_id, EventType::DialogTimeout)
+            .process_event_exact(&deadline.handle, EventType::DialogTimeout)
             .await
         {
             tracing::warn!(
@@ -8137,83 +10043,67 @@ impl UnifiedCoordinator {
                 reason: reason.to_string(),
             },
         };
-        let outcome = publisher
-            .publish_terminal_then_release(
-                api_event,
-                release_exact_local_resources(
-                    Arc::clone(&state_machine.store),
-                    helpers,
-                    dialog_adapter,
-                    media_adapter,
-                    deadline.handle,
-                ),
-            )
-            .await;
-        let publication_succeeded = match outcome.publication {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::warn!(
-                    "setup teardown watchdog failed to publish terminal event for {}: {}",
-                    session_id,
-                    err
-                );
-                false
-            }
-        };
-        if let Err(error) = outcome.release {
+        if let Err(err) = publisher.publish_terminal_best_effort_exact(&deadline.handle, api_event)
+        {
+            tracing::warn!(
+                "setup teardown watchdog failed to publish terminal event for {}: {}",
+                session_id,
+                err
+            );
+        }
+        if let Err(error) = release_exact_local_resources(
+            Arc::clone(&state_machine.store),
+            helpers,
+            dialog_adapter,
+            media_adapter,
+            Some(pending_exact_responses),
+            Some(self.setup_teardown_deadline_cancellation()),
+            deadline.handle,
+        )
+        .await
+        {
             tracing::debug!(%error, "setup watchdog exact release was incomplete");
             release_guard.finish_failure();
             crate::cleanup_diag::record_setup_teardown_watchdog_release_failed();
-            claim_owner.finish(if publication_succeeded {
-                ExactTerminalCompletion::ReleaseFailed
-            } else {
-                ExactTerminalCompletion::PublicationAndReleaseFailed
-            });
+            claim_owner.finish(ExactTerminalCompletion::ReleaseFailed);
             return;
         }
         release_guard.finish_success();
         crate::cleanup_diag::record_setup_teardown_watchdog_release_completed();
-        claim_owner.finish(if publication_succeeded {
-            ExactTerminalCompletion::PublishedAndReleased
-        } else {
-            ExactTerminalCompletion::PublicationFailed
-        });
+        claim_owner.finish(ExactTerminalCompletion::Released);
     }
 
-    /// Complete local BYE teardown when rvoip-sip-dialog accepts the outbound BYE.
-    ///
-    /// Dialog-core does not currently emit a per-session `DialogTerminated`
-    /// event for every successful outbound BYE transaction, so the public BYE
-    /// paths release rvoip-sip state explicitly after the BYE has been
-    /// dispatched. Inbound BYE/CANCEL/failure paths still release through the
-    /// dialog event handler.
-    pub(crate) async fn finalize_local_bye(
+    /// Complete the retained publication/release phase for one exact local
+    /// teardown lifetime.
+    pub(crate) async fn finalize_local_bye_exact(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        let Some(handle) = self
-            .helpers
-            .state_machine
-            .store
-            .lifecycle_handle(session_id)
-        else {
-            return Ok(());
+        let api_event = crate::api::events::Event::CallEnded {
+            call_id: handle.session_id().clone(),
+            reason: reason.into(),
         };
-        let publication_timeout = self.dialog_adapter.non_invite_transaction_timeout();
+        self.finalize_local_terminal_exact(handle, api_event).await
+    }
 
-        let claim_owner = match self.app_event_publisher.claim_exact_terminal(&handle) {
+    async fn finalize_local_terminal_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        api_event: crate::api::events::Event,
+    ) -> Result<()> {
+        let session_id = handle.session_id();
+        let release_timeout = self.dialog_adapter.non_invite_transaction_timeout();
+
+        let claim_owner = match self.app_event_publisher.claim_exact_terminal(handle) {
             ExactTerminalClaim::Owner(owner) => {
-                tracing::debug!(session = %session_id, "local BYE finalizer owns exact terminal publication");
+                tracing::debug!(session = %session_id, "local BYE finalizer owns exact terminal release");
                 owner
             }
             ExactTerminalClaim::Observer(observer) => {
-                tracing::debug!(session = %session_id, "local BYE finalizer is joining exact terminal publication");
-                match tokio::time::timeout(publication_timeout, observer.wait()).await {
-                    Ok(
-                        ExactTerminalCompletion::PublishedAndReleased
-                        | ExactTerminalCompletion::PublicationFailed,
-                    ) => return Ok(()),
+                tracing::debug!(session = %session_id, "local BYE finalizer is joining exact terminal release");
+                match tokio::time::timeout(release_timeout, observer.wait()).await {
+                    Ok(ExactTerminalCompletion::Released) => return Ok(()),
                     Ok(completion) => {
                         tracing::warn!(
                             session = %session_id,
@@ -8224,7 +10114,7 @@ impl UnifiedCoordinator {
                     Err(_) => {
                         tracing::warn!(
                             session = %session_id,
-                            timeout_ms = publication_timeout.as_millis(),
+                            timeout_ms = release_timeout.as_millis(),
                             "local BYE terminal owner exceeded its deadline; taking over exact cleanup"
                         );
                     }
@@ -8238,7 +10128,9 @@ impl UnifiedCoordinator {
                     Arc::clone(&self.helpers),
                     Arc::clone(&self.dialog_adapter),
                     Arc::clone(&self.media_adapter),
-                    handle,
+                    Some(Arc::clone(&self.pending_exact_responses)),
+                    Some(self.setup_teardown_deadline_cancellation()),
+                    handle.clone(),
                 )
                 .await;
                 match release {
@@ -8254,67 +10146,76 @@ impl UnifiedCoordinator {
             &session_id.0,
         );
 
-        let api_event = crate::api::events::Event::CallEnded {
-            call_id: session_id.clone(),
-            reason: reason.into(),
-        };
-        let release_handle = handle.clone();
-        let outcome = self
+        if let Err(err) = self
             .app_event_publisher
-            .publish_terminal_then_release_bounded(
-                api_event,
-                release_exact_local_resources_with_retry(
-                    Arc::clone(&self.helpers.state_machine.store),
-                    Arc::clone(&self.helpers),
-                    Arc::clone(&self.dialog_adapter),
-                    Arc::clone(&self.media_adapter),
-                    release_handle,
-                ),
-                publication_timeout,
-            )
-            .await;
-        let publication_succeeded = match outcome.publication {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::warn!(
-                    error_class = "app-event-publication",
-                    "Local BYE terminal event publication failed after lifecycle admission: {}",
-                    err
-                );
-                false
-            }
-        };
-        if let Err(error) = outcome.release {
+            .publish_terminal_best_effort_exact(handle, api_event)
+        {
+            tracing::warn!(
+                error_class = "app-event-publication",
+                "Local BYE terminal event publication failed after lifecycle admission: {}",
+                err
+            );
+        }
+        if let Err(error) = release_exact_local_resources_with_retry(
+            Arc::clone(&self.helpers.state_machine.store),
+            Arc::clone(&self.helpers),
+            Arc::clone(&self.dialog_adapter),
+            Arc::clone(&self.media_adapter),
+            Some(Arc::clone(&self.pending_exact_responses)),
+            Some(self.setup_teardown_deadline_cancellation()),
+            handle.clone(),
+        )
+        .await
+        {
             release_guard.finish_failure();
-            claim_owner.finish(if publication_succeeded {
-                ExactTerminalCompletion::ReleaseFailed
-            } else {
-                ExactTerminalCompletion::PublicationAndReleaseFailed
-            });
+            claim_owner.finish(ExactTerminalCompletion::ReleaseFailed);
             return Err(error);
         }
         release_guard.finish_success();
-        claim_owner.finish(if publication_succeeded {
-            ExactTerminalCompletion::PublishedAndReleased
-        } else {
-            ExactTerminalCompletion::PublicationFailed
-        });
+        claim_owner.finish(ExactTerminalCompletion::Released);
         Ok(())
     }
 
-    /// Await the peer's successful final response before acknowledging local
-    /// BYE teardown. Local resources are reclaimed on every outcome, but a
-    /// timeout or non-2xx remains visible to the caller as wire failure.
-    pub(crate) async fn finalize_confirmed_local_bye(
+    /// Await the exact peer response before acknowledging local BYE teardown.
+    /// A 2xx is confirmed receipt and an exact 481 is graceful
+    /// already-terminated completion under RFC 3261 §15.1.1. Local resources
+    /// are reclaimed on every outcome, but any other timeout or non-2xx
+    /// remains visible to the caller as wire failure.
+    pub(crate) async fn finalize_confirmed_local_bye_exact(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
+        let reason = reason.into();
         let confirmation = self
             .dialog_adapter
-            .wait_for_outgoing_bye_final_response(session_id)
+            .wait_for_outgoing_bye_final_response_exact(handle)
             .await;
-        let finalization = self.finalize_local_bye(session_id, reason).await;
+        let lifecycle_commit =
+            commit_local_bye_lifecycle_exact(Arc::clone(&self.helpers.state_machine), handle).await;
+        let finalization = match lifecycle_commit {
+            Ok(LocalByeLifecycleCommit::Ended | LocalByeLifecycleCommit::AlreadyReleased) => {
+                self.finalize_local_bye_exact(handle, reason).await
+            }
+            Ok(LocalByeLifecycleCommit::Cancelled) => {
+                self.finalize_local_terminal_exact(
+                    handle,
+                    crate::api::events::Event::CallCancelled {
+                        call_id: handle.session_id().clone(),
+                    },
+                )
+                .await
+            }
+            Err(lifecycle_error) => {
+                if let Err(cleanup_error) = self.finalize_local_bye_exact(handle, reason).await {
+                    tracing::debug!(
+                        %cleanup_error,
+                        "local SIP cleanup was incomplete after BYE lifecycle failure"
+                    );
+                }
+                Err(lifecycle_error)
+            }
+        };
         match confirmation {
             Ok(()) => finalization,
             Err(error) => {
@@ -8336,52 +10237,68 @@ impl UnifiedCoordinator {
     pub(crate) async fn dispatch_confirmed_outbound_bye(
         &self,
         session_id: &SessionId,
+        slot: crate::state_machine::executor::PendingOptionsSlot,
     ) -> Result<()> {
-        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait(session_id);
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.dispatch_confirmed_outbound_bye_exact(&handle, slot)
+            .await
+    }
+
+    pub(crate) async fn dispatch_confirmed_outbound_bye_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        slot: crate::state_machine::executor::PendingOptionsSlot,
+    ) -> Result<()> {
+        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
         let generation_before_dispatch = self
             .dialog_adapter
-            .outgoing_bye_generation(session_id)
+            .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
         let dispatch = self
-            .dispatch_outbound(session_id, EventType::SendOutboundBye)
+            .dispatch_outbound_with_options_exact(handle, EventType::SendOutboundBye, slot)
             .await
             .map(|_| ());
         let retained_new_bye = self
             .dialog_adapter
-            .has_outgoing_bye_after(session_id, generation_before_dispatch);
+            .has_outgoing_bye_after_exact(handle, generation_before_dispatch);
         complete_established_bye_dispatch(
             dispatch,
             retained_new_bye,
-            self.finalize_confirmed_local_bye(session_id, "Local BYE"),
+            self.finalize_confirmed_local_bye_exact(handle, "Local BYE"),
         )
         .await
     }
 
     /// Begin authoritative local reclamation without publishing an app event.
     ///
-    /// Normal teardown uses [`Self::finalize_local_bye`] so terminal delivery
-    /// linearizes before the session disappears. This fallback exists only
-    /// for a blocked or failed terminal publisher. It captures the exact
-    /// authority/registry owner synchronously; the returned cleanup is then
-    /// run as retained work and performs quiesce, lower release, and exact
-    /// conditional removal as one ordered continuation.
-    pub(crate) async fn begin_force_reclaim_local_session(
+    /// Capture forced reclamation for one already-qualified lifetime.
+    ///
+    /// Retained adapter cleanup must use this entry point: resolving a raw
+    /// identifier after a timeout could otherwise select a replacement
+    /// lifetime admitted while the old cleanup was delayed.
+    pub(crate) async fn begin_force_reclaim_local_session_exact(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
     ) -> ForcedLocalSessionCleanup {
         let release_guard = crate::cleanup_diag::stage_guard(
             crate::cleanup_diag::CleanupStage::TerminalRelease,
-            &session_id.0,
+            &handle.session_id().0,
         );
 
         let session_store = Arc::clone(&self.helpers.state_machine.store);
-        let handle = session_store.lifecycle_handle(session_id);
         release_guard.finish_success();
         ForcedLocalSessionCleanup {
-            handle,
+            handle: Some(handle.clone()),
             helpers: Arc::clone(&self.helpers),
             dialog_adapter: Arc::clone(&self.dialog_adapter),
             media_adapter: Arc::clone(&self.media_adapter),
+            pending_exact_responses: Arc::clone(&self.pending_exact_responses),
+            setup_teardown_deadlines: self.setup_teardown_deadline_cancellation(),
             session_store,
         }
     }
@@ -8512,6 +10429,14 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
+    pub(crate) async fn hold_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        self.helpers
+            .state_machine
+            .process_event_exact(handle, EventType::HoldCall)
+            .await?;
+        Ok(())
+    }
+
     /// Resume a call from hold.
     ///
     /// # Examples
@@ -8526,6 +10451,14 @@ impl UnifiedCoordinator {
         self.helpers
             .state_machine
             .process_event(session_id, EventType::ResumeCall)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn resume_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        self.helpers
+            .state_machine
+            .process_event_exact(handle, EventType::ResumeCall)
             .await?;
         Ok(())
     }
@@ -8649,30 +10582,42 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn accept_refer(&self, session_id: &SessionId) -> Result<()> {
-        let (refer_to, transaction_id) =
-            self.helpers
-                .state_machine
-                .store
-                .with_session(session_id, |session| {
-                    let refer_to = session.transfer_target.clone().ok_or_else(|| {
-                        SessionError::Other(format!(
-                            "No pending REFER target for session {}",
-                            session_id
-                        ))
-                    })?;
-                    let transaction_id = session.refer_transaction_id.clone().ok_or_else(|| {
-                        SessionError::Other(format!(
-                            "No pending REFER transaction for session {}",
-                            session_id
-                        ))
-                    })?;
-                    Ok::<_, SessionError>((refer_to, transaction_id))
-                })??;
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.accept_refer_exact(&handle).await
+    }
+
+    pub(crate) async fn accept_refer_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        let session_id = handle.session_id();
+        let (refer_to, transaction_id) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .map(|session| {
+                let refer_to = session.transfer_target.clone().ok_or_else(|| {
+                    SessionError::Other(format!(
+                        "No pending REFER target for session {}",
+                        session_id
+                    ))
+                })?;
+                let transaction_id = session.refer_transaction_id.clone().ok_or_else(|| {
+                    SessionError::Other(format!(
+                        "No pending REFER transaction for session {}",
+                        session_id
+                    ))
+                })?;
+                Ok::<_, SessionError>((refer_to, transaction_id))
+            })??;
 
         self.helpers
             .state_machine
-            .process_event(
-                session_id,
+            .process_event_exact(
+                handle,
                 EventType::TransferRequested {
                     refer_to,
                     transfer_type: "blind".to_string(),
@@ -8680,24 +10625,6 @@ impl UnifiedCoordinator {
                 },
             )
             .await?;
-
-        if self
-            .helpers
-            .state_machine
-            .store
-            .with_session(session_id, |_| ())
-            .is_ok()
-        {
-            self.helpers
-                .state_machine
-                .store
-                .update_session_with(session_id, |session| {
-                    if session.refer_transaction_id.as_deref() == Some(transaction_id.as_str()) {
-                        session.refer_transaction_id = None;
-                    }
-                })
-                .await?;
-        }
 
         Ok(())
     }
@@ -8718,56 +10645,42 @@ impl UnifiedCoordinator {
         status_code: u16,
         reason: &str,
     ) -> Result<()> {
-        let transaction_id =
-            self.helpers
-                .state_machine
-                .store
-                .with_session(session_id, |session| {
-                    session.refer_transaction_id.clone().ok_or_else(|| {
-                        SessionError::Other(format!(
-                            "No pending REFER transaction for session {}",
-                            session_id
-                        ))
-                    })
-                })??;
-
-        let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(
-            rvoip_infra_common::events::cross_crate::SessionToDialogEvent::ReferResponse {
-                transaction_id: transaction_id.clone(),
-                accept: false,
-                status_code,
-                reason: reason.to_string(),
-            },
-        );
-
-        self.global_coordinator
-            .publish(Arc::new(event))
-            .await
-            .map_err(|e| {
-                SessionError::Other(format!("Failed to publish REFER rejection: {}", e))
-            })?;
-
-        if self
-            .helpers
+        let _reason_present = !reason.is_empty();
+        self.helpers
             .state_machine
-            .store
-            .with_session(session_id, |_| ())
-            .is_ok()
-        {
-            self.helpers
-                .state_machine
-                .store
-                .update_session_with(session_id, |session| {
-                    if session.refer_transaction_id.as_deref() == Some(transaction_id.as_str()) {
-                        session.refer_transaction_id = None;
-                        session.transfer_target = None;
-                        session.transfer_state = crate::session_store::state::TransferState::None;
-                    }
-                })
-                .await?;
-        }
+            .reject_refer(session_id, status_code)
+            .await
+            .map_err(|error| {
+                if let Ok(typed) = error.downcast::<SessionError>() {
+                    *typed
+                } else {
+                    SessionError::InternalError(
+                        "failed to reject pending REFER transaction".to_string(),
+                    )
+                }
+            })
+    }
 
-        Ok(())
+    pub(crate) async fn reject_refer_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status_code: u16,
+        reason: &str,
+    ) -> Result<()> {
+        let _reason_present = !reason.is_empty();
+        self.helpers
+            .state_machine
+            .reject_refer_exact(handle, status_code)
+            .await
+            .map_err(|error| {
+                if let Ok(typed) = error.downcast::<SessionError>() {
+                    *typed
+                } else {
+                    SessionError::InternalError(
+                        "failed to reject pending REFER transaction".to_string(),
+                    )
+                }
+            })
     }
 
     /// Send a REFER progress NOTIFY with a SIP status code and reason.
@@ -8818,6 +10731,13 @@ impl UnifiedCoordinator {
         self.dialog_adapter.dialog_identity(session_id).await
     }
 
+    pub(crate) async fn dialog_identity_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<Option<crate::api::types::DialogIdentity>> {
+        self.dialog_adapter.dialog_identity_exact(handle).await
+    }
+
     // ===== DTMF Operations =====
 
     /// Send a single RFC 4733 DTMF digit over the active media session
@@ -8843,6 +10763,16 @@ impl UnifiedCoordinator {
     pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
         self.media_adapter
             .send_dtmf_rfc4733(session_id, digit, 100)
+            .await
+    }
+
+    pub(crate) async fn send_dtmf_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        digit: char,
+    ) -> Result<()> {
+        self.media_adapter
+            .send_dtmf_rfc4733_exact(handle, digit, 100)
             .await
     }
 
@@ -8919,6 +10849,13 @@ impl UnifiedCoordinator {
         self.helpers.get_session_info(session_id).await
     }
 
+    pub(crate) async fn get_session_info_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<SessionInfo> {
+        self.helpers.get_session_info_exact(handle).await
+    }
+
     /// List all active sessions.
     ///
     /// # Examples
@@ -8946,6 +10883,13 @@ impl UnifiedCoordinator {
     /// ```
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
         self.helpers.get_state(session_id).await
+    }
+
+    pub(crate) async fn get_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<CallState> {
+        self.helpers.get_state_exact(handle).await
     }
 
     /// Check whether a session is in a conference.
@@ -8990,6 +10934,15 @@ impl UnifiedCoordinator {
             .await
     }
 
+    pub(crate) async fn subscribe_to_audio_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<crate::types::AudioFrameSubscriber> {
+        self.media_adapter
+            .subscribe_to_audio_frames_exact(handle)
+            .await
+    }
+
     /// Send an encoded/decoded audio frame to a session's media path.
     ///
     /// # Examples
@@ -9003,6 +10956,26 @@ impl UnifiedCoordinator {
     /// ```
     pub async fn send_audio(&self, session_id: &SessionId, frame: AudioFrame) -> Result<()> {
         self.media_adapter.send_audio_frame(session_id, frame).await
+    }
+
+    pub(crate) async fn send_audio_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        frame: AudioFrame,
+    ) -> Result<()> {
+        self.media_adapter
+            .send_audio_frame_exact(handle, frame)
+            .await
+    }
+
+    pub(crate) async fn set_audio_source_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        source: AudioSource,
+    ) -> Result<()> {
+        self.media_adapter
+            .set_audio_source_exact(handle, source)
+            .await
     }
 
     /// Resolve the exact SDP-negotiated media format for a live session.
@@ -9105,23 +11078,38 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         events: &mut crate::api::stream_peer::EventReceiver,
     ) -> Result<Option<crate::api::incoming::IncomingCall>> {
-        let Some((call_id, from, to, sdp)) = events.next_incoming().await else {
+        // `events()` is intentionally observation-only for monitoring callers,
+        // but this control-producing primitive needs the exact private stream
+        // to preserve the inbound lifecycle authority and request bundle.
+        events.ensure_control(self).await?;
+        let Some((call_id, from, to, sdp, lifecycle_handle)) = events.next_incoming_exact().await
+        else {
             return Ok(None);
         };
 
-        let pending = self.pending_incoming_bundle_exact(&call_id);
+        let pending = lifecycle_handle
+            .as_ref()
+            .and_then(|handle| self.pending_incoming_bundle_for_handle_exact(handle));
         let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
         let transport = pending.and_then(|bundle| bundle.transport);
         let incoming = match parsed {
-            Some(req) => crate::api::incoming::IncomingCall::with_request(
+            Some(req) => crate::api::incoming::IncomingCall::with_request_captured(
                 call_id,
                 from,
                 to,
                 sdp,
                 self.clone(),
                 req,
+                lifecycle_handle,
             ),
-            None => crate::api::incoming::IncomingCall::new(call_id, from, to, sdp, self.clone()),
+            None => crate::api::incoming::IncomingCall::new_captured(
+                call_id,
+                from,
+                to,
+                sdp,
+                self.clone(),
+                lifecycle_handle,
+            ),
         }
         .with_transport_context(
             transport
@@ -9132,18 +11120,10 @@ impl UnifiedCoordinator {
         Ok(Some(incoming))
     }
 
-    /// Resolve pending inbound material through the exact session generation
-    /// and registry slot associated with this call. Ambiguous or quiescing raw
-    /// identifiers fail closed.
-    pub(crate) fn pending_incoming_bundle_exact(
+    pub(crate) fn pending_incoming_bundle_for_handle_exact(
         &self,
-        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
     ) -> Option<PendingInboundBundle> {
-        let handle = self
-            .helpers
-            .state_machine
-            .store
-            .lifecycle_handle(session_id)?;
         self.session_registry
             .pending_bundle_exact(handle.key(), handle.slot_revision())
             .ok()
@@ -9172,8 +11152,8 @@ impl UnifiedCoordinator {
     /// Start server-side registration handling
     ///
     /// This creates and starts a RegistrationAdapter that handles incoming REGISTER
-    /// requests via the global event bus. The registrar service authenticates users
-    /// and manages registrations.
+    /// requests on the authoritative typed dialog-to-session route. The registrar
+    /// service authenticates users and manages registrations.
     ///
     /// # Arguments
     /// * `realm` - The SIP realm for digest authentication (e.g., "example.com")
@@ -9228,16 +11208,16 @@ impl UnifiedCoordinator {
 
         let registrar = Arc::new(registrar);
 
-        // Subscribe the registration adapter to THIS coordinator's event bus — the
-        // same instance the dialog/transaction layer publishes inbound REGISTER to.
-        // Using the process-wide singleton here meant the adapter never saw REGISTER,
-        // so the registrar never answered and clients timed out.
+        // Install the registration adapter through THIS coordinator's one
+        // authoritative dialog-to-session handler. The private installation
+        // event is never copied to the observational bus.
         let global_coordinator = self.global_coordinator.clone();
 
         // Create and start the registration adapter
-        let adapter = Arc::new(RegistrationAdapter::new(
+        let adapter = Arc::new(RegistrationAdapter::with_dialog_adapter(
             registrar.clone(),
             global_coordinator,
+            Arc::clone(&self.dialog_adapter),
         ));
 
         adapter.start().await.map_err(|e| {
@@ -9247,6 +11227,15 @@ impl UnifiedCoordinator {
         tracing::info!("✅ Server-side registration handler started");
 
         Ok(registrar)
+    }
+
+    pub(crate) async fn send_register_response_fields(
+        &self,
+        fields: &crate::api::respond::register_response::RegisterResponseEventFields,
+    ) -> Result<()> {
+        self.dialog_adapter
+            .send_register_response_fields(fields)
+            .await
     }
 
     // ===== Internal Helpers =====
@@ -9517,15 +11506,13 @@ impl UnifiedCoordinator {
     }
 }
 
-/// SIP_API_DESIGN_2 §7.1 — builder → state-machine dispatch helpers.
+/// SIP_API_DESIGN_2 §7.1 — compatibility stage/dispatch helpers.
 ///
-/// These two thin wrappers form the canonical builder send path. Builders
-/// call [`UnifiedCoordinator::stage_outbound_options`] to write the matching
-/// `pending_<method>_options` slot under the §7.3 invariant #5 conflict
-/// guard, then call [`UnifiedCoordinator::dispatch_outbound`] with the
-/// matching `EventType::SendOutbound<METHOD>` to drive the state table.
-/// The action handler reads from the stash; the final-response transition
-/// (`ClearPending*Options`) drops it.
+/// The public two-step surface remains stable for downstream callers. Crate
+/// builders use the private atomic stage-and-dispatch path so the immutable
+/// options snapshot and its matching event enter one exact-session lane.
+/// Either route leaves the action handler and final-response transition as
+/// the only consumers of the staged request.
 impl UnifiedCoordinator {
     /// Stage a pending-options snapshot on the session and check the
     /// single-in-flight conflict guard. Returns
@@ -9553,32 +11540,27 @@ impl UnifiedCoordinator {
             })
     }
 
-    pub(crate) async fn stage_outbound_options_guarded(
-        &self,
-        session_id: &SessionId,
-        slot: crate::state_machine::executor::PendingOptionsSlot,
-    ) -> Result<crate::state_machine::executor::PendingOptionsStageGuard> {
-        self.helpers
-            .state_machine
-            .stage_outbound_options_guarded(session_id, slot)
-            .await
-            .map_err(|error| {
-                if let Ok(typed) = error.downcast::<SessionError>() {
-                    *typed
-                } else {
-                    SessionError::InternalError(
-                        "stage_outbound_options_guarded: state-machine error".to_string(),
-                    )
-                }
-            })
-    }
-
     /// Queue a state-machine event on the session's event queue and run
     /// the resulting transition. Thin wrapper over
     /// [`StateMachine::process_event`].
     pub async fn dispatch_outbound(
         &self,
         session_id: &SessionId,
+        event: crate::state_table::EventType,
+    ) -> Result<crate::state_machine::executor::ProcessEventResult> {
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.dispatch_outbound_exact(&handle, event).await
+    }
+
+    /// Queue an outbound event only for the captured session lifetime.
+    pub(crate) async fn dispatch_outbound_exact(
+        &self,
+        handle: &SessionRegistryHandle,
         event: crate::state_table::EventType,
     ) -> Result<crate::state_machine::executor::ProcessEventResult> {
         // `SendOutboundNotify` has one legacy, stack-generated shape in
@@ -9593,13 +11575,14 @@ impl UnifiedCoordinator {
                 .helpers
                 .state_machine
                 .store
-                .with_session(session_id, |session| {
+                .get_session_snapshot_exact(handle)
+                .map(|session| {
                     (
                         session.pending_notify_options.is_some(),
                         session.local_sdp.clone(),
                     )
                 })
-                .map_err(|_| SessionError::SessionNotFound(session_id.to_string()))?;
+                .map_err(|_| SessionError::SessionNotFound(handle.session_id().to_string()))?;
 
             if !has_pending_options {
                 let options = Arc::new(rvoip_sip_dialog::api::unified::NotifyRequestOptions {
@@ -9610,50 +11593,88 @@ impl UnifiedCoordinator {
                     subscription_id: None,
                     extra_headers: self.dialog_adapter.auto_emit_extra_headers.clone(),
                 });
-                let staging = self
-                    .stage_outbound_options_guarded(
-                        session_id,
+                return self
+                    .dispatch_outbound_with_options_exact(
+                        handle,
+                        event,
                         crate::state_machine::executor::PendingOptionsSlot::Notify(options),
                     )
-                    .await?;
-                let result = self
-                    .dispatch_outbound_guarded(session_id, event, &staging)
-                    .await?;
-                staging.confirm_consumed().await?;
-                return Ok(result);
+                    .await;
             }
         }
 
         let state_machine = Arc::clone(&self.helpers.state_machine);
-        let task_session_id = session_id.clone();
+        let task_handle = handle.clone();
         let task = AbortOutboundDispatchTaskOnDrop::new(tokio::spawn(async move {
-            state_machine.process_event(&task_session_id, event).await
+            state_machine.process_event_exact(&task_handle, event).await
         }));
         task.join()
             .await
             .map_err(|_| SessionError::InternalError(OUTBOUND_DISPATCH_JOIN_FAILURE.to_string()))?
-            .map_err(|e| SessionError::InternalError(format!("dispatch_outbound: {}", e)))
+            .map_err(map_state_machine_dispatch_error)
     }
 
-    /// Dispatch an event that owns a guarded exact builder stage.
+    /// Atomically stage a builder snapshot and dispatch its matching event.
     ///
-    /// Cancellation before the state-machine atomically claims the staged Arc
-    /// aborts the task. Cancellation after claim detaches it so the request's
-    /// first transport write and tracker activation cannot be split.
-    pub(crate) async fn dispatch_outbound_guarded(
+    /// Cancellation before the state machine claims the staged Arc aborts the
+    /// task and clears that exact stage. Cancellation after claim detaches the
+    /// task so the first transport write and tracker activation cannot split.
+    pub(crate) async fn dispatch_outbound_with_options(
         &self,
         session_id: &SessionId,
         event: crate::state_table::EventType,
-        staging: &crate::state_machine::executor::PendingOptionsStageGuard,
+        slot: crate::state_machine::executor::PendingOptionsSlot,
+    ) -> Result<crate::state_machine::executor::ProcessEventResult> {
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.dispatch_outbound_with_options_and_input_exact(&handle, event, slot, None)
+            .await
+    }
+
+    /// Atomically stage and dispatch only for a captured session lifetime.
+    pub(crate) async fn dispatch_outbound_with_options_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        event: crate::state_table::EventType,
+        slot: crate::state_machine::executor::PendingOptionsSlot,
+    ) -> Result<crate::state_machine::executor::ProcessEventResult> {
+        self.dispatch_outbound_with_options_and_input_exact(handle, event, slot, None)
+            .await
+    }
+
+    /// Dispatch a manual REGISTER refresh from one captured session lifetime.
+    /// Registration metadata and the next CSeq are deliberately absent from
+    /// the public builder object; the state machine derives them only after it
+    /// owns this exact generation's complete-event lane.
+    pub(crate) async fn dispatch_registration_refresh_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        expires_override: Option<u32>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<crate::state_machine::executor::ProcessEventResult> {
         let state_machine = Arc::clone(&self.helpers.state_machine);
-        let task_session_id = session_id.clone();
-        let stage_claim = staging.dispatch_claim();
+        let task_handle = handle.clone();
+        let stage_claim = Arc::new(
+            crate::state_machine::executor::StageDispatchClaim::new_deferred(
+                Method::Register,
+                crate::state_machine::executor::PendingOptionsSlotKind::Register,
+            ),
+        );
         let task_claim = Arc::clone(&stage_claim);
         let task = AbortOutboundDispatchTaskOnDrop::with_stage_claim(
             tokio::spawn(async move {
                 state_machine
-                    .process_event_with_stage_claim(&task_session_id, event, task_claim)
+                    .process_registration_refresh_exact(
+                        &task_handle,
+                        crate::state_table::EventType::SendOutboundRegister,
+                        expires_override,
+                        extra_headers,
+                        task_claim,
+                    )
                     .await
             }),
             stage_claim,
@@ -9661,7 +11682,76 @@ impl UnifiedCoordinator {
         task.join()
             .await
             .map_err(|_| SessionError::InternalError(OUTBOUND_DISPATCH_JOIN_FAILURE.to_string()))?
-            .map_err(|e| SessionError::InternalError(format!("dispatch_outbound: {}", e)))
+            .map_err(|e| SessionError::InternalError(format!("registration refresh dispatch: {e}")))
+    }
+
+    pub(crate) async fn dispatch_outbound_invite_with_options(
+        &self,
+        session_id: &SessionId,
+        snapshot: Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>,
+        pai_uri: Option<String>,
+    ) -> Result<crate::state_machine::executor::ProcessEventResult> {
+        let transferor_lifecycle_handle = match snapshot.transfer_leg.as_ref() {
+            Some(transferor) => Some(
+                self.helpers
+                    .state_machine
+                    .store
+                    .lifecycle_handle(transferor)
+                    .ok_or_else(|| SessionError::SessionNotFound(transferor.to_string()))?,
+            ),
+            None => None,
+        };
+        let input = crate::state_machine::executor::OutboundSessionStateInput::from_snapshot(
+            &snapshot,
+            pai_uri,
+            transferor_lifecycle_handle,
+        );
+        let handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.dispatch_outbound_with_options_and_input_exact(
+            &handle,
+            crate::state_table::EventType::SendOutboundInvite,
+            crate::state_machine::executor::PendingOptionsSlot::Invite(snapshot),
+            Some(input),
+        )
+        .await
+    }
+
+    async fn dispatch_outbound_with_options_and_input_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        event: crate::state_table::EventType,
+        slot: crate::state_machine::executor::PendingOptionsSlot,
+        outbound_session: Option<crate::state_machine::executor::OutboundSessionStateInput>,
+    ) -> Result<crate::state_machine::executor::ProcessEventResult> {
+        let state_machine = Arc::clone(&self.helpers.state_machine);
+        let task_handle = handle.clone();
+        let stage_claim = Arc::new(crate::state_machine::executor::StageDispatchClaim::new(
+            slot.clone(),
+        ));
+        let task_claim = Arc::clone(&stage_claim);
+        let task = AbortOutboundDispatchTaskOnDrop::with_stage_claim(
+            tokio::spawn(async move {
+                state_machine
+                    .process_event_with_staged_options_exact(
+                        &task_handle,
+                        event,
+                        slot,
+                        task_claim,
+                        outbound_session,
+                    )
+                    .await
+            }),
+            stage_claim,
+        );
+        task.join()
+            .await
+            .map_err(|_| SessionError::InternalError(OUTBOUND_DISPATCH_JOIN_FAILURE.to_string()))?
+            .map_err(map_state_machine_dispatch_error)
     }
 
     /// Crate-internal accessor: read the current `SessionState` snapshot for
@@ -9679,11 +11769,11 @@ impl UnifiedCoordinator {
             .map_err(|_| SessionError::SessionNotFound(session_id.to_string()))
     }
 
-    /// Crate-internal: write back a modified `SessionState`. Used by
-    /// response builders to stash extras (`Retry-After`, `Warning`,
-    /// `WWW-Authenticate`, …) on the session before firing the
-    /// state-machine event that consumes them.
-    pub(crate) async fn update_session_state(
+    /// Test-only state setup hook. Production response and send paths must
+    /// carry mutations through typed executor input instead of replacing a
+    /// session snapshot before dispatch.
+    #[cfg(test)]
+    pub(crate) async fn update_session_state_for_test(
         &self,
         session: crate::session_store::SessionState,
     ) -> Result<()> {
@@ -9692,7 +11782,9 @@ impl UnifiedCoordinator {
             .store
             .update_session(session)
             .await
-            .map_err(|e| SessionError::InternalError(format!("update_session: {}", e)))
+            .map_err(|error| {
+                SessionError::InternalError(format!("test session-state update: {error}"))
+            })
     }
 }
 
@@ -9770,41 +11862,36 @@ impl UnifiedCoordinator {
             }
         }
 
-        let session_store = &self.helpers.state_machine.store;
-        session_store
-            .update_session_with(&session_id, |session| {
-                session.credentials = Some(credentials);
-                session.registrar_uri = Some(registrar_uri.to_string());
-                session.registration_contact = Some(contact_uri.to_string());
-                session.registration_expires = Some(expires);
-
-                if !extra_headers.is_empty() {
-                    session.pending_register_options = Some(std::sync::Arc::new(
-                        rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-                            registrar_uri: registrar_uri.to_string(),
-                            aor_uri: from_uri.to_string(),
-                            contact_uri: contact_uri.to_string(),
-                            expires,
-                            authorization: None,
-                            proxy_authorization: None,
-                            call_id: None,
-                            cseq: None,
-                            outbound_contact: None,
-                            outbound_proxy_uri: None,
-                            extra_headers,
-                            refresh: false,
-                        },
-                    ));
-                }
+        let pending_options = (!extra_headers.is_empty()).then(|| {
+            std::sync::Arc::new(rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                registrar_uri: registrar_uri.to_string(),
+                aor_uri: from_uri.to_string(),
+                contact_uri: contact_uri.to_string(),
+                expires,
+                authorization: None,
+                proxy_authorization: None,
+                call_id: None,
+                cseq: None,
+                outbound_contact: None,
+                outbound_proxy_uri: None,
+                extra_headers,
+                refresh: false,
             })
-            .await?;
+        });
 
         let _ = self
             .helpers
             .state_machine
-            .process_event(
+            .process_event_with_registration_start_input(
                 &session_id,
                 crate::state_table::types::EventType::StartRegistration,
+                crate::state_machine::executor::RegistrationStartInput::new(
+                    credentials,
+                    registrar_uri.to_string(),
+                    contact_uri.to_string(),
+                    expires,
+                    pending_options,
+                ),
             )
             .await
             .map_err(|e| {
@@ -9849,11 +11936,12 @@ impl UnifiedCoordinator {
                 handle.session_id.0, result.old_state
             )));
         }
-        if !result
-            .actions_executed
-            .iter()
-            .any(|action| matches!(action, Action::SendUnREGISTER))
-        {
+        if !result.actions_executed.iter().any(|action| {
+            matches!(
+                action,
+                Action::SendREGISTERWithOptions | Action::SendUnREGISTER
+            )
+        }) {
             return Err(SessionError::InternalError(format!(
                 "Unregistration transition for session {} did not send REGISTER Expires: 0",
                 handle.session_id.0
@@ -9899,7 +11987,16 @@ impl UnifiedCoordinator {
         self: &Arc<Self>,
         handle: &RegistrationHandle,
     ) -> crate::api::send::RegisterRefreshBuilder {
-        crate::api::send::RegisterRefreshBuilder::new(self.clone(), handle.clone())
+        let lifecycle_handle = self
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(&handle.session_id);
+        crate::api::send::RegisterRefreshBuilder::new(
+            self.clone(),
+            handle.clone(),
+            lifecycle_handle,
+        )
     }
 
     /// Return whether the registration is currently marked registered.

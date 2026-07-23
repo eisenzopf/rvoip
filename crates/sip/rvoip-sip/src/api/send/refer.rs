@@ -8,6 +8,9 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use crate::session_registry::SessionRegistryHandle;
+
+use super::InDialogRequestAuthority;
 
 /// In-dialog REFER builder (RFC 3515, call transfer). Reachable via
 /// [`UnifiedCoordinator::refer`](crate::api::unified::UnifiedCoordinator::refer).
@@ -19,6 +22,7 @@ pub struct ReferBuilder {
     referred_by: Option<String>,
     target_dialog: Option<String>,
     state: BuilderHeaderState,
+    authority: InDialogRequestAuthority,
 }
 
 impl ReferBuilder {
@@ -35,7 +39,19 @@ impl ReferBuilder {
             referred_by: None,
             target_dialog: None,
             state: BuilderHeaderState::default(),
+            authority: InDialogRequestAuthority::CaptureCurrent,
         }
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        session_id: CallId,
+        refer_to: impl Into<String>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        let mut builder = Self::new(coord, session_id, refer_to);
+        builder.authority = InDialogRequestAuthority::captured(lifecycle_handle);
+        builder
     }
 
     /// RFC 3891 `Replaces` (attended transfer).
@@ -83,21 +99,20 @@ impl ReferBuilder {
             target_dialog: self.target_dialog,
             extra_headers,
         });
-        let staging = self
-            .coord
-            .stage_outbound_options_guarded(
-                &self.session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Refer(opts),
-            )
-            .await?;
-        self.coord
-            .dispatch_outbound_guarded(
-                &self.session_id,
-                crate::state_table::EventType::SendOutboundRefer,
-                &staging,
-            )
-            .await?;
-        staging.confirm_consumed().await?;
+        let event = crate::state_table::EventType::SendOutboundRefer;
+        let slot = crate::state_machine::executor::PendingOptionsSlot::Refer(opts);
+        match self.authority.exact_handle(&self.session_id)? {
+            Some(handle) => {
+                self.coord
+                    .dispatch_outbound_with_options_exact(&handle, event, slot)
+                    .await?
+            }
+            None => {
+                self.coord
+                    .dispatch_outbound_with_options(&self.session_id, event, slot)
+                    .await?
+            }
+        };
         Ok(())
     }
 }

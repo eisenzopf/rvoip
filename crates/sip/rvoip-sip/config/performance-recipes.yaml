@@ -77,7 +77,10 @@ performanceProfiles:
       sipUdpParseQueueCapacity: "$capacity"
       sipUdpParseDispatch: round-robin
       sipTransactionDispatchWorkers: 2
-      sipDialogDispatchWorkers: 4
+      # Incoming INVITE delivery awaits the authoritative session/state-machine
+      # commit. Keep enough call-id-sharded workers to avoid unrelated calls
+      # holding ACK/BYE transaction events behind that causal setup work.
+      sipDialogDispatchWorkers: 16
       sessionEventDispatcherWorkers: 4
       sipTransactionCommandChannelCapacity: 256
       serverCallCapacity: "$capacity"
@@ -125,7 +128,9 @@ performanceProfiles:
       sipUdpParseQueueCapacity: "$capacity"
       sipUdpParseDispatch: round-robin
       sipTransactionDispatchWorkers: 4
-      sipDialogDispatchWorkers: 4
+      # Dense bursts need additional call-id shards because each initial
+      # INVITE remains ordered with its authoritative session commit.
+      sipDialogDispatchWorkers: 32
       sessionEventDispatcherWorkers: 4
       sipTransactionCommandChannelCapacity: 512
       serverCallCapacity: "$capacity"

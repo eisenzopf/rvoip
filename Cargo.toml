@@ -67,6 +67,10 @@ members = [
 ]
 
 exclude = [
+    # Reviewed source patches for rtc 0.20.0-alpha.1. These remain ordinary
+    # path dependencies, not independent rvoip workspace packages.
+    "third_party/rtc",
+    "third_party/rtc-shared",
     # Gap plan §3.2 — Playwright browser smoke. Node.js project; lives
     # outside the Cargo workspace so `cargo` doesn't try to interpret
     # `package.json` or descend into `node_modules`.
@@ -101,7 +105,7 @@ default-members = [
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
 [workspace.package]
 # Numeric maturity tiers (no -alpha/-beta suffixes): 0.1.x = alpha,
-# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.2;
+# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.5;
 # Alpha-tier crates override in their own [package] with version = "0.1.0".
 version = "0.2.5"
 edition = "2021"
@@ -223,7 +227,7 @@ rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.5" }
 rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.5" }
 rvoip-users-core    = { path = "crates/identity/users-core", version = "0.2.0" }
 
-# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.2
+# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.5
 # beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
 # as optional runtime deps, so their versions must resolve on crates.io
 # regardless of feature activation.
@@ -338,13 +342,13 @@ tracing-appender = "0.2"
 env_logger = "0.11"
 criterion = { version = "0.5", features = ["html_reports"] }
 
-# webrtc-rs 0.20.0-alpha.1 does not dial DataChannels created after the SCTP
-# handshake and drops received DCEP partial-reliability parameters. Keep this
-# exact reviewed revision until a replacement is explicitly approved. A port
-# to the current rtc line is kept on the fork for review; do not submit it
-# upstream without project-owner approval.
+# No single upstream rtc revision currently contains the reviewed late
+# DataChannel, DCEP reliability, and duplicate-MID re-offer fixes together.
+# Keep the paired, provenance-documented source patches local and immutable
+# until one upstream revision passes the full beta gate.
 [patch.crates-io]
-rtc = { git = "https://github.com/eisenzopf/rtc", rev = "1e5b7d4be6d94850694f2519f4c235d16c871d53" }
+rtc = { path = "third_party/rtc" }
+rtc-shared = { path = "third_party/rtc-shared" }
 
 # 🔧 Optimization Profiles for Binary Size Reduction
 

@@ -11,7 +11,31 @@ CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
 PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
 TEST_NAME="perf_call_setup_cps"
 FEATURES="perf-tests"
-REVIEWED_BASELINE="${CRATE_DIR}/beta-report/20260706T181609Z/perf-results"
+REVIEWED_BASELINE_ID="20260706T181609Z"
+REVIEWED_BASELINE_SCENARIO="perf_call_setup_cps_pbx-media-server"
+REVIEWED_BASELINE_RELATIVE_PATH="${REVIEWED_BASELINE_SCENARIO}/2000.json"
+REVIEWED_BASELINE_CANONICAL_SHA256="6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3"
+TRACKED_REVIEWED_BASELINE="${CRATE_DIR}/perf-baselines/${REVIEWED_BASELINE_ID}"
+REVIEWED_BASELINE="${RVOIP_PERF_REVIEWED_BASELINE:-${TRACKED_REVIEWED_BASELINE}}"
+REVIEWED_BASELINE_REPORT="${REVIEWED_BASELINE}/${REVIEWED_BASELINE_RELATIVE_PATH}"
+REVIEWED_BASELINE_ORIGIN=""
+REVIEWED_BASELINE_SHA256=""
+REVIEWED_BASELINE_SNAPSHOT=""
+
+sha256_file() {
+  python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+with path.open("rb") as stream:
+    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
 
 usage() {
   cat <<'EOF'
@@ -35,6 +59,11 @@ Useful profiler-only overrides:
   RVOIP_PERF_PROFILE_SAMPLY_RATE       samply Hz (default 1000)
   RVOIP_PERF_PROFILE_CSWITCH_MARKERS  1 to add samply context switches
   RVOIP_PERF_PROFILE_BUILD_ONLY       1 to build/resolve/manifest, then stop
+
+Evidence input override:
+  RVOIP_PERF_REVIEWED_BASELINE        reviewed baseline perf-results directory
+  RVOIP_PERF_REVIEWED_BASELINE_SHA256 required with an override; it must identify
+                                      the byte-identical tracked reviewed baseline
 EOF
 }
 
@@ -127,9 +156,34 @@ case "${MODE}" in
     ;;
 esac
 
-if [[ "${MODE}" == "clean" && ! -f "${REVIEWED_BASELINE}/${SCENARIO}/2000.json" ]]; then
-  echo "[perf-2k] reviewed baseline is missing ${SCENARIO}/2000.json: ${REVIEWED_BASELINE}" >&2
-  exit 2
+if [[ "${MODE}" == "clean" ]]; then
+  if [[ "${SCENARIO}" != "${REVIEWED_BASELINE_SCENARIO}" ]]; then
+    echo "[perf-2k] canonical scenario does not match the reviewed baseline identity" >&2
+    exit 2
+  fi
+  if [[ ! -f "${REVIEWED_BASELINE_REPORT}" ]]; then
+    echo "[perf-2k] reviewed baseline is missing ${REVIEWED_BASELINE_RELATIVE_PATH}: ${REVIEWED_BASELINE}" >&2
+    exit 2
+  fi
+  REVIEWED_BASELINE_SHA256="$(sha256_file "${REVIEWED_BASELINE_REPORT}")"
+  if [[ -n "${RVOIP_PERF_REVIEWED_BASELINE:-}" ]]; then
+    REVIEWED_BASELINE_ORIGIN="explicit-override"
+    if [[ -z "${RVOIP_PERF_REVIEWED_BASELINE_SHA256:-}" ]]; then
+      echo "[perf-2k] RVOIP_PERF_REVIEWED_BASELINE requires RVOIP_PERF_REVIEWED_BASELINE_SHA256" >&2
+      exit 2
+    fi
+    if [[ "${RVOIP_PERF_REVIEWED_BASELINE_SHA256}" != "${REVIEWED_BASELINE_SHA256}" ]]; then
+      echo "[perf-2k] explicit reviewed baseline does not match its declared SHA-256" >&2
+      exit 2
+    fi
+  else
+    REVIEWED_BASELINE_ORIGIN="tracked-default"
+  fi
+  if [[ "${REVIEWED_BASELINE_SHA256}" != "${REVIEWED_BASELINE_CANONICAL_SHA256}" ]]; then
+    echo "[perf-2k] reviewed baseline content differs from ${REVIEWED_BASELINE_ID}" >&2
+    echo "[perf-2k] expected ${REVIEWED_BASELINE_CANONICAL_SHA256}, found ${REVIEWED_BASELINE_SHA256}" >&2
+    exit 2
+  fi
 fi
 
 RUN_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -141,6 +195,32 @@ BUILD_MESSAGES="${RUN_DIR}/cargo-build.jsonl"
 RUN_LOG="${RUN_DIR}/run.log"
 SOURCE_AT_BUILD="${RUN_DIR}/source-at-build.json"
 BUILD_ENVIRONMENT="${RUN_DIR}/build-environment.json"
+if [[ "${MODE}" == "clean" ]]; then
+  REVIEWED_BASELINE_SNAPSHOT="${RUN_DIR}/reviewed-baseline"
+  snapshot_report="${REVIEWED_BASELINE_SNAPSHOT}/${REVIEWED_BASELINE_RELATIVE_PATH}"
+  # The 2K scalar is the only comparison path, but legacy reviewed sweeps need
+  # their preceding point reports plus `_sweep.json` to prove conditioning and
+  # shared-peer ordering. Snapshot the manifest's complete immutable inventory
+  # so perf_audit can derive that identity instead of treating a legitimate
+  # predecessor report as non-comparable.
+  mkdir -p "${REVIEWED_BASELINE_SNAPSHOT}"
+  cp -R "${REVIEWED_BASELINE}/." "${REVIEWED_BASELINE_SNAPSHOT}/"
+  if ! python3 "${SCRIPT_DIR}/perf_regression_baseline.py" verify \
+    --manifest "${REVIEWED_BASELINE_SNAPSHOT}/manifest.json" \
+    --result-root "${REVIEWED_BASELINE_SNAPSHOT}"
+  then
+    echo "[perf-2k] reviewed baseline snapshot inventory is invalid" >&2
+    exit 2
+  fi
+  if ! cmp -s "${REVIEWED_BASELINE_REPORT}" "${snapshot_report}"; then
+    echo "[perf-2k] reviewed baseline changed while its run snapshot was captured" >&2
+    exit 2
+  fi
+  if [[ "$(sha256_file "${snapshot_report}")" != "${REVIEWED_BASELINE_SHA256}" ]]; then
+    echo "[perf-2k] reviewed baseline snapshot hash differs from its approved identity" >&2
+    exit 2
+  fi
+fi
 
 # Canonical beta workload. Assign rather than default so a caller's shell does
 # not silently turn this reproduction into a different experiment.
@@ -388,7 +468,12 @@ write_manifest() {
   RUN_STARTED_EPOCH="${RUN_STARTED_EPOCH}" \
   SOURCE_AT_BUILD="${SOURCE_AT_BUILD}" \
   BUILD_ENVIRONMENT="${BUILD_ENVIRONMENT}" \
-  REVIEWED_BASELINE="${REVIEWED_BASELINE}" \
+  REVIEWED_BASELINE="${REVIEWED_BASELINE_SNAPSHOT}" \
+  REVIEWED_BASELINE_SOURCE="${REVIEWED_BASELINE}" \
+  REVIEWED_BASELINE_ID="${REVIEWED_BASELINE_ID}" \
+  REVIEWED_BASELINE_RELATIVE_PATH="${REVIEWED_BASELINE_RELATIVE_PATH}" \
+  REVIEWED_BASELINE_ORIGIN="${REVIEWED_BASELINE_ORIGIN}" \
+  REVIEWED_BASELINE_SHA256="${REVIEWED_BASELINE_SHA256}" \
     python3 <<'PY'
 import datetime
 import hashlib
@@ -580,6 +665,29 @@ manifest = {
     "reviewed_baseline_path": (
         os.environ["REVIEWED_BASELINE"] if os.environ["MODE"] == "clean" else None
     ),
+    "reviewed_baseline_source_path": (
+        os.environ["REVIEWED_BASELINE_SOURCE"]
+        if os.environ["MODE"] == "clean"
+        else None
+    ),
+    "reviewed_baseline_id": (
+        os.environ["REVIEWED_BASELINE_ID"] if os.environ["MODE"] == "clean" else None
+    ),
+    "reviewed_baseline_relative_path": (
+        os.environ["REVIEWED_BASELINE_RELATIVE_PATH"]
+        if os.environ["MODE"] == "clean"
+        else None
+    ),
+    "reviewed_baseline_origin": (
+        os.environ["REVIEWED_BASELINE_ORIGIN"]
+        if os.environ["MODE"] == "clean"
+        else None
+    ),
+    "reviewed_baseline_sha256": (
+        os.environ["REVIEWED_BASELINE_SHA256"]
+        if os.environ["MODE"] == "clean"
+        else None
+    ),
     "perf_audit_path": (
         str(pathlib.Path(os.environ["RUN_DIR"]) / "perf-audit.md")
         if (pathlib.Path(os.environ["RUN_DIR"]) / "perf-audit.md").is_file()
@@ -671,8 +779,10 @@ if [[ -f "${raw_report_path}" ]]; then
   cp "${raw_report_path}" "${captured_report_path}"
   if [[ "${MODE}" == "clean" ]]; then
     # The reviewed baseline is a multi-point sweep whose 2,000-CPS result lives
-    # at <scenario>/2000.json. Stage this single-point result under that exact
-    # relative path so perf_audit never reads a stale workspace-wide result.
+    # at <scenario>/2000.json. Stage this single current result under that exact
+    # relative path; the immutable baseline snapshot retains its complete
+    # conditioning inventory while current evidence cannot pick up a stale
+    # workspace-wide result.
     audit_results_dir="${RUN_DIR}/perf-results"
     audit_report_dir="${audit_results_dir}/${SCENARIO}"
     mkdir -p "${audit_report_dir}"
@@ -694,7 +804,7 @@ if [[ -f "${raw_report_path}" ]]; then
     fi
 
     if python3 "${SCRIPT_DIR}/perf_audit.py" \
-      --baseline "${REVIEWED_BASELINE}" \
+      --baseline "${REVIEWED_BASELINE_SNAPSHOT}" \
       --current "${audit_results_dir}" \
       --out "${RUN_DIR}/perf-audit.md" \
       --fail-on-regression

@@ -54,8 +54,38 @@ fn registering_auth_required_drives_register_retry() {
     assert_eq!(t.next_state, Some(CallState::Registering));
     assert!(t.actions.contains(&Action::StoreAuthChallenge));
     assert!(
-        t.actions.contains(&Action::SendREGISTERWithAuth),
-        "REGISTER auth retry goes through SendREGISTERWithAuth (not INVITE variant)"
+        t.actions.contains(&Action::SendREGISTERWithOptions),
+        "REGISTER auth retry must replay the retained options snapshot"
+    );
+}
+
+#[test]
+fn registered_auth_required_drives_manual_refresh_retry() {
+    let table = load();
+    let t = table
+        .get(&key(Role::UAC, CallState::Registered, auth_event()))
+        .expect("UAC Registered + AuthRequired transition must exist");
+
+    assert_eq!(t.next_state, Some(CallState::Registered));
+    assert_eq!(
+        t.actions,
+        vec![Action::StoreAuthChallenge, Action::SendREGISTERWithOptions],
+        "manual refresh challenges must use the same retained options path"
+    );
+}
+
+#[test]
+fn unregistering_auth_required_retains_canonical_register_snapshot() {
+    let table = load();
+    let t = table
+        .get(&key(Role::UAC, CallState::Unregistering, auth_event()))
+        .expect("UAC Unregistering + AuthRequired transition must exist");
+
+    assert_eq!(t.next_state, Some(CallState::Unregistering));
+    assert_eq!(
+        t.actions,
+        vec![Action::StoreAuthChallenge, Action::SendREGISTERWithOptions],
+        "challenged unregistration must retain Expires: 0 on the canonical path"
     );
 }
 

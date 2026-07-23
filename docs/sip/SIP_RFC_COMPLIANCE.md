@@ -1,15 +1,17 @@
 # SIP RFC Compliance Matrix
 
-> Comprehensive catalogue of SIP and SIP-adjacent RFCs with rvoip's
-> implementation status and the **test evidence** that attests to each claim.
+> Comprehensive catalogue of SIP and SIP-adjacent RFCs with rvoip's bounded
+> implementation status, explicit limits, and the evidence basis for each claim.
 
 - **Maintained for:** the `rvoip` SIP stack — `rvoip-sip`, `rvoip-sip-dialog`,
   `rvoip-sip-core`, `rvoip-sip-transport`, `rvoip-sip-proxy`,
   `rvoip-sip-registrar`.
-- **Last reviewed:** 2026-06-18
-- **Attestation basis:** beta-gate report
-  [`20260616T014649Z`](../../crates/sip/rvoip-sip/beta-report/20260616T014649Z/summary.md)
-  — clean revision `2bd8c570`, **all 44 gates PASS, 0 failures, 0 skips.**
+- **Last reviewed:** 2026-07-21
+- **Evidence basis:** the exact, non-ignored source inventory in the crate-local
+  [`RFC_COMPLIANCE_MATRIX.md`](../../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md).
+  The archived July 20 run is diagnostic because it came from a dirty source
+  tree and its monolithic soak failed. A clean, current-source full beta
+  attestation is still required before any release-candidate claim.
 
 This document is the **superset** reference. The crate-local
 [`RFC_COMPLIANCE_MATRIX.md`](../../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md)
@@ -20,13 +22,16 @@ matrix governs what may be claimed in release notes.
 
 ## How to read the Compliance column
 
-Every "✅ Verified" / "🟡 Partial" row is backed by a named, runnable test or by
-an interop matrix that was green in the latest beta gate. The **Verified by**
-column cites that evidence so the claim is reproducible, not aspirational.
+Every "✅ Verified" row states a deliberately bounded behavior and cites one or
+more `T-*` IDs from the crate-local
+[`Executable evidence catalog`](../../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md#executable-evidence-catalog).
+Those IDs resolve to exact, non-ignored executable tests. A partial row may
+also cite construction evidence or a code location to describe its limit, but
+that does not promote the broader RFC behavior to verified status.
 
 | Badge | Meaning |
 |-------|---------|
-| ✅ **Verified** | Implemented and covered by an automated test and/or live interop matrix that is **green in the latest beta gate**. Documented limits may still apply. |
+| ✅ **Verified** | The exact bounded behavior stated in the row has direct, non-ignored executable evidence. This is not whole-RFC certification and does not replace a clean, source-matched release attestation. |
 | 🟡 **Partial** | Common path implemented and exercised, but coverage, features, or edge cases are incomplete and the broader behaviour is **not claimed**. |
 | 🔵 **Types only** | Header / SDP parsing and serialization present (carry-through); no higher-layer protocol behaviour wired into the state machine. |
 | 🟠 **Planned / Post-beta** | Recognized and on the roadmap; **explicitly not claimed today** (often an intentional non-claim in the security/compatibility docs). |
@@ -50,14 +55,15 @@ cargo test -p rvoip-sip-dialog --test sip_compliance
 cargo test -p rvoip-sip-core --features generated-validation --test generated_message_compliance
 cargo test -p rvoip-sip-core --test rfc_compliance
 
-# Per-RFC fault-injection / recovery behaviour
-cargo test -p rvoip-sip --test '*' resilience
+# Static claim-to-evidence validation (also rejects ignored/stub-only evidence)
+cargo test -p rvoip-sip --test beta_release_docs
 ```
 
 > **Note (validation hygiene):** feature-gated targets such as
 > `generated_sip_compliance` are skipped by a bare `cargo test`. Always validate
 > with the feature flags above (or `--all-features`) or the suite reports a
-> false green.
+> false green. Files under `tests/resilience/` that are marked `#[ignore]` as
+> stubs are roadmap notes, not compliance evidence.
 
 ---
 
@@ -65,14 +71,14 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **3261** | SIP: Session Initiation Protocol | The base protocol: requests/responses, transactions, dialogs, the offer/answer hook, REGISTER/INVITE/ACK/BYE/CANCEL/OPTIONS. | ✅ **Verified** (core; full section-by-section production audit not separately claimed) | `rvoip-sip` + `sip-dialog` `generated_sip_compliance.rs`, `sip-dialog/tests/sip_compliance.rs`, RFC 4475 torture, `resilience/rfc3261_transaction_recovery.rs`, Asterisk/FreeSWITCH/SIPp/baresip matrices |
+| **3261** | SIP: Session Initiation Protocol | Core request construction plus INVITE-dialog CANCEL and BYE completion/cleanup behavior. | 🟡 **Partial** — no section-by-section transaction, proxy, registrar, transport, or error-path certification | `T-3261-C1`, `T-3261-W1`, `T-3261-W2`; ignored resilience stubs are excluded |
 | **2543** | SIP (original) | First SIP specification. | 📕 Historical — obsoleted by 3261 | n/a (tracked via 3261) |
-| **6026** | Correct Transaction Handling for 2xx Responses to INVITE | Fixes INVITE server-transaction state for retransmitted 2xx / late ACK. | 🟡 **Partial** — INVITE transaction state machine implemented; not separately attested as a 6026 conformance run | `sip-dialog` transaction state machine, `resilience/rfc3261_transaction_recovery.rs` |
+| **6026** | Correct Transaction Handling for 2xx Responses to INVITE | Fixes INVITE server-transaction state for retransmitted 2xx / late ACK. | 🟡 **Partial** — implementation is present, but no dedicated non-ignored RFC 6026 conformance test is claimed | `sip-dialog` transaction state machine inspection only; ignored resilience stubs are excluded |
 | **6141** | Re-INVITE and Target-Refresh Request Handling | Clarifies re-INVITE/UPDATE target refresh and glare. | 🟡 **Partial** — re-INVITE + glare handled | `glare_retry_integration.rs`, `sdp_matcher_integration.rs`, `adapter_renegotiate.rs` |
 | **5057** | Multiple Dialog Usages in SIP | Guidance on multiple usages sharing a dialog. | 🟠 **Planned** | — |
 | **5658** | Addressing Record-Route Issues in SIP | Double Record-Route for transport switches. | 🟡 **Partial** — Record-Route/route-set handled for common topologies | `sbc_topology_hiding_via_strip.rs`, proxy tests |
-| **3263** | SIP: Locating SIP Servers | NAPTR/SRV/A resolution + transport selection and failover. | ✅ **Verified** | `sip-dialog/tests/rfc3263_resolution.rs`, `rfc3263_failover.rs`, `sip-transport/tests/resolver_hickory_e2e.rs`, `resilience/rfc3263_dns_failover_recovery.rs` |
-| **3264** | An Offer/Answer Model with SDP | Negotiation of media via SDP offer/answer (hold/resume, glare). | ✅ **Verified** | `sdp_matcher_integration.rs`, `glare_retry_integration.rs`, PBX hold/resume rows in `matrix.tsv` |
+| **3263** | SIP: Locating SIP Servers | Configured NAPTR/SRV/A resolution and recoverable first-candidate failover for outbound requests. | ✅ **Verified** (bounded client-resolution behavior; not every transport/failure permutation) | `T-3263-U1`, `T-3263-U2`, `T-3263-W1` |
+| **3264** | An Offer/Answer Model with SDP | Audio codec intersection, media-direction propagation, and an established-dialog re-INVITE carrying SDP. | 🟡 **Partial** — complex multi-stream negotiation, all glare permutations, and WebRTC negotiation are not claimed | `T-3264-U1`, `T-3264-U2`, `T-3264-W1` |
 | **4320** | Actions Addressing Non-INVITE Transaction Issues | Non-INVITE timer/response fixes. | 🟡 **Partial** — non-INVITE transaction timers implemented | `sip-dialog` transaction timer layer |
 
 ---
@@ -81,14 +87,14 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **3262** | Reliability of Provisional Responses (PRACK / 100rel) | Reliable 1xx with RSeq/RAck and PRACK. | ✅ **Verified** (broader PBX reliable-provisional interop is post-beta) | `prack_integration.rs`, `reliable_provisional_bridge.rs`, `early_media_tests.rs`, `sip-dialog/tests/prack_test.rs`, `resilience/rfc3262_reliable_provisional_recovery.rs` |
-| **3311** | The SIP UPDATE Method | Update session parameters before final response. | ✅ **Verified** | `resilience/rfc3311_update_reinvite_recovery.rs`, `update_notify_auth_retry.rs`, `update_for_dialog` in `sip-dialog/tests/generated_sip_compliance.rs` |
-| **3428** | SIP Extension for Instant Messaging (MESSAGE) | Pager-mode instant messages. | ✅ **Verified** (in-dialog + out-of-dialog builders emit valid MESSAGE) | `message_for_dialog` / `message_out_of_dialog` in `sip-dialog/tests/generated_sip_compliance.rs` |
-| **3515** | The SIP REFER Method | Call transfer / reference to another resource. | ✅ **Verified** (attended-transfer orchestration is primitives-only) | `blind_transfer_integration.rs`, `transfer_notify_wiring_tests.rs`, `refer_auth_retry.rs`, `refer_for_dialog` generated-valid |
+| **3262** | Reliability of Provisional Responses (PRACK / 100rel) | PRACK construction, a reliable `183`/PRACK exchange, and unsupported-policy rejection with `420`. | 🟡 **Partial** — forking, loss/retransmission matrices, and independent-PBX reliable-provisional evidence are not established | `T-3262-C1`, `T-3262-W1`, `T-3262-W2`; ignored resilience stubs are excluded |
+| **3311** | The SIP UPDATE Method | In-dialog UPDATE transmission plus `401` and `407` digest retry on the same method. | 🟡 **Partial** — no complete UPDATE offer/answer, glare, Retry-After, or independent-peer matrix | `T-3311-W1`, `T-3311-W2`, `T-3311-W3`; ignored resilience stubs are excluded |
+| **3428** | SIP Extension for Instant Messaging (MESSAGE) | Pager-mode MESSAGE request construction for in-dialog and out-of-dialog use. | 🟡 **Partial** — construction/auth flows do not establish a complete messaging interoperability profile | `sip-dialog/tests/generated_sip_compliance.rs`, `T-AUTH-W2`, `T-AUTH-W3` |
+| **3515** | The SIP REFER Method | Blind REFER construction, end-to-end blind transfer, and typed NOTIFY progress/final status on the wire. | ✅ **Verified** (bounded blind-transfer behavior; attended transfer and RFC 3891 replacement are excluded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3` |
 | **4488** | Suppression of REFER Implicit Subscription | `Refer-Sub: false` to suppress the implicit subscription. | 🔵 **Types only** | REFER header handling in `sip-core` |
-| **6086** | SIP INFO Method and Package Framework | Mid-dialog application info (e.g. DTMF, signaling). | ✅ **Verified** (INFO package registry completeness not claimed) | `info_auth_retry.rs`, `info_for_dialog` generated-valid, DTMF/INFO PBX+SIPp evidence |
+| **6086** | SIP INFO Method and Package Framework | Generic in-dialog INFO transmission and preservation across `401`/`407` authentication retry. | 🟡 **Partial** — no Info-Package registry, `Recv-Info` negotiation, or package-specific standards profile | `T-6086-W1`, `T-6086-W2`, `T-6086-W3` |
 | **2976** | The SIP INFO Method | Original INFO method. | 📕 Historical — obsoleted by 6086 | n/a |
-| **3903** | SIP Extension for Event State Publication (PUBLISH) | Publish event state (SIP-ETag / SIP-If-Match). | 🟡 **Partial** — ETag/If-Match types + presence body builders present | `sip-core` `sip_etag.rs`, `sip_if_match.rs`, `presence_builder_test.rs` |
+| **3903** | SIP Extension for Event State Publication (PUBLISH) | Publish event state (SIP-ETag / SIP-If-Match). | 🔵 **Types only** — ETag/If-Match and presence-body construction do not implement PUBLISH lifecycle behavior | `sip-core` `sip_etag.rs`, `sip_if_match.rs`, `presence_builder_test.rs` |
 
 ---
 
@@ -96,7 +102,7 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **6665** | SIP-Specific Event Notification | The SUBSCRIBE/NOTIFY framework, subscription state, multi-package dialogs. | ✅ **Verified** (package-registry completeness not claimed) | `notify_send_integration.rs`, `sip-dialog/tests/subscription_dialogs.rs`, `subscription_multi_id.rs`, `subscribe_out_of_dialog`/`notify_for_dialog` generated-valid |
+| **6665** | SIP-Specific Event Notification | Subscription dialog creation/termination primitives, successful NOTIFY handling, subscription-id routing, and authenticated SUBSCRIBE retry. | 🟡 **Partial** — full notifier/subscriber state machines, refresh/expiry recovery, forks, and independent-peer interop are not established | `T-6665-U1`, `T-6665-U2`, `T-6665-U3`, `T-6665-W1`, `T-6665-W2` |
 | **3265** | SIP-Specific Event Notification | Original event framework. | 📕 Historical — obsoleted by 6665 (types remain in `sip-core`) | `sip-core/src/types/event.rs` |
 | **4235** | An INVITE-Initiated Dialog Event Package | `dialog`/`dialog-info+xml` state for transfer & BLF. | 🟡 **Partial** — dialog-info+xml NOTIFY bodies generated; package wiring present | `api/dialog_package.rs`, dialog-info NOTIFY in `sip-dialog/tests/generated_sip_compliance.rs` |
 | **3856** | A Presence Event Package for SIP | `presence` package (PIDF). | 🟡 **Partial** — presence body builders present | `presence_builder_test.rs` |
@@ -113,12 +119,12 @@ cargo test -p rvoip-sip --test '*' resilience
 |-----|-------|-------------|------------|-------------|
 | **3327** | Path Header (registering non-adjacent contacts) | `Path` insertion/echo for edge proxies. | 🟡 **Partial** — Path parsed, stored, and echoed | `server/contact_resolver.rs`, `api/send/register.rs`, `api/respond/register_response.rs` |
 | **3608** | Service-Route Discovery During Registration | `Service-Route` returned in 2xx REGISTER and applied to subsequent requests. | 🟡 **Partial** | `sip-core/src/types/service_route.rs`, `api/respond/register_response.rs` |
-| **5626** | Managing Client-Initiated Connections (Outbound) | `;ob`, `+sip.instance`, `reg-id`, flow keep-alive. | 🟡 **Partial** — single registered flow verified; **multi-flow not claimed** | outbound contact (`;ob`/`+sip.instance`/`reg-id`) generated-valid in `sip-dialog/tests/generated_sip_compliance.rs`, `resilience/rfc5626_outbound_flow_recovery.rs` |
+| **5626** | Managing Client-Initiated Connections (Outbound) | Outbound Contact construction with `ob`, `+sip.instance`, and `reg-id`, plus registered-flow configuration validation. | 🟡 **Partial** — flow tokens, multi-flow behavior, keepalive/recovery, failover, and registrar-side behavior are not claimed | `T-5626-C1`, `T-5626-U1`, `T-5626-U2`; ignored flow-recovery stubs are excluded |
 | **5627** | Obtaining and Using GRUUs | Globally Routable UA URIs (temp/pub). | 🟡 **Partial** — instance-id/GRUU params handled in contacts | outbound contact params, registrar contact handling |
 | **5628** | Registration Event Package for GRUU | `reg` package GRUU extension. | ⚪ Not implemented | — |
 | **6140** | Registration for Multiple Phone Numbers (SIP trunking) | Bulk/wildcard registration for trunks. | 🟠 **Planned** | — |
 | **3680** | SIP Event Package for Registrations | (see §3) | 🟠 **Planned** | — |
-| **6223** | Indication of Support for Keep-Alive | STUN/CRLF keep-alive negotiation for outbound flows. | 🟡 **Partial** — CRLF keep-alive on registered flows | transport keep-alive, `resilience/rfc5626_outbound_flow_recovery.rs` |
+| **6223** | Indication of Support for Keep-Alive | CRLF keep-alive framing on supported stream transports. | 🟡 **Partial** — STUN negotiation and end-to-end registered-flow recovery are not claimed | `sip-transport` TCP/TLS keep-alive frame tests; ignored RFC 5626 recovery stubs are excluded |
 
 ---
 
@@ -126,11 +132,11 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **3581** | Symmetric Response Routing (`rport`) | Respond to the source IP/port observed on the request. | ✅ **Verified** | `sip-dialog/tests/rport_restamp_response.rs`, `resilience/rfc3581_rport_nat_recovery.rs`, PBX UDP/TLS rows |
+| **3581** | Symmetric Response Routing (`rport`) | Restamp the top Via with `received` and `rport` when the inbound request carries the `rport` flag. | 🟡 **Partial** — no live-NAT, multi-hop, keepalive, ICE, or TURN claim follows | `T-3581-U1`, `T-3581-U2`; the ignored NAT-pinhole resilience stub is excluded |
 | **7118** | WebSocket as a Transport for SIP | `ws`/`wss` SIP transport. | 🟡 **Partial** — `ws` client round-trip; browser/WebRTC + `wss` outbound post-beta | `sip-transport/tests/ws_client_round_trip.rs` |
 | **5923** | Connection Reuse in SIP | Reuse a TLS/TCP connection in both directions (`alias`). | 🟡 **Partial** — connection reuse for TCP/TLS | `sip-transport` connection management |
 | **5630** | The Use of the SIPS URI Scheme in SIP | SIPS routing & TLS hop semantics. | 🟡 **Partial** — SIPS/TLS hop handling | `tls_call_integration.rs` |
-| **8489** | Session Traversal Utilities for NAT (STUN) | Server-reflexive address discovery at startup. | 🟡 **Partial** — `Config::stun_server` address discovery only; **not** ICE connectivity checks | `Config::stun_server` startup address-discovery |
+| **8489** | Session Traversal Utilities for NAT (STUN) | Server-reflexive address discovery. | 🟠 **Post-beta** as a compliance claim — a configured startup helper does not establish the RFC 8489 behavior profile or ICE connectivity checks | `Config::stun_server` is configuration/implementation presence, not conformance evidence |
 | **8445** | Interactive Connectivity Establishment (ICE) | Full candidate gathering + connectivity checks. | 🟠 **Post-beta** — explicit non-claim | `SECURITY_POSTURE.md` / release docs non-claim |
 | **8656** | Traversal Using Relays around NAT (TURN) | Media relay allocation. | 🟠 **Post-beta** — explicit non-claim | release docs non-claim |
 | **8838** | Trickle ICE | Incremental candidate exchange. | 🔵 **Types only** (SDP candidate parsing) — owned by `rvoip-webrtc` | `rvoip-webrtc` WHIP/trickle tests |
@@ -146,7 +152,7 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **7616** | HTTP Digest Access Authentication | Digest with MD5 / SHA-256, `qop=auth`, nonce-count, stale recovery. | ✅ **Verified** (REGISTER & INVITE/PROXY challenge flows) | `generated_sip_compliance.rs` (401/407/stale/`nc` reset), `invite_auth_tests.rs`, `invite_repeated_challenge_auth.rs`, `api/respond/challenge.rs` |
+| **7616** | HTTP Digest Access Authentication | SHA-256 digest generation/validation, `auth-int`, nonce-count progression, stale-nonce recovery, and endpoint INVITE digest retry. | 🟡 **Partial** — the full algorithm/method/challenge-selection matrix and independent-server certification are not claimed | `T-AUTH-U1`, `T-AUTH-U2`, `T-AUTH-U3`, `T-AUTH-W1`, `T-AUTH-W2`, `T-AUTH-W3` |
 | **2617** | HTTP Authentication: Basic and Digest | Original digest scheme. | 📕 Historical — superseded by 7616 (digest math shared) | tracked via 7616 |
 | **8760** | SIP Digest Access Authentication (added algorithms) | SHA-512/256 and algorithm agility for SIP digest. | 🟡 **Partial** — MD5/SHA-256 path verified; SHA-512/256 not claimed | digest algorithm handling in `sip-core` auth types |
 | **3329** | Security Mechanism Agreement for SIP | `Security-Client`/`Server`/`Verify` negotiation. | 🟠 **Planned** — requires path-wide proxy support; not claimed | — |
@@ -177,9 +183,9 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **8866** | SDP: Session Description Protocol | The SDP grammar (parse + build). | ✅ **Verified** (WebRTC-specific attrs are carry-through unless wired higher) | `sip-core` SDP parser/builder tests, `generated_message_compliance.rs`, SDP fuzz target |
+| **8866** | SDP: Session Description Protocol | SDP audio-offer parsing/matching, payload filtering, media-direction propagation, and generated INVITE SDP validation. | 🟡 **Partial** — full grammar/media coverage, BUNDLE, trickle ICE, and WebRTC negotiation are not claimed | `T-SDP-U1`, `T-SDP-U2`, `T-SDP-C1` |
 | **4566** | SDP (previous) | Prior SDP edition. | 📕 Historical — obsoleted by 8866 | tracked via 8866 |
-| **3264** | Offer/Answer Model | (see §1) | ✅ **Verified** | `sdp_matcher_integration.rs`, glare tests |
+| **3264** | Offer/Answer Model | (see §1) | 🟡 **Partial** | `T-3264-U1`, `T-3264-U2`, `T-3264-W1` |
 | **4568** | SDP Security Descriptions (SDES) for SRTP | `a=crypto` SRTP keying in SDP. | 🟡 **Partial** — SDES negotiation; DTLS-SRTP excluded | `srtp_call_integration.rs`, `adapters/srtp_negotiator.rs` |
 | **5763** | Framework for SRTP context via DTLS | DTLS-SRTP framework. | 🟠 **Post-beta** — explicit non-claim | `SECURITY_POSTURE.md` non-claim |
 | **5764** | DTLS Extension to Establish Keys for SRTP | DTLS-SRTP (`a=fingerprint`, `setup`). | 🟠 **Post-beta** — explicit non-claim | `SECURITY_POSTURE.md` / `COMPATIBILITY_MATRIX.md` non-claim |
@@ -202,10 +208,10 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **3550** | RTP: A Transport Protocol for Real-Time Applications | Core RTP/RTCP. | ✅ **Verified** (full RTCP feedback behaviour not claimed) | `audio_roundtrip_integration.rs`, `bridge_roundtrip_integration.rs`, `perf_rtp_steady_state` |
-| **3551** | RTP Profile for Audio and Video Conferences (AVP) | Static payload types, PCMU/PCMA. | ✅ **Verified** | audio round-trip + PBX G.711/G.729 matrix rows |
+| **3550** | RTP: A Transport Protocol for Real-Time Applications | RTP packet and RTCP receiver-report round trips plus bidirectional audio/bridge delivery. | 🟡 **Partial** — full RTCP scheduling/feedback, congestion, multicast, and independent-stack certification are not claimed | `T-RTP-U1`, `T-RTP-U2`, `T-RTP-W1`, `T-RTP-W2` |
+| **3551** | RTP Profile for Audio and Video Conferences (AVP) | Static PCMU/PCMA payload negotiation and audio delivery. | 🟡 **Partial** — the cited call tests do not certify the complete AVP profile | `T-RTP-W1`, `T-RTP-W2`; PBX codec rows are supplemental interop evidence only |
 | **3711** | The Secure Real-time Transport Protocol (SRTP) | SRTP/SRTCP encryption + auth. | 🟡 **Partial** — SDES-keyed SRTP; DTLS-SRTP excluded | `srtp_call_integration.rs`, SRTP negotiator tests, PBX SRTP rows |
-| **4733** | RTP Payload for DTMF / Telephony Tones (telephone-event) | RFC 2833-style out-of-band DTMF. | ✅ **Verified** | DTMF/INFO tests, SIPp + Asterisk/FreeSWITCH DTMF matrix evidence, `media_stream.rs`/`state_machine/actions.rs` |
+| **4733** | RTP Payload for DTMF / Telephony Tones (telephone-event) | Telephone-event send/receive behavior in the supported audio-call profile. | 🟡 **Partial** — implementation locations and historical PBX/SIPp rows do not certify every event/timing/interoperability case | DTMF integration tests; PBX/SIPp rows are supplemental rather than sole conformance evidence |
 | **2833** | RTP Payload for DTMF (original) | Predecessor of 4733. | 📕 Historical — obsoleted by 4733 | tracked via 4733 |
 | **3389** | RTP Payload for Comfort Noise | CN payload for silence suppression. | 🔵 **Types only** — CN payload recognized | media payload handling |
 | **4585** | Extended RTP Profile for RTCP Feedback (AVPF) | NACK/PLI/FIR feedback. | ⚪ Not implemented (WebRTC path in `rvoip-webrtc`) | — |
@@ -223,9 +229,9 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **4028** | Session Timers in SIP | `Session-Expires`/`Min-SE`, refresher, 422 recovery. | ✅ **Verified** (full edge-case production audit remains open) | `session_timer_integration.rs`, `session_timer_failure_integration.rs`, `session_422_retry.rs`, `resilience/rfc4028_session_timer_recovery.rs`, 422 retry generated-valid |
+| **4028** | Session Timers in SIP | Successful session-refresh and refresh-failure event delivery. | 🟡 **Partial** — negotiation roles, `422`/Min-SE behavior, proxy handling, and the expiration/race matrix are not claimed | `T-4028-W1`, `T-4028-W2`; ignored resilience stubs are excluded |
 | **3326** | The Reason Header Field for SIP | `Reason:` on BYE/CANCEL and responses. | 🟡 **Partial** — Reason emitted on teardown paths | teardown/reason handling, `teardown_rfc_state_table_tests.rs` |
-| **3891** | The SIP "Replaces" Header | Replace an existing dialog (attended transfer / pickup). | 🟡 **Partial** — Replaces consumed on transfer | `server/transfer.rs`, `adapters/dialog_adapter.rs` |
+| **3891** | The SIP "Replaces" Header | Replace an existing dialog (attended transfer / pickup). | 🔵 **Types/construction only** — Replaces can be constructed and carried, but executable replacement semantics are not established | `T-3891-C1`, `T-3891-U1` (neither test executes call replacement) |
 | **3892** | The SIP Referred-By Mechanism | `Referred-By` on REFER-initiated requests. | 🟡 **Partial** — Referred-By emitted/propagated on REFER | `api/send/refer.rs`, `adapters/dialog_adapter.rs` |
 | **4538** | Target-Dialog (`Target-Dialog` header) | Authorize a request by referencing a known dialog. | 🔵 **Types only** | `sip-core` header type |
 | **4916** | Connected Identity in SIP | `P-…`/connected-line update mid-dialog. | ⚪ Not implemented | — |
@@ -242,14 +248,14 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **3261 URIs** | SIP / SIPS URI scheme | `sip:`/`sips:` URI parse + build with params/headers. | ✅ **Verified** | `sip-core` URI parser tests + URI fuzz target |
-| **3986** | URI: Generic Syntax | Generic RFC 3986 URI conformance. | ✅ **Verified** | `sip-core` URI parsing + fuzz |
+| **3261 URIs** | SIP / SIPS URI scheme | `sip:`/`sips:` URI parsing/building with supported parameters and headers. | 🟡 **Partial** — parser and fuzz coverage do not establish every RFC 3261 URI production or normalization rule | `sip-core` URI parser tests and URI fuzz target |
+| **3986** | URI: Generic Syntax | Generic URI parsing used by the supported SIP URI profile. | 🟡 **Partial** — no complete RFC 3986 conformance suite is claimed | `sip-core` URI parser tests and URI fuzz target |
 | **3966** | The `tel` URI for Telephone Numbers | `tel:` URIs and `phone-context`. | 🟡 **Partial** — tel URI parse/build | `sip-core` URI types |
 | **2045** | MIME Part 1: Format of Message Bodies | MIME headers / encodings for SIP bodies. | 🔵 **Types only** | `sip-core` content-type / MIME parsing |
 | **2046** | MIME Part 2: Media Types | `multipart/*`, media-type registry. | 🟡 **Partial** — multipart bodies parsed (torture `mpart01`) | `sip-core` multipart parsing, `rfc_compliance/wellformed/3.1.1.11_mpart01.sip` |
 | **5621** | Message Body Handling in SIP | Multipart body handling rules for SIP. | 🟡 **Partial** — multipart carry-through | `sip-core` body handling |
 | **5646** | Tags for Identifying Languages (BCP 47) | `Content-Language`/`Accept-Language` tag validation. | 🟡 **Partial** — language-tag parse/validate (incl. grandfathered tags) | `sip-core` language-tag parser tests |
-| **4475** | SIP Torture Test Messages | Pathological-message corpus a parser must accept/reject correctly. | ✅ **Verified** (documented exclusions retained in fixture) | `sip-core/tests/rfc_compliance/torture_test.rs` + `malformed/`+`wellformed/` corpus |
+| **4475** | SIP Torture Test Messages | Included well-formed fixtures parse and included malformed fixtures are rejected. | ✅ **Verified** (bounded to the checked-in corpus; the documented well-formed exclusions remain outside the claim) | `T-4475-U1`, `T-4475-U2` |
 | **5118** | SIP Torture Test Messages for IPv6 | IPv6-specific torture cases. | 🟡 **Partial** — IPv6 cases in corpus | `rfc_compliance` corpus (`4.2_ipv6-bad.sip`, …) |
 
 ---
@@ -261,8 +267,8 @@ cargo test -p rvoip-sip --test '*' resilience
 
 | RFC | Title | Description | Compliance | Verified by |
 |-----|-------|-------------|------------|-------------|
-| **G.711** (ITU) | PCMU / PCMA | μ-law / A-law audio (static PT 0/8). | ✅ **Verified** | audio round-trip + PBX matrix |
-| **G.729** (ITU) | G.729 / G.729A/AB | Low-bitrate audio. | ✅ **Verified** | PBX `g729a g729ab` matrix profiles |
+| **G.711** (ITU) | PCMU / PCMA | μ-law / A-law audio using static payload types 0/8. | 🟡 **Partial** — audio round-trip is executable; PBX rows require a source-matched release attestation | `T-RTP-W1`, `T-RTP-W2`; PBX matrix is supplemental interop evidence |
+| **G.729** (ITU) | G.729 / G.729A/AB | Low-bitrate audio in the configured PBX profiles. | 🟡 **Partial** — historical `g729a`/`g729ab` PBX rows do not qualify the current source | PBX `g729a g729ab` matrix profiles, subject to clean attestation |
 | **6716** | Definition of the Opus Audio Codec | Opus codec. | ⚪ Out of SIP scope — media/webrtc crates | `rvoip-webrtc` |
 | **7587** | RTP Payload Format for Opus | `a=rtpmap:… opus`. | 🔵 **Types only** (SDP) — media in webrtc crate | SDP rtpmap parsing |
 | **6184** | RTP Payload Format for H.264 | Video payload. | ⚪ Out of SIP scope — media/webrtc crates | `rvoip-webrtc` |
@@ -294,7 +300,9 @@ Distilled from the statuses above — the natural candidates for the next
 milestones, grouped by how far they are from "done".
 
 **🟡 Partial → finish & promote to Verified**
-- RFC 5626 Outbound: multi-flow registration (single-flow is verified today).
+- RFC 5626 Outbound: flow-token processing, keepalive/recovery, and multi-flow
+  registration (current evidence covers Contact construction and configuration
+  validation only).
 - RFC 8224/8225/8226/8588 STIR/SHAKEN: carrier trust-anchor + attestation
   certification (sign/verify already wired).
 - RFC 3327 / 3608 Path / Service-Route: dedicated conformance tests.
@@ -324,9 +332,11 @@ milestones, grouped by how far they are from "done".
 
 - **When to update:** whenever a compliance test is added/renamed, a new RFC is
   implemented, or a new beta-gate report supersedes the attestation basis above.
-- **Keep claims honest:** a row may only be marked ✅ **Verified** if it is backed
-  by a named test or interop matrix that is green in the *current* beta gate.
-  Promote from 🟡/🔵 only when that evidence exists.
+- **Keep claims honest:** a row may only be marked ✅ **Verified** if its exact,
+  bounded behavior cites at least one `T-*` entry whose named test exists, is
+  executable, and is neither ignored nor a stub. A release claim additionally
+  requires that evidence to be green in a clean, source-matched current beta
+  gate. Promote from 🟡/🔵 only when both conditions are met.
 - **Source of beta claims:** the crate-local
   [`RFC_COMPLIANCE_MATRIX.md`](../../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md)
   governs what release notes may claim; this file is the broader engineering &

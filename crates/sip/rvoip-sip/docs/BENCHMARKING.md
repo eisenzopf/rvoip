@@ -47,7 +47,12 @@ audit that window, without endpoint diagnostic scans in the active or RSS gate
 windows. `clean` also verifies the exact workload/configuration, runs
 `scripts/perf_2k_acceptance.py` against the absolute beta limits, and gates
 `perf_audit.py --fail-on-regression` against the reviewed `20260706T181609Z`
-baseline. Only a `PASS` clean manifest is acceptance evidence; see
+baseline tracked under `perf-baselines/`. The runner snapshots that input into
+each run and records its relative path and SHA-256. An explicit
+`RVOIP_PERF_REVIEWED_BASELINE` may only relocate the byte-identical reviewed
+input and requires the matching `RVOIP_PERF_REVIEWED_BASELINE_SHA256`; it
+cannot select different comparison data for release evidence. Only a `PASS`
+clean manifest is acceptance evidence; see
 [`PROFILING.md`](PROFILING.md#canonical-2000-cps-reproduction).
 
 Enable diagnostic features only for targeted investigation runs:
@@ -500,7 +505,7 @@ load.
 
 **Citing a result** — pick the highest sweep point where ASR ≥ 0.99
 and setup-p99 stays inside your SLA budget, and report that as the
-sustained capacity. Example: "rvoip-sip 0.2.2 sustains 500 CPS at
+sustained capacity. Example: "rvoip-sip 0.2.5 sustains 500 CPS at
 98.7% ASR with setup p99 < 90 ms on Apple M3 Max." Always include the
 hardware spec block from §6.
 
@@ -527,7 +532,7 @@ extra keys is fine, removing a canonical one is a breaking change.
     "total_ram_gb": 64.0,
     "build_profile": "release",
     "global_allocator": "mimalloc",
-    "rvoip_sip_version": "0.2.2",
+    "rvoip_sip_version": "0.2.5",
     "git_rev": "a9a3383c",
     "git_commit": "a9a3383c...",
     "git_dirty": false,

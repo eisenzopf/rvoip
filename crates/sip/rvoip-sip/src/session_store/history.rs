@@ -524,6 +524,16 @@ impl SessionHistory {
         }
     }
 
+    /// Whether this configured history currently admits records.
+    ///
+    /// A session may retain a history object while recording is paused.  The
+    /// executor uses this crate-private predicate to avoid publishing a new
+    /// session revision solely for a record that `record_transition` would
+    /// discard.
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
     /// Record a transition
     pub fn record_transition(&mut self, mut record: TransitionRecord) {
         if !self.config.enabled {

@@ -139,6 +139,30 @@ impl BurstScenario {
         );
         self.answer_delay.validate(&self.name);
         self.acceptance.validate(&self.name);
+        if self.acceptance.min_recovery_asr.is_some() {
+            let recovery = self
+                .phases
+                .iter()
+                .rev()
+                .find(|phase| phase.label.to_ascii_lowercase().contains("recovery"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "burst scenario '{}' acceptance.minRecoveryAsr requires a recovery phase",
+                        self.name
+                    )
+                });
+            let recovery_budget = self.acceptance.max_recovery_secs.unwrap_or_else(|| {
+                panic!(
+                    "burst scenario '{}' acceptance.minRecoveryAsr requires maxRecoverySecs",
+                    self.name
+                )
+            });
+            assert!(
+                recovery_budget < recovery.duration_secs,
+                "burst scenario '{}' maxRecoverySecs must leave a non-empty stable recovery window",
+                self.name
+            );
+        }
     }
 
     pub fn duration_secs(&self) -> u64 {
@@ -147,6 +171,19 @@ impl BurstScenario {
 
     pub fn total_offered_calls(&self) -> u64 {
         self.phases.iter().map(|phase| phase.expected_calls()).sum()
+    }
+
+    /// Bound the exact-lifecycle authority for this finite burst workload.
+    ///
+    /// Active call admission and retained SIP anti-reuse fences are separate
+    /// dimensions. A short-call scenario can retire far more identifiers than
+    /// its active-call limit during the 64-second anti-reuse horizon. Covering
+    /// the active limit plus every offered call is deliberately conservative,
+    /// independent of answer rate, and avoids turning retained fence pressure
+    /// into a false live-call overload signal during recovery.
+    pub fn retained_lifecycle_capacity(&self) -> usize {
+        let offered = usize::try_from(self.total_offered_calls()).unwrap_or(usize::MAX);
+        self.capacity.saturating_add(offered)
     }
 
     pub fn phase_start_secs(&self, phase_index: usize) -> u64 {
@@ -299,6 +336,8 @@ pub struct BurstAcceptance {
     pub min_rss_gate_window_secs: f64,
     #[serde(default)]
     pub max_recovery_secs: Option<u64>,
+    #[serde(default)]
+    pub min_recovery_asr: Option<f64>,
 }
 
 impl Default for BurstAcceptance {
@@ -313,6 +352,7 @@ impl Default for BurstAcceptance {
             max_rss_growth_mb_per_hr: None,
             min_rss_gate_window_secs: default_min_rss_gate_window_secs(),
             max_recovery_secs: None,
+            min_recovery_asr: None,
         }
     }
 }
@@ -333,6 +373,20 @@ impl BurstAcceptance {
             self.min_rss_gate_window_secs.is_finite() && self.min_rss_gate_window_secs >= 0.0,
             "burst scenario '{scenario}' acceptance.minRssGateWindowSecs must be >= 0"
         );
+        if let Some(min_recovery_asr) = self.min_recovery_asr {
+            assert!(
+                min_recovery_asr.is_finite() && (0.0..=1.0).contains(&min_recovery_asr),
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr must be between 0 and 1"
+            );
+            assert!(
+                self.allow_overload_rejections,
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr requires allowOverloadRejections"
+            );
+            assert!(
+                self.max_recovery_secs.is_some(),
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr requires maxRecoverySecs"
+            );
+        }
     }
 }
 

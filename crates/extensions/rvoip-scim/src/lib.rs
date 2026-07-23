@@ -1092,6 +1092,7 @@ mod tests {
                 access_ttl_seconds: 300,
                 refresh_ttl_seconds: 3600,
                 algorithm: "HS256".to_string(),
+                tenant_id: None,
                 signing_key: Some("scim-test-secret".to_string()),
             },
             password: PasswordConfig {

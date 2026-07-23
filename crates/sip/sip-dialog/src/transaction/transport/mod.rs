@@ -10,7 +10,6 @@ use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::Message;
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
-use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpParseDispatch, UdpSocketOptions,
@@ -334,11 +333,6 @@ pub struct TransportManager {
     default_transport: Option<Arc<dyn Transport>>,
     /// Default UDP transport (required for SIP)
     udp_transport: Option<Arc<dyn Transport>>,
-    /// Transport factory. Captured at construction so a future
-    /// dynamic transport-add path can spin new transports without
-    /// re-creating the factory.
-    #[allow(dead_code)]
-    transport_factory: Arc<TransportFactory>,
     /// Combined event channel
     event_tx: mpsc::Sender<TransportEvent>,
     /// Separately reserved lifecycle/control lane.
@@ -360,22 +354,11 @@ impl TransportManager {
         let (control_event_tx, control_event_rx) = mpsc::channel(control_capacity);
 
         let transports = Arc::new(Mutex::new(HashMap::new()));
-        let transport_factory = Arc::new(TransportFactory::new(TransportFactoryConfig {
-            channel_capacity: config.default_channel_capacity,
-            udp_recv_buffer_size: config.udp_recv_buffer_size,
-            udp_send_buffer_size: config.udp_send_buffer_size,
-            udp_parse_workers: config.udp_parse_workers,
-            udp_parse_queue_capacity: config.udp_parse_queue_capacity,
-            udp_parse_dispatch: config.udp_parse_dispatch,
-            ..Default::default()
-        }));
-
         let manager = Self {
             config,
             transports,
             default_transport: None,
             udp_transport: None,
-            transport_factory,
             event_tx,
             control_event_tx,
             control_event_rx: Arc::new(Mutex::new(Some(control_event_rx))),

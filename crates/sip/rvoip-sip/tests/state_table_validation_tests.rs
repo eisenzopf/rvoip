@@ -289,8 +289,8 @@ fn test_registration_transitions() {
         unregister_transition
             .actions
             .iter()
-            .any(|action| matches!(action, Action::SendUnREGISTER)),
-        "Unregistration transition must send REGISTER with Expires: 0"
+            .any(|action| matches!(action, Action::SendREGISTERWithOptions)),
+        "Unregistration transition must use the canonical REGISTER options action"
     );
 
     let unregister_ok_key = StateKey {
@@ -314,20 +314,31 @@ fn test_subscription_transitions() {
         event: EventType::SendOutboundSubscribe,
     };
 
-    let notify_key = StateKey {
-        role: Role::Both,
-        state: CallState::Subscribed,
-        event: EventType::ReceiveNOTIFY,
-    };
-
     assert!(
         !table.has_transition(&subscribe_key),
         "SUBSCRIBE should be direct-wired, not state-table dispatched"
     );
-    assert!(
-        !table.has_transition(&notify_key),
-        "NOTIFY should be dialog/session event-wired, not state-table dispatched"
-    );
+    for role in [Role::UAC, Role::UAS] {
+        for state in [
+            CallState::Idle,
+            CallState::Initiating,
+            CallState::Active,
+            CallState::OnHold,
+            CallState::Subscribed,
+            CallState::Terminating,
+        ] {
+            let notify_key = StateKey {
+                role,
+                state,
+                event: EventType::ReceiveNOTIFY,
+            };
+            let transition = table
+                .get(&notify_key)
+                .unwrap_or_else(|| panic!("Missing {role:?}/{state:?}/ReceiveNOTIFY transition"));
+            assert_eq!(transition.next_state, None);
+            assert_eq!(transition.actions, vec![Action::ProcessNOTIFY]);
+        }
+    }
 }
 
 #[test]

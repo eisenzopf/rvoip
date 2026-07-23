@@ -20,6 +20,8 @@ use crate::api::events::{Event, MediaSecurityState, TransferTargetEvidence};
 use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::session_lifecycle::SessionOperationKind;
+use crate::session_registry::SessionRegistryHandle;
 use crate::state_table::types::SessionId;
 use crate::types::{CallState, SessionInfo};
 
@@ -322,19 +324,61 @@ impl Default for TransferLifecycleOptions {
 pub struct SessionHandle {
     pub(crate) call_id: CallId,
     pub(crate) coordinator: Arc<UnifiedCoordinator>,
+    lifecycle_handle: Option<SessionRegistryHandle>,
 }
 
 impl SessionHandle {
     pub(crate) fn new(call_id: CallId, coordinator: Arc<UnifiedCoordinator>) -> Self {
+        let lifecycle_handle = coordinator
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(&call_id);
+        Self::new_captured(call_id, coordinator, lifecycle_handle)
+    }
+
+    /// Construct from authority already carried by an internal event. A
+    /// missing sidecar stays missing; this path never resolves a delayed raw
+    /// Call-ID into a potentially newer generation.
+    pub(crate) fn new_captured(
+        call_id: CallId,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             call_id,
             coordinator,
+            lifecycle_handle,
         }
+    }
+
+    /// Construct from authority captured by the operation that produced the
+    /// handle. This never re-resolves the application-visible Call-ID.
+    pub(crate) fn new_exact(
+        call_id: CallId,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: SessionRegistryHandle,
+    ) -> Self {
+        debug_assert_eq!(&call_id, lifecycle_handle.session_id());
+        Self::new_captured(call_id, coordinator, Some(lifecycle_handle))
     }
 
     /// The unique identifier for this call session.
     pub fn id(&self) -> &CallId {
         &self.call_id
+    }
+
+    fn exact_lifecycle_handle(&self) -> Result<SessionRegistryHandle> {
+        match self.lifecycle_handle.clone() {
+            Some(handle) if handle.session_id() == &self.call_id => Ok(handle),
+            Some(_) => Err(SessionError::InvalidTransition(
+                "SessionHandle lifecycle authority does not match its CallId".to_string(),
+            )),
+            None => Err(SessionError::SessionNotFound(format!(
+                "Session {} has no exact lifecycle authority",
+                self.call_id
+            ))),
+        }
     }
 
     // ===== In-dialog request builders =====
@@ -364,7 +408,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn bye(&self) -> crate::api::send::ByeBuilder {
-        self.coordinator.bye(&self.call_id)
+        crate::api::send::ByeBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound CANCEL for this session.
@@ -383,7 +431,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn cancel(&self) -> crate::api::send::CancelBuilder {
-        self.coordinator.cancel(&self.call_id)
+        crate::api::send::CancelBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound REFER for this session.
@@ -401,7 +453,12 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn refer(&self, refer_to: impl Into<String>) -> crate::api::send::ReferBuilder {
-        self.coordinator.refer(&self.call_id, refer_to)
+        crate::api::send::ReferBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            refer_to,
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound NOTIFY for this session.
@@ -422,7 +479,12 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn notify(&self, event_package: impl Into<String>) -> crate::api::send::NotifyBuilder {
-        self.coordinator.notify(&self.call_id, event_package)
+        crate::api::send::NotifyBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            event_package,
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound INFO for this session.
@@ -443,7 +505,12 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn info(&self, content_type: impl Into<String>) -> crate::api::send::InfoBuilder {
-        self.coordinator.info(&self.call_id, content_type)
+        crate::api::send::InfoBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            content_type,
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound UPDATE (RFC 3311) for this session.
@@ -461,7 +528,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn update(&self) -> crate::api::send::UpdateBuilder {
-        self.coordinator.update(&self.call_id)
+        crate::api::send::UpdateBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     /// Begin building an outbound re-INVITE for this session.
@@ -481,7 +552,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub fn reinvite(&self) -> crate::api::send::ReInviteBuilder {
-        self.coordinator.reinvite(&self.call_id)
+        crate::api::send::ReInviteBuilder::new_captured(
+            Arc::clone(&self.coordinator),
+            self.call_id.clone(),
+            self.lifecycle_handle.clone(),
+        )
     }
 
     // ===== Call control =====
@@ -510,7 +585,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup(&self) -> Result<()> {
-        self.coordinator.hangup(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.hangup_exact(&handle).await
     }
 
     /// Hang up the call and wait for the terminal event.
@@ -537,11 +613,12 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
-        match self.coordinator.hangup(&self.call_id).await {
+        match self.coordinator.hangup_exact(&handle).await {
             Ok(()) => {}
             Err(e) if e.is_session_gone() => {
                 if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
@@ -552,15 +629,10 @@ impl SessionHandle {
             Err(e) => return Err(e),
         }
 
-        let result =
-            wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
-                Ok(terminal_reason(snapshot))
-            })
-            .await;
-        if matches!(result, Err(SessionError::Timeout(_))) {
-            self.spawn_late_answer_teardown_observer();
-        }
-        result
+        wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
+            Ok(terminal_reason(snapshot))
+        })
+        .await
     }
 
     /// Hang up the call with an RFC 3326 `Reason` header and wait for the
@@ -584,7 +656,8 @@ impl SessionHandle {
         reason: SipReason,
         timeout: Option<Duration>,
     ) -> Result<String> {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
             return Ok(cached);
         }
@@ -614,7 +687,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hold(&self) -> Result<()> {
-        self.coordinator.hold(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.hold_exact(&handle).await
     }
 
     /// Resume a held call with a target-refresh re-INVITE.
@@ -630,7 +704,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn resume(&self) -> Result<()> {
-        self.coordinator.resume(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.resume_exact(&handle).await
     }
 
     /// Mute local audio.
@@ -648,10 +723,11 @@ impl SessionHandle {
     /// ```
     pub async fn mute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
+        let handle = self.exact_lifecycle_handle()?;
         self.coordinator
             .helpers
             .state_machine
-            .process_event(&self.call_id, EventType::MuteCall)
+            .process_event_exact(&handle, EventType::MuteCall)
             .await?;
         Ok(())
     }
@@ -668,10 +744,11 @@ impl SessionHandle {
     /// ```
     pub async fn unmute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
+        let handle = self.exact_lifecycle_handle()?;
         self.coordinator
             .helpers
             .state_machine
-            .process_event(&self.call_id, EventType::UnmuteCall)
+            .process_event_exact(&handle, EventType::UnmuteCall)
             .await?;
         Ok(())
     }
@@ -947,7 +1024,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn accept_refer(&self) -> Result<()> {
-        self.coordinator.accept_refer(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.accept_refer_exact(&handle).await
     }
 
     /// Reject a pending inbound REFER on this call.
@@ -961,8 +1039,9 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn reject_refer(&self, status_code: u16, reason: &str) -> Result<()> {
+        let handle = self.exact_lifecycle_handle()?;
         self.coordinator
-            .reject_refer(&self.call_id, status_code, reason)
+            .reject_refer_exact(&handle, status_code, reason)
             .await
     }
 
@@ -1027,7 +1106,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn dialog_identity(&self) -> Result<Option<crate::api::types::DialogIdentity>> {
-        self.coordinator.dialog_identity(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.dialog_identity_exact(&handle).await
     }
 
     // ===== DTMF =====
@@ -1043,7 +1123,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn send_dtmf(&self, digit: char) -> Result<()> {
-        self.coordinator.send_dtmf(&self.call_id, digit).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.send_dtmf_exact(&handle, digit).await
     }
 
     /// Send a SIP INFO request (RFC 6086) with caller-chosen `Content-Type`.
@@ -1155,15 +1236,53 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn audio(&self) -> Result<AudioStream> {
+        let lifecycle_handle = self.exact_lifecycle_handle()?;
+        let authority = self.coordinator.helpers.state_machine.store.authority();
+        let cancellation = {
+            // OperationGuard is deliberately !Send. Keep it in a lexical
+            // pre-await scope while capturing only the generation-qualified
+            // cancellation receiver needed by the spawned audio pumps.
+            let cancellation_guard = authority
+                .try_operation_exact(lifecycle_handle.key(), SessionOperationKind::Media)
+                .map_err(|error| {
+                    SessionError::SessionNotFound(format!(
+                        "Session {} is no longer the current media lifetime: {error}",
+                        self.call_id
+                    ))
+                })?;
+            let cancellation = cancellation_guard.cancellation().ok_or_else(|| {
+                SessionError::InvalidTransition(format!(
+                    "Session {} has no lifecycle cancellation signal",
+                    self.call_id
+                ))
+            })?;
+            cancellation_guard.finish_rollback();
+            cancellation
+        };
+
         // Subscribe to receive audio frames from media layer
-        let mut subscriber = self.coordinator.subscribe_to_audio(&self.call_id).await?;
+        let mut subscriber = self
+            .coordinator
+            .subscribe_to_audio_exact(&lifecycle_handle)
+            .await?;
 
         // Create a channel for receiving frames: drain the subscriber into an mpsc channel
         let (recv_tx, recv_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
+        let mut receive_cancellation = cancellation.clone();
         tokio::spawn(async move {
-            while let Some(frame) = subscriber.receiver.recv().await {
-                if recv_tx.send(frame).await.is_err() {
-                    break; // AudioReceiver dropped
+            loop {
+                tokio::select! {
+                    changed = receive_cancellation.changed() => {
+                        if changed.is_err() || *receive_cancellation.borrow() {
+                            break;
+                        }
+                    }
+                    frame = subscriber.receiver.recv() => {
+                        let Some(frame) = frame else { break; };
+                        if recv_tx.send(frame).await.is_err() {
+                            break; // AudioReceiver dropped
+                        }
+                    }
                 }
             }
         });
@@ -1171,12 +1290,24 @@ impl SessionHandle {
         // Create a channel for sending frames to the media layer
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
+        let send_handle = lifecycle_handle.clone();
+        let mut send_cancellation = cancellation;
         let (send_tx, mut send_rx) = mpsc::channel::<AudioFrame>(AUDIO_STREAM_CHANNEL_FRAMES);
         tokio::spawn(async move {
-            while let Some(frame) = send_rx.recv().await {
-                if let Err(e) = coordinator.send_audio(&call_id, frame).await {
-                    tracing::debug!("[SessionHandle] audio send error for {}: {}", call_id, e);
-                    break;
+            loop {
+                tokio::select! {
+                    changed = send_cancellation.changed() => {
+                        if changed.is_err() || *send_cancellation.borrow() {
+                            break;
+                        }
+                    }
+                    frame = send_rx.recv() => {
+                        let Some(frame) = frame else { break; };
+                        if let Err(e) = coordinator.send_audio_exact(&send_handle, frame).await {
+                            tracing::debug!("[SessionHandle] audio send error for {}: {}", call_id, e);
+                            break;
+                        }
+                    }
                 }
             }
         });
@@ -1201,7 +1332,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn state(&self) -> Result<CallState> {
-        self.coordinator.get_state(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.get_state_exact(&handle).await
     }
 
     /// Get detailed session information from the session store.
@@ -1221,7 +1353,8 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn session_info(&self) -> Result<SessionInfo> {
-        self.coordinator.get_session_info(&self.call_id).await
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.get_session_info_exact(&handle).await
     }
 
     /// Get the current negotiated media-security state for this call.
@@ -1249,7 +1382,8 @@ impl SessionHandle {
     /// current session-store state with lifecycle evidence captured from
     /// app-level events before they are published on the global event bus.
     pub async fn lifecycle(&self) -> Result<CallLifecycleSnapshot> {
-        Ok(self.coordinator.lifecycle_snapshot(&self.call_id).await)
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator.lifecycle_snapshot_exact(&handle).await
     }
 
     /// Wait for typed SRTP media-security negotiation on this call.
@@ -1262,7 +1396,8 @@ impl SessionHandle {
         &self,
         timeout: Option<Duration>,
     ) -> Result<MediaSecurityState> {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         wait_for_lifecycle(
             self,
             rx,
@@ -1336,10 +1471,25 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
+        let handle = self.exact_lifecycle_handle()?;
+        self.coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(&handle)
+            .map_err(|_| SessionError::SessionNotFound(self.call_id.to_string()))?;
         let rx = self.coordinator.subscribe_events().await?;
-        Ok(crate::api::stream_peer::EventReceiver::filtered(
+        self.coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(&handle)
+            .map_err(|_| SessionError::SessionNotFound(self.call_id.to_string()))?;
+        Ok(crate::api::stream_peer::EventReceiver::filtered_exact(
             rx,
-            self.call_id.clone(),
+            handle,
+            Arc::clone(&self.coordinator.helpers.state_machine.store),
+            self.coordinator.lifecycle_index(),
         ))
     }
 
@@ -1372,7 +1522,8 @@ impl SessionHandle {
     where
         F: Fn(&Event) -> bool,
     {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         wait_for_lifecycle(
             self,
             rx,
@@ -1410,7 +1561,8 @@ impl SessionHandle {
     /// state as ready could race immediate call control with those actions.
     /// The timeout only cancels this wait.
     pub async fn wait_for_answered(&self, timeout: Option<Duration>) -> Result<SessionHandle> {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         wait_for_lifecycle(
             self,
             rx,
@@ -1449,62 +1601,12 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn wait_for_end(&self, timeout: Option<Duration>) -> Result<String> {
-        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        let handle = self.exact_lifecycle_handle()?;
+        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
         wait_for_lifecycle(self, rx, timeout, "wait_for_end timed out", |snapshot| {
             Ok(terminal_reason(snapshot))
         })
         .await
-    }
-
-    fn spawn_late_answer_teardown_observer(&self) {
-        let timeout = self.coordinator.setup_teardown_timeout_duration();
-        if timeout.is_zero() {
-            return;
-        }
-
-        let handle = self.clone();
-        tokio::spawn(async move {
-            let mut rx = handle.coordinator.lifecycle_watcher(&handle.call_id);
-            let watch = async {
-                loop {
-                    let snapshot = match handle.lifecycle().await {
-                        Ok(snapshot) => snapshot,
-                        Err(err) => {
-                            tracing::debug!(
-                                "late answer teardown observer failed to read lifecycle for {}: {}",
-                                handle.call_id,
-                                err
-                            );
-                            return;
-                        }
-                    };
-
-                    if snapshot.terminal.is_some()
-                        || snapshot.state.is_some_and(|state| state.is_final())
-                    {
-                        return;
-                    }
-
-                    if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state)
-                    {
-                        if let Err(err) = handle.coordinator.hangup(&handle.call_id).await {
-                            tracing::debug!(
-                                "late answer teardown observer failed to hang up {}: {}",
-                                handle.call_id,
-                                err
-                            );
-                        }
-                        return;
-                    }
-
-                    if rx.changed().await.is_err() {
-                        return;
-                    }
-                }
-            };
-
-            let _ = tokio::time::timeout(timeout, watch).await;
-        });
     }
 }
 
@@ -1747,16 +1849,29 @@ mod tests {
     }
 
     async fn publish_synthetic(coordinator: &UnifiedCoordinator, event: Event) {
+        let call_id = event.call_id().expect("session-scoped synthetic event");
+        let lifecycle_handle = coordinator
+            .helpers
+            .state_machine
+            .store
+            .lifecycle_handle(call_id)
+            .expect("synthetic event exact lifetime");
         coordinator
-            .publish_app_event_for_test(event)
-            .await
-            .expect("publish synthetic event");
+            .publish_app_event_exact_for_test(&lifecycle_handle, event)
+            .expect("publish exact synthetic event");
     }
 
     #[tokio::test]
     async fn session_handle_wait_for_answered_observes_typed_event() {
         let coordinator = UnifiedCoordinator::new(test_config(35680)).await.unwrap();
         let call_id = SessionId::new();
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .create_session(call_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create answer-wait session");
         let handle = SessionHandle::new(call_id.clone(), coordinator.clone());
 
         let waiter = tokio::spawn({
@@ -1828,6 +1943,13 @@ mod tests {
     async fn session_handle_wait_for_media_security_observes_typed_event() {
         let coordinator = UnifiedCoordinator::new(test_config(35690)).await.unwrap();
         let call_id = SessionId::new();
+        coordinator
+            .helpers
+            .state_machine
+            .store
+            .create_session(call_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create media-security wait session");
         let handle = SessionHandle::new(call_id.clone(), coordinator.clone());
 
         let waiter = tokio::spawn({
@@ -1857,6 +1979,93 @@ mod tests {
         assert_eq!(security.suite, CryptoSuite::AesCm128HmacSha1_80);
         assert_eq!(security.profile, MediaSecurityProfile::RtpSavp);
         assert!(security.contexts_installed);
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stale_session_handle_and_captured_builder_cannot_cross_call_id_reuse() {
+        let coordinator = UnifiedCoordinator::new(test_config(35710)).await.unwrap();
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let call_id = SessionId("handle-exact-reuse".to_string());
+
+        store
+            .create_session(call_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create generation A");
+        let generation_a = store
+            .lifecycle_handle(&call_id)
+            .expect("generation A handle");
+        let stale = SessionHandle::new_exact(
+            call_id.clone(),
+            Arc::clone(&coordinator),
+            generation_a.clone(),
+        );
+        let captured_bye = stale.bye();
+        let captured_cancel = stale.cancel();
+        let captured_refer = stale.refer("sip:replacement@example.com");
+        let captured_notify = stale.notify("presence");
+        let captured_info = stale.info("application/dtmf-relay");
+        let captured_update = stale.update();
+        let captured_reinvite = stale.reinvite();
+
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(
+            store.authority().elapse_reuse_horizon_for_test(&call_id),
+            "expire the test-only anti-reuse horizon"
+        );
+        store
+            .create_session(call_id.clone(), crate::state_table::Role::UAC, false)
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&call_id)
+            .expect("generation B handle");
+        assert_ne!(generation_a, generation_b);
+        store
+            .update_session_exact_with(&generation_b, None, |session| {
+                session.call_state = CallState::Ringing;
+            })
+            .expect("mark generation B");
+
+        assert!(stale.state().await.is_err());
+        assert!(stale.session_info().await.is_err());
+        assert!(stale.lifecycle().await.is_err());
+        assert!(stale.events().await.is_err());
+        assert!(stale
+            .wait_for_end(Some(Duration::from_millis(10)))
+            .await
+            .is_err());
+        assert!(stale.hangup().await.is_err());
+        assert!(stale.hold().await.is_err());
+        assert!(stale.mute().await.is_err());
+        assert!(stale.send_dtmf('5').await.is_err());
+        assert!(captured_bye.send().await.is_err());
+        assert!(captured_cancel.send().await.is_err());
+        assert!(captured_refer.send().await.is_err());
+        assert!(captured_notify.send().await.is_err());
+        assert!(captured_info.send().await.is_err());
+        assert!(captured_update.send().await.is_err());
+        assert!(captured_reinvite.send().await.is_err());
+
+        let generation_b_snapshot = store
+            .get_session_snapshot_exact(&generation_b)
+            .expect("generation B remains current");
+        assert_eq!(generation_b_snapshot.call_state, CallState::Ringing);
+        assert!(generation_b_snapshot.pending_bye_options.is_none());
+        assert!(generation_b_snapshot.pending_cancel_options.is_none());
+        assert!(generation_b_snapshot.pending_refer_options.is_none());
+        assert!(generation_b_snapshot.pending_notify_options.is_none());
+        assert!(generation_b_snapshot.pending_info_options.is_none());
+        assert!(generation_b_snapshot.pending_update_options.is_none());
+        assert!(generation_b_snapshot.pending_reinvite_options.is_none());
+
+        store
+            .remove_session_exact(&generation_b)
+            .await
+            .expect("retire generation B");
         coordinator.shutdown();
     }
 

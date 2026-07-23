@@ -5,12 +5,41 @@ use std::sync::{Arc, Mutex as SyncMutex, OnceLock, Weak};
 
 use bytes::Bytes;
 use rtc::rtp;
-use tokio::sync::{Mutex, MutexGuard};
+use rtc::rtp::extension::HeaderExtension;
+use rtc::shared::marshal::{Marshal, MarshalSize};
+use tokio::sync::Mutex;
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
-use webrtc::media_stream::track_local::TrackLocal;
 
-/// Sequence and timestamp state shared by primary audio and same-clock
-/// telephone-event packets on one SSRC.
+use crate::peer::builder::HDREXT_SDES_MID;
+
+/// RFC 8843/RFC 9335 SDES MID payload. The track applies the negotiated
+/// extension ID; this value owns only the exact identification-tag bytes.
+struct SdesMidExtension(Vec<u8>);
+
+impl MarshalSize for SdesMidExtension {
+    fn marshal_size(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Marshal for SdesMidExtension {
+    fn marshal_to(&self, buffer: &mut [u8]) -> rtc::shared::error::Result<usize> {
+        if buffer.len() < self.0.len() {
+            return Err(rtc::shared::error::Error::ErrBufferTooSmall);
+        }
+        buffer[..self.0.len()].copy_from_slice(&self.0);
+        Ok(self.0.len())
+    }
+}
+
+pub(crate) fn sdes_mid_header_extension(mid: &str) -> HeaderExtension {
+    HeaderExtension::Custom {
+        uri: HDREXT_SDES_MID.into(),
+        extension: Box::new(SdesMidExtension(mid.as_bytes().to_vec())),
+    }
+}
+
+/// Sequence and timestamp state for one primary audio SSRC.
 #[derive(Debug)]
 pub(crate) struct OutboundAudioRtpState {
     next_sequence_number: u16,
@@ -54,9 +83,8 @@ impl OutboundAudioRtpState {
                 }
             }
             (source, None, Some(last_wire)) => {
-                // Media resumed after a serialized telephone event. Start at
-                // the next audio tick rather than replaying a queued source
-                // timestamp from before the event.
+                // Media resumed after a source handoff. Start at the next
+                // audio tick rather than replaying a stale source timestamp.
                 let _ = source;
                 last_wire.wrapping_add(samples_per_frame)
             }
@@ -66,44 +94,14 @@ impl OutboundAudioRtpState {
         self.last_wire_timestamp = Some(timestamp);
         timestamp
     }
-
-    /// Reserve a constant event timestamp and advance the shared media clock
-    /// to the event's final 20 ms interval. The caller holds the writer lock
-    /// while it emits every packet in the event, so primary audio cannot
-    /// reorder them. The next audio timestamp then lands exactly at the event
-    /// end rather than leaving an extra silent tick.
-    pub(crate) fn reserve_event_timestamp(
-        &mut self,
-        samples_per_tick: u16,
-        final_duration_samples: u16,
-    ) -> u32 {
-        let start = self.last_wire_timestamp.map_or_else(
-            || {
-                let seed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64;
-                ((seed >> 16) as u32) | 1
-            },
-            |last| last.wrapping_add(u32::from(samples_per_tick)),
-        );
-        let final_interval_start = final_duration_samples.saturating_sub(samples_per_tick);
-        self.last_wire_timestamp = Some(start.wrapping_add(u32::from(final_interval_start)));
-        self.last_source_timestamp = None;
-        start
-    }
-
-    #[cfg(test)]
-    fn last_wire_timestamp(&self) -> Option<u32> {
-        self.last_wire_timestamp
-    }
 }
 
-/// The single enqueue boundary for primary audio and same-clock DTMF RTP.
+/// The single enqueue boundary for primary audio RTP.
 pub(crate) struct OutboundAudioRtpWriter {
     track: Arc<TrackLocalStaticRTP>,
     ssrc: u32,
     clock_rate_hz: u32,
+    mid: SyncMutex<Option<String>>,
     state: Mutex<OutboundAudioRtpState>,
 }
 
@@ -158,26 +156,15 @@ impl OutboundAudioRtpWriter {
             track,
             ssrc,
             clock_rate_hz,
+            mid: SyncMutex::new(None),
             state: Mutex::new(OutboundAudioRtpState::default()),
         });
         writers.insert(key, Arc::downgrade(&writer));
         writer
     }
 
-    pub(crate) fn track(&self) -> &Arc<TrackLocalStaticRTP> {
-        &self.track
-    }
-
-    pub(crate) fn ssrc(&self) -> u32 {
-        self.ssrc
-    }
-
-    pub(crate) fn clock_rate_hz(&self) -> u32 {
-        self.clock_rate_hz
-    }
-
-    pub(crate) async fn lock_state(&self) -> MutexGuard<'_, OutboundAudioRtpState> {
-        self.state.lock().await
+    pub(crate) fn set_mid(&self, mid: Option<String>) {
+        *self.mid.lock().expect("outbound audio MID mutex poisoned") = mid;
     }
 
     pub(crate) async fn write_audio(
@@ -204,8 +191,23 @@ impl OutboundAudioRtpWriter {
             payload,
         };
 
+        let mid = self
+            .mid
+            .lock()
+            .expect("outbound audio MID mutex poisoned")
+            .clone()
+            .ok_or_else(|| {
+                webrtc::error::Error::Other(
+                    "outbound audio MID is not committed by final SDP".into(),
+                )
+            })?;
+        let extension = sdes_mid_header_extension(&mid);
         loop {
-            match self.track.write_rtp(packet.clone()).await {
+            match self
+                .track
+                .write_rtp_with_extensions(packet.clone(), std::slice::from_ref(&extension))
+                .await
+            {
                 Err(error) if error.to_string().contains("not binding") => {
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
@@ -258,38 +260,10 @@ mod tests {
     }
 
     #[test]
-    fn audio_event_audio_timeline_is_monotonic_across_source_pause() {
-        let mut state = OutboundAudioRtpState::default();
-        assert_eq!(state.allocate_audio_timestamp(48_000, 960), 48_000);
-        assert_eq!(state.next_sequence_number(), 1);
-        let event = state.reserve_event_timestamp(960, 5_760);
-        assert_eq!(event, 48_960);
-        assert_eq!(state.last_wire_timestamp(), Some(53_760));
-        assert_eq!(state.next_sequence_number(), 2);
-        assert_eq!(
-            state.allocate_audio_timestamp(48_960, 960),
-            54_720,
-            "queued media resumes after the event instead of moving backwards"
-        );
-        assert_eq!(state.next_sequence_number(), 3);
-    }
-
-    #[test]
     fn source_timestamp_deltas_are_preserved_until_a_reset() {
         let mut state = OutboundAudioRtpState::default();
         assert_eq!(state.allocate_audio_timestamp(10_000, 960), 10_000);
         assert_eq!(state.allocate_audio_timestamp(10_960, 960), 10_960);
         assert_eq!(state.allocate_audio_timestamp(100, 960), 11_920);
-    }
-
-    #[test]
-    fn pre_audio_event_seeds_a_timeline_for_later_media() {
-        let mut state = OutboundAudioRtpState::default();
-        let event = state.reserve_event_timestamp(960, 5_760);
-        assert_ne!(event, 0);
-        assert_eq!(
-            state.allocate_audio_timestamp(1_000, 960),
-            event.wrapping_add(5_760)
-        );
     }
 }

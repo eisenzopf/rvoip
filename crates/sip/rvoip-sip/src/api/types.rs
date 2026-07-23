@@ -277,31 +277,32 @@ impl CallSession {
 
     /// Start recording the media session
     pub async fn start_recording(&self) -> Result<()> {
-        // For now, return Ok to avoid crashing the example
-        // Real implementation would trigger StartRecordingMedia action
-        Ok(())
+        Err(crate::errors::SessionError::Other(
+            "CallSession has no recording authority; use a coordinator-owned media API".to_string(),
+        ))
     }
 
     /// Stop recording the media session
     pub async fn stop_recording(&self) -> Result<()> {
-        // For now, return Ok to avoid crashing the example
-        // Real implementation would trigger StopRecordingMedia action
-        Ok(())
+        Err(crate::errors::SessionError::Other(
+            "CallSession has no recording authority; use a coordinator-owned media API".to_string(),
+        ))
     }
 
     /// Play an audio file
     pub async fn play_audio(&self, _file: &str) -> Result<()> {
-        // For now, return Ok to avoid crashing the example
-        // Real implementation would trigger PlayAudioFile action
-        Ok(())
+        Err(crate::errors::SessionError::Other(
+            "CallSession has no media playback authority; use a coordinator-owned media API"
+                .to_string(),
+        ))
     }
 
     /// Start the media session
     pub async fn start_media(&self) -> Result<()> {
-        // For now, return Ok to avoid crashing the example
-        // This would trigger StartMediaSession action but it's already
-        // started automatically when the call is established
-        Ok(())
+        Err(crate::errors::SessionError::Other(
+            "CallSession has no media lifecycle authority; media starts through the session state machine"
+                .to_string(),
+        ))
     }
 }
 
@@ -908,5 +909,22 @@ mod tests {
         ] {
             assert!(!rendered.contains(SECRET), "debug leaked: {rendered}");
         }
+    }
+
+    #[tokio::test]
+    async fn detached_call_session_never_fabricates_media_success() {
+        let call = CallSession {
+            id: SessionId::new(),
+            from: "sip:alice@example.invalid".to_string(),
+            to: "sip:bob@example.invalid".to_string(),
+            state: CallState::Active,
+            started_at: None,
+            sip_call_id: None,
+        };
+
+        assert!(call.start_recording().await.is_err());
+        assert!(call.stop_recording().await.is_err());
+        assert!(call.play_audio("unused.wav").await.is_err());
+        assert!(call.start_media().await.is_err());
     }
 }

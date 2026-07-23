@@ -31,7 +31,10 @@ use support::soak::{
     sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
     MemoryDiagnosticSampler, RssGrowthGate,
 };
-use support::{LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
+use support::{
+    CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary,
+    ScenarioReport,
+};
 
 const BOB_PORT_ENV: &str = "RVOIP_PERF_BURST_BOB_PORT";
 const ALICE_PORT_ENV: &str = "RVOIP_PERF_BURST_ALICE_PORT";
@@ -122,12 +125,17 @@ struct PhaseMetrics {
     offered: AtomicU64,
     succeeded: AtomicU64,
     failed: AtomicU64,
+    stable_recovery_after_ms: Option<u64>,
+    stable_recovery_offered: AtomicU64,
+    stable_recovery_succeeded: AtomicU64,
+    stable_recovery_failed: AtomicU64,
+    last_overload_rejection_ms_plus_one: AtomicU64,
     setup_hist: Arc<LatencyHistogram>,
     teardown_hist: Arc<LatencyHistogram>,
 }
 
 impl PhaseMetrics {
-    fn new(phase: &BurstPhase) -> Self {
+    fn new(phase: &BurstPhase, stable_recovery_after_secs: Option<u64>) -> Self {
         let label = phase.label.clone();
         Self {
             setup_hist: Arc::new(LatencyHistogram::new(format!("setup_latency_{label}"))),
@@ -136,12 +144,62 @@ impl PhaseMetrics {
             offered: AtomicU64::new(0),
             succeeded: AtomicU64::new(0),
             failed: AtomicU64::new(0),
+            stable_recovery_after_ms: stable_recovery_after_secs
+                .map(|seconds| seconds.saturating_mul(1_000)),
+            stable_recovery_offered: AtomicU64::new(0),
+            stable_recovery_succeeded: AtomicU64::new(0),
+            stable_recovery_failed: AtomicU64::new(0),
+            last_overload_rejection_ms_plus_one: AtomicU64::new(0),
+        }
+    }
+
+    fn record_offered(&self, phase_elapsed: Duration) -> bool {
+        self.offered.fetch_add(1, Ordering::Relaxed);
+        let in_stable_recovery = self
+            .stable_recovery_after_ms
+            .is_some_and(|deadline_ms| duration_millis(phase_elapsed) >= deadline_ms);
+        if in_stable_recovery {
+            self.stable_recovery_offered.fetch_add(1, Ordering::Relaxed);
+        }
+        in_stable_recovery
+    }
+
+    fn record_succeeded(&self, in_stable_recovery: bool) {
+        self.succeeded.fetch_add(1, Ordering::Relaxed);
+        if in_stable_recovery {
+            self.stable_recovery_succeeded
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_failed(
+        &self,
+        in_stable_recovery: bool,
+        overload_rejected: bool,
+        phase_elapsed: Duration,
+    ) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+        if in_stable_recovery {
+            self.stable_recovery_failed.fetch_add(1, Ordering::Relaxed);
+        }
+        if overload_rejected && self.stable_recovery_after_ms.is_some() {
+            update_atomic_max(
+                &self.last_overload_rejection_ms_plus_one,
+                duration_millis(phase_elapsed).saturating_add(1),
+            );
         }
     }
 
     fn to_json(&self) -> Value {
         let offered = self.offered.load(Ordering::Relaxed);
         let succeeded = self.succeeded.load(Ordering::Relaxed);
+        let stable_offered = self.stable_recovery_offered.load(Ordering::Relaxed);
+        let stable_succeeded = self.stable_recovery_succeeded.load(Ordering::Relaxed);
+        let stable_failed = self.stable_recovery_failed.load(Ordering::Relaxed);
+        let last_overload_rejection_ms = self
+            .last_overload_rejection_ms_plus_one
+            .load(Ordering::Relaxed)
+            .checked_sub(1);
         json!({
             "label": self.label,
             "offered": offered,
@@ -150,8 +208,24 @@ impl PhaseMetrics {
             "asr": if offered > 0 { round4(succeeded as f64 / offered as f64) } else { 0.0 },
             "setup_latency": self.setup_hist.snapshot(),
             "teardown_latency": self.teardown_hist.snapshot(),
+            "recovery_stability": self.stable_recovery_after_ms.map(|deadline_ms| json!({
+                "must_be_stable_after_ms": deadline_ms,
+                "offered": stable_offered,
+                "succeeded": stable_succeeded,
+                "failed": stable_failed,
+                "asr": if stable_offered > 0 {
+                    round4(stable_succeeded as f64 / stable_offered as f64)
+                } else {
+                    0.0
+                },
+                "last_overload_rejection_ms": last_overload_rejection_ms,
+            })),
         })
     }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 struct ActiveSeries {
@@ -211,6 +285,7 @@ async fn perf_burst_caller() {
         bob_port,
         &scenario.server_profile,
         scenario.capacity,
+        Some(scenario.retained_lifecycle_capacity()),
         BOB_MEDIA_START,
         BOB_MEDIA_END,
     );
@@ -220,6 +295,7 @@ async fn perf_burst_caller() {
             alice_base_port,
             &scenario.client_profile,
             scenario.capacity.div_ceil(scenario.alice_shards).max(1),
+            None,
             ALICE_MEDIA_START,
             ALICE_MEDIA_END,
         );
@@ -247,6 +323,7 @@ async fn perf_burst_caller() {
             sip_port,
             &scenario.client_profile,
             alice_capacity,
+            None,
             media_start,
             media_end,
         );
@@ -266,7 +343,13 @@ async fn perf_burst_caller() {
         scenario
             .phases
             .iter()
-            .map(PhaseMetrics::new)
+            .map(|phase| {
+                let recovery_budget = (scenario.acceptance.min_recovery_asr.is_some()
+                    && phase.label.to_ascii_lowercase().contains("recovery"))
+                .then_some(scenario.acceptance.max_recovery_secs)
+                .flatten();
+                PhaseMetrics::new(phase, recovery_budget)
+            })
             .collect::<Vec<_>>(),
     );
     let in_process_resource_sampling = in_process_resource_sampler_enabled();
@@ -281,7 +364,7 @@ async fn perf_burst_caller() {
     let retention_sampler = EndpointRetentionSampler::start(
         "burst_caller",
         clients[0].peer.clone(),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler = MemoryDiagnosticSampler::start(
         "burst_caller",
@@ -544,6 +627,10 @@ async fn perf_burst_caller() {
                 "expected_records": failed,
             }),
         )
+        .diagnostic_block(
+            "call_setup_diagnostics",
+            CallSetupDiagnostics::from_env().to_json(),
+        )
         .diagnostic_block("sip_dialog_diagnostics", sip_dialog_raw_diagnostics())
         .diagnostic_block("media_setup_diagnostics", media_setup_raw_diagnostics())
         .diagnostic_block("media_receive", media_receive_diagnostics())
@@ -580,6 +667,67 @@ async fn perf_burst_caller() {
     }
     if !scenario.acceptance.allow_overload_rejections && overload_rejected > 0 {
         gate_failures.push(format!("overload_rejected={overload_rejected}"));
+    }
+    if scenario.acceptance.allow_overload_rejections {
+        if overload_rejected == 0 {
+            gate_failures.push(
+                "intentional-overload scenario observed no classified SIP overload responses"
+                    .to_string(),
+            );
+        }
+        if failed != overload_rejected {
+            gate_failures.push(format!(
+                "intentional-overload failures were not all classified SIP overload responses: failed={failed} overload_rejected={overload_rejected}"
+            ));
+        }
+        if timeout != 0 {
+            gate_failures.push(format!(
+                "intentional-overload scenario timed out instead of rejecting cleanly: timeout={timeout}"
+            ));
+        }
+    }
+    if let Some(min_recovery_asr) = scenario.acceptance.min_recovery_asr {
+        match phase_metrics
+            .iter()
+            .rev()
+            .find(|phase| phase.label.to_ascii_lowercase().contains("recovery"))
+        {
+            Some(recovery) => {
+                let offered = recovery.stable_recovery_offered.load(Ordering::Relaxed);
+                let succeeded = recovery.stable_recovery_succeeded.load(Ordering::Relaxed);
+                let recovery_asr = if offered > 0 {
+                    succeeded as f64 / offered as f64
+                } else {
+                    0.0
+                };
+                if offered == 0 {
+                    gate_failures.push(
+                        "recovery stability deadline left no offered calls to evaluate".to_string(),
+                    );
+                } else if recovery_asr < min_recovery_asr {
+                    gate_failures.push(format!(
+                        "stable recovery ASR {:.4} below {:.4}: succeeded={succeeded} offered={offered}",
+                        recovery_asr, min_recovery_asr
+                    ));
+                }
+                let recovery_deadline_ms = recovery
+                    .stable_recovery_after_ms
+                    .expect("validated recovery stability deadline");
+                if let Some(last_rejection_ms) = recovery
+                    .last_overload_rejection_ms_plus_one
+                    .load(Ordering::Relaxed)
+                    .checked_sub(1)
+                {
+                    if last_rejection_ms >= recovery_deadline_ms {
+                        gate_failures.push(format!(
+                            "overload recovery took {last_rejection_ms}ms, exceeding the {recovery_deadline_ms}ms stability deadline"
+                        ));
+                    }
+                }
+            }
+            None => gate_failures
+                .push("minRecoveryAsr is configured but no recovery phase was found".to_string()),
+        }
     }
     if retained_after_drain > scenario.acceptance.max_retained_after_drain {
         gate_failures.push(format!(
@@ -716,6 +864,7 @@ async fn run_burst_load(
                     scenario.clone(),
                     call_seq,
                     phase_index,
+                    elapsed,
                     call_timeout,
                     Arc::clone(&counters),
                     Arc::clone(&phase_metrics),
@@ -738,6 +887,7 @@ async fn run_burst_load(
                 scenario.clone(),
                 call_seq,
                 phase_index,
+                phase_duration,
                 call_timeout,
                 Arc::clone(&counters),
                 Arc::clone(&phase_metrics),
@@ -784,6 +934,7 @@ fn spawn_call(
     scenario: BurstScenario,
     call_seq: u64,
     phase_index: usize,
+    phase_elapsed: Duration,
     call_timeout: Duration,
     counters: Arc<BurstCounters>,
     phase_metrics: Arc<Vec<PhaseMetrics>>,
@@ -801,6 +952,7 @@ fn spawn_call(
             scenario,
             call_seq,
             phase_index,
+            phase_elapsed,
             call_timeout,
             counters,
             phase_metrics,
@@ -820,6 +972,7 @@ async fn run_one_call(
     scenario: BurstScenario,
     call_seq: u64,
     phase_index: usize,
+    phase_elapsed: Duration,
     call_timeout: Duration,
     counters: Arc<BurstCounters>,
     phase_metrics: Arc<Vec<PhaseMetrics>>,
@@ -837,7 +990,7 @@ async fn run_one_call(
             + counters.active_calls.load(Ordering::Relaxed),
     );
     let phase = &phase_metrics[phase_index];
-    phase.offered.fetch_add(1, Ordering::Relaxed);
+    let in_stable_recovery = phase.record_offered(phase_elapsed);
     let t_start = Instant::now();
     let from = client.from.clone();
     let call_id = match client
@@ -853,12 +1006,13 @@ async fn run_one_call(
             if looks_like_overload(&err) {
                 counters.overload_rejected.fetch_add(1, Ordering::Relaxed);
             }
-            phase.failed.fetch_add(1, Ordering::Relaxed);
+            phase.record_failed(in_stable_recovery, looks_like_overload(&err), phase_elapsed);
             call_failure_trace.record(json!({
                 "kind": "invite_send_failed",
                 "call_seq": call_seq,
                 "phase_index": phase_index,
                 "phase": phase.label,
+                "phase_elapsed_ms": duration_millis(phase_elapsed),
                 "from": from,
                 "to": target_uri,
                 "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
@@ -887,7 +1041,7 @@ async fn run_one_call(
                     counters.overload_rejected.fetch_add(1, Ordering::Relaxed);
                 }
             }
-            phase.failed.fetch_add(1, Ordering::Relaxed);
+            phase.record_failed(in_stable_recovery, looks_like_overload, phase_elapsed);
             let hangup_started = Instant::now();
             let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
             let lifecycle_after_hangup = handle
@@ -900,6 +1054,7 @@ async fn run_one_call(
                 "call_seq": call_seq,
                 "phase_index": phase_index,
                 "phase": phase.label,
+                "phase_elapsed_ms": duration_millis(phase_elapsed),
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
@@ -937,7 +1092,7 @@ async fn run_one_call(
             .is_err()
         {
             counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-            phase.failed.fetch_add(1, Ordering::Relaxed);
+            phase.record_failed(in_stable_recovery, false, phase_elapsed);
             counters.active_calls.fetch_sub(1, Ordering::Relaxed);
             let hangup_started = Instant::now();
             let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
@@ -951,6 +1106,7 @@ async fn run_one_call(
                 "call_seq": call_seq,
                 "phase_index": phase_index,
                 "phase": phase.label,
+                "phase_elapsed_ms": duration_millis(phase_elapsed),
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
@@ -976,14 +1132,14 @@ async fn run_one_call(
             phase.teardown_hist.record_nanos(teardown_ns);
             full_cycle_hist.record_nanos(full_ns);
             counters.succeeded.fetch_add(1, Ordering::Relaxed);
-            phase.succeeded.fetch_add(1, Ordering::Relaxed);
+            phase.record_succeeded(in_stable_recovery);
         }
         Err(err) => {
             if matches!(err, rvoip_sip::SessionError::Timeout(_)) {
                 counters.timeout.fetch_add(1, Ordering::Relaxed);
             }
             counters.teardown_failed.fetch_add(1, Ordering::Relaxed);
-            phase.failed.fetch_add(1, Ordering::Relaxed);
+            phase.record_failed(in_stable_recovery, false, phase_elapsed);
             let lifecycle_after_hangup = handle
                 .lifecycle()
                 .await
@@ -994,6 +1150,7 @@ async fn run_one_call(
                 "call_seq": call_seq,
                 "phase_index": phase_index,
                 "phase": phase.label,
+                "phase_elapsed_ms": duration_millis(phase_elapsed),
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
@@ -1027,6 +1184,7 @@ fn burst_config(
     sip_port: u16,
     profile: &str,
     capacity: usize,
+    retained_lifecycle_capacity: Option<usize>,
     media_start: u16,
     media_end: u16,
 ) -> Config {
@@ -1040,11 +1198,16 @@ fn burst_config(
     {
         performance = performance.with_recipe_path(path);
     }
-    Config::local(name, sip_port)
+    let config = Config::local(name, sip_port)
         .try_with_performance_config(performance)
         .unwrap_or_else(|err| panic!("burst performance profile '{profile}' failed: {err}"))
         .with_media_port_capacity(media_start, media_capacity)
-        .with_media_session_capacity(capacity.min(media_capacity))
+        .with_media_session_capacity(capacity.min(media_capacity));
+    let config = CallSetupDiagnostics::from_env().configure(config);
+    match retained_lifecycle_capacity {
+        Some(retained) => config.with_server_retained_lifecycle_capacity(retained),
+        None => config,
+    }
 }
 
 fn start_active_sampler(
@@ -1250,6 +1413,10 @@ fn config_snapshot(config: &Config) -> Value {
         json!(config.server_call_capacity),
     );
     snapshot.insert(
+        "server_retained_lifecycle_capacity".to_string(),
+        json!(config.server_retained_lifecycle_capacity),
+    );
+    snapshot.insert(
         "server_call_admission_limit".to_string(),
         json!(config.server_call_admission_limit),
     );
@@ -1433,7 +1600,16 @@ fn percentile_u64(mut values: Vec<u64>, quantile: f64) -> u64 {
 }
 
 fn looks_like_overload(err: &rvoip_sip::SessionError) -> bool {
-    let text = err.to_string().to_ascii_lowercase();
+    // SessionError deliberately redacts string payloads in Display/Debug.
+    // The performance harness may inspect the still-typed, in-process detail
+    // to classify a 503, while its persisted failure trace remains redacted.
+    let detail = match err {
+        rvoip_sip::SessionError::Other(detail)
+        | rvoip_sip::SessionError::DialogError(detail)
+        | rvoip_sip::SessionError::ProtocolError(detail) => detail.as_str(),
+        _ => return false,
+    };
+    let text = detail.to_ascii_lowercase();
     text.contains("503") || text.contains("service unavailable") || text.contains("overload")
 }
 
@@ -1460,5 +1636,23 @@ fn soak_like_settings(scenario: &BurstScenario) -> support::soak::SoakLoadSettin
         min_hold_secs: 1,
         max_hold_secs: max_hold(scenario).as_secs(),
         call_timeout: Duration::from_secs(30),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_overload;
+
+    #[test]
+    fn overload_classifier_uses_typed_detail_without_unredacting_reports() {
+        let error = rvoip_sip::SessionError::Other(
+            "call failed before answer: 503 Service Unavailable".to_string(),
+        );
+
+        assert!(looks_like_overload(&error));
+        assert!(!error.to_string().contains("503"));
+        assert!(!looks_like_overload(&rvoip_sip::SessionError::Other(
+            "call failed before answer: 486 Busy Here".to_string(),
+        )));
     }
 }

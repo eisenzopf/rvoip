@@ -184,7 +184,8 @@ mod tests {
     #[derive(Debug)]
     struct WireBoundaryMockTransport {
         local_addr: SocketAddr,
-        fail_prepare: bool,
+        fail_local_addr: AtomicBool,
+        fail_prepare: AtomicBool,
         fail_first_write: AtomicBool,
         wire_attempts: AtomicUsize,
         attempted: Mutex<Vec<(Message, TransportRoute)>>,
@@ -194,7 +195,8 @@ mod tests {
         fn prepare_failure() -> Self {
             Self {
                 local_addr: "127.0.0.1:5060".parse().unwrap(),
-                fail_prepare: true,
+                fail_local_addr: AtomicBool::new(false),
+                fail_prepare: AtomicBool::new(true),
                 fail_first_write: AtomicBool::new(false),
                 wire_attempts: AtomicUsize::new(0),
                 attempted: Mutex::new(Vec::new()),
@@ -204,8 +206,20 @@ mod tests {
         fn first_write_failure() -> Self {
             Self {
                 local_addr: "127.0.0.1:5060".parse().unwrap(),
-                fail_prepare: false,
+                fail_local_addr: AtomicBool::new(false),
+                fail_prepare: AtomicBool::new(false),
                 fail_first_write: AtomicBool::new(true),
+                wire_attempts: AtomicUsize::new(0),
+                attempted: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn success() -> Self {
+            Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                fail_local_addr: AtomicBool::new(false),
+                fail_prepare: AtomicBool::new(false),
+                fail_first_write: AtomicBool::new(false),
                 wire_attempts: AtomicUsize::new(0),
                 attempted: Mutex::new(Vec::new()),
             }
@@ -213,6 +227,14 @@ mod tests {
 
         fn wire_attempts(&self) -> usize {
             self.wire_attempts.load(Ordering::Acquire)
+        }
+
+        fn allow_prepare(&self) {
+            self.fail_prepare.store(false, Ordering::Release);
+        }
+
+        fn fail_local_address(&self) {
+            self.fail_local_addr.store(true, Ordering::Release);
         }
 
         async fn attempted(&self) -> Vec<(Message, TransportRoute)> {
@@ -223,6 +245,11 @@ mod tests {
     #[async_trait::async_trait]
     impl Transport for WireBoundaryMockTransport {
         fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            if self.fail_local_addr.load(Ordering::Acquire) {
+                return Err(rvoip_sip_transport::Error::InvalidState(
+                    "injected CANCEL composition prerequisite failure".into(),
+                ));
+            }
             Ok(self.local_addr)
         }
 
@@ -241,7 +268,7 @@ mod tests {
             _message: &Message,
             route: TransportRoute,
         ) -> std::result::Result<TransportRoute, rvoip_sip_transport::Error> {
-            if self.fail_prepare {
+            if self.fail_prepare.load(Ordering::Acquire) {
                 return Err(rvoip_sip_transport::Error::InvalidState(
                     "injected route preparation failure".into(),
                 ));
@@ -270,6 +297,100 @@ mod tests {
 
         fn is_closed(&self) -> bool {
             false
+        }
+    }
+
+    /// Transport that deliberately changes the selected route during the
+    /// prepare phase and holds the first wire call open. This lets tests inject
+    /// an immediate response while `send_request()` is still pending and prove
+    /// response authentication already sees the exact prepared UDP peer or
+    /// stream flow.
+    #[derive(Debug)]
+    struct PreparedRouteBarrierTransport {
+        local_addr: SocketAddr,
+        prepared_destination: SocketAddr,
+        prepared_transport: TransportType,
+        prepared_flow: Option<TransportFlowId>,
+        wire_entered: tokio::sync::Notify,
+        release_wire: tokio::sync::Notify,
+    }
+
+    impl PreparedRouteBarrierTransport {
+        fn new(
+            prepared_destination: SocketAddr,
+            prepared_transport: TransportType,
+            prepared_flow: Option<TransportFlowId>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                prepared_destination,
+                prepared_transport,
+                prepared_flow,
+                wire_entered: tokio::sync::Notify::new(),
+                release_wire: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for PreparedRouteBarrierTransport {
+        fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: Message,
+            destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            self.send_message_on_route(message, TransportRoute::new(destination))
+                .await
+                .map(|_| ())
+        }
+
+        async fn prepare_message_route(
+            &self,
+            _message: &Message,
+            mut route: TransportRoute,
+        ) -> std::result::Result<TransportRoute, rvoip_sip_transport::Error> {
+            route.destination = self.prepared_destination;
+            route.transport_type = Some(self.prepared_transport);
+            route.flow_id = self.prepared_flow;
+            Ok(route)
+        }
+
+        async fn send_message_on_route(
+            &self,
+            _message: Message,
+            route: TransportRoute,
+        ) -> std::result::Result<TransportRoute, rvoip_sip_transport::Error> {
+            if route.destination != self.prepared_destination
+                || route.transport_type != Some(self.prepared_transport)
+                || route.flow_id != self.prepared_flow
+            {
+                return Err(rvoip_sip_transport::Error::InvalidState(
+                    "wire send did not receive the prepared route".into(),
+                ));
+            }
+            self.wire_entered.notify_one();
+            self.release_wire.notified().await;
+            Ok(route)
+        }
+
+        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
+        }
+
+        fn supports_tcp(&self) -> bool {
+            self.prepared_transport == TransportType::Tcp
+        }
+
+        fn default_transport_type(&self) -> TransportType {
+            self.prepared_transport
         }
     }
 
@@ -2531,6 +2652,112 @@ mod tests {
         Ok(())
     }
 
+    async fn assert_prepared_route_authenticates_before_send_returns(
+        transport_type: TransportType,
+        flow_id: Option<TransportFlowId>,
+    ) -> Result<()> {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let original_destination: SocketAddr = "192.0.2.60:5060".parse().unwrap();
+        let prepared_destination: SocketAddr = "192.0.2.61:5060".parse().unwrap();
+        let transport =
+            PreparedRouteBarrierTransport::new(prepared_destination, transport_type, flow_id);
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        let transport_token = match transport_type {
+            TransportType::Udp => "UDP",
+            TransportType::Tcp => "TCP",
+            other => panic!("unsupported prepared-route test transport {other}"),
+        };
+        let request = create_test_invite_with_identity(
+            &format!("prepared-{transport_token}-route-call"),
+            &format!("z9hG4bK.prepared-{transport_token}"),
+            transport_token,
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction_on_route(
+                request,
+                TransportRoute::new(original_destination).with_transport_type(transport_type),
+            )
+            .await?;
+        let sent_request = manager
+            .original_request(&transaction)
+            .await?
+            .expect("prepared-route request retained");
+
+        let send_manager = manager.clone();
+        let send_transaction = transaction.clone();
+        let send = tokio::spawn(async move { send_manager.send_request(&send_transaction).await });
+        tokio::time::timeout(Duration::from_secs(1), transport.wire_entered.notified())
+            .await
+            .expect("prepared route did not reach the wire boundary");
+
+        let indexed_route = manager
+            .transaction_route(&transaction)
+            .await
+            .expect("active response route");
+        assert_eq!(indexed_route.destination, prepared_destination);
+        assert_eq!(indexed_route.transport_type, Some(transport_type));
+        assert_eq!(indexed_route.flow_id, flow_id);
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&sent_request, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sip:bob@example.com", Some("prepared-route-tag"))
+                .build();
+        let response_event = match (transport_type, flow_id) {
+            (TransportType::Udp, None) => {
+                dispatch_event_from(Message::Response(response), prepared_destination)
+            }
+            (TransportType::Tcp, Some(flow_id)) => dispatch_stream_event_from(
+                Message::Response(response),
+                prepared_destination,
+                flow_id,
+            ),
+            _ => panic!("invalid prepared-route response identity"),
+        };
+        manager.handle_transport_event(response_event).await?;
+
+        transport.release_wire.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), send)
+            .await
+            .expect("send did not return after releasing the wire")
+            .expect("send task panicked")?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Some(TransactionEvent::SuccessResponse {
+                    transaction_id,
+                    source,
+                    ..
+                }) = events.recv().await
+                {
+                    if transaction_id == transaction {
+                        assert_eq!(source, prepared_destination);
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("immediate response was rejected before send_request returned");
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prepared_udp_route_authenticates_before_send_returns() -> Result<()> {
+        assert_prepared_route_authenticates_before_send_returns(TransportType::Udp, None).await
+    }
+
+    #[tokio::test]
+    async fn prepared_stream_route_authenticates_before_send_returns() -> Result<()> {
+        let (flow_id, _other_flow) = two_live_tcp_flow_ids().await;
+        assert_prepared_route_authenticates_before_send_returns(TransportType::Tcp, Some(flow_id))
+            .await
+    }
+
     #[tokio::test]
     async fn client_route_retirement_has_no_unknown_authentication_window() -> Result<()> {
         use rvoip_sip_core::builder::SimpleResponseBuilder;
@@ -2860,6 +3087,119 @@ mod tests {
         assert_eq!(attempted[1].1.destination, destination);
 
         manager.terminate_transaction(&cancel).await?;
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_composition_failure_is_classified_zero_wire() -> Result<()> {
+        let transport = Arc::new(WireBoundaryMockTransport::success());
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(8)).await?;
+        let invite = create_test_invite_with_identity(
+            "cancel-composition-zero-wire",
+            "z9hG4bK.cancel-composition-zero-wire",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction(invite, "192.0.2.53:5060".parse().unwrap())
+            .await?;
+        transport.fail_local_address();
+
+        let failure = manager
+            .cancel_invite_transaction_with_extras_classified(&transaction, Vec::new())
+            .await
+            .expect_err("local CANCEL composition prerequisite must fail");
+        assert!(matches!(
+            failure,
+            super::super::CancelInviteTransactionFailure::ZeroWire(_)
+        ));
+        assert_eq!(transport.wire_attempts(), 0);
+
+        manager.terminate_transaction(&transaction).await?;
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_prepare_failure_is_zero_wire_and_exact_retry_sends_once() -> Result<()> {
+        let transport = Arc::new(WireBoundaryMockTransport::prepare_failure());
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(8)).await?;
+        let invite = create_test_invite_with_identity(
+            "cancel-prepare-zero-wire",
+            "z9hG4bK.cancel-prepare-zero-wire",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction(invite, "192.0.2.54:5060".parse().unwrap())
+            .await?;
+
+        let failure = manager
+            .cancel_invite_transaction_with_extras_classified(&transaction, Vec::new())
+            .await
+            .expect_err("route preparation must fail before the write boundary");
+        assert!(matches!(
+            failure,
+            super::super::CancelInviteTransactionFailure::ZeroWire(_)
+        ));
+        assert_eq!(transport.wire_attempts(), 0);
+
+        transport.allow_prepare();
+        let cancel = manager
+            .cancel_invite_transaction_with_extras_classified(&transaction, Vec::new())
+            .await
+            .expect("the exact zero-wire CANCEL key must be immediately retryable");
+        assert_eq!(transport.wire_attempts(), 1);
+        assert!(matches!(
+            transport.attempted().await.as_slice(),
+            [(Message::Request(request), _)] if request.method() == Method::Cancel
+        ));
+
+        manager.terminate_transaction(&cancel).await?;
+        manager.terminate_transaction(&transaction).await?;
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_first_write_failure_is_classified_wire_unknown_once() -> Result<()> {
+        let transport = Arc::new(WireBoundaryMockTransport::first_write_failure());
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(8)).await?;
+        let invite = create_test_invite_with_identity(
+            "cancel-write-unknown",
+            "z9hG4bK.cancel-write-unknown",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let transaction = manager
+            .create_client_transaction(invite, "192.0.2.55:5060".parse().unwrap())
+            .await?;
+
+        let failure = manager
+            .cancel_invite_transaction_with_extras_classified(&transaction, Vec::new())
+            .await
+            .expect_err("the first write is injected to fail ambiguously");
+        let cancel = match failure {
+            super::super::CancelInviteTransactionFailure::WireUnknown {
+                transaction_id, ..
+            } => transaction_id,
+            other => panic!("write-started failure misclassified as {other:?}"),
+        };
+        assert_eq!(transport.wire_attempts(), 1);
+        assert!(matches!(
+            transport.attempted().await.as_slice(),
+            [(Message::Request(request), _)] if request.method() == Method::Cancel
+        ));
+
+        manager.terminate_transaction(&cancel).await?;
+        manager.terminate_transaction(&transaction).await?;
         manager.shutdown().await;
         Ok(())
     }
@@ -3443,6 +3783,10 @@ mod tests {
             .create_client_transaction_on_route(request.clone(), route.clone())
             .await?;
         let transaction = manager.client_transactions.get(&key).unwrap().clone();
+        // This fixture represents a transaction that crossed the conservative
+        // wire boundary. Zero-wire retirement intentionally permits immediate
+        // reuse of the same transaction key and retains no completion owner.
+        transaction.data().mark_initial_send_attempted();
         assert!(manager.retire_and_remove_client_transaction(&key).await);
         let runner = transaction
             .data()
@@ -3488,6 +3832,9 @@ mod tests {
             .create_client_transaction_on_route(request, route)
             .await?;
         let transaction = manager.client_transactions.get(&key).unwrap().clone();
+        // Receiving a 401 proves that this exact generation crossed the wire;
+        // mirror the production send boundary before recording the response.
+        transaction.data().mark_initial_send_attempted();
 
         let mut challenge = Response::new(StatusCode::Unauthorized);
         challenge

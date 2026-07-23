@@ -10,11 +10,13 @@ use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::incoming::ExactResponseObligation;
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 
 /// Builds and sends a generic non-2xx final response (3xx/4xx/5xx/6xx).
 pub struct GenericResponseBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     method: Method,
     status: u16,
     reason: Option<String>,
@@ -35,6 +37,27 @@ impl GenericResponseBuilder {
         method: Method,
         status: u16,
     ) -> Result<Self> {
+        let lifecycle_handle = coord.helpers.state_machine.store.lifecycle_handle(&call_id);
+        Self::new_captured(coord, call_id, lifecycle_handle, method, status)
+    }
+
+    pub(crate) fn new_exact(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        lifecycle_handle: SessionRegistryHandle,
+        method: Method,
+        status: u16,
+    ) -> Result<Self> {
+        Self::new_captured(coord, call_id, Some(lifecycle_handle), method, status)
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+        method: Method,
+        status: u16,
+    ) -> Result<Self> {
         // Status range guard per §3.4: 3xx/4xx/5xx/6xx only.
         if !(300..=699).contains(&status) {
             return Err(SessionError::InvalidInput(format!(
@@ -44,6 +67,7 @@ impl GenericResponseBuilder {
         Ok(Self {
             coord,
             call_id,
+            lifecycle_handle,
             method,
             status,
             reason: None,
@@ -78,6 +102,7 @@ impl GenericResponseBuilder {
         Ok(Self {
             coord,
             call_id,
+            lifecycle_handle: None,
             method,
             status,
             reason: None,
@@ -148,41 +173,27 @@ impl GenericResponseBuilder {
             };
         }
 
+        let lifecycle_handle = self
+            .lifecycle_handle
+            .as_ref()
+            .ok_or_else(|| SessionError::SessionNotFound(self.call_id.to_string()))?;
+
         // 3xx → redirect path; 4xx/5xx/6xx → reject path.
         if (300..=399).contains(&self.status) {
-            if extras.is_empty() {
-                self.coord
-                    .helpers
-                    .redirect_call(&self.call_id, self.status, vec![reason])
-                    .await
-            } else {
-                self.coord
-                    .dialog_adapter()
-                    .send_redirect_response_with_options(
-                        &self.call_id,
-                        self.status,
-                        vec![reason],
-                        extras,
-                    )
-                    .await
-            }
-        } else if extras.is_empty() {
             self.coord
                 .helpers
-                .reject_call(&self.call_id, self.status, &reason)
+                .redirect_call_with_extras_exact(
+                    lifecycle_handle,
+                    self.status,
+                    vec![reason],
+                    extras,
+                )
                 .await
         } else {
             self.coord
-                .dialog_adapter()
-                .send_response_with_options(&self.call_id, self.status, None, extras)
-                .await?;
-            // Mirror the legacy reject path's state-machine teardown
-            // so the session settles to the correct terminal state.
-            self.coord
                 .helpers
-                .reject_call(&self.call_id, self.status, &reason)
+                .reject_call_with_extras_exact(lifecycle_handle, self.status, &reason, extras)
                 .await
-                .or(Ok(()))
         }
     }
 }

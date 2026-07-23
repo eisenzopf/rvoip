@@ -5,7 +5,9 @@
 //! an internal companion cache updated immediately before event publication so
 //! late waiters can observe recently published lifecycle facts without polling.
 
-use crate::adapters::SessionApiCrossCrateEvent;
+use crate::adapters::{
+    sanitize_session_api_observation, SessionApiCrossCrateEvent, SessionControlEvent,
+};
 use crate::api::events::{Event, MediaSecurityState};
 use crate::api::handle::TransferOutcome;
 use crate::cleanup_diag::{self, CleanupStage};
@@ -18,7 +20,6 @@ use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -36,50 +37,35 @@ const MAX_EAGER_LIFECYCLE_WAITER_CAPACITY: usize = 256;
 const TERMINAL_DEADLINE_PRUNE_BATCH_MAX: usize = 4_096;
 
 const EXACT_TERMINAL_PENDING: u8 = 0;
-const EXACT_TERMINAL_PUBLISHED_AND_RELEASED: u8 = 1;
-const EXACT_TERMINAL_PUBLICATION_FAILED: u8 = 2;
-const EXACT_TERMINAL_RELEASE_FAILED: u8 = 3;
-const EXACT_TERMINAL_PUBLICATION_AND_RELEASE_FAILED: u8 = 4;
-const EXACT_TERMINAL_OWNER_DROPPED: u8 = 5;
+const EXACT_TERMINAL_RELEASED: u8 = 1;
+const EXACT_TERMINAL_RELEASE_FAILED: u8 = 2;
+const EXACT_TERMINAL_OWNER_DROPPED: u8 = 3;
 
-/// Result retained by an exact terminal-publication claim.
+/// Exact resource-release result retained by a terminal claim.
 ///
-/// Publication and local resource release are one ordered terminal operation:
-/// the winner publishes first, releases second, and only then wakes observers.
-/// This lets a public hangup path safely join a dialog-event winner without
-/// returning before exact cleanup has completed.
+/// Observational event publication is attempted before release, but its
+/// health never changes this completion state and never gates signaling or
+/// cleanup. Observers wake only after exact release reaches an outcome.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExactTerminalCompletion {
-    PublishedAndReleased,
-    /// The authoritative lifecycle record was committed and exact resources
-    /// were released, but the observational cross-crate bus rejected the
-    /// delivery attempt. Protocol callers still completed successfully; the
-    /// dispatcher diagnostics retain the publication failure.
-    PublicationFailed,
+    Released,
     ReleaseFailed,
-    PublicationAndReleaseFailed,
     OwnerDropped,
 }
 
 impl ExactTerminalCompletion {
     fn encode(self) -> u8 {
         match self {
-            Self::PublishedAndReleased => EXACT_TERMINAL_PUBLISHED_AND_RELEASED,
-            Self::PublicationFailed => EXACT_TERMINAL_PUBLICATION_FAILED,
+            Self::Released => EXACT_TERMINAL_RELEASED,
             Self::ReleaseFailed => EXACT_TERMINAL_RELEASE_FAILED,
-            Self::PublicationAndReleaseFailed => EXACT_TERMINAL_PUBLICATION_AND_RELEASE_FAILED,
             Self::OwnerDropped => EXACT_TERMINAL_OWNER_DROPPED,
         }
     }
 
     fn decode(value: u8) -> Option<Self> {
         match value {
-            EXACT_TERMINAL_PUBLISHED_AND_RELEASED => Some(Self::PublishedAndReleased),
-            EXACT_TERMINAL_PUBLICATION_FAILED => Some(Self::PublicationFailed),
+            EXACT_TERMINAL_RELEASED => Some(Self::Released),
             EXACT_TERMINAL_RELEASE_FAILED => Some(Self::ReleaseFailed),
-            EXACT_TERMINAL_PUBLICATION_AND_RELEASE_FAILED => {
-                Some(Self::PublicationAndReleaseFailed)
-            }
             EXACT_TERMINAL_OWNER_DROPPED => Some(Self::OwnerDropped),
             _ => None,
         }
@@ -131,7 +117,7 @@ impl ExactTerminalClaimSlot {
     }
 }
 
-/// Winning ownership of terminal publication for one exact SIP lifetime.
+/// Winning ownership of terminal release for one exact SIP lifetime.
 /// Dropping an unfinished owner wakes observers with a deterministic failure
 /// instead of leaving a public hangup blocked forever.
 pub(crate) struct ExactTerminalClaimOwner {
@@ -648,6 +634,24 @@ impl CallTerminalInfo {
             Self::Cancelled => "Cancelled".to_string(),
         }
     }
+
+    pub(crate) fn to_event(&self, call_id: SessionId) -> Event {
+        match self {
+            Self::Ended { reason } => Event::CallEnded {
+                call_id,
+                reason: reason.clone(),
+            },
+            Self::Failed {
+                status_code,
+                reason,
+            } => Event::CallFailed {
+                call_id,
+                status_code: *status_code,
+                reason: reason.clone(),
+            },
+            Self::Cancelled => Event::CallCancelled { call_id },
+        }
+    }
 }
 
 /// Current typed lifecycle view for one call.
@@ -804,16 +808,25 @@ impl LifecycleEntry {
     }
 }
 
-#[derive(Default, Debug)]
-struct LifecycleDeadlineQueue {
-    by_deadline: BTreeMap<(Instant, u64), Arc<SessionId>>,
+#[derive(Debug)]
+struct LifecycleDeadlineQueue<K> {
+    by_deadline: BTreeMap<(Instant, u64), K>,
     next_sequence: u64,
 }
 
-impl LifecycleDeadlineQueue {
+impl<K> Default for LifecycleDeadlineQueue<K> {
+    fn default() -> Self {
+        Self {
+            by_deadline: BTreeMap::new(),
+            next_sequence: 0,
+        }
+    }
+}
+
+impl<K> LifecycleDeadlineQueue<K> {
     fn schedule(
         &mut self,
-        call_id: Arc<SessionId>,
+        identity: K,
         stored_at: Instant,
         previous: Option<(Instant, u64)>,
     ) -> u64 {
@@ -824,22 +837,16 @@ impl LifecycleDeadlineQueue {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let key = (stored_at + TERMINAL_EVENT_TTL, sequence);
-        self.by_deadline.insert(key, call_id);
+        self.by_deadline.insert(key, identity);
         sequence
     }
 
-    fn unschedule(&mut self, call_id: &SessionId, stored_at: Instant, generation: u64) {
+    fn unschedule(&mut self, stored_at: Instant, generation: u64) {
         let key = (stored_at + TERMINAL_EVENT_TTL, generation);
-        if self
-            .by_deadline
-            .get(&key)
-            .is_some_and(|scheduled| scheduled.as_ref() == call_id)
-        {
-            self.by_deadline.remove(&key);
-        }
+        self.by_deadline.remove(&key);
     }
 
-    fn take_due(&mut self, now: Instant, max_work: usize) -> Vec<(Arc<SessionId>, u64)> {
+    fn take_due(&mut self, now: Instant, max_work: usize) -> Vec<(K, u64)> {
         let mut due = Vec::with_capacity(max_work.min(self.by_deadline.len()));
         while due.len() < max_work
             && self
@@ -847,10 +854,10 @@ impl LifecycleDeadlineQueue {
                 .first_key_value()
                 .is_some_and(|((deadline, _), _)| *deadline <= now)
         {
-            let Some((key, call_id)) = self.by_deadline.pop_first() else {
+            let Some((key, identity)) = self.by_deadline.pop_first() else {
                 break;
             };
-            due.push((call_id, key.1));
+            due.push((identity, key.1));
         }
         due
     }
@@ -862,12 +869,16 @@ impl LifecycleDeadlineQueue {
     }
 }
 
-/// Internal lifecycle index keyed by session id.
+/// Internal lifecycle index with a public Call-ID view and a compact exact
+/// generation view for capability-bearing handles.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LifecycleIndex {
     entries: Arc<DashMap<Arc<SessionId>, LifecycleEntry>>,
     waiters: Arc<DashMap<SessionId, watch::Sender<u64>>>,
-    terminal_deadlines: Arc<Mutex<LifecycleDeadlineQueue>>,
+    terminal_deadlines: Arc<Mutex<LifecycleDeadlineQueue<Arc<SessionId>>>>,
+    exact_entries: Arc<DashMap<ExactTerminalClaimKey, LifecycleEntry>>,
+    exact_waiters: Arc<DashMap<ExactTerminalClaimKey, watch::Sender<u64>>>,
+    exact_terminal_deadlines: Arc<Mutex<LifecycleDeadlineQueue<ExactTerminalClaimKey>>>,
     pruner_started: Arc<AtomicBool>,
     pruner_changed: Arc<Notify>,
 }
@@ -887,6 +898,9 @@ impl LifecycleIndex {
             entries: Arc::new(DashMap::with_capacity(initial_entries)),
             waiters: Arc::new(DashMap::with_capacity(initial_waiters)),
             terminal_deadlines: Arc::new(Mutex::new(LifecycleDeadlineQueue::default())),
+            exact_entries: Arc::new(DashMap::with_capacity(initial_entries)),
+            exact_waiters: Arc::new(DashMap::with_capacity(initial_waiters)),
+            exact_terminal_deadlines: Arc::new(Mutex::new(LifecycleDeadlineQueue::default())),
             pruner_started: Arc::new(AtomicBool::new(false)),
             pruner_changed: Arc::new(Notify::new()),
         }
@@ -909,6 +923,9 @@ impl LifecycleIndex {
         let entries = Arc::downgrade(&self.entries);
         let waiters = Arc::downgrade(&self.waiters);
         let terminal_deadlines = Arc::downgrade(&self.terminal_deadlines);
+        let exact_entries = Arc::downgrade(&self.exact_entries);
+        let exact_waiters = Arc::downgrade(&self.exact_waiters);
+        let exact_terminal_deadlines = Arc::downgrade(&self.exact_terminal_deadlines);
         let changed = Arc::clone(&self.pruner_changed);
         handle.spawn(async move {
             loop {
@@ -925,6 +942,15 @@ impl LifecycleIndex {
                 let Some(terminal_deadlines) = terminal_deadlines.upgrade() else {
                     break;
                 };
+                let Some(exact_entries) = exact_entries.upgrade() else {
+                    break;
+                };
+                let Some(exact_waiters) = exact_waiters.upgrade() else {
+                    break;
+                };
+                let Some(exact_terminal_deadlines) = exact_terminal_deadlines.upgrade() else {
+                    break;
+                };
                 let now = Instant::now();
                 prune_due_terminal_entries_from(
                     &entries,
@@ -933,10 +959,30 @@ impl LifecycleIndex {
                     now,
                     TERMINAL_DEADLINE_PRUNE_BATCH_MAX,
                 );
-                let next_deadline = terminal_deadlines
+                prune_due_exact_lifecycle_entries_from(
+                    &exact_entries,
+                    &exact_waiters,
+                    &exact_terminal_deadlines,
+                    now,
+                    TERMINAL_DEADLINE_PRUNE_BATCH_MAX,
+                );
+                let next_public_deadline = terminal_deadlines
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .next_deadline();
+                let next_exact_deadline = exact_terminal_deadlines
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .next_deadline();
+                let next_deadline = match (next_public_deadline, next_exact_deadline) {
+                    (Some(public), Some(exact)) => Some(public.min(exact)),
+                    (Some(public), None) => Some(public),
+                    (None, Some(exact)) => Some(exact),
+                    (None, None) => None,
+                };
+                drop(exact_terminal_deadlines);
+                drop(exact_waiters);
+                drop(exact_entries);
                 drop(terminal_deadlines);
                 drop(waiters);
                 drop(entries);
@@ -1045,6 +1091,88 @@ impl LifecycleIndex {
         self.notify_waiters(&call_id, is_terminal);
     }
 
+    /// Record the same public lifecycle fact under the exact registry
+    /// generation that caused it. This parallel key prevents a delayed waiter
+    /// for lifetime A from observing lifetime B after an application Call-ID
+    /// is reused.
+    pub(crate) fn record_event_exact(
+        &self,
+        lifecycle_handle: &SessionRegistryHandle,
+        event: &Event,
+    ) {
+        debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
+        self.record_event(event);
+
+        let call_id = lifecycle_handle.session_id();
+        let exact_key = ExactTerminalClaimKey::from(lifecycle_handle);
+        let mut entry = self.exact_entries.entry(exact_key).or_default();
+        let terminal = CallTerminalInfo::from_event(event).map(|(_, terminal)| terminal);
+        let is_terminal = terminal.is_some();
+        let mut terminal_stored_at = None;
+        if let LifecycleEntry::Active(active) = entry.value_mut() {
+            if let Some(progress) = CallProgressInfo::from_event(event) {
+                if active.progress.len() == MAX_PROGRESS_EVENTS {
+                    active.progress.pop_front();
+                }
+                active.progress.push_back(progress);
+            }
+
+            if let Some(answered) = CallAnsweredInfo::from_event(event) {
+                active.answered = Some(answered);
+            }
+
+            if let Event::MediaSecurityNegotiated {
+                keying,
+                suite,
+                profile,
+                contexts_installed,
+                ..
+            } = event
+            {
+                active.media_security = Some(MediaSecurityState {
+                    keying: *keying,
+                    suite: *suite,
+                    profile: *profile,
+                    contexts_installed: *contexts_installed,
+                });
+            }
+
+            if let Ok(outcome) = TransferOutcome::try_from(event.clone()) {
+                active.latest_transfer_outcome = Some(Box::new(outcome));
+            }
+
+            if let Some(terminal) = terminal {
+                let stored_at = Instant::now();
+                let active = std::mem::take(active);
+                *entry = LifecycleEntry::Terminal(TerminalLifecycleEntry::from_active(
+                    active, terminal, stored_at, 0,
+                ));
+                terminal_stored_at = Some(stored_at);
+            }
+        }
+        drop(entry);
+
+        if let Some(stored_at) = terminal_stored_at {
+            let mut deadlines = self
+                .exact_terminal_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let deadline_generation = deadlines.schedule(exact_key, stored_at, None);
+            if let Some(mut entry) = self.exact_entries.get_mut(&exact_key) {
+                if let LifecycleEntry::Terminal(terminal) = entry.value_mut() {
+                    if terminal.stored_at == stored_at && terminal.deadline_generation == 0 {
+                        terminal.deadline_generation = deadline_generation;
+                    }
+                }
+            }
+            drop(deadlines);
+            self.pruner_changed.notify_one();
+        }
+
+        self.notify_exact_waiters(lifecycle_handle, is_terminal);
+        debug_assert_eq!(call_id, lifecycle_handle.session_id());
+    }
+
     #[cfg_attr(not(feature = "perf-tests"), allow(dead_code))]
     fn prune_expired_terminal_entries(&self) -> usize {
         prune_due_terminal_entries_from(
@@ -1060,6 +1188,13 @@ impl LifecycleIndex {
     #[cfg(feature = "perf-tests")]
     pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
         let pruned_expired_terminal_entries = self.prune_expired_terminal_entries();
+        let pruned_expired_exact_terminal_entries = prune_due_exact_lifecycle_entries_from(
+            &self.exact_entries,
+            &self.exact_waiters,
+            &self.exact_terminal_deadlines,
+            Instant::now(),
+            TERMINAL_DEADLINE_PRUNE_BATCH_MAX,
+        );
         let mut terminal_entries = 0_u64;
         let mut expired_terminal_entries = 0_u64;
         let mut progress_events = 0_u64;
@@ -1089,10 +1224,18 @@ impl LifecycleIndex {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             deadlines.by_deadline.len()
         };
+        let exact_terminal_deadline_records = self
+            .exact_terminal_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .by_deadline
+            .len();
 
         serde_json::json!({
             "entries": self.entries.len(),
             "waiters": self.waiters.len(),
+            "exact_entries": self.exact_entries.len(),
+            "exact_waiters": self.exact_waiters.len(),
             "terminal_entries": terminal_entries,
             "expired_terminal_entries": expired_terminal_entries,
             "progress_events": progress_events,
@@ -1101,16 +1244,21 @@ impl LifecycleIndex {
             "retained_terminal_reason_bytes": retained_terminal_reason_bytes,
             "terminal_ttl_secs": TERMINAL_EVENT_TTL.as_secs(),
             "pruned_expired_terminal_entries": pruned_expired_terminal_entries,
+            "pruned_expired_exact_terminal_entries": pruned_expired_exact_terminal_entries,
             "storage": {
                 "entry_table_capacity": self.entries.capacity(),
                 "waiter_table_capacity": self.waiters.capacity(),
+                "exact_entry_table_capacity": self.exact_entries.capacity(),
+                "exact_waiter_table_capacity": self.exact_waiters.capacity(),
                 "entry_identifier_payload_bytes": entry_identifier_payload_bytes,
                 "terminal_deadline_records": terminal_deadline_records,
+                "exact_terminal_deadline_records": exact_terminal_deadline_records,
                 "terminal_deadline_identifier_payload_bytes": 0,
                 "terminal_deadline_identifiers_share_entry_keys": true,
                 "record_inline_bytes": {
                     "session_id": std::mem::size_of::<SessionId>(),
                     "entry_key": std::mem::size_of::<Arc<SessionId>>(),
+                    "exact_entry_key": std::mem::size_of::<ExactTerminalClaimKey>(),
                     "lifecycle_entry": std::mem::size_of::<LifecycleEntry>(),
                     "terminal_lifecycle_entry": std::mem::size_of::<TerminalLifecycleEntry>(),
                     "deadline_key": std::mem::size_of::<(Instant, u64)>(),
@@ -1120,7 +1268,8 @@ impl LifecycleIndex {
         })
     }
 
-    pub(crate) fn watcher(&self, call_id: &SessionId) -> watch::Receiver<u64> {
+    #[cfg(test)]
+    fn watcher(&self, call_id: &SessionId) -> watch::Receiver<u64> {
         #[cfg(feature = "perf-infra-memory-diagnostics")]
         let waiter_was_new = !self.waiters.contains_key(call_id);
         let receiver = self
@@ -1141,6 +1290,20 @@ impl LifecycleIndex {
         receiver
     }
 
+    pub(crate) fn watcher_exact(
+        &self,
+        lifecycle_handle: &SessionRegistryHandle,
+    ) -> watch::Receiver<u64> {
+        let exact_key = ExactTerminalClaimKey::from(lifecycle_handle);
+        self.exact_waiters
+            .entry(exact_key)
+            .or_insert_with(|| {
+                let (tx, _) = watch::channel(0);
+                tx
+            })
+            .subscribe()
+    }
+
     fn notify_waiters(&self, call_id: &SessionId, terminal: bool) {
         if let Some(sender) = self.waiters.get(call_id) {
             let current = *sender.borrow();
@@ -1153,6 +1316,18 @@ impl LifecycleIndex {
                 "sip.lifecycle.waiter",
                 std::mem::size_of::<watch::Sender<u64>>(),
             );
+        }
+    }
+
+    fn notify_exact_waiters(&self, lifecycle_handle: &SessionRegistryHandle, terminal: bool) {
+        let exact_key = ExactTerminalClaimKey::from(lifecycle_handle);
+        if let Some(sender) = self.exact_waiters.get(&exact_key) {
+            let current = *sender.borrow();
+            let _ = sender.send(current.wrapping_add(1));
+        }
+
+        if terminal {
+            self.exact_waiters.remove(&exact_key);
         }
     }
 
@@ -1238,7 +1413,82 @@ impl LifecycleIndex {
             self.terminal_deadlines
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .unschedule(call_id, stored_at, deadline_generation);
+                .unschedule(stored_at, deadline_generation);
+        }
+
+        snapshot
+    }
+
+    pub(crate) fn snapshot_exact(
+        &self,
+        lifecycle_handle: &SessionRegistryHandle,
+        state: Option<CallState>,
+    ) -> CallLifecycleSnapshot {
+        let call_id = lifecycle_handle.session_id().clone();
+        let exact_key = ExactTerminalClaimKey::from(lifecycle_handle);
+        let mut terminal_expired = false;
+        let mut expired_deadline = None;
+        let snapshot = if let Some(entry) = self.exact_entries.get(&exact_key) {
+            match entry.value() {
+                LifecycleEntry::Active(active) => CallLifecycleSnapshot {
+                    call_id: call_id.clone(),
+                    state,
+                    progress: active.progress.iter().cloned().collect(),
+                    answered: active.answered.clone(),
+                    media_security: active.media_security.clone(),
+                    terminal: None,
+                    latest_transfer_outcome: active.latest_transfer_outcome.as_deref().cloned(),
+                },
+                LifecycleEntry::Terminal(terminal) => {
+                    if terminal.stored_at.elapsed() > TERMINAL_EVENT_TTL {
+                        terminal_expired = true;
+                        expired_deadline = Some((terminal.stored_at, terminal.deadline_generation));
+                    }
+                    CallLifecycleSnapshot {
+                        call_id: call_id.clone(),
+                        state,
+                        progress: Vec::new(),
+                        answered: terminal.answered.then(|| CallAnsweredInfo {
+                            call_id: call_id.clone(),
+                            sdp: None,
+                        }),
+                        media_security: terminal.media_security.clone(),
+                        terminal: (!terminal_expired).then(|| terminal.terminal.clone()),
+                        latest_transfer_outcome: None,
+                    }
+                }
+            }
+        } else {
+            CallLifecycleSnapshot {
+                call_id,
+                state,
+                progress: Vec::new(),
+                answered: None,
+                media_security: None,
+                terminal: None,
+                latest_transfer_outcome: None,
+            }
+        };
+
+        if let Some((stored_at, deadline_generation)) = expired_deadline {
+            if self
+                .exact_entries
+                .remove_if(&exact_key, |_, entry| {
+                    matches!(
+                        entry,
+                        LifecycleEntry::Terminal(terminal)
+                            if terminal.stored_at == stored_at
+                                && terminal.deadline_generation == deadline_generation
+                    )
+                })
+                .is_some()
+            {
+                self.exact_waiters.remove(&exact_key);
+            }
+            self.exact_terminal_deadlines
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unschedule(stored_at, deadline_generation);
         }
 
         snapshot
@@ -1248,7 +1498,7 @@ impl LifecycleIndex {
 fn prune_due_terminal_entries_from(
     entries: &DashMap<Arc<SessionId>, LifecycleEntry>,
     waiters: &DashMap<SessionId, watch::Sender<u64>>,
-    terminal_deadlines: &Mutex<LifecycleDeadlineQueue>,
+    terminal_deadlines: &Mutex<LifecycleDeadlineQueue<Arc<SessionId>>>,
     now: Instant,
     max_work: usize,
 ) -> usize {
@@ -1301,6 +1551,51 @@ fn prune_due_terminal_entries_from(
     removed
 }
 
+fn prune_due_exact_lifecycle_entries_from(
+    entries: &DashMap<ExactTerminalClaimKey, LifecycleEntry>,
+    waiters: &DashMap<ExactTerminalClaimKey, watch::Sender<u64>>,
+    terminal_deadlines: &Mutex<LifecycleDeadlineQueue<ExactTerminalClaimKey>>,
+    now: Instant,
+    max_work: usize,
+) -> usize {
+    let (expired, drained_to_empty) = {
+        let mut terminal_deadlines = terminal_deadlines
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let had_deadlines = !terminal_deadlines.by_deadline.is_empty();
+        let expired = terminal_deadlines.take_due(now, max_work);
+        (
+            expired,
+            had_deadlines && terminal_deadlines.by_deadline.is_empty(),
+        )
+    };
+    let mut removed = 0;
+    for (exact_key, deadline_generation) in expired {
+        if entries
+            .remove_if(&exact_key, |_, entry| {
+                matches!(
+                    entry,
+                    LifecycleEntry::Terminal(terminal)
+                        if terminal.deadline_generation == deadline_generation
+                )
+            })
+            .is_some()
+        {
+            removed += 1;
+            waiters.remove(&exact_key);
+        }
+    }
+    if drained_to_empty {
+        if entries.is_empty() && entries.capacity() > MAX_EAGER_LIFECYCLE_ENTRY_CAPACITY {
+            entries.shrink_to_fit();
+        }
+        if waiters.is_empty() && waiters.capacity() > MAX_EAGER_LIFECYCLE_WAITER_CAPACITY {
+            waiters.shrink_to_fit();
+        }
+    }
+    removed
+}
+
 const SESSION_EVENT_DISPATCHER_OPEN: u8 = 0;
 const SESSION_EVENT_DISPATCHER_DRAINING: u8 = 1;
 const SESSION_EVENT_DISPATCHER_CLOSED: u8 = 2;
@@ -1340,7 +1635,6 @@ struct SessionEventDispatcherMetrics {
     best_effort_dropped: AtomicU64,
     closed_admissions: AtomicU64,
     publication_failures: AtomicU64,
-    publication_timeouts: AtomicU64,
     shutdown_timeouts: AtomicU64,
     shutdown_aborted_workers: AtomicU64,
 }
@@ -1361,7 +1655,6 @@ struct SessionEventDispatcherMetricsSnapshot {
     best_effort_dropped: u64,
     closed_admissions: u64,
     publication_failures: u64,
-    publication_timeouts: u64,
     shutdown_timeouts: u64,
     shutdown_aborted_workers: u64,
 }
@@ -1505,6 +1798,9 @@ impl SessionEventDispatcher {
                             let stage = cleanup_stage_for_event(&event.event);
                             let label = cleanup_label_for_event(&event.event);
                             let guard = cleanup_diag::stage_guard(stage, label);
+                            // Only the sanitized public projection reaches
+                            // the coordinator. Exact authority has already
+                            // been offered to the single private owner.
                             let result = match coordinator.publish_observational(event).await {
                                 Ok(()) => {
                                     in_flight.delivered();
@@ -1550,7 +1846,10 @@ impl SessionEventDispatcher {
         }
     }
 
-    fn publish_best_effort(&self, event: Arc<SessionApiCrossCrateEvent>) {
+    fn publish_best_effort(
+        &self,
+        event: Arc<SessionApiCrossCrateEvent>,
+    ) -> std::result::Result<(), SessionEventDispatchError> {
         let idx = self.worker_index(&event.event);
         let tx = self.workers[idx].clone();
         cleanup_diag::record_queue_depth(
@@ -1559,11 +1858,11 @@ impl SessionEventDispatcher {
         );
         let Ok(_admission) = self.admission_gate.try_read() else {
             self.record_closed_admission(&event.event);
-            return;
+            return Err(SessionEventDispatchError::Closed);
         };
         if self.state.load(Ordering::Acquire) != SESSION_EVENT_DISPATCHER_OPEN {
             self.record_closed_admission(&event.event);
-            return;
+            return Err(SessionEventDispatchError::Closed);
         }
         let terminal = cleanup_stage_for_event(&event.event) == CleanupStage::TerminalEventPublish;
         match tx.try_send(SessionEventDispatchCommand::Publish {
@@ -1571,7 +1870,7 @@ impl SessionEventDispatcher {
             completion: None,
             accounting: SessionEventQueueAccounting::new(Arc::clone(&self.metrics), terminal),
         }) {
-            Ok(()) => {}
+            Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(command)) => {
                 let event = command.event();
                 self.metrics
@@ -1592,9 +1891,11 @@ impl SessionEventDispatcher {
                     error_class = "bounded-queue-full",
                     "Session event dispatcher rejected a best-effort observational event"
                 );
+                Err(SessionEventDispatchError::PublicationFailed)
             }
             Err(mpsc::error::TrySendError::Closed(command)) => {
                 self.record_closed_admission(command.event());
+                Err(SessionEventDispatchError::Closed)
             }
         }
     }
@@ -1648,13 +1949,6 @@ impl SessionEventDispatcher {
             self.record_closed_admission_without_event();
             Err(SessionEventDispatchError::Closed)
         })
-    }
-
-    fn record_publication_timeout(&self) {
-        self.metrics
-            .publication_timeouts
-            .fetch_add(1, Ordering::Relaxed);
-        cleanup_diag::record_session_event_publication_timed_out();
     }
 
     async fn shutdown(&self) {
@@ -1794,10 +2088,9 @@ impl SessionEventDispatcher {
             best_effort_dropped: self.metrics.best_effort_dropped.load(Ordering::Relaxed),
             closed_admissions: self.metrics.closed_admissions.load(Ordering::Relaxed),
             publication_failures: self.metrics.publication_failures.load(Ordering::Relaxed),
-            // Only terminal publication owners use a deadline, and they do so
-            // to guarantee exact release. Ordinary observational publication
-            // remains uncancelled so it cannot split handler delivery.
-            publication_timeouts: self.metrics.publication_timeouts.load(Ordering::Relaxed),
+            // Dispatcher shutdown is bounded independently of exact terminal
+            // release. A hostile observer can be aborted without retaining
+            // signaling resources.
             shutdown_timeouts: self.metrics.shutdown_timeouts.load(Ordering::Relaxed),
             shutdown_aborted_workers: self
                 .metrics
@@ -1843,13 +2136,15 @@ pub(crate) struct SessionEventPublisher {
 
 #[derive(Clone)]
 struct SessionControlSink {
-    sender: tokio::sync::mpsc::Sender<Event>,
+    sender: tokio::sync::mpsc::UnboundedSender<SessionControlEvent>,
     claimed: Arc<AtomicBool>,
 }
 
-pub(crate) struct TerminalEventReleaseOutcome {
-    pub(crate) publication: Result<()>,
-    pub(crate) release: Result<()>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionControlAdmission {
+    NoOwner,
+    Accepted,
+    Rejected,
 }
 
 impl SessionEventPublisher {
@@ -1876,7 +2171,7 @@ impl SessionEventPublisher {
 
     pub(crate) fn with_control_sink(
         mut self,
-        sender: tokio::sync::mpsc::Sender<Event>,
+        sender: tokio::sync::mpsc::UnboundedSender<SessionControlEvent>,
         claimed: Arc<AtomicBool>,
     ) -> Self {
         self.control_sink = Some(SessionControlSink { sender, claimed });
@@ -1892,13 +2187,26 @@ impl SessionEventPublisher {
 
     pub(crate) fn publish(&self, event: Event) {
         self.lifecycle.record_event(&event);
-        let wrapped = SessionApiCrossCrateEvent::new(event);
-        self.dispatcher.publish_best_effort(wrapped);
+        let _ = self.offer_to_control_owner(&event, None);
+        let wrapped = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.dispatcher.publish_best_effort(wrapped);
+    }
+
+    /// Publish an inbound control event together with the exact registry
+    /// lifetime that produced it. Only the private owning receiver receives
+    /// the capability; the event bus receives a sanitized observation.
+    pub(crate) fn publish_exact(&self, lifecycle_handle: &SessionRegistryHandle, event: Event) {
+        debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
+        self.lifecycle.record_event_exact(lifecycle_handle, &event);
+        let _ = self.offer_to_control_owner(&event, Some(lifecycle_handle));
+        let public = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.dispatcher.publish_best_effort(public);
     }
 
     pub(crate) async fn publish_now(&self, event: Event) -> Result<()> {
         self.lifecycle.record_event(&event);
-        let wrapped = SessionApiCrossCrateEvent::new(event);
+        let _ = self.offer_to_control_owner(&event, None);
+        let wrapped = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
         match self.dispatcher.publish_confirmed(wrapped).await {
             Ok(()) => Ok(()),
             Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(
@@ -1910,91 +2218,121 @@ impl SessionEventPublisher {
         }
     }
 
-    /// Publish a control-bearing event with nonblocking bounded admission.
+    /// Publish a control-bearing event to the nonblocking single-owner path.
     ///
-    /// The capability-bearing event is delivered only to the single private
-    /// owner. A separately stripped public observation is emitted exactly
-    /// once whether owner admission succeeds or fails.
+    /// The internal channel is unbounded so observational dispatcher pressure
+    /// cannot drop exact authority. Its lifetime is bounded by the owning
+    /// coordinator/peer, and closed or absent ownership fails explicitly. A
+    /// separately stripped public observation is emitted exactly once whether
+    /// owner admission succeeds or fails.
     pub(crate) async fn publish_control_now(&self, event: Event) -> Result<()> {
+        self.publish_control_with_lifecycle_now(None, event).await
+    }
+
+    /// Publish a response-capable control event with its exact session
+    /// generation on the private owner channel only.
+    pub(crate) async fn publish_control_exact_now(
+        &self,
+        lifecycle_handle: &SessionRegistryHandle,
+        event: Event,
+    ) -> Result<()> {
+        debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
+        self.publish_control_with_lifecycle_now(Some(lifecycle_handle), event)
+            .await
+    }
+
+    async fn publish_control_with_lifecycle_now(
+        &self,
+        lifecycle_handle: Option<&SessionRegistryHandle>,
+        event: Event,
+    ) -> Result<()> {
         self.lifecycle.record_event(&event);
-        let mut observation = event.clone();
-        if let Event::InfoReceived { request, .. } = &mut observation {
-            request.clear_response_capability();
+        let observation = sanitize_session_api_observation(&event);
+        let control_result = self.offer_to_control_owner(&event, lifecycle_handle);
+        if control_result == SessionControlAdmission::NoOwner {
+            let _ = self
+                .dispatcher
+                .publish_best_effort(SessionApiCrossCrateEvent::new(observation));
+            return Err(SessionError::Other(
+                "Failed to publish control event (class=no-owner)".to_string(),
+            ));
         }
-        let control_result = match &self.control_sink {
-            Some(sink) if sink.claimed.load(Ordering::Acquire) => {
-                sink.sender.try_send(event).map_err(|_| ())
-            }
-            _ => {
-                self.dispatcher
-                    .publish_best_effort(SessionApiCrossCrateEvent::new(observation));
-                return Err(SessionError::Other(
-                    "Failed to publish control event (class=no-owner)".to_string(),
-                ));
-            }
-        };
-        self.dispatcher
+        let _ = self
+            .dispatcher
             .publish_best_effort(SessionApiCrossCrateEvent::new(observation));
         match control_result {
-            Ok(()) => Ok(()),
-            Err(_) => Err(SessionError::Other(
+            SessionControlAdmission::Accepted => Ok(()),
+            SessionControlAdmission::Rejected => Err(SessionError::Other(
                 "Failed to publish control event (class=owner-rejected)".to_string(),
+            )),
+            SessionControlAdmission::NoOwner => unreachable!("handled above"),
+        }
+    }
+
+    fn offer_to_control_owner(
+        &self,
+        event: &Event,
+        lifecycle_handle: Option<&SessionRegistryHandle>,
+    ) -> SessionControlAdmission {
+        let Some(sink) = &self.control_sink else {
+            return SessionControlAdmission::NoOwner;
+        };
+        if !sink.claimed.load(Ordering::Acquire) {
+            return SessionControlAdmission::NoOwner;
+        }
+        let control = SessionControlEvent::new(event.clone(), lifecycle_handle.cloned());
+        match sink.sender.send(control) {
+            Ok(()) => SessionControlAdmission::Accepted,
+            Err(_) => SessionControlAdmission::Rejected,
+        }
+    }
+
+    /// Record committed terminal lifecycle state and attempt nonblocking
+    /// observational admission.
+    ///
+    /// This method deliberately cannot accept or await a release future. Exact
+    /// resource release remains a separate causal operation, so a healthy,
+    /// saturated, stalled, closed, or absent observer has identical cleanup
+    /// semantics.
+    #[cfg(test)]
+    pub(crate) fn publish_terminal_best_effort(&self, event: Event) -> Result<()> {
+        self.lifecycle.record_event(&event);
+        let _ = self.offer_to_control_owner(&event, None);
+        match self
+            .dispatcher
+            .publish_best_effort(SessionApiCrossCrateEvent::new(
+                sanitize_session_api_observation(&event),
+            )) {
+            Ok(()) => Ok(()),
+            Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(
+                "Failed to publish app-level event (class=dispatcher-closed)".to_string(),
+            )),
+            Err(SessionEventDispatchError::PublicationFailed) => Err(SessionError::Other(
+                "Failed to publish app-level event (class=dispatcher-saturated)".to_string(),
             )),
         }
     }
 
-    /// Attempt ordered terminal publication, then always run exact release.
-    ///
-    /// The lifecycle index is updated before queue admission. A closed or
-    /// overloaded observational bus is therefore reported separately but can
-    /// never skip the authoritative release future.
-    pub(crate) async fn publish_terminal_then_release<F>(
+    /// Record and publish terminal evidence for one exact lifetime before its
+    /// registry entry is released. Exact waiters retain this terminal snapshot
+    /// even if a later call reuses the same public identifier.
+    pub(crate) fn publish_terminal_best_effort_exact(
         &self,
+        lifecycle_handle: &SessionRegistryHandle,
         event: Event,
-        release: F,
-    ) -> TerminalEventReleaseOutcome
-    where
-        F: Future<Output = Result<()>>,
-    {
-        let publication = self.publish_now(event).await;
-        let release = release.await;
-        TerminalEventReleaseOutcome {
-            publication,
-            release,
-        }
-    }
-
-    /// Attempt ordered terminal publication for at most `publication_timeout`,
-    /// then always run exact release.
-    ///
-    /// A stalled observational consumer must not retain a SIP call after its
-    /// protocol teardown has reached a terminal outcome. The lifecycle record
-    /// is committed synchronously before dispatcher admission, so timing out
-    /// this delivery wait preserves late-waiter semantics while allowing the
-    /// authoritative resource owner to finish.
-    pub(crate) async fn publish_terminal_then_release_bounded<F>(
-        &self,
-        event: Event,
-        release: F,
-        publication_timeout: Duration,
-    ) -> TerminalEventReleaseOutcome
-    where
-        F: Future<Output = Result<()>>,
-    {
-        let publication =
-            match tokio::time::timeout(publication_timeout, self.publish_now(event)).await {
-                Ok(publication) => publication,
-                Err(_) => {
-                    self.dispatcher.record_publication_timeout();
-                    Err(SessionError::Other(
-                        "Failed to publish app-level event (class=publication-timeout)".to_string(),
-                    ))
-                }
-            };
-        let release = release.await;
-        TerminalEventReleaseOutcome {
-            publication,
-            release,
+    ) -> Result<()> {
+        debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
+        self.lifecycle.record_event_exact(lifecycle_handle, &event);
+        let _ = self.offer_to_control_owner(&event, Some(lifecycle_handle));
+        let public = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        match self.dispatcher.publish_best_effort(public) {
+            Ok(()) => Ok(()),
+            Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(
+                "Failed to publish app-level event (class=dispatcher-closed)".to_string(),
+            )),
+            Err(SessionEventDispatchError::PublicationFailed) => Err(SessionError::Other(
+                "Failed to publish app-level event (class=dispatcher-saturated)".to_string(),
+            )),
         }
     }
 
@@ -2020,7 +2358,6 @@ impl SessionEventPublisher {
                 "best_effort_dropped": dispatcher.best_effort_dropped,
                 "closed_admissions": dispatcher.closed_admissions,
                 "publication_failures": dispatcher.publication_failures,
-                "publication_timeouts": dispatcher.publication_timeouts,
                 "shutdown_timeouts": dispatcher.shutdown_timeouts,
                 "shutdown_aborted_workers": dispatcher.shutdown_aborted_workers,
             },
@@ -2167,18 +2504,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn control_event_admission_fails_immediately_when_dispatcher_is_saturated() {
+    async fn exact_control_delivery_survives_saturated_observational_dispatcher() {
         let (publisher, _lifecycle, mut observed, release, coordinator) =
             blocking_event_publisher(1).await;
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
-        control_tx
-            .try_send(Event::CallProgress {
-                call_id: SessionId::from_string("queue-filler"),
-                status_code: 100,
-                reason: "queue filler".to_string(),
-                sdp: None,
-            })
-            .expect("fill control owner queue");
+        publisher.publish(Event::CallProgress {
+            call_id: SessionId::from_string("in-flight-observation"),
+            status_code: 101,
+            reason: "block observer".to_string(),
+            sdp: None,
+        });
+        assert_eq!(next_observed(&mut observed).await, 101);
+        publisher.publish(Event::CallProgress {
+            call_id: SessionId::from_string("queued-observation"),
+            status_code: 102,
+            reason: "fill dispatcher".to_string(),
+            sdp: None,
+        });
+
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
         let publisher = publisher.with_control_sink(control_tx, Arc::new(AtomicBool::new(true)));
 
         let result = tokio::time::timeout(
@@ -2192,23 +2535,20 @@ mod tests {
         )
         .await
         .expect("control admission waited for queue capacity")
-        .expect_err("saturated control event was accepted");
-        assert!(
-            matches!(
-                &result,
-                SessionError::Other(detail) if detail.contains("class=owner-rejected")
-            ),
-            "unexpected saturation error: {result}"
-        );
+        .expect("private control event was coupled to observation saturation");
+        let _ = result;
         assert!(matches!(
             control_rx.try_recv().expect("retained queue filler"),
-            Event::CallProgress {
-                status_code: 100,
+            SessionControlEvent {
+                event: Event::CallProgress {
+                    status_code: 183,
+                    ..
+                },
+                lifecycle_handle: None,
                 ..
             }
         ));
-        assert_eq!(next_observed(&mut observed).await, 183);
-        release.add_permits(1);
+        release.add_permits(2);
 
         publisher.shutdown().await;
         coordinator.shutdown().await.expect("shutdown coordinator");
@@ -2221,7 +2561,7 @@ mod tests {
                 .await
                 .expect("create test event coordinator"),
         );
-        let (control_tx, control_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
         drop(control_rx);
         let mut observations = coordinator
             .subscribe(crate::adapters::SESSION_TO_APP_CHANNEL)
@@ -2264,7 +2604,7 @@ mod tests {
                 .await
                 .expect("create coordinator"),
         );
-        let (control_tx, mut control_rx) = tokio::sync::mpsc::channel(1);
+        let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
         let publisher = SessionEventPublisher::with_dispatcher(
             Arc::clone(&coordinator),
             LifecycleIndex::new(),
@@ -2288,9 +2628,12 @@ mod tests {
         .expect("private control owner accepted event");
         assert!(matches!(
             control_rx.recv().await,
-            Some(Event::CallProgress {
-                status_code: 183,
-                ..
+            Some(SessionControlEvent {
+                event: Event::CallProgress {
+                    status_code: 183,
+                    ..
+                },
+                lifecycle_handle: None,
             })
         ));
 
@@ -2379,25 +2722,18 @@ mod tests {
             ExactTerminalClaim::Observer(_) => panic!("first exact claim was not owner"),
         };
         let release_ran = Arc::new(AtomicBool::new(false));
-        let release_ran_in_future = Arc::clone(&release_ran);
-        let outcome = publisher
-            .publish_terminal_then_release(
-                Event::CallEnded {
-                    call_id: call_id.clone(),
-                    reason: "confirmed BYE".to_string(),
-                },
-                async move {
-                    release_ran_in_future.store(true, Ordering::Release);
-                    Ok(())
-                },
-            )
-            .await;
+        let publication = publisher.publish_terminal_best_effort(Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "confirmed BYE".to_string(),
+        });
+        release_ran.store(true, Ordering::Release);
+        let release: Result<()> = Ok(());
         assert!(matches!(
-            outcome.publication,
+            publication,
             Err(SessionError::Other(ref detail))
                 if detail == "Failed to publish app-level event (class=dispatcher-closed)"
         ));
-        assert!(outcome.release.is_ok());
+        assert!(release.is_ok());
         assert!(
             release_ran.load(Ordering::Acquire),
             "closed dispatcher skipped exact release"
@@ -2410,22 +2746,208 @@ mod tests {
         // Publication failure is observational. The exact-release owner still
         // records successful local reclamation, and late contenders observe
         // that immutable completion rather than becoming a second owner.
-        owner.finish(ExactTerminalCompletion::PublicationFailed);
+        owner.finish(ExactTerminalCompletion::Released);
         let observer = match publisher.claim_exact_terminal(&handle) {
             ExactTerminalClaim::Observer(observer) => observer,
             ExactTerminalClaim::Owner(_) => panic!("closed dispatcher created a second owner"),
         };
-        assert_eq!(
-            observer.wait().await,
-            ExactTerminalCompletion::PublicationFailed
-        );
+        assert_eq!(observer.wait().await, ExactTerminalCompletion::Released);
         let diagnostics = publisher.dispatcher.metrics_snapshot();
         assert_eq!(diagnostics.closed_admissions, 1);
         assert_eq!(diagnostics.best_effort_dropped, 0);
     }
 
     #[tokio::test]
-    async fn publish_terminal_then_release_waits_for_bus_not_observer_completion() {
+    async fn healthy_terminal_observer_has_the_same_exact_release_semantics() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .expect("create test event coordinator"),
+        );
+        let mut observed = coordinator
+            .subscribe(crate::adapters::SESSION_TO_APP_CHANNEL)
+            .await
+            .expect("subscribe healthy observer");
+        let lifecycle = LifecycleIndex::new();
+        let publisher = SessionEventPublisher::with_dispatcher(
+            Arc::clone(&coordinator),
+            lifecycle.clone(),
+            1,
+            1,
+        );
+        let call_id = SessionId::from_string("healthy-terminal-observer");
+        let release_ran = Arc::new(AtomicBool::new(false));
+
+        let publication = publisher.publish_terminal_best_effort(Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "confirmed BYE".to_string(),
+        });
+        release_ran.store(true, Ordering::Release);
+
+        assert!(publication.is_ok());
+        assert!(release_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            lifecycle.snapshot(&call_id, None).terminal,
+            Some(CallTerminalInfo::Ended { .. })
+        ));
+        assert_eq!(next_bus_observed(&mut observed).await, 999);
+        publisher.shutdown().await;
+        coordinator.shutdown().await.expect("shutdown coordinator");
+    }
+
+    #[tokio::test]
+    async fn absent_terminal_observer_has_the_same_exact_release_semantics() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .expect("create test event coordinator"),
+        );
+        let lifecycle = LifecycleIndex::new();
+        let publisher = SessionEventPublisher::with_dispatcher(
+            Arc::clone(&coordinator),
+            lifecycle.clone(),
+            1,
+            1,
+        );
+        let call_id = SessionId::from_string("absent-terminal-observer");
+        let release_ran = Arc::new(AtomicBool::new(false));
+
+        let publication = publisher.publish_terminal_best_effort(Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "confirmed BYE".to_string(),
+        });
+        release_ran.store(true, Ordering::Release);
+
+        assert!(publication.is_ok());
+        assert!(release_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            lifecycle.snapshot(&call_id, None).terminal,
+            Some(CallTerminalInfo::Ended { .. })
+        ));
+        publisher.shutdown().await;
+        coordinator.shutdown().await.expect("shutdown coordinator");
+    }
+
+    #[tokio::test]
+    async fn best_effort_terminal_release_does_not_wait_for_stalled_observer() {
+        let (publisher, lifecycle, mut observed, release_observer, coordinator) =
+            blocking_event_publisher(1).await;
+        let call_id = SessionId::from_string("best-effort-stalled-observer");
+        let release_ran = Arc::new(AtomicBool::new(false));
+        let release_ran_in_task = Arc::clone(&release_ran);
+        let task_publisher = publisher.clone();
+        let terminal_call_id = call_id.clone();
+        let terminal = tokio::spawn(async move {
+            let publication = task_publisher.publish_terminal_best_effort(Event::CallEnded {
+                call_id: terminal_call_id,
+                reason: "confirmed BYE".to_string(),
+            });
+            release_ran_in_task.store(true, Ordering::Release);
+            (publication, Ok::<(), SessionError>(()))
+        });
+
+        let outcome = tokio::time::timeout(Duration::from_millis(100), terminal)
+            .await
+            .expect("stalled observer retained exact terminal release")
+            .expect("terminal release task panicked");
+        assert!(outcome.0.is_ok());
+        assert!(outcome.1.is_ok());
+        assert!(release_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            lifecycle.snapshot(&call_id, None).terminal,
+            Some(CallTerminalInfo::Ended { .. })
+        ));
+
+        assert_eq!(next_observed(&mut observed).await, 999);
+        release_observer.add_permits(1);
+        publisher.shutdown().await;
+        coordinator.shutdown().await.expect("shutdown coordinator");
+    }
+
+    #[tokio::test]
+    async fn saturated_best_effort_terminal_admission_still_runs_exact_release() {
+        let metrics = Arc::new(SessionEventDispatcherMetrics::default());
+        let (worker, mut retained_receiver) = mpsc::channel(1);
+        let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+        worker
+            .try_send(SessionEventDispatchCommand::Shutdown {
+                completion: shutdown_tx,
+            })
+            .expect("fill synthetic dispatcher queue");
+        let lifecycle = LifecycleIndex::new();
+        let publisher = SessionEventPublisher {
+            lifecycle: lifecycle.clone(),
+            dispatcher: SessionEventDispatcher {
+                workers: Arc::new(vec![worker]),
+                next_worker: Arc::new(AtomicUsize::new(0)),
+                state: Arc::new(AtomicU8::new(SESSION_EVENT_DISPATCHER_OPEN)),
+                admission_gate: Arc::new(TokioRwLock::new(())),
+                closed: Arc::new(Notify::new()),
+                metrics: Arc::clone(&metrics),
+                worker_tasks: Arc::new(TokioMutex::new(Some(Vec::new()))),
+            },
+            control_sink: None,
+            exact_terminal_claims: ExactTerminalClaims::default(),
+        };
+        let call_id = SessionId::from_string("best-effort-saturated-admission");
+        let release_ran = Arc::new(AtomicBool::new(false));
+        let publication = publisher.publish_terminal_best_effort(Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "confirmed BYE".to_string(),
+        });
+        release_ran.store(true, Ordering::Release);
+        assert!(matches!(
+            publication,
+            Err(SessionError::Other(ref detail))
+                if detail.contains("class=dispatcher-saturated")
+        ));
+        assert!(release_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            lifecycle.snapshot(&call_id, None).terminal,
+            Some(CallTerminalInfo::Ended { .. })
+        ));
+        assert_eq!(metrics.saturated_admissions.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.best_effort_dropped.load(Ordering::Relaxed), 1);
+        retained_receiver.close();
+    }
+
+    #[tokio::test]
+    async fn closed_best_effort_terminal_admission_still_runs_exact_release() {
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .expect("create test event coordinator"),
+        );
+        let lifecycle = LifecycleIndex::new();
+        let publisher = SessionEventPublisher::with_dispatcher(
+            Arc::clone(&coordinator),
+            lifecycle.clone(),
+            1,
+            1,
+        );
+        publisher.shutdown().await;
+        let call_id = SessionId::from_string("best-effort-closed-admission");
+        let release_ran = Arc::new(AtomicBool::new(false));
+        let publication = publisher.publish_terminal_best_effort(Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "confirmed BYE".to_string(),
+        });
+        release_ran.store(true, Ordering::Release);
+        assert!(matches!(
+            publication,
+            Err(SessionError::Other(ref detail))
+                if detail.contains("class=dispatcher-closed")
+        ));
+        assert!(release_ran.load(Ordering::Acquire));
+        assert!(matches!(
+            lifecycle.snapshot(&call_id, None).terminal,
+            Some(CallTerminalInfo::Ended { .. })
+        ));
+        coordinator.shutdown().await.expect("shutdown coordinator");
+    }
+
+    #[tokio::test]
+    async fn terminal_observation_admission_cannot_delay_exact_release() {
         let (publisher, _lifecycle, mut observed, release_handler, coordinator) =
             blocking_event_publisher(1).await;
         let mut bus = coordinator
@@ -2434,30 +2956,23 @@ mod tests {
             .expect("subscribe to authoritative app bus");
         let call_id = SessionId::from_string("terminal-release-order");
         let release_ran = Arc::new(AtomicBool::new(false));
-        let release_ran_in_future = Arc::clone(&release_ran);
+        let release_ran_in_task = Arc::clone(&release_ran);
         let task_publisher = publisher.clone();
         let terminal = tokio::spawn(async move {
-            task_publisher
-                .publish_terminal_then_release(
-                    Event::CallEnded {
-                        call_id,
-                        reason: "confirmed BYE".to_string(),
-                    },
-                    async move {
-                        release_ran_in_future.store(true, Ordering::Release);
-                        Ok(())
-                    },
-                )
-                .await
+            let publication = task_publisher.publish_terminal_best_effort(Event::CallEnded {
+                call_id,
+                reason: "confirmed BYE".to_string(),
+            });
+            release_ran_in_task.store(true, Ordering::Release);
+            publication
         });
-        assert_eq!(next_observed(&mut observed).await, 999);
-        let outcome = tokio::time::timeout(Duration::from_secs(1), terminal)
+        let publication = tokio::time::timeout(Duration::from_millis(100), terminal)
             .await
-            .expect("terminal release did not complete")
+            .expect("terminal observer admission delayed exact release")
             .expect("terminal release task panicked");
-        assert!(outcome.publication.is_ok());
-        assert!(outcome.release.is_ok());
+        assert!(publication.is_ok());
         assert!(release_ran.load(Ordering::Acquire));
+        assert_eq!(next_observed(&mut observed).await, 999);
         assert_eq!(next_bus_observed(&mut bus).await, 999);
         assert_eq!(
             coordinator.event_bus_diagnostic_snapshot()["observational_handlers"]
@@ -2475,33 +2990,26 @@ mod tests {
             blocking_event_publisher(1).await;
         let call_id = SessionId::from_string("hostile-terminal-observer");
         let release_ran = Arc::new(AtomicBool::new(false));
-        let release_ran_in_future = Arc::clone(&release_ran);
+        let release_ran_in_task = Arc::clone(&release_ran);
         let task_publisher = publisher.clone();
         let terminal = tokio::spawn(async move {
-            task_publisher
-                .publish_terminal_then_release(
-                    Event::CallEnded {
-                        call_id,
-                        reason: "confirmed BYE".to_string(),
-                    },
-                    async move {
-                        release_ran_in_future.store(true, Ordering::Release);
-                        Ok(())
-                    },
-                )
-                .await
+            let publication = task_publisher.publish_terminal_best_effort(Event::CallEnded {
+                call_id,
+                reason: "confirmed BYE".to_string(),
+            });
+            release_ran_in_task.store(true, Ordering::Release);
+            publication
         });
         assert_eq!(next_observed(&mut observed).await, 999);
 
         tokio::time::timeout(Duration::from_secs(1), publisher.shutdown())
             .await
             .expect("hostile observer blocked dispatcher shutdown");
-        let outcome = tokio::time::timeout(Duration::from_secs(1), terminal)
+        let publication = tokio::time::timeout(Duration::from_secs(1), terminal)
             .await
-            .expect("bus-first publication did not unblock exact release")
+            .expect("nonblocking publication did not unblock exact release")
             .expect("terminal release task panicked");
-        assert!(outcome.publication.is_ok());
-        assert!(outcome.release.is_ok());
+        assert!(publication.is_ok());
         assert!(release_ran.load(Ordering::Acquire));
         assert!(matches!(
             lifecycle
@@ -2571,35 +3079,25 @@ mod tests {
             ExactTerminalClaim::Observer(_) => panic!("first exact claim was not owner"),
         };
         let release_ran = Arc::new(AtomicBool::new(false));
-        let release_ran_in_future = Arc::clone(&release_ran);
+        let release_ran_in_task = Arc::clone(&release_ran);
         let task_publisher = publisher.clone();
         let terminal_call_id = call_id.clone();
         let terminal = tokio::spawn(async move {
-            let outcome = task_publisher
-                .publish_terminal_then_release(
-                    Event::CallEnded {
-                        call_id: terminal_call_id,
-                        reason: "confirmed BYE".to_string(),
-                    },
-                    async move {
-                        release_ran_in_future.store(true, Ordering::Release);
-                        Ok(())
-                    },
-                )
-                .await;
-            if outcome.publication.is_ok() && outcome.release.is_ok() {
-                owner.finish(ExactTerminalCompletion::PublishedAndReleased);
-            }
-            outcome
+            let publication = task_publisher.publish_terminal_best_effort(Event::CallEnded {
+                call_id: terminal_call_id,
+                reason: "confirmed BYE".to_string(),
+            });
+            release_ran_in_task.store(true, Ordering::Release);
+            owner.finish(ExactTerminalCompletion::Released);
+            publication
         });
         assert_eq!(next_observed(&mut observed).await, 999);
 
-        let outcome = tokio::time::timeout(Duration::from_secs(1), terminal)
+        let publication = tokio::time::timeout(Duration::from_secs(1), terminal)
             .await
-            .expect("bus-first publication did not unblock exact release")
+            .expect("nonblocking publication did not unblock exact release")
             .expect("terminal release task panicked");
-        assert!(outcome.publication.is_ok());
-        assert!(outcome.release.is_ok());
+        assert!(publication.is_ok());
         assert!(release_ran.load(Ordering::Acquire));
         assert!(matches!(
             lifecycle.snapshot(&call_id, None).terminal,
@@ -2609,10 +3107,7 @@ mod tests {
             ExactTerminalClaim::Observer(observer) => observer,
             ExactTerminalClaim::Owner(_) => panic!("publication created a second owner"),
         };
-        assert_eq!(
-            observer.wait().await,
-            ExactTerminalCompletion::PublishedAndReleased
-        );
+        assert_eq!(observer.wait().await, ExactTerminalCompletion::Released);
         assert_eq!(next_bus_observed(&mut bus).await, 999);
 
         publisher
@@ -2628,7 +3123,6 @@ mod tests {
         release_handler.add_permits(2);
         assert_eq!(next_observed(&mut observed).await, 204);
         let diagnostics = publisher.dispatcher.metrics_snapshot();
-        assert_eq!(diagnostics.publication_timeouts, 0);
         assert_eq!(diagnostics.publication_failures, 0);
         publisher.shutdown().await;
         coordinator.shutdown().await.expect("shutdown coordinator");
@@ -2645,15 +3139,15 @@ mod tests {
         }
 
         tokio::task::yield_now().await;
-        assert!(slot.finish(ExactTerminalCompletion::PublishedAndReleased));
-        assert!(!slot.finish(ExactTerminalCompletion::PublicationFailed));
+        assert!(slot.finish(ExactTerminalCompletion::Released));
+        assert!(!slot.finish(ExactTerminalCompletion::ReleaseFailed));
 
         for waiter in waiters {
             let completion = tokio::time::timeout(Duration::from_secs(1), waiter)
                 .await
                 .expect("exact terminal claim waiter timed out")
                 .expect("exact terminal claim waiter panicked");
-            assert_eq!(completion, ExactTerminalCompletion::PublishedAndReleased);
+            assert_eq!(completion, ExactTerminalCompletion::Released);
         }
     }
 
@@ -2681,13 +3175,13 @@ mod tests {
         };
         let retained_slot = Arc::downgrade(&owner.slot);
 
-        owner.finish(ExactTerminalCompletion::PublishedAndReleased);
+        owner.finish(ExactTerminalCompletion::Released);
 
         let key = ExactTerminalClaimKey::from(&handle);
         assert!(matches!(
             claims.slots.get(&key).as_deref(),
             Some(ExactTerminalClaimState::Completed {
-                completion: ExactTerminalCompletion::PublishedAndReleased,
+                completion: ExactTerminalCompletion::Released,
                 ..
             })
         ));
@@ -2703,7 +3197,7 @@ mod tests {
         let completion = tokio::time::timeout(Duration::from_secs(1), observer.wait())
             .await
             .expect("compact exact claim did not resolve immediately");
-        assert_eq!(completion, ExactTerminalCompletion::PublishedAndReleased);
+        assert_eq!(completion, ExactTerminalCompletion::Released);
     }
 
     #[tokio::test]
@@ -2749,13 +3243,11 @@ mod tests {
             ExactTerminalClaim::Owner(owner) => owner,
             ExactTerminalClaim::Observer(_) => panic!("first exact claim was not owner"),
         };
-        assert!(owner
-            .slot
-            .finish(ExactTerminalCompletion::PublishedAndReleased));
+        assert!(owner.slot.finish(ExactTerminalCompletion::Released));
         claims.compact_completed(
             owner.key,
             &owner.slot,
-            ExactTerminalCompletion::PublishedAndReleased,
+            ExactTerminalCompletion::Released,
             Instant::now() - TERMINAL_EVENT_TTL - Duration::from_millis(1),
         );
         owner.finished = true;
@@ -2796,13 +3288,11 @@ mod tests {
                 ExactTerminalClaim::Owner(owner) => owner,
                 ExactTerminalClaim::Observer(_) => panic!("unique exact claim was not owner"),
             };
-            assert!(owner
-                .slot
-                .finish(ExactTerminalCompletion::PublishedAndReleased));
+            assert!(owner.slot.finish(ExactTerminalCompletion::Released));
             claims.compact_completed(
                 owner.key,
                 &owner.slot,
-                ExactTerminalCompletion::PublishedAndReleased,
+                ExactTerminalCompletion::Released,
                 completed_at,
             );
             owner.finished = true;
@@ -2875,7 +3365,7 @@ mod tests {
         claims.slots.insert(
             key,
             ExactTerminalClaimState::Completed {
-                completion: ExactTerminalCompletion::PublishedAndReleased,
+                completion: ExactTerminalCompletion::Released,
                 deadline_generation: current_generation,
             },
         );
@@ -3083,6 +3573,58 @@ mod tests {
             snapshot.terminal.as_ref().map(CallTerminalInfo::reason),
             Some("Cancelled".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn exact_lifecycle_snapshot_and_watcher_do_not_cross_reused_generation() {
+        let index = LifecycleIndex::new();
+        let generation_a = exact_terminal_test_handle("exact-lifecycle-reuse");
+        let generation_b = generation_a.with_next_slot_revision_for_test();
+        let call_id = generation_a.session_id().clone();
+        let mut generation_a_watcher = index.watcher_exact(&generation_a);
+
+        index.record_event_exact(
+            &generation_a,
+            &Event::CallAnswered {
+                call_id: call_id.clone(),
+                sdp: Some("generation-a".to_string()),
+            },
+        );
+        generation_a_watcher
+            .changed()
+            .await
+            .expect("generation A answered wake");
+        index.record_event_exact(
+            &generation_a,
+            &Event::CallEnded {
+                call_id: call_id.clone(),
+                reason: "generation-a-ended".to_string(),
+            },
+        );
+        generation_a_watcher
+            .changed()
+            .await
+            .expect("generation A terminal wake");
+
+        index.record_event_exact(
+            &generation_b,
+            &Event::CallAnswered {
+                call_id,
+                sdp: Some("generation-b".to_string()),
+            },
+        );
+
+        let stale = index.snapshot_exact(&generation_a, None);
+        assert!(matches!(
+            stale.terminal,
+            Some(CallTerminalInfo::Ended { ref reason }) if reason == "generation-a-ended"
+        ));
+        let current = index.snapshot_exact(&generation_b, Some(CallState::Active));
+        assert_eq!(
+            current.answered.and_then(|answered| answered.sdp),
+            Some("generation-b".to_string())
+        );
+        assert!(generation_a_watcher.has_changed().is_err());
     }
 
     #[test]

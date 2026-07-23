@@ -11,10 +11,12 @@
 //! The test is considered passing iff both child processes exit 0. Alice
 //! drives the hangup at the end.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35073;
 const BOB_PORT: u16 = 35074;
@@ -25,27 +27,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
@@ -62,31 +43,9 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e))
 }
 
-fn build_examples() {
-    let output = Command::new(cargo_bin())
-        .args([
-            "build",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_glare_retry_alice",
-            "--example",
-            "regression_glare_retry_bob",
-        ])
-        .output()
-        .expect("failed to invoke cargo build");
-    if !output.status.success() {
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), &output.stderr);
-        panic!(
-            "cargo build failed (exit={:?}); stderr printed above",
-            output.status.code()
-        );
-    }
-}
-
 #[test]
 fn glare_retry_converges_to_on_hold() {
-    build_examples();
+    build_examples(&["regression_glare_retry_alice", "regression_glare_retry_bob"]);
 
     // Both peers sleep until this wall-clock instant before calling hold().
     // Use a generous 8 s lead time so Alice can establish the call and both

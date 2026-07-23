@@ -13,10 +13,12 @@
 //! Each peer exits 0 on success. The test succeeds if Alice exits cleanly
 //! within the deadline; Bob and Charlie are then cleaned up.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 /// Port set chosen to avoid collisions with the shell-script example
 /// (which uses 5060-5062).
@@ -32,28 +34,6 @@ impl Drop for ChildGuard {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
-}
-
-fn cargo_bin() -> String {
-    // Honour CARGO if cargo set it (it does when running tests via cargo test).
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
@@ -74,23 +54,11 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
 
 #[test]
 fn blind_transfer_end_to_end() {
-    // Build all three examples first so cargo-run invocations below are cheap.
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "stream_peer_blind_transfer_alice",
-            "--example",
-            "stream_peer_blind_transfer_bob",
-            "--example",
-            "stream_peer_blind_transfer_charlie",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "stream_peer_blind_transfer_alice",
+        "stream_peer_blind_transfer_bob",
+        "stream_peer_blind_transfer_charlie",
+    ]);
 
     let env_vars: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

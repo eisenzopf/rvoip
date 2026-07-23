@@ -449,15 +449,25 @@ impl EndpointEvents {
 
     /// Wait for the next endpoint event.
     pub async fn next(&mut self) -> Result<Option<EndpointEvent>> {
-        Ok(self.events.next().await.map(|event| self.map_event(event)))
+        Ok(self
+            .events
+            .next_with_lifecycle()
+            .await
+            .map(|(event, lifecycle_handle)| self.map_event(event, lifecycle_handle)))
     }
 
     /// Return the next endpoint event if one is ready immediately.
     pub fn try_next(&mut self) -> Option<EndpointEvent> {
-        self.events.try_next().map(|event| self.map_event(event))
+        self.events
+            .try_next_with_lifecycle()
+            .map(|(event, lifecycle_handle)| self.map_event(event, lifecycle_handle))
     }
 
-    fn map_event(&self, event: Event) -> EndpointEvent {
+    fn map_event(
+        &self,
+        event: Event,
+        lifecycle_handle: Option<crate::session_registry::SessionRegistryHandle>,
+    ) -> EndpointEvent {
         match event {
             Event::IncomingCall {
                 call_id,
@@ -465,8 +475,14 @@ impl EndpointEvents {
                 to,
                 sdp,
             } => {
-                let incoming =
-                    IncomingCall::new(call_id, from, to, sdp, self.control.coordinator().clone());
+                let incoming = IncomingCall::new_captured(
+                    call_id,
+                    from,
+                    to,
+                    sdp,
+                    self.control.coordinator().clone(),
+                    lifecycle_handle,
+                );
                 EndpointEvent::IncomingCall(EndpointIncomingCall::new(
                     incoming,
                     self.registrar.clone(),
@@ -486,7 +502,11 @@ impl EndpointEvents {
             },
             Event::CallAnswered { call_id, sdp } => EndpointEvent::CallAnswered {
                 call: EndpointCall::new(
-                    SessionHandle::new(call_id, self.control.coordinator().clone()),
+                    SessionHandle::new_captured(
+                        call_id,
+                        self.control.coordinator().clone(),
+                        lifecycle_handle,
+                    ),
                     self.registrar.clone(),
                     self.transport,
                 ),

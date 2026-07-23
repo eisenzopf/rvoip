@@ -7,7 +7,10 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const ENV: &str = "RVOIP_PERF_CALL_SETUP_DIAGNOSTICS";
-const MAX_RECORDS: usize = 20_000;
+// Dense acceptance profiles exceed 8,000 calls and emit several setup stages
+// per call. Keep enough diagnostics to include the tail where admission or
+// dispatch stalls occur instead of silently retaining only the warmup.
+const MAX_RECORDS: usize = 100_000;
 
 static ENABLED: OnceLock<bool> = OnceLock::new();
 static RECORDS: LazyLock<Mutex<Vec<StageRecord>>> = LazyLock::new(|| Mutex::new(Vec::new()));

@@ -248,32 +248,6 @@ async fn handle_registration(
 }
 ```
 
-### Dialog Recovery
-
-```rust
-use rvoip_dialog_core::recovery::{DialogRecoveryManager, RecoveryConfig};
-
-async fn setup_dialog_recovery(
-    dialog_manager: &DialogManager,
-) -> Result<(), DialogError> {
-    let recovery_config = RecoveryConfig {
-        enable_state_persistence: true,
-        recovery_timeout: Duration::from_secs(30),
-        max_recovery_attempts: 3,
-    };
-    
-    let recovery_manager = DialogRecoveryManager::new(
-        recovery_config,
-        dialog_manager.clone()
-    ).await?;
-    
-    // Enable automatic recovery
-    recovery_manager.enable_auto_recovery().await?;
-    
-    Ok(())
-}
-```
-
 ## Relationship to Other Crates
 
 ### Core Dependencies

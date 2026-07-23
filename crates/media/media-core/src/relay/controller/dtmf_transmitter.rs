@@ -291,6 +291,7 @@ mod tests {
     /// `(sender_session, receiver_events)`.
     async fn pair() -> (
         Arc<Mutex<RtpSession>>,
+        UdpRtpTransport,
         tokio::sync::broadcast::Receiver<RtpEvent>,
     ) {
         let receiver_cfg = RtpTransportConfig {
@@ -319,7 +320,7 @@ mod tests {
         };
         let rtp_session = RtpSession::new(session_cfg).await.expect("rtp session");
 
-        (Arc::new(Mutex::new(rtp_session)), events)
+        (Arc::new(Mutex::new(rtp_session)), receiver, events)
     }
 
     /// Drain DTMF events from the receiver until a `timeout` elapses
@@ -341,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn start_packet_carries_e0_and_initial_duration() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session.clone());
         let _handle = tx.send_digit('5', /*duration*/ 100);
 
@@ -370,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn continuation_packets_share_timestamp_increment_duration() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session.clone());
         // 100 ms tone → 5 ticks: 1 start + 3 continuations + final E=1.
         let _handle = tx.send_digit('1', 100);
@@ -419,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn three_end_of_event_packets_collapse_to_one() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session.clone());
         let handle = tx.send_digit('#', 60);
         let _ = handle.await.expect("send task");
@@ -451,7 +452,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_suffix_rejects_the_complete_sequence_before_first_packet() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session);
 
         tx.send_sequence("1X", 100, DEFAULT_DTMF_INTER_DIGIT_MS)
@@ -467,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequence_uses_requested_duration_and_inter_digit_quiet_interval() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session);
         let receive = tokio::spawn(async move {
             let mut first_final_at = None;
@@ -515,7 +516,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_tick_duration_is_not_truncated() {
-        let (session, mut rx) = pair().await;
+        let (session, _receiver_transport, mut rx) = pair().await;
         let tx = DtmfTransmitter::new(session);
         tx.send_digit('3', 95)
             .await

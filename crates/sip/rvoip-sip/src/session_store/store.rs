@@ -23,14 +23,6 @@ const MAX_EAGER_SESSION_STORE_INDEX_CAPACITY: usize = 4_096;
 #[cfg(test)]
 type IndexDeltaCommitHook = Arc<dyn Fn() + Send + Sync>;
 
-fn same_optional_arc<T>(left: &Option<Arc<T>>, right: &Option<Arc<T>>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-        (None, None) => true,
-        _ => false,
-    }
-}
-
 /// Exact secondary-index changes for one session revision.
 ///
 /// Keeping a per-index delta is both a correctness and hot-path property:
@@ -184,23 +176,21 @@ impl SessionStore {
         .then_some(snapshot)
     }
 
-    /// Resolve the lazy hangup-control lane for this exact current lifetime.
-    /// Callers retain the returned `Arc` while awaiting the lane, so removal
-    /// of the raw-ID map entry cannot redirect queued teardown to a reused ID.
-    pub(crate) fn hangup_control(
+    /// Resolve the lazy hangup-control lane only for the caller's captured
+    /// session lifetime. A stale handle must never join the control lane of a
+    /// replacement session that reused the same application-visible ID.
+    pub(crate) fn hangup_control_exact(
         &self,
-        session_id: &SessionId,
-    ) -> Option<(SessionRegistryHandle, Arc<SessionHangupControl>)> {
+        handle: &SessionRegistryHandle,
+    ) -> Option<Arc<SessionHangupControl>> {
         let cell = self
             .sessions
-            .get(session_id)
+            .get(handle.session_id())
             .map(|entry| Arc::clone(entry.value()))?;
         let snapshot = cell.snapshot();
-        let handle = snapshot.lifecycle_handle.as_ref()?;
-        (snapshot.session_id == *session_id
-            && handle.session_id() == session_id
+        (snapshot.lifecycle_handle.as_ref() == Some(handle)
             && self.authority.is_current(handle.key()))
-        .then(|| (handle.clone(), cell.hangup_control()))
+        .then(|| cell.hangup_control())
     }
 
     /// Resolve the async state-machine lane for this exact current lifetime.
@@ -222,6 +212,33 @@ impl SessionStore {
             && handle.session_id() == session_id
             && self.authority.is_current(handle.key()))
         .then(|| (handle.clone(), cell.state_machine_lane()))
+    }
+
+    /// Resolve the async state-machine lane for an already retained exact
+    /// lifetime. Delayed callbacks use this form so a raw identifier reused
+    /// by a later admission can never redirect their queued work.
+    pub(crate) fn state_machine_lane_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        if !self.authority.is_current(handle.key()) {
+            return None;
+        }
+        self.cell_for_handle(handle)
+            .map(|cell| cell.state_machine_lane())
+    }
+
+    /// Resolve the same exact state-machine lane while its retained cell is
+    /// quiescing or retired. Terminal resource cleanup uses this after
+    /// lifecycle quiesce so it still waits behind an already-admitted signal
+    /// operation. Exact cell identity—not the raw session ID—prevents this
+    /// accessor from ever resolving a replacement lifetime.
+    pub(crate) fn state_machine_lane_retained_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.cell_for_handle(handle)
+            .map(|cell| cell.state_machine_lane())
     }
 
     fn map_owns_cell(&self, handle: &SessionRegistryHandle, cell: &Arc<SessionStateCell>) -> bool {
@@ -365,6 +382,24 @@ impl SessionStore {
         role: Role,
         with_history: bool,
     ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>> {
+        self.create_session_initialized(session_id, role, with_history, |_| {})
+            .await
+    }
+
+    /// Admit a session whose initial non-indexed fields are complete before
+    /// the exact lifetime becomes visible in the store. This closes the
+    /// create-then-replace window without changing the retained public
+    /// constructor.
+    pub(crate) async fn create_session_initialized<F>(
+        &self,
+        session_id: SessionId,
+        role: Role,
+        with_history: bool,
+        initialize: F,
+    ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: FnOnce(&mut SessionState),
+    {
         let lease = self.authority.admit(session_id.clone())?;
         let handle = match self.registry.register_handle_exact(lease.key()) {
             Ok(handle) => handle,
@@ -388,6 +423,16 @@ impl SessionStore {
             SessionState::new(session_id.clone(), role)
         };
         session.lifecycle_handle = Some(handle.clone());
+        initialize(&mut session);
+        if session.session_id != session_id
+            || session.lifecycle_handle.as_ref() != Some(&handle)
+            || session.dialog_id.is_some()
+            || session.media_session_id.is_some()
+            || session.call_id.is_some()
+        {
+            self.retire_unpublished_lifetime(&handle).await;
+            return Err("initial session data changed exact identity or an indexed field".into());
+        }
 
         let inserted = {
             let _mutation = self.lock_mutations();
@@ -577,6 +622,17 @@ impl SessionStore {
         &self,
         session: SessionState,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let handle = session
+            .lifecycle_handle
+            .clone()
+            .ok_or("session state has no admitted lifecycle handle")?;
+        if session.session_id != *handle.session_id() {
+            return Err("session state identifier does not match its lifecycle handle".into());
+        }
+        let lane = self
+            .state_machine_lane_exact(&handle)
+            .ok_or("session lifetime is not present in the store")?;
+        let _lane = lane.lock_owned().await;
         self.update_session_and_snapshot(session).map(|_| ())
     }
 
@@ -602,19 +658,14 @@ impl SessionStore {
         self.replace_session_exact(&handle, session)
     }
 
-    /// Publish state-machine-owned event state without resurrecting stale
-    /// tracked-request staging slots.
+    /// Publish state-machine-owned event state.
     ///
-    /// Builders stage these four slots through atomic cell updates while
-    /// different-method state-machine actions may execute concurrently. The
-    /// action transfers its own slot into the request tracker before clearing
-    /// the stored slot. Merging the cell's current values while its update lock
-    /// is held preserves a newer builder stage without changing the semantics
-    /// of the public owned-state compatibility replacement APIs.
+    /// Builder staging, event execution, and retained authentication now use
+    /// the same exact-session lane, so this commit is authoritative for the
+    /// complete working state and requires no field-selective reconciliation.
     pub(crate) fn update_state_machine_session_and_snapshot(
         &self,
         session: SessionState,
-        auth_required_event: bool,
     ) -> Result<Arc<SessionStateSnapshot>, Box<dyn std::error::Error + Send + Sync>> {
         let handle = session
             .lifecycle_handle
@@ -623,7 +674,7 @@ impl SessionStore {
         if session.session_id != *handle.session_id() {
             return Err("session state identifier does not match its lifecycle handle".into());
         }
-        self.replace_session_exact_inner(&handle, session, true, !auth_required_event)
+        self.replace_session_exact(&handle, session)
     }
 
     /// Publish an already-owned compatibility state without first cloning the
@@ -635,15 +686,13 @@ impl SessionStore {
         handle: &SessionRegistryHandle,
         session: SessionState,
     ) -> Result<Arc<SessionStateSnapshot>, Box<dyn std::error::Error + Send + Sync>> {
-        self.replace_session_exact_inner(handle, session, false, false)
+        self.replace_session_exact_inner(handle, session)
     }
 
     fn replace_session_exact_inner(
         &self,
         handle: &SessionRegistryHandle,
-        mut session: SessionState,
-        merge_tracked_request_staging: bool,
-        preserve_auth_coordination: bool,
+        session: SessionState,
     ) -> Result<Arc<SessionStateSnapshot>, Box<dyn std::error::Error + Send + Sync>> {
         if session.session_id != *handle.session_id()
             || session.lifecycle_handle.as_ref() != Some(handle)
@@ -669,56 +718,6 @@ impl SessionStore {
         }
 
         let old_session = old_snapshot.state();
-        let final_state = session.call_state.is_final();
-        let tracked_staging_changed = merge_tracked_request_staging
-            && !final_state
-            && (!same_optional_arc(
-                &session.pending_refer_options,
-                &old_session.pending_refer_options,
-            ) || !same_optional_arc(
-                &session.pending_notify_options,
-                &old_session.pending_notify_options,
-            ) || !same_optional_arc(
-                &session.pending_info_options,
-                &old_session.pending_info_options,
-            ) || !same_optional_arc(
-                &session.pending_update_options,
-                &old_session.pending_update_options,
-            ));
-        if tracked_staging_changed {
-            session.pending_refer_options = old_session.pending_refer_options.clone();
-            session.pending_notify_options = old_session.pending_notify_options.clone();
-            session.pending_info_options = old_session.pending_info_options.clone();
-            session.pending_update_options = old_session.pending_update_options.clone();
-        }
-        let auth_coordination_changed = preserve_auth_coordination
-            && !final_state
-            && (session.pending_auth != old_session.pending_auth
-                || session.pending_auth_method != old_session.pending_auth_method
-                || session.pending_auth_transport != old_session.pending_auth_transport
-                || session.pending_auth_transaction_id != old_session.pending_auth_transaction_id
-                || session.pending_auth_request_uri != old_session.pending_auth_request_uri
-                || session.request_auth_retry_count != old_session.request_auth_retry_count
-                || session.auth_challenge != old_session.auth_challenge
-                || session.auth_challenge_raw != old_session.auth_challenge_raw
-                || session.auth_challenge_stale != old_session.auth_challenge_stale
-                || session.auth_challenge_replaces_nonce
-                    != old_session.auth_challenge_replaces_nonce
-                || session.digest_nc != old_session.digest_nc);
-        if auth_coordination_changed {
-            session.pending_auth = old_session.pending_auth.clone();
-            session.pending_auth_method = old_session.pending_auth_method.clone();
-            session.pending_auth_transport = old_session.pending_auth_transport.clone();
-            session.pending_auth_transaction_id = old_session.pending_auth_transaction_id.clone();
-            session.pending_auth_request_uri = old_session.pending_auth_request_uri.clone();
-            session.request_auth_retry_count = old_session.request_auth_retry_count;
-            session.auth_challenge = old_session.auth_challenge.clone();
-            session.auth_challenge_raw = old_session.auth_challenge_raw.clone();
-            session.auth_challenge_stale = old_session.auth_challenge_stale;
-            session.auth_challenge_replaces_nonce =
-                old_session.auth_challenge_replaces_nonce.clone();
-            session.digest_nc = old_session.digest_nc.clone();
-        }
         let index_delta = SessionIndexDelta::between(old_session, &session);
         let _mutation = (!index_delta.is_empty()).then(|| self.lock_mutations());
         if !self.map_owns_cell(handle, &cell) {
@@ -764,9 +763,10 @@ impl SessionStore {
         session_id: &SessionId,
         update: impl FnOnce(&mut SessionState) -> R,
     ) -> Result<R, Box<dyn std::error::Error + Send + Sync>> {
-        let handle = self
-            .lifecycle_handle(session_id)
+        let (handle, lane) = self
+            .state_machine_lane(session_id)
             .ok_or_else(|| format!("Session {session_id} not found"))?;
+        let _lane = lane.lock_owned().await;
         self.update_session_exact_with(&handle, None, update)
     }
 
@@ -782,6 +782,10 @@ impl SessionStore {
             .lifecycle_handle
             .as_ref()
             .ok_or("session snapshot has no admitted lifecycle handle")?;
+        let lane = self
+            .state_machine_lane_exact(handle)
+            .ok_or("session lifetime is not present in the store")?;
+        let _lane = lane.lock_owned().await;
         self.update_session_exact_with(handle, Some(snapshot.revision()), update)
     }
 
@@ -973,6 +977,12 @@ impl SessionStore {
             "remove_missing_total": self.remove_missing_total.load(Ordering::Relaxed),
             "update_missing_total": self.update_missing_total.load(Ordering::Relaxed),
             "net_created_minus_removed": created.saturating_sub(removed),
+            "live_indexes": {
+                "session_cells": self.sessions.len(),
+                "dialog": self.by_dialog.len(),
+                "call_id": self.by_call_id.len(),
+                "media": self.by_media_id.len(),
+            },
             "authority": {
                 "active_capacity": authority.capacity,
                 "active_capacity_in_use": authority.active_capacity_in_use,
@@ -1236,6 +1246,108 @@ mod tests {
         assert!(entered.load(Ordering::Acquire));
     }
 
+    #[tokio::test]
+    async fn public_store_writer_queues_behind_exact_state_machine_lane() {
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId::new();
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create public-writer lane session");
+        let (handle, lane) = store
+            .state_machine_lane(&session_id)
+            .expect("resolve exact state-machine lane");
+        let lane_guard = lane.lock_owned().await;
+
+        let writer_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let queued_store = Arc::clone(&store);
+        let queued_id = session_id.clone();
+        let queued_started = Arc::clone(&writer_started);
+        let writer = tokio::spawn(async move {
+            queued_started.store(true, Ordering::Release);
+            queued_store
+                .update_session_with(&queued_id, |session| {
+                    session.call_state = CallState::Active;
+                })
+                .await
+        });
+        while !writer_started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+        tokio::task::yield_now().await;
+
+        let mut working = store
+            .get_session_snapshot_exact(&handle)
+            .expect("load lane-owned state")
+            .state()
+            .clone();
+        working.call_state = CallState::Initiating;
+        store
+            .update_state_machine_session_and_snapshot(working)
+            .expect("commit lane-owned state before public writer");
+        assert_eq!(
+            store
+                .get_session_snapshot_exact(&handle)
+                .expect("read lane-owned commit")
+                .call_state,
+            CallState::Initiating,
+            "public writer interleaved with the lane-owned working state"
+        );
+
+        drop(lane_guard);
+        writer
+            .await
+            .expect("public writer task")
+            .expect("public writer commits after lane release");
+        assert_eq!(
+            store
+                .get_session_snapshot_exact(&handle)
+                .expect("read queued public commit")
+                .call_state,
+            CallState::Active
+        );
+    }
+
+    #[tokio::test]
+    async fn retained_exact_state_machine_lane_survives_quiesce_only_for_its_cell() {
+        let store = SessionStore::new();
+        let session_id = SessionId::new();
+        let created = store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create retained-lane session");
+        let handle = created
+            .lifecycle_handle
+            .clone()
+            .expect("retained-lane exact handle");
+        let active_lane = store
+            .state_machine_lane_exact(&handle)
+            .expect("active exact lane");
+
+        store
+            .quiesce_session_exact(&handle)
+            .await
+            .expect("quiesce retained-lane session");
+        assert!(store.state_machine_lane_exact(&handle).is_none());
+        let retained_lane = store
+            .state_machine_lane_retained_exact(&handle)
+            .expect("retired exact cell retains its lane");
+        assert!(Arc::ptr_eq(&active_lane, &retained_lane));
+
+        store
+            .remove_quiesced_session_exact(&handle)
+            .expect("remove retained-lane exact cell");
+        assert!(store.state_machine_lane_retained_exact(&handle).is_none());
+        let reuse_error = store
+            .create_session(session_id, Role::UAC, false)
+            .await
+            .expect_err("stale retained handle must block early raw-ID reuse");
+        assert!(matches!(
+            reuse_error.downcast_ref::<crate::session_lifecycle::SessionAdmissionError>(),
+            Some(crate::session_lifecycle::SessionAdmissionError::ReuseBlocked)
+        ));
+    }
+
     #[test]
     fn index_delta_reserves_only_identifiers_that_changed() {
         let session_id = SessionId::new();
@@ -1397,51 +1509,40 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn state_machine_publication_preserves_concurrent_tracked_staging_slots() {
-        let store = Arc::new(SessionStore::new());
+    #[tokio::test]
+    async fn state_machine_publication_does_not_reconcile_competing_tracked_staging() {
+        let store = SessionStore::new();
         let session_id = SessionId::new();
         let mut event_local = store
             .create_session(session_id.clone(), Role::UAC, false)
             .await
             .unwrap();
 
-        let info_store = Arc::clone(&store);
-        let info_session = session_id.clone();
-        let notify_store = Arc::clone(&store);
-        let notify_session = session_id.clone();
-        let (info_result, notify_result) = tokio::join!(
-            async move {
-                info_store
-                    .update_session_with(&info_session, |session| {
-                        session.pending_info_options = Some(Arc::new(Default::default()));
-                    })
-                    .await
-            },
-            async move {
-                notify_store
-                    .update_session_with(&notify_session, |session| {
-                        session.pending_notify_options = Some(Arc::new(Default::default()));
-                    })
-                    .await
-            }
-        );
-        info_result.unwrap();
-        notify_result.unwrap();
+        // This deliberately violates the executor's exact-lane contract to
+        // prove the store no longer contains a second, field-selective merge
+        // authority. Production staging cannot interleave this way because it
+        // acquires the same lane before publishing the slot.
+        store
+            .update_session_with(&session_id, |session| {
+                session.pending_info_options = Some(Arc::new(Default::default()));
+                session.pending_notify_options = Some(Arc::new(Default::default()));
+            })
+            .await
+            .unwrap();
 
         event_local.call_state = CallState::Active;
         store
-            .update_state_machine_session_and_snapshot(event_local, false)
+            .update_state_machine_session_and_snapshot(event_local)
             .unwrap();
 
         let current = store.get_session(&session_id).await.unwrap();
-        assert!(current.pending_info_options.is_some());
-        assert!(current.pending_notify_options.is_some());
+        assert!(current.pending_info_options.is_none());
+        assert!(current.pending_notify_options.is_none());
         assert_eq!(current.call_state, CallState::Active);
     }
 
     #[tokio::test]
-    async fn non_auth_publication_preserves_concurrent_exact_auth_coordination() {
+    async fn state_machine_publication_does_not_reconcile_competing_auth_coordination() {
         let store = Arc::new(SessionStore::new());
         let session_id = SessionId::new();
         let mut stale_non_auth_event = store
@@ -1468,23 +1569,18 @@ mod tests {
 
         stale_non_auth_event.call_state = CallState::Active;
         store
-            .update_state_machine_session_and_snapshot(stale_non_auth_event, false)
+            .update_state_machine_session_and_snapshot(stale_non_auth_event)
             .unwrap();
 
         let current = store.get_session(&session_id).await.unwrap();
-        assert_eq!(current.pending_auth_method.as_deref(), Some("INFO"));
-        assert_eq!(
-            current.pending_auth_transaction_id.as_deref(),
-            Some("exact-info-tx")
-        );
-        assert_eq!(current.request_auth_retry_count, 2);
-        assert!(current.auth_challenge_stale);
-        assert_eq!(
-            current
-                .digest_nc
-                .get(&("realm".to_string(), "nonce".to_string())),
-            Some(&7)
-        );
+        assert!(current.pending_auth.is_none());
+        assert!(current.pending_auth_method.is_none());
+        assert!(current.pending_auth_transaction_id.is_none());
+        assert!(current.pending_auth_request_uri.is_none());
+        assert_eq!(current.request_auth_retry_count, 0);
+        assert!(!current.auth_challenge_stale);
+        assert!(current.auth_challenge_replaces_nonce.is_none());
+        assert!(current.digest_nc.is_empty());
     }
 
     #[tokio::test]
@@ -1513,7 +1609,7 @@ mod tests {
             .unwrap();
 
         store
-            .update_state_machine_session_and_snapshot(auth_event, true)
+            .update_state_machine_session_and_snapshot(auth_event)
             .unwrap();
         let current = store.get_session(&session_id).await.unwrap();
         assert_eq!(current.pending_auth_method.as_deref(), Some("NOTIFY"));
@@ -1555,7 +1651,7 @@ mod tests {
         final_event.call_state = CallState::Terminated;
         final_event.clear_pending_request_state_for_final_transition();
         store
-            .update_state_machine_session_and_snapshot(final_event, false)
+            .update_state_machine_session_and_snapshot(final_event)
             .unwrap();
 
         let current = store.get_session(&session_id).await.unwrap();

@@ -12,10 +12,13 @@
 //! detection reuses the Goertzel filter pattern from
 //! `audio_roundtrip_integration.rs`.
 
-use std::env;
-use std::path::{Path, PathBuf};
+mod support;
+
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_SIP_PORT: u16 = 35590;
 const CAROL_SIP_PORT: u16 = 35591;
@@ -47,10 +50,6 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
     // All examples are built before launch. Execute those binaries directly
     // so three long-lived peers never serialize behind Cargo's artifact lock.
@@ -63,23 +62,6 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e));
     ChildGuard(child)
-}
-
-fn example_binary(name: &str) -> PathBuf {
-    let test_binary = env::current_exe().expect("current integration-test binary");
-    let debug_dir = test_binary
-        .parent()
-        .and_then(Path::parent)
-        .expect("integration test runs from target/<profile>/deps");
-    let binary = debug_dir
-        .join("examples")
-        .join(format!("{name}{}", env::consts::EXE_SUFFIX));
-    assert!(
-        binary.is_file(),
-        "built example binary is missing: {}",
-        binary.display()
-    );
-    binary
 }
 
 fn goertzel_magnitude(samples: &[i16], sample_rate: f32, target_hz: f32) -> f32 {
@@ -110,22 +92,11 @@ fn read_wav(path: &PathBuf) -> Vec<i16> {
 
 #[test]
 fn bridge_roundtrip_relays_tones_between_legs() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "unified_b2bua_bridge_alice",
-            "--example",
-            "unified_b2bua_bridge_peer",
-            "--example",
-            "unified_b2bua_bridge_carol",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "unified_b2bua_bridge_alice",
+        "unified_b2bua_bridge_peer",
+        "unified_b2bua_bridge_carol",
+    ]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().to_string_lossy().to_string();

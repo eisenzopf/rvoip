@@ -255,12 +255,8 @@ fn classify_bye_failure(error: &rvoip_sip::SessionError) -> (&'static str, &'sta
             ("exact_dialog_unavailable", "dispatch")
         }
         SessionError::InternalError(detail) => match detail.as_str() {
-            "exact terminal publication failed" => ("terminal_publication_failed", "terminal"),
             "exact terminal resource release failed" => ("terminal_release_failed", "terminal"),
-            "exact terminal publication and resource release failed" => {
-                ("terminal_publication_and_release_failed", "terminal")
-            }
-            "exact terminal publication owner stopped before completion" => {
+            "exact terminal release owner stopped before completion" => {
                 ("terminal_owner_dropped", "terminal")
             }
             _ => ("internal_other", "other"),
@@ -876,14 +872,17 @@ const CLEANUP_CONVERGENCE_POINTERS: &[&str] = &[
     "/app_event_publisher/dispatcher/in_flight_current",
     "/app_event_publisher/dispatcher/queued_current",
     "/app_event_publisher/dispatcher/terminal_queued_current",
-    "/dialog_adapter/callid_to_session",
-    "/dialog_adapter/dialog_to_session",
+    "/app_event_publisher/exact_terminal_claims/deadlines",
+    "/app_event_publisher/exact_terminal_claims/slots",
     "/dialog_adapter/outbound_initial_invites",
+    "/dialog_adapter/outbound_request_tracker/deferred_events",
+    "/dialog_adapter/outbound_request_tracker/live_requests",
     "/dialog_adapter/outgoing_bye_generation_watch",
     "/dialog_adapter/outgoing_bye_tx",
     "/dialog_adapter/outgoing_bye_wait_intents",
     "/dialog_adapter/outgoing_invite_tx",
-    "/dialog_adapter/session_to_dialog",
+    "/dialog_adapter/registration_refresh_retained_tasks",
+    "/dialog_adapter/registration_refresh_tasks",
     "/dialog_manager/dialog_invite_transactions",
     "/dialog_manager/dialog_lookup",
     "/dialog_manager/dialog_server_transactions",
@@ -906,16 +905,29 @@ const CLEANUP_CONVERGENCE_POINTERS: &[&str] = &[
     "/global_event_bus/observational_handlers/in_flight_current",
     "/global_event_bus/observational_handlers/queued_current",
     "/global_event_bus/subscriber_queued_total",
+    "/exact_response_supervisor/fire_in_flight",
+    "/exact_response_supervisor/pending_deadlines",
+    "/exact_response_supervisor/pending_obligations",
+    "/exact_response_supervisor/retry_attempts",
+    "/cleanup/setup_teardown_watchdog/fire_in_flight",
+    "/cleanup/setup_teardown_watchdog/pending_deadlines",
     "/lifecycle/entries",
+    "/lifecycle/storage/terminal_deadline_records",
     "/lifecycle/terminal_entries",
     "/lifecycle/waiters",
     "/media_adapter/audio_receivers",
     "/media_adapter/dialog_to_session",
     "/media_adapter/media_create_reservations",
+    "/media_adapter/registry_media_bindings",
     "/media_adapter/media_resources",
     "/media_adapter/media_sessions",
-    "/media_adapter/session_to_dialog",
     "/session_registry/sessions",
+    "/session_registry/dialog_mappings",
+    "/session_registry/entries",
+    "/session_registry/media_mappings",
+    "/session_store/lifecycle/live_indexes/call_id",
+    "/session_store/lifecycle/live_indexes/dialog",
+    "/session_store/lifecycle/live_indexes/media",
     "/session_store/lifecycle/authority/active",
     "/session_store/lifecycle/authority/active_capacity_in_use",
     "/session_store/lifecycle/authority/index_blocked",
@@ -939,6 +951,7 @@ const CLEANUP_CONVERGENCE_POINTERS: &[&str] = &[
     "/transaction_manager/server_invite_dialog_index",
     "/transaction_manager/server_invite_dialog_keys_by_tx",
     "/transaction_manager/server_transactions",
+    "/transaction_manager/event_subscribers",
     "/transaction_manager/terminated_transactions",
     "/transaction_manager/total",
     "/transaction_manager/transaction_destinations",
@@ -1848,6 +1861,12 @@ fn bye_failure_classifier_distinguishes_release_and_wire_failures() {
             "exact terminal resource release failed".to_string(),
         )),
         ("terminal_release_failed", "terminal")
+    );
+    assert_eq!(
+        classify_bye_failure(&SessionError::InternalError(
+            "exact terminal release owner stopped before completion".to_string(),
+        )),
+        ("terminal_owner_dropped", "terminal")
     );
     assert_eq!(
         classify_bye_failure(&SessionError::Other(

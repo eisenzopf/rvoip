@@ -7,13 +7,15 @@ use rvoip_sip_core::types::Method;
 use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
-use crate::errors::Result;
+use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 
 /// Builds and sends a 3xx redirect response (default 302 Moved
 /// Temporarily) carrying one or more `Contact:` targets.
 pub struct RedirectBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     status: u16,
     contacts: Vec<String>,
     state: BuilderHeaderState,
@@ -21,9 +23,19 @@ pub struct RedirectBuilder {
 
 impl RedirectBuilder {
     pub(crate) fn new(coord: Arc<UnifiedCoordinator>, call_id: CallId) -> Self {
+        let lifecycle_handle = coord.helpers.state_machine.store.lifecycle_handle(&call_id);
+        Self::new_captured(coord, call_id, lifecycle_handle)
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             coord,
             call_id,
+            lifecycle_handle,
             status: 302,
             contacts: Vec::new(),
             state: BuilderHeaderState::default(),
@@ -48,24 +60,18 @@ impl RedirectBuilder {
 
     /// Send the redirect response on the wire.
     pub async fn send(mut self) -> Result<()> {
+        let lifecycle_handle = self
+            .lifecycle_handle
+            .as_ref()
+            .ok_or_else(|| SessionError::SessionNotFound(self.call_id.to_string()))?;
         if self.coord.fast_auto_accept_incoming_calls() {
             return Ok(());
         }
 
         let extras = take_staged(&mut self.state);
-        if extras.is_empty() {
-            return self
-                .coord
-                .helpers
-                .redirect_call(&self.call_id, self.status, self.contacts)
-                .await;
-        }
-        // SIP_API_DESIGN_2 Phase D: route through the extras-aware
-        // redirect path so staged headers (e.g., Retry-After on a 305)
-        // ride to the wire.
         self.coord
-            .dialog_adapter()
-            .send_redirect_response_with_options(&self.call_id, self.status, self.contacts, extras)
+            .helpers
+            .redirect_call_with_extras_exact(lifecycle_handle, self.status, self.contacts, extras)
             .await
     }
 }

@@ -259,6 +259,61 @@ impl CallHandler for AcceptAll {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn active_media_watchdog_uses_confirmed_exact_bye_before_release() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let alice_port = 17938;
+    let bob_port = 17939;
+
+    let bob_cfg = cfg("bob-media-watchdog", bob_port)
+        .with_active_call_no_media_timeout_secs(1)
+        .with_active_call_media_idle_timeout_secs(0);
+    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
+    let bob_coordinator = bob.coordinator().clone();
+    let bob_shutdown = bob.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob.run().await;
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let alice = UnifiedCoordinator::new(cfg("alice-media-watchdog", alice_port))
+        .await
+        .expect("alice");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let call_id = alice
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{alice_port}")),
+            format!("sip:bob@127.0.0.1:{bob_port}"),
+        )
+        .send()
+        .await
+        .expect("invite");
+    let call = alice.session(&call_id);
+    call.wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("call should be active");
+
+    call.wait_for_end(Some(Duration::from_secs(8)))
+        .await
+        .expect("watchdog BYE should terminate the remote call");
+    call.hangup_and_wait(Some(Duration::from_secs(1)))
+        .await
+        .expect("hangup after the confirmed watchdog BYE must use cached terminal evidence");
+
+    assert!(
+        wait_for_no_sessions(&alice, Duration::from_secs(3)).await,
+        "caller retained a session after watchdog BYE"
+    );
+    assert!(
+        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(3)).await,
+        "watchdog owner retained a session after confirmed BYE"
+    );
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn server_call_admission_limit_rejects_with_503_retry_after_on_wire() {
     let _ = tracing_subscriber::fmt::try_init();
     let alice_port = 17920;

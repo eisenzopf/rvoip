@@ -973,15 +973,17 @@ impl CallHandler for CallbackBuilderHandler {
         let Some(hook) = &self.refer_received else {
             return;
         };
-        let Some(coord) = request.coordinator.clone() else {
-            tracing::warn!(
-                callback = "on_refer_received",
-                call_id_bytes = request.call_id.as_str().len(),
-                "CallbackPeer REFER hook has no coordinator"
-            );
-            return;
+        let handle = match request.session_handle() {
+            Ok(handle) => handle,
+            Err(_error) => {
+                tracing::warn!(
+                    callback = "on_refer_received",
+                    call_id_bytes = request.call_id.as_str().len(),
+                    "CallbackPeer REFER hook has no exact lifecycle authority"
+                );
+                return;
+            }
         };
-        let handle = SessionHandle::new(request.call_id.clone(), coord);
         let accepted = match hook(handle.clone(), request).await {
             Ok(b) => b,
             Err(_error) => {
@@ -1879,6 +1881,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let mut shutdown_rx = self.shutdown_rx.clone();
         let mut handlers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
         let control_slots = Arc::new(tokio::sync::Semaphore::new(CONTROL_HANDLER_CONCURRENCY));
+        let mut observations_open = true;
 
         loop {
             reap_ready_handlers(&mut handlers, "completed");
@@ -1904,7 +1907,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                     }
                 }
                 control = control_rx.recv(), if control_slots.available_permits() > 0 => {
-                    let Some(event) = control else {
+                    let Some(control) = control else {
                         tracing::info!("[CallbackPeer] Control-event channel closed, stopping");
                         break;
                     };
@@ -1912,32 +1915,26 @@ impl<H: CallHandler> CallbackPeer<H> {
                         .acquire_owned()
                         .await
                         .expect("callback control semaphore remains open");
-                    self.dispatch(event, &mut handlers, Some(permit)).await;
+                    self.dispatch(
+                        control.event,
+                        control.lifecycle_handle,
+                        &mut handlers,
+                        Some(permit),
+                    ).await;
                     reap_ready_handlers(&mut handlers, "post-control-dispatch");
                 }
-                // Process next event
-                raw = event_rx.recv() => {
+                // Drain public observations so the subscription remains
+                // healthy, but never reacquire authority or duplicate the
+                // single private application delivery from this channel.
+                raw = event_rx.recv(), if observations_open => {
                     let Some(raw_event) = raw else {
-                        tracing::info!("[CallbackPeer] Event channel closed, stopping");
-                        break;
+                        observations_open = false;
+                        continue;
                     };
-
-                    // Downcast from cross-crate event wrapper to our Event type
-                    let Some(session_event) = raw_event
+                    let _is_session_observation = raw_event
                         .as_any()
                         .downcast_ref::<crate::adapters::SessionApiCrossCrateEvent>()
-                    else {
-                        continue;
-                    };
-
-                    let event = session_event.event.clone();
-                    if matches!(&event, Event::InfoReceived { .. }) {
-                        // Response-bearing INFO is delivered exactly once by
-                        // the private authoritative control channel above.
-                        continue;
-                    }
-                    self.dispatch(event, &mut handlers, None).await;
-                    reap_ready_handlers(&mut handlers, "post-dispatch");
+                        .is_some();
                 }
             }
         }
@@ -1990,6 +1987,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     async fn dispatch(
         &self,
         event: Event,
+        lifecycle_handle: Option<crate::session_registry::SessionRegistryHandle>,
         handlers: &mut tokio::task::JoinSet<()>,
         control_permit: Option<tokio::sync::OwnedSemaphorePermit>,
     ) {
@@ -2022,24 +2020,28 @@ impl<H: CallHandler> CallbackPeer<H> {
                     //
                     // SIP_API_DESIGN_2 Phase A: prefer the parsed
                     // `Arc<Request>` view when the bus enriched it.
-                    let pending = coordinator.pending_incoming_bundle_exact(&call_id);
+                    let pending = lifecycle_handle.as_ref().and_then(|handle| {
+                        coordinator.pending_incoming_bundle_for_handle_exact(handle)
+                    });
                     let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
                     let transport = pending.and_then(|bundle| bundle.transport);
                     let incoming = match parsed {
-                        Some(req) => IncomingCall::with_request(
+                        Some(req) => IncomingCall::with_request_captured(
                             call_id.clone(),
                             from,
                             to,
                             sdp,
                             coordinator.clone(),
                             req,
+                            lifecycle_handle.clone(),
                         ),
-                        None => IncomingCall::new(
+                        None => IncomingCall::new_captured(
                             call_id.clone(),
                             from,
                             to,
                             sdp,
                             coordinator.clone(),
+                            lifecycle_handle.clone(),
                         ),
                     }
                     .with_transport_context(
@@ -2066,7 +2068,12 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),
                             );
-                            match coordinator.accept_call(&call_id).await {
+                            let Some(exact_handle) = lifecycle_handle.as_ref() else {
+                                tracing::warn!(call_id = %call_id, "callback accept suppressed without exact lifecycle authority");
+                                accept_guard.finish_failure();
+                                return;
+                            };
+                            match coordinator.helpers.accept_call_exact(exact_handle).await {
                                 Ok(()) => {
                                     accept_guard.finish_success();
                                     let should_notify = {
@@ -2074,8 +2081,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         callbacks.insert(call_id.clone())
                                     };
                                     if should_notify {
-                                        let handle =
-                                            SessionHandle::new(call_id.clone(), coordinator.clone());
+                                        let handle = SessionHandle::new_exact(
+                                            call_id.clone(),
+                                            coordinator.clone(),
+                                            exact_handle.clone(),
+                                        );
                                         handler.on_call_established(handle).await;
                                     }
                                 }
@@ -2102,7 +2112,16 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),
                             );
-                            match coordinator.accept_call_with_sdp(&call_id, sdp).await {
+                            let Some(exact_handle) = lifecycle_handle.as_ref() else {
+                                tracing::warn!(call_id = %call_id, "callback accept-with-SDP suppressed without exact lifecycle authority");
+                                accept_guard.finish_failure();
+                                return;
+                            };
+                            match coordinator
+                                .helpers
+                                .accept_call_with_sdp_exact(exact_handle, sdp)
+                                .await
+                            {
                                 Ok(()) => {
                                     accept_guard.finish_success();
                                     let should_notify = {
@@ -2110,8 +2129,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         callbacks.insert(call_id.clone())
                                     };
                                     if should_notify {
-                                        let handle =
-                                            SessionHandle::new(call_id.clone(), coordinator.clone());
+                                        let handle = SessionHandle::new_exact(
+                                            call_id.clone(),
+                                            coordinator.clone(),
+                                            exact_handle.clone(),
+                                        );
                                         handler.on_call_established(handle).await;
                                     }
                                 }
@@ -2134,12 +2156,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 return;
                             }
 
-                            let _ = coordinator
-                                .reject(&call_id)
-                                .with_status(status)
-                                .with_reason(reason)
-                                .send()
-                                .await;
+                            if let Some(exact_handle) = lifecycle_handle.as_ref() {
+                                let _ = coordinator
+                                    .helpers
+                                    .reject_call_exact(exact_handle, status, &reason)
+                                    .await;
+                            } else {
+                                tracing::warn!(call_id = %call_id, "callback reject suppressed without exact lifecycle authority");
+                            }
                         }
                         CallHandlerDecision::Redirect(target) => {
                             if fast_auto_accept_incoming_calls {
@@ -2150,12 +2174,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 return;
                             }
 
-                            let _ = coordinator
-                                .redirect(&call_id)
-                                .with_status(302)
-                                .with_contacts(vec![target])
-                                .send()
-                                .await;
+                            if let Some(exact_handle) = lifecycle_handle.as_ref() {
+                                let _ = coordinator
+                                    .helpers
+                                    .redirect_call_exact(exact_handle, 302, vec![target])
+                                    .await;
+                            } else {
+                                tracing::warn!(call_id = %call_id, "callback redirect suppressed without exact lifecycle authority");
+                            }
                         }
                         CallHandlerDecision::Defer(guard) => {
                             if fast_auto_accept_incoming_calls {
@@ -2181,7 +2207,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                         callbacks.insert(call_id.clone())
                     };
                     if should_notify {
-                        let handle = SessionHandle::new(call_id, coordinator);
+                        let handle = SessionHandle::new_captured(
+                            call_id,
+                            coordinator,
+                            lifecycle_handle.clone(),
+                        );
                         handler.on_call_established(handle).await;
                     }
                 }
@@ -2192,7 +2222,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     reason,
                     sdp,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_call_progress(handle, status_code, reason, sdp)
                         .await;
@@ -2246,27 +2280,47 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::CallOnHold { call_id } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_call_on_hold(handle).await;
                 }
 
                 Event::CallResumed { call_id } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_call_resumed(handle).await;
                 }
 
                 Event::RemoteCallOnHold { call_id } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_remote_call_on_hold(handle).await;
                 }
 
                 Event::RemoteCallResumed { call_id } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_remote_call_resumed(handle).await;
                 }
 
                 Event::DtmfReceived { call_id, digit } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_dtmf(handle, digit).await;
                 }
 
@@ -2277,7 +2331,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     profile,
                     contexts_installed,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_media_security_negotiated(
                             handle,
@@ -2300,13 +2358,20 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // `req.accept_refer()` / `req.reject_refer(...)`
                     // inside the callback.
                     if let Some(mut req) = request {
-                        req.set_coordinator(coordinator.clone());
+                        req.set_coordinator_captured(
+                            coordinator.clone(),
+                            lifecycle_handle.clone(),
+                        );
                         handler.on_refer_received(req).await;
                     }
                 }
 
                 Event::TransferAccepted { call_id, refer_to } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_transfer_accepted(handle, refer_to).await;
                 }
 
@@ -2317,7 +2382,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     subscription_state,
                     body,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_refer_notify(handle, status_code, reason, subscription_state, body)
                         .await;
@@ -2328,7 +2397,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     status_code,
                     reason,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_refer_progress(handle, status_code, reason).await;
                 }
 
@@ -2338,7 +2411,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     status_code,
                     reason,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_refer_completed(handle, target, status_code, reason)
                         .await;
@@ -2349,7 +2426,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     status_code,
                     reason,
                 } => {
-                    let handle = SessionHandle::new(call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_transfer_failed(handle, status_code, reason)
                         .await;
@@ -2360,7 +2441,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     target_uri,
                     evidence,
                 } => {
-                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        transfer_call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_transfer_target_answered(handle, target_uri, evidence)
                         .await;
@@ -2370,7 +2455,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     transfer_call_id,
                     dialog,
                 } => {
-                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        transfer_call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_transfer_replacement_dialog_observed(handle, dialog)
                         .await;
@@ -2381,7 +2470,11 @@ impl<H: CallHandler> CallbackPeer<H> {
                     dialog,
                     reason,
                 } => {
-                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    let handle = SessionHandle::new_captured(
+                        transfer_call_id,
+                        coordinator,
+                        lifecycle_handle.clone(),
+                    );
                     handler
                         .on_transfer_replacement_dialog_terminated(handle, dialog, reason)
                         .await;
@@ -2421,7 +2514,10 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // Applications inspect headers/body via the
                     // `IncomingRequest` directly.
                     if let Some(mut req) = request {
-                        req.set_coordinator(coordinator.clone());
+                        req.set_coordinator_captured(
+                            coordinator.clone(),
+                            lifecycle_handle.clone(),
+                        );
                         handler.on_notify_received(req).await;
                     }
                 }
@@ -2488,19 +2584,31 @@ impl<H: CallHandler> CallbackPeer<H> {
                 // IncomingRequest before forwarding to the handler so
                 // any *_builder() it calls can dispatch.
                 Event::InfoReceived { call_id: _, mut request } => {
-                    request.set_coordinator(coordinator.clone());
+                    request.set_coordinator_captured(
+                        coordinator.clone(),
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_info_received(request).await;
                 }
                 Event::MessageReceived { call_id: _, mut request } => {
-                    request.set_coordinator(coordinator.clone());
+                    request.set_coordinator_captured(
+                        coordinator.clone(),
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_message_received(request).await;
                 }
                 Event::OptionsReceived { call_id: _, mut request } => {
-                    request.set_coordinator(coordinator.clone());
+                    request.set_coordinator_captured(
+                        coordinator.clone(),
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_options_received(request).await;
                 }
                 Event::UpdateReceived { call_id: _, mut request } => {
-                    request.set_coordinator(coordinator.clone());
+                    request.set_coordinator_captured(
+                        coordinator.clone(),
+                        lifecycle_handle.clone(),
+                    );
                     handler.on_update_received(request).await;
                 }
                 Event::IncomingRegister { mut register } => {
@@ -3091,7 +3199,7 @@ mod tests {
         ];
 
         for event in events {
-            peer.dispatch(event, &mut handlers, None).await;
+            peer.dispatch(event, None, &mut handlers, None).await;
         }
         drain(handlers).await;
 
@@ -3226,7 +3334,7 @@ mod tests {
                 reason: "normal".into(),
             },
         ] {
-            peer.dispatch(event, &mut handlers, None).await;
+            peer.dispatch(event, None, &mut handlers, None).await;
         }
         drain(handlers).await;
 
