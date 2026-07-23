@@ -92,6 +92,14 @@ path = "examples/stream_peer/08_sdes_srtp/alice.rs"
 [[example]]
 name = "stream_peer_sdes_srtp_bob"
 path = "examples/stream_peer/08_sdes_srtp/bob.rs"
+[[example]]
+name = "stream_peer_dtls_srtp_alice"
+path = "examples/stream_peer/09_dtls_srtp/alice.rs"
+required-features = ["dtls-srtp"]
+[[example]]
+name = "stream_peer_dtls_srtp_bob"
+path = "examples/stream_peer/09_dtls_srtp/bob.rs"
+required-features = ["dtls-srtp"]
 
 # CallbackPeer examples (reactive server API)
 [[example]]
