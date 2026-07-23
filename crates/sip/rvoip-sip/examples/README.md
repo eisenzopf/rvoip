@@ -49,6 +49,7 @@ and `SIP_TARGET`.
 | `./crates/sip/rvoip-sip/examples/stream_peer/05_blind_transfer/run.sh` | Three-party blind transfer |
 | `./crates/sip/rvoip-sip/examples/stream_peer/06_concurrent_calls/run.sh` | Multiple concurrent callers |
 | `./crates/sip/rvoip-sip/examples/stream_peer/07_ice/run.sh` | Real RFC 8445 ICE connectivity check (`Config::enable_ice`, requires the `ice` feature) |
+| `./crates/sip/rvoip-sip/examples/stream_peer/08_sdes_srtp/run.sh` | Mandatory RFC 4568 SDES-SRTP, printing `Event::MediaSecurityNegotiated` |
 
 ## CallbackPeer
 
