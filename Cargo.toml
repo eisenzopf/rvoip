@@ -236,6 +236,7 @@ rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.3" }
 rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.3" }
 rvoip-client        = { path = "crates/rvoip-client", version = "0.1.3" }
 rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.1.3" }
+rvoip-nat-core      = { path = "crates/media/nat-core", version = "0.1.0" }
 rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.3" }
 rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.3" }
 rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.3" }

@@ -13,9 +13,7 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
-#[cfg(feature = "dtls-webrtc")]
-use tokio::sync::mpsc;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
@@ -312,6 +310,16 @@ pub struct UdpRtpTransport {
     #[cfg(feature = "dtls-webrtc")]
     dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
 
+    /// Outbound sender for inbound datagrams classified as STUN (RFC
+    /// 7983) — the demux path an ICE connectivity check's bytes arrive
+    /// on when sharing this socket with RTP/RTCP. `None` until a caller
+    /// subscribes via [`Self::subscribe_stun_datagrams`], in which case
+    /// STUN bytes are dropped exactly like before this existed.
+    /// Re-subscribing swaps the previous sender out — same
+    /// one-active-consumer-per-transport discipline as the rest of this
+    /// struct (one transport per call/media-stream already).
+    stun_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<(Bytes, SocketAddr)>>>>,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -447,6 +455,7 @@ impl UdpRtpTransport {
             dtmf_seen: Arc::new(DashMap::new()),
             #[cfg(feature = "dtls-webrtc")]
             dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
+            stun_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -486,6 +495,7 @@ impl UdpRtpTransport {
         let dtmf_seen = self.dtmf_seen.clone();
         #[cfg(feature = "dtls-webrtc")]
         let dtls_tx = self.dtls_tx.clone();
+        let stun_tx = self.stun_tx.clone();
         let srtp_diagnostics = srtp_diagnostics_enabled();
         let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
@@ -542,6 +552,22 @@ impl UdpRtpTransport {
                                 continue;
                             }
 
+                            if packet_class == RtpMuxPacketClass::Stun {
+                                let sender = stun_tx.lock().clone();
+                                if let Some(sender) = sender {
+                                    let datagram = Bytes::copy_from_slice(&buffer[..size]);
+                                    if sender.try_send((datagram, addr)).is_err() {
+                                        trace!(
+                                            "Dropped inbound STUN datagram from {}: subscriber channel full or closed",
+                                            addr
+                                        );
+                                    }
+                                    continue;
+                                }
+                                // No subscriber (ICE not in use for this
+                                // transport) — fall through to the
+                                // generic non-media drop path below.
+                            }
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -902,6 +928,32 @@ impl UdpRtpTransport {
     /// This is used when sharing the same socket with other protocols (e.g., DTLS)
     pub fn get_socket(&self) -> Arc<UdpSocket> {
         self.rtp_socket.clone()
+    }
+
+    /// Subscribe to inbound datagrams classified as STUN (RFC 7983) —
+    /// the demux path an ICE connectivity check's bytes take when
+    /// sharing this socket with RTP/RTCP. Feed the received
+    /// `(datagram, source)` pairs into `IceAgent::handle_incoming_stun`
+    /// (`rvoip-nat-core`) to drive connectivity checks over
+    /// [`Self::ice_conn_adapter`].
+    ///
+    /// Only one subscriber is active at a time — one transport per
+    /// call/media-stream already, same scope an `IceAgent` needs.
+    /// Subscribing again replaces the previous channel; its receiver
+    /// then simply stops getting new datagrams.
+    #[cfg(feature = "ice")]
+    pub fn subscribe_stun_datagrams(&self) -> mpsc::Receiver<(Bytes, SocketAddr)> {
+        let (tx, rx) = mpsc::channel(32);
+        *self.stun_tx.lock() = Some(tx);
+        rx
+    }
+
+    /// An outbound-only handle to this transport's shared socket for
+    /// `rvoip-nat-core`'s `IceAgent::new_with_shared_socket` — pair with
+    /// [`Self::subscribe_stun_datagrams`] to also route inbound bytes.
+    #[cfg(feature = "ice")]
+    pub fn ice_conn_adapter(&self) -> Arc<super::IceUdpSocketAdapter> {
+        Arc::new(super::IceUdpSocketAdapter::new(self.rtp_socket.clone()))
     }
 
     /// Install per-direction SRTP contexts (RFC 4568 §6.1, RFC 3711).

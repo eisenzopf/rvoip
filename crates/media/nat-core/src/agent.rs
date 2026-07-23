@@ -19,8 +19,11 @@ use webrtc_ice::agent::agent_config::AgentConfig;
 use webrtc_ice::agent::Agent as InnerAgent;
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate, CandidateType};
 use webrtc_ice::network_type::NetworkType;
+use webrtc_ice::udp_mux::UDPMux;
+use webrtc_ice::udp_network::UDPNetwork;
 use webrtc_ice::url::Url;
 
+use crate::bridge::{SharedIceMux, SharedIceSocket};
 use crate::candidate::{CandidateKind, IceCandidate};
 use crate::error::{Error, Result};
 
@@ -41,6 +44,11 @@ pub enum IceRole {
 pub struct IceAgent {
     inner: InnerAgent,
     role: IceRole,
+    /// Set only when this agent was built via
+    /// [`IceAgent::new_with_shared_socket`] — the caller's demux loop
+    /// feeds inbound STUN datagrams in through
+    /// [`IceAgent::handle_incoming_stun`], which forwards to this.
+    mux: Option<Arc<SharedIceMux>>,
 }
 
 fn to_ice_candidate(c: &Arc<dyn Candidate + Send + Sync>) -> Result<IceCandidate> {
@@ -95,10 +103,29 @@ fn to_wire_string(c: &IceCandidate) -> String {
     s
 }
 
+fn parse_stun_servers(stun_servers: &[String]) -> Result<(Vec<Url>, Vec<CandidateType>)> {
+    let urls = stun_servers
+        .iter()
+        .map(|s| Url::parse_url(s))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| Error::Agent(format!("invalid STUN server URL: {e}")))?;
+
+    let mut candidate_types = vec![CandidateType::Host];
+    if !urls.is_empty() {
+        candidate_types.push(CandidateType::ServerReflexive);
+    }
+    Ok((urls, candidate_types))
+}
+
 impl IceAgent {
     /// Create a new agent. `stun_servers` are `stun:host:port` URLs (same
     /// convention as `rvoip-sip`'s `Config::stun_server`); an empty list
     /// means host candidates only (no server-reflexive gathering).
+    ///
+    /// Gathers host candidates over ephemeral sockets it binds itself.
+    /// Use [`IceAgent::new_with_shared_socket`] to instead multiplex
+    /// connectivity checks over a socket the caller already owns (e.g.
+    /// `rvoip-rtp-core`'s shared RTP/RTCP/DTLS/STUN socket).
     pub async fn new(role: IceRole, stun_servers: &[String]) -> Result<Self> {
         Self::new_with_ip_filter(role, stun_servers, None).await
     }
@@ -113,16 +140,7 @@ impl IceAgent {
         stun_servers: &[String],
         ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
     ) -> Result<Self> {
-        let urls = stun_servers
-            .iter()
-            .map(|s| Url::parse_url(s))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| Error::Agent(format!("invalid STUN server URL: {e}")))?;
-
-        let mut candidate_types = vec![CandidateType::Host];
-        if !urls.is_empty() {
-            candidate_types.push(CandidateType::ServerReflexive);
-        }
+        let (urls, candidate_types) = parse_stun_servers(stun_servers)?;
 
         let include_loopback = ip_filter.is_some();
         let ip_filter: webrtc_ice::agent::agent_config::IpFilterFn = match ip_filter {
@@ -141,7 +159,75 @@ impl IceAgent {
         };
 
         let inner = InnerAgent::new(config).await?;
-        Ok(Self { inner, role })
+        Ok(Self {
+            inner,
+            role,
+            mux: None,
+        })
+    }
+
+    /// Create a new agent that multiplexes its connectivity checks over a
+    /// socket the caller already owns and reads from — e.g.
+    /// `rvoip-rtp-core`'s shared RTP/RTCP/DTLS/STUN socket, via its own
+    /// RFC 7983 demux — instead of binding dedicated ephemeral sockets.
+    ///
+    /// The caller must forward every inbound datagram it classifies as
+    /// STUN to [`IceAgent::handle_incoming_stun`]; this agent never reads
+    /// `socket` itself; it only writes through it.
+    pub async fn new_with_shared_socket(
+        role: IceRole,
+        stun_servers: &[String],
+        socket: Arc<dyn SharedIceSocket>,
+    ) -> Result<Self> {
+        Self::new_with_shared_socket_and_ip_filter(role, stun_servers, socket, None).await
+    }
+
+    /// Same as [`IceAgent::new_with_shared_socket`], but restricts host
+    /// candidate gathering to IP addresses the given filter accepts —
+    /// see [`IceAgent::new_with_ip_filter`] for why this matters on
+    /// multi-homed machines (mainly tests).
+    pub async fn new_with_shared_socket_and_ip_filter(
+        role: IceRole,
+        stun_servers: &[String],
+        socket: Arc<dyn SharedIceSocket>,
+        ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    ) -> Result<Self> {
+        let (urls, candidate_types) = parse_stun_servers(stun_servers)?;
+
+        let mux = SharedIceMux::new(socket);
+
+        let include_loopback = ip_filter.is_some();
+        let ip_filter: webrtc_ice::agent::agent_config::IpFilterFn = match ip_filter {
+            Some(f) => Box::new(move |ip| f(ip)),
+            None => Box::new(|_| true),
+        };
+
+        let config = AgentConfig {
+            urls,
+            network_types: vec![NetworkType::Udp4],
+            candidate_types,
+            is_controlling: matches!(role, IceRole::Controlling),
+            udp_network: UDPNetwork::Muxed(mux.clone() as Arc<dyn UDPMux + Send + Sync>),
+            ip_filter: Arc::new(Some(ip_filter)),
+            include_loopback,
+            ..Default::default()
+        };
+
+        let inner = InnerAgent::new(config).await?;
+        Ok(Self {
+            inner,
+            role,
+            mux: Some(mux),
+        })
+    }
+
+    /// Feed in one inbound datagram the caller's own demux loop has
+    /// already classified as STUN. A no-op if this agent wasn't built via
+    /// [`IceAgent::new_with_shared_socket`].
+    pub async fn handle_incoming_stun(&self, buf: &[u8], addr: SocketAddr) {
+        if let Some(mux) = &self.mux {
+            mux.handle_incoming(buf, addr).await;
+        }
     }
 
     /// Our local `(ufrag, pwd)` for the outgoing `a=ice-ufrag`/`a=ice-pwd`

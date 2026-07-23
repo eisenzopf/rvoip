@@ -14,8 +14,14 @@ pub mod error;
 #[cfg(feature = "ice")]
 pub mod agent;
 
+#[cfg(feature = "ice")]
+pub mod bridge;
+
 pub use candidate::{CandidateKind, IceCandidate};
 pub use error::{Error, Result};
 
 #[cfg(feature = "ice")]
 pub use agent::{IceAgent, IceRole};
+
+#[cfg(feature = "ice")]
+pub use bridge::{SharedIceMux, SharedIceSocket};

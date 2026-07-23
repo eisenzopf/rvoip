@@ -25,6 +25,7 @@ thiserror = "1.0.56"
 tokio = { version = "1.35.1", features = ["rt", "sync", "net", "time", "macros"] }
 tracing = "0.1.40"
 async-trait = "0.1"
+parking_lot = "0.12.1"
 
 # Real ICE 1.2 agent (RFC 8445), same webrtc-rs "production" 0.17.x
 # lineage already used elsewhere in this workspace for DTLS (`dtls`) and
@@ -34,10 +35,14 @@ webrtc-ice = { version = "0.17", optional = true }
 # Only the shared `Conn` trait is used from this — same role it plays for
 # the DTLS bridge in `rvoip-rtp-core`.
 webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
+# Parses the STUN USERNAME attribute for ufrag-based routing in the
+# shared-socket bridge (`bridge::SharedIceMux`) — same version webrtc-ice
+# itself depends on.
+stun = { version = "0.17", optional = true }
 
 [features]
 default = []
-ice = ["dep:webrtc-ice", "dep:webrtc-util"]
+ice = ["dep:webrtc-ice", "dep:webrtc-util", "dep:stun"]
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

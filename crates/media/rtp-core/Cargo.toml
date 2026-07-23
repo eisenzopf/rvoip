@@ -21,6 +21,10 @@ workspace = true
 [dependencies]
 # Internal crates
 rvoip-infra-common.workspace = true
+# Only for the `SharedIceSocket` trait the ICE bridge (`transport::ice_bridge`)
+# implements — same optional, feature-gated shape as the DTLS dependencies
+# below, kept out of the default build.
+rvoip-nat-core = { workspace = true, optional = true, features = ["ice"] }
 
 bytes = "1.5.0"
 thiserror = "1.0.56"
@@ -83,6 +87,9 @@ webrtc-util = { version = "0.17", optional = true, default-features = false, fea
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
 dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util"]
+# Bridges ICE (RFC 8445) connectivity checks over this transport's shared
+# RTP/RTCP/STUN socket via `rvoip-nat-core`. See `transport::ice_bridge`.
+ice = ["dep:rvoip-nat-core"]
 
 [dev-dependencies]
 criterion = { workspace = true }
