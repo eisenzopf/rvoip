@@ -189,7 +189,9 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 | OAuth 2 / Bearer | ✅ Beta | `rvoip-auth-core` |
 | STIR/SHAKEN signing | 🚧 Alpha | `rvoip-stir-shaken` workspace crate |
 | OIDC / Passkey / DPoP | 🚧 Alpha | Core primitives and extension crates; `rvoip-identity` currently ships `BearerProvider` only |
-| ICE / TURN / STUN | 🔮 Post-beta | STUN client landed; ICE/TURN are non-claims |
+| ICE (RFC 8445) | 🚧 Alpha | Real `webrtc-ice`-backed connectivity checks via the new [`rvoip-nat-core`](crates/media/nat-core) crate, bridged onto the shared RTP socket, wired into `rvoip-sip` behind `Config::enable_ice` / the `ice` feature. Host + server-reflexive candidates only. |
+| STUN public-address probe | 🚧 Alpha | Boot-time `Config::stun_server` probe in `rvoip-rtp-core`, unrelated to the `IceAgent` above — best-effort, soft-fail address discovery only, not a beta claim |
+| TURN / relay candidates | 🔮 Post-beta | Not implemented; `rvoip-nat-core` never gathers `Relay` candidates |
 | ZRTP / MIKEY | 🔮 Post-beta | Not a beta claim |
 
 ### 🚀 Performance claim
@@ -287,6 +289,7 @@ breaking changes before each graduates to beta.
 | [rvoip-webtransport](crates/uctp/rvoip-webtransport) | New WebTransport substrate adapter |
 | [rvoip-websocket](crates/uctp/rvoip-websocket) | UCTP over WebSocket substrate adapter |
 | [rvoip-webrtc](crates/webrtc/rvoip-webrtc) | WHIP/WS signaling, full-gather + trickle ICE, audio/VP8/data channel/DTMF; pinned to upstream `webrtc 0.20.0-alpha.1` |
+| [rvoip-nat-core](crates/media/nat-core) | New ICE (RFC 8445) engine for the SIP media plane — `webrtc-ice` agent + shared-socket bridge, host + server-reflexive only, no TURN |
 | [rvoip-vcon](crates/extensions/rvoip-vcon) | First Rust impl of the IETF vCon draft — publishes |
 | [rvoip-vcon-postgres](crates/extensions/rvoip-vcon-postgres) | Optional Postgres reference store for vCon documents |
 | [rvoip-harness](crates/extensions/rvoip-harness) | ASR / TTS / DialogManager provider traits — publishes |
