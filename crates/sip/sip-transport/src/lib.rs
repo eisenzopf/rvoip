@@ -20,10 +20,10 @@ mod tests;
 pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
-pub use transport::tls::TlsTransport;
+pub use transport::tls::{TlsClientConfig, TlsTransport};
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
-pub use transport::{Transport, TransportEvent, TransportReceiveTiming};
+pub use transport::{OutboundTlsConfig, Transport, TransportEvent, TransportReceiveTiming};
 
 // Simplified helper functions
 /// Bind a UDP transport to the specified address

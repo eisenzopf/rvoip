@@ -525,6 +525,12 @@ pub struct Config {
 
     /// Optional PEM-encoded client certificate chain for mutual TLS.
     /// Leave unset for normal server-authenticated SIP TLS.
+    ///
+    /// This is the *process-wide default* identity, baked into the
+    /// TLS/WSS transport at startup. A single call can override it with
+    /// [`crate::OutboundTlsConfig`] via
+    /// [`crate::api::send::outbound_call::OutboundCallBuilder::with_transport_security`]
+    /// without affecting any other call.
     pub tls_client_cert_path: Option<std::path::PathBuf>,
 
     /// Optional PEM-encoded PKCS#8 private key matching

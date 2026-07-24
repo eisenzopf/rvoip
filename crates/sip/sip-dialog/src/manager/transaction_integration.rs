@@ -1257,6 +1257,17 @@ impl DialogManager {
             candidates
         };
 
+        // Per-call outbound TLS/WSS client identity override, resolved
+        // from the dialog this send belongs to (if any). `None` — no
+        // dialog, or the dialog has no override — falls back to the
+        // transport's baked-in default identity, unchanged from before
+        // this override existed.
+        let tls_override = tx_to_dialog.and_then(|dialog_id| {
+            self.get_dialog(dialog_id)
+                .ok()
+                .and_then(|dialog| dialog.tls_override.clone())
+        });
+
         let total = candidates.len();
         let mut last_err: Option<crate::errors::DialogError> = None;
 
@@ -1275,11 +1286,19 @@ impl DialogManager {
 
             let tx_result = if method == Method::Invite {
                 self.transaction_manager
-                    .create_invite_client_transaction(req, target.addr)
+                    .create_invite_client_transaction_with_tls_identity(
+                        req,
+                        target.addr,
+                        tls_override.clone(),
+                    )
                     .await
             } else {
                 self.transaction_manager
-                    .create_non_invite_client_transaction(req, target.addr)
+                    .create_non_invite_client_transaction_with_tls_identity(
+                        req,
+                        target.addr,
+                        tls_override.clone(),
+                    )
                     .await
             };
             let tx_id = match tx_result {

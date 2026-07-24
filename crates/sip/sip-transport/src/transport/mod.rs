@@ -12,7 +12,7 @@ pub mod udp;
 pub mod ws;
 
 pub use tcp::TcpTransport;
-pub use tls::TlsTransport;
+pub use tls::{OutboundTlsConfig, TlsTransport};
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
 
@@ -279,6 +279,31 @@ pub trait Transport: Send + Sync + fmt::Debug {
         Err(crate::error::Error::NotImplemented(
             "send_message_raw is not supported on this transport".to_string(),
         ))
+    }
+
+    /// Sends a SIP message using a caller-supplied outbound TLS/WSS
+    /// client identity override, instead of whatever identity this
+    /// transport instance was constructed with.
+    ///
+    /// `identity: None` behaves exactly like [`Transport::send_message`]
+    /// — the transport's default/baked-in identity. Transports that
+    /// don't speak TLS (UDP, TCP) have no identity to override, so the
+    /// default implementation just ignores `identity` and delegates to
+    /// `send_message`; only [`tls::TlsTransport`] and the secure
+    /// `WebSocketTransport` override this meaningfully, building an
+    /// ad-hoc connector for the supplied identity when dialing and
+    /// keying their connection pool on `(destination, identity)` instead
+    /// of `destination` alone — so a call using one client
+    /// certificate/trust policy never reuses a connection established
+    /// with a different one.
+    async fn send_message_with_tls_identity(
+        &self,
+        message: Message,
+        destination: SocketAddr,
+        identity: Option<&tls::OutboundTlsConfig>,
+    ) -> Result<()> {
+        let _ = identity;
+        self.send_message(message, destination).await
     }
 
     /// Forward a serialized SIP message verbatim while pushing or

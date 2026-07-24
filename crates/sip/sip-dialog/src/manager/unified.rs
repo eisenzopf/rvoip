@@ -443,6 +443,7 @@ impl UnifiedDialogManager {
             Vec::new(),
             None,
             None,
+            None,
         )
         .await
     }
@@ -461,6 +462,7 @@ impl UnifiedDialogManager {
             call_id,
             None,
             Vec::new(),
+            None,
             None,
             None,
         )
@@ -795,6 +797,7 @@ impl UnifiedDialogManager {
             extra_headers,
             None,
             None,
+            None,
         )
         .await
     }
@@ -818,6 +821,7 @@ impl UnifiedDialogManager {
             call_id,
             Some(session_id.to_string()),
             extra_headers,
+            None,
             None,
             None,
         )
@@ -858,6 +862,7 @@ impl UnifiedDialogManager {
             extra_headers,
             opts.from_display,
             opts.contact_uri,
+            opts.tls_override,
         )
         .await
     }
@@ -873,6 +878,7 @@ impl UnifiedDialogManager {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
         from_display: Option<String>,
         contact_override: Option<String>,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
@@ -904,7 +910,7 @@ impl UnifiedDialogManager {
         // Create outgoing dialog
         let dialog_id = self
             .core
-            .create_outgoing_dialog(from_uri, to_uri, call_id)
+            .create_outgoing_dialog_with_tls_identity(from_uri, to_uri, call_id, tls_override)
             .await
             .map_err(|e| {
                 error!("Failed to create outgoing dialog: {}", e);

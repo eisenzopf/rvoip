@@ -187,7 +187,7 @@ use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
-    Error as TransportError, Transport, TransportEvent, TransportReceiveTiming,
+    Error as TransportError, OutboundTlsConfig, Transport, TransportEvent, TransportReceiveTiming,
 };
 
 use crate::diagnostics;
@@ -3207,6 +3207,20 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
+        self.create_client_transaction_with_tls_identity(request, destination, None)
+            .await
+    }
+
+    /// Same as [`Self::create_client_transaction`] but with a per-call
+    /// outbound TLS/WSS client identity override, propagated from the
+    /// originating `Dialog`. `None` behaves identically to the
+    /// identity-less method.
+    pub async fn create_client_transaction_with_tls_identity(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<TransactionKey> {
         debug!(method=%request.method(), destination=%destination, "Creating client transaction");
 
         // Debug the Via headers in the request
@@ -3300,15 +3314,17 @@ impl TransactionManager {
         let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!("Creating ClientInviteTransaction: {}", key);
-                let tx = ClientInviteTransaction::new_with_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientInviteTransaction::new_with_command_channel_capacity_and_tls_identity(
+                        key.clone(),
+                        modified_request.clone(),
+                        destination,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        self.timer_settings_for_request(&modified_request),
+                        self.transaction_command_channel_capacity,
+                        tls_override.clone(),
+                    )?;
                 tracing::trace!("Created ClientInviteTransaction: {}", key);
                 Arc::new(tx)
             }
@@ -3316,42 +3332,48 @@ impl TransactionManager {
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_command_channel_capacity_and_tls_identity(
+                        key.clone(),
+                        modified_request.clone(),
+                        destination,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        self.timer_settings_for_request(&modified_request),
+                        self.transaction_command_channel_capacity,
+                        tls_override.clone(),
+                    )?;
                 Arc::new(tx)
             }
             Method::Update => {
                 if let Err(e) = update::validate_update_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_command_channel_capacity_and_tls_identity(
+                        key.clone(),
+                        modified_request.clone(),
+                        destination,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        self.timer_settings_for_request(&modified_request),
+                        self.transaction_command_channel_capacity,
+                        tls_override.clone(),
+                    )?;
                 Arc::new(tx)
             }
             _ => {
-                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
-                    key.clone(),
-                    modified_request.clone(),
-                    destination,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request),
-                    self.transaction_command_channel_capacity,
-                )?;
+                let tx =
+                    ClientNonInviteTransaction::new_with_command_channel_capacity_and_tls_identity(
+                        key.clone(),
+                        modified_request.clone(),
+                        destination,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        self.timer_settings_for_request(&modified_request),
+                        self.transaction_command_channel_capacity,
+                        tls_override.clone(),
+                    )?;
                 Arc::new(tx)
             }
         };
@@ -4378,13 +4400,28 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
+        self.create_non_invite_client_transaction_with_tls_identity(request, destination, None)
+            .await
+    }
+
+    /// Same as [`Self::create_non_invite_client_transaction`] but with a
+    /// per-call outbound TLS/WSS client identity override, propagated from
+    /// the originating `Dialog`. `None` behaves identically to the
+    /// identity-less method.
+    pub async fn create_non_invite_client_transaction_with_tls_identity(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<TransactionKey> {
         if request.method() == Method::Invite {
             return Err(Error::Other(
                 "Cannot create non-INVITE transaction for INVITE request".to_string(),
             ));
         }
 
-        self.create_client_transaction(request, destination).await
+        self.create_client_transaction_with_tls_identity(request, destination, tls_override)
+            .await
     }
 
     /// Creates a client transaction for an INVITE request.
@@ -4400,13 +4437,28 @@ impl TransactionManager {
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
+        self.create_invite_client_transaction_with_tls_identity(request, destination, None)
+            .await
+    }
+
+    /// Same as [`Self::create_invite_client_transaction`] but with a
+    /// per-call outbound TLS/WSS client identity override, propagated from
+    /// the originating `Dialog`. `None` behaves identically to the
+    /// identity-less method.
+    pub async fn create_invite_client_transaction_with_tls_identity(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<TransactionKey> {
         if request.method() != Method::Invite {
             return Err(Error::Other(
                 "Cannot create INVITE transaction for non-INVITE request".to_string(),
             ));
         }
 
-        self.create_client_transaction(request, destination).await
+        self.create_client_transaction_with_tls_identity(request, destination, tls_override)
+            .await
     }
 
     /// Get information about available transport types and their capabilities

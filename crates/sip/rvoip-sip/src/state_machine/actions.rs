@@ -374,6 +374,7 @@ fn materialize_invite_options(
         contact_uri: snapshot.contact_uri.clone(),
         precomputed_authorization: snapshot.precomputed_auth.clone(),
         extra_headers: extras,
+        tls_override: snapshot.tls_override.clone(),
     };
     Ok((opts, suppress_global_proxy))
 }

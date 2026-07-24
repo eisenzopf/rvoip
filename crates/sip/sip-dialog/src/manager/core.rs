@@ -2888,8 +2888,26 @@ impl DialogManager {
         remote_uri: rvoip_sip_core::Uri,
         call_id: Option<String>,
     ) -> DialogResult<DialogId> {
+        self.create_outgoing_dialog_with_tls_identity(local_uri, remote_uri, call_id, None)
+            .await
+    }
+
+    /// Same as [`Self::create_outgoing_dialog`] but with a per-call
+    /// outbound TLS/WSS client identity override. `None` behaves
+    /// identically to the identity-less method.
+    pub async fn create_outgoing_dialog_with_tls_identity(
+        &self,
+        local_uri: rvoip_sip_core::Uri,
+        remote_uri: rvoip_sip_core::Uri,
+        call_id: Option<String>,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
+    ) -> DialogResult<DialogId> {
         <Self as super::dialog_operations::DialogStore>::create_outgoing_dialog(
-            self, local_uri, remote_uri, call_id,
+            self,
+            local_uri,
+            remote_uri,
+            call_id,
+            tls_override,
         )
         .await
     }

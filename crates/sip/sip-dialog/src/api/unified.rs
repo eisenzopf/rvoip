@@ -347,6 +347,10 @@ pub struct InviteRequestOptions {
     pub precomputed_authorization: Option<String>,
     /// Headers appended after the stack stamps Call-ID/CSeq/Via/Max-Forwards.
     pub extra_headers: Vec<TypedHeader>,
+    /// Per-call outbound TLS/WSS client identity override (client
+    /// cert/truststore/SNI). `None` uses the process's default transport
+    /// identity, same as omitting this field entirely.
+    pub tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
 }
 
 /// SUBSCRIBE options (RFC 6665).

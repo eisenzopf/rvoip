@@ -71,7 +71,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{OutboundTlsConfig, Transport};
 
 use crate::transaction::client::data::CommonClientTransaction;
 use crate::transaction::client::{ClientTransaction, ClientTransactionData};
@@ -279,7 +279,11 @@ impl ClientNonInviteLogic {
         let request_guard: &Request = &data.request;
         if let Err(e) = data
             .transport
-            .send_message(Message::Request(request_guard.clone()), data.remote_addr)
+            .send_message_with_tls_identity(
+                Message::Request(request_guard.clone()),
+                data.remote_addr,
+                data.tls_override.as_ref(),
+            )
             .await
         {
             error!(id=%tx_id, error=%e, "Failed to send initial request from Trying state");
@@ -325,7 +329,11 @@ impl ClientNonInviteLogic {
                 let request_guard: &Request = &data.request;
                 if let Err(e) = data
                     .transport
-                    .send_message(Message::Request(request_guard.clone()), data.remote_addr)
+                    .send_message_with_tls_identity(
+                        Message::Request(request_guard.clone()),
+                        data.remote_addr,
+                        data.tls_override.as_ref(),
+                    )
                     .await
                 {
                     error!(id=%tx_id, error=%e, "Failed to retransmit request");
@@ -714,6 +722,33 @@ impl ClientNonInviteTransaction {
         timer_config_override: Option<TimerSettings>,
         command_channel_capacity: usize,
     ) -> Result<Self> {
+        Self::new_with_command_channel_capacity_and_tls_identity(
+            id,
+            request,
+            remote_addr,
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+            None,
+        )
+    }
+
+    /// Same as [`Self::new_with_command_channel_capacity`] but with a
+    /// per-call outbound TLS/WSS client identity override, propagated from
+    /// the originating `Dialog`. `None` behaves identically to the
+    /// identity-less constructor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_command_channel_capacity_and_tls_identity(
+        id: TransactionKey,
+        request: Request,
+        remote_addr: SocketAddr,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+        tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<Self> {
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
 
@@ -730,6 +765,7 @@ impl ClientNonInviteTransaction {
             // cmd_rx is no longer stored here; it's passed directly to the spawned loop
             event_loop_handle: Arc::new(Mutex::new(None)),
             timer_config: timer_config.clone(),
+            tls_override,
         });
 
         let logic = Arc::new(ClientNonInviteLogic {

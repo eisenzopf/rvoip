@@ -28,13 +28,15 @@ use tokio_rustls::rustls::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, trace, warn};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
 
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
 /// expect to expose through `session-core::Config` once Step 1C wires
 /// it up.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TlsClientConfig {
     /// Optional path to a PEM-encoded CA bundle to *add to* the system
     /// trust store. Useful for enterprise PKI / private carriers.
@@ -51,6 +53,27 @@ pub struct TlsClientConfig {
     /// Optional PEM-encoded PKCS#8 private key for
     /// [`TlsClientConfig::client_cert_path`].
     pub client_key_path: Option<PathBuf>,
+}
+
+/// A resolved per-call outbound TLS/WSS client identity + trust policy,
+/// overriding whatever identity the transport was constructed with for
+/// just this one call.
+///
+/// Lets a single process (e.g. a gateway/edge-sip fronting multiple
+/// tenants or upstream carriers) place simultaneous outbound calls using
+/// different client certificates and trust stores, resolved per call
+/// from the destination endpoint's profile — instead of one client
+/// identity baked into the transport for its whole lifetime. `None`
+/// anywhere this type is accepted means "use the transport's default
+/// identity", preserving today's behavior exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OutboundTlsConfig {
+    /// Client identity + trust policy for this call.
+    pub client: TlsClientConfig,
+    /// Explicit SNI server name for this call. `None` falls back to the
+    /// existing derivation ([`tls_server_name_for_message`] for a
+    /// request's next-hop URI host, [`ip_to_server_name`] otherwise).
+    pub server_name: Option<String>,
 }
 
 /// TLS socket role for a SIP transport instance.
@@ -92,11 +115,19 @@ pub struct TlsTransport {
     /// it.
     connector: TlsConnector,
 
-    /// Active TLS connections, keyed by remote address. Used by
-    /// `send_message` to find the right write-side mpsc channel.
-    /// Connection-lifetime: removed by the per-connection reader task
-    /// on EOF/error.
-    connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+    /// Active TLS connections, keyed by remote address **and** the
+    /// client identity used to establish them. `None` identity = this
+    /// transport's own baked-in default (`connector` above) — today's
+    /// behavior. A `Some(identity)` entry only ever comes from a
+    /// per-call [`OutboundTlsConfig`] override, and is never reused for
+    /// a send that doesn't ask for that same identity, so a call using
+    /// one client certificate/trust policy can never end up sharing a
+    /// connection authenticated with a different one. Used by
+    /// `send_message`/`send_message_with_tls_identity` to find the
+    /// right write-side mpsc channel. Connection-lifetime: removed by
+    /// the per-connection reader task on EOF/error.
+    connections:
+        Arc<tokio::sync::Mutex<Vec<(SocketAddr, Option<TlsClientConfig>, mpsc::Sender<Bytes>)>>>,
 
     /// Transport event sender.
     event_tx: Option<mpsc::Sender<TransportEvent>>,
@@ -285,7 +316,9 @@ impl TlsTransport {
         listener: TcpListener,
         addr: SocketAddr,
         acceptor: TlsAcceptor,
-        connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+        connections: Arc<
+            tokio::sync::Mutex<Vec<(SocketAddr, Option<TlsClientConfig>, mpsc::Sender<Bytes>)>>,
+        >,
         event_tx: mpsc::Sender<TransportEvent>,
     ) {
         loop {
@@ -301,10 +334,15 @@ impl TlsTransport {
                         match acceptor.accept(stream).await {
                             Ok(tls_stream) => {
                                 debug!("TLS handshake with {} successful", remote_addr);
+                                // Inbound (server-accepted) connections
+                                // always register under the default
+                                // identity — the server side doesn't
+                                // select a client identity per call.
                                 Self::handle_connection(
                                     tls_stream,
                                     remote_addr,
                                     local_addr,
+                                    None,
                                     connections,
                                     event_tx,
                                 )
@@ -339,7 +377,10 @@ impl TlsTransport {
         tls_stream: S,
         remote_addr: SocketAddr,
         local_addr: SocketAddr,
-        connections: Arc<tokio::sync::Mutex<Vec<(SocketAddr, mpsc::Sender<Bytes>)>>>,
+        identity: Option<TlsClientConfig>,
+        connections: Arc<
+            tokio::sync::Mutex<Vec<(SocketAddr, Option<TlsClientConfig>, mpsc::Sender<Bytes>)>>,
+        >,
         event_tx: mpsc::Sender<TransportEvent>,
     ) where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
@@ -349,7 +390,7 @@ impl TlsTransport {
 
         {
             let mut connections_guard = connections.lock().await;
-            connections_guard.push((remote_addr, tx.clone()));
+            connections_guard.push((remote_addr, identity.clone(), tx.clone()));
         }
 
         let write_task = tokio::spawn(async move {
@@ -452,7 +493,8 @@ impl TlsTransport {
 
         {
             let mut connections_guard = connections.lock().await;
-            connections_guard.retain(|(addr, _)| *addr != remote_addr);
+            connections_guard
+                .retain(|(addr, ident, _)| !(*addr == remote_addr && *ident == identity));
         }
 
         debug!("TLS connection closed: {}", remote_addr);
@@ -461,18 +503,28 @@ impl TlsTransport {
     /// Send data to a specific remote address. Auto-dials if no
     /// connection exists yet. Request sends supply SNI from the next-hop
     /// URI host; response/raw sends fall back to destination-address SNI.
+    ///
+    /// `identity` selects which client identity's connection to reuse
+    /// or dial: `None` is this transport's own baked-in default
+    /// (today's behavior); `Some` is a per-call [`OutboundTlsConfig`]
+    /// override, matched *and* dialed independently of any other
+    /// identity's connection to the same `addr`.
     async fn send_to_addr(
         &self,
         data: Bytes,
         addr: SocketAddr,
         server_name: Option<ServerName<'static>>,
+        identity: Option<TlsClientConfig>,
     ) -> Result<()> {
         // Fast path: existing connection. Clone the bytes for the fast
         // path send so we still have the original on hand for the
         // auto-dial fallback when the channel is closed.
         {
             let connections_guard = self.connections.lock().await;
-            if let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == addr) {
+            if let Some((_, _, tx)) = connections_guard
+                .iter()
+                .find(|(a, ident, _)| *a == addr && *ident == identity)
+            {
                 if tx.send(data.clone()).await.is_ok() {
                     return Ok(());
                 }
@@ -488,15 +540,14 @@ impl TlsTransport {
         }
 
         // Auto-dial.
-        match server_name {
-            Some(server_name) => self.connect_with_server_name(addr, server_name).await?,
-            None => self.connect(addr).await?,
-        }
+        let server_name = server_name.unwrap_or_else(|| ip_to_server_name(addr));
+        self.connect_with_identity(addr, server_name, identity.clone())
+            .await?;
 
         let connections_guard = self.connections.lock().await;
-        let (_, tx) = connections_guard
+        let (_, _, tx) = connections_guard
             .iter()
-            .find(|(a, _)| *a == addr)
+            .find(|(a, ident, _)| *a == addr && *ident == identity)
             .ok_or_else(|| {
                 Error::Other(format!(
                     "TLS auto-dial succeeded but no connection registered for {}",
@@ -531,29 +582,60 @@ impl TlsTransport {
         remote_addr: SocketAddr,
         server_name: ServerName<'static>,
     ) -> Result<()> {
+        self.connect_with_identity(remote_addr, server_name, None)
+            .await
+    }
+
+    /// Like [`Self::connect_with_server_name`], but dials (or reuses)
+    /// the connection registered under `identity` specifically —
+    /// `None` is this transport's own baked-in default identity/trust
+    /// policy (`self.connector`, built once at construction); `Some`
+    /// builds an ad-hoc [`TlsConnector`] from that
+    /// [`TlsClientConfig`] for this dial instead, per a per-call
+    /// [`OutboundTlsConfig`] override. Building it from scratch per
+    /// dial (rather than caching one connector per distinct identity)
+    /// is fine at SIP signaling dial rates — `build_client_config`
+    /// already caches the expensive part (system root anchors) in a
+    /// process-wide `OnceLock`; only the (small) supplied cert/key PEM
+    /// gets re-parsed.
+    pub async fn connect_with_identity(
+        &self,
+        remote_addr: SocketAddr,
+        server_name: ServerName<'static>,
+        identity: Option<TlsClientConfig>,
+    ) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
 
-        // Already connected? — short-circuit.
+        // Already connected under this exact identity? — short-circuit.
         {
             let connections_guard = self.connections.lock().await;
             if connections_guard
                 .iter()
-                .any(|(addr, _)| *addr == remote_addr)
+                .any(|(addr, ident, _)| *addr == remote_addr && *ident == identity)
             {
                 return Ok(());
             }
         }
 
-        debug!("TLS dial → {} (SNI {:?})", remote_addr, server_name);
+        debug!(
+            "TLS dial → {} (SNI {:?}, identity override: {})",
+            remote_addr,
+            server_name,
+            identity.is_some()
+        );
 
         let tcp_stream = TcpStream::connect(remote_addr)
             .await
             .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
 
-        let tls_stream = self
-            .connector
+        let connector = match &identity {
+            Some(cfg) => TlsConnector::from(Arc::new(build_client_config(cfg)?)),
+            None => self.connector.clone(),
+        };
+
+        let tls_stream = connector
             .connect(server_name, tcp_stream)
             .await
             .map_err(|e| {
@@ -568,13 +650,21 @@ impl TlsTransport {
             .clone()
             .ok_or_else(|| Error::TlsHandshakeFailed("TLS transport has no event sender".into()))?;
         let local_addr = self.local_addr;
+        let identity_for_task = identity.clone();
 
         // Spawn the same generic read/write loop used for inbound
         // connections; it registers the connection in the registry as
         // its first action so a subsequent `send_to_addr` finds it.
         tokio::spawn(async move {
-            Self::handle_connection(tls_stream, remote_addr, local_addr, connections, event_tx)
-                .await;
+            Self::handle_connection(
+                tls_stream,
+                remote_addr,
+                local_addr,
+                identity_for_task,
+                connections,
+                event_tx,
+            )
+            .await;
         });
 
         // Wait briefly for the spawned task to register the connection
@@ -586,7 +676,7 @@ impl TlsTransport {
                 let connections_guard = self.connections.lock().await;
                 if connections_guard
                     .iter()
-                    .any(|(addr, _)| *addr == remote_addr)
+                    .any(|(addr, ident, _)| *addr == remote_addr && *ident == identity)
                 {
                     return Ok(());
                 }
@@ -617,8 +707,40 @@ impl Transport for TlsTransport {
         // peer's read side.
         let server_name = tls_server_name_for_message(&message, destination);
         let bytes = message.to_bytes();
-        self.send_to_addr(bytes.into(), destination, server_name)
+        self.send_to_addr(bytes.into(), destination, server_name, None)
             .await
+    }
+
+    async fn send_message_with_tls_identity(
+        &self,
+        message: rvoip_sip_core::Message,
+        destination: SocketAddr,
+        identity: Option<&OutboundTlsConfig>,
+    ) -> Result<()> {
+        let Some(identity) = identity else {
+            return self.send_message(message, destination).await;
+        };
+        // Explicit per-call SNI wins; otherwise fall back to the same
+        // next-hop-URI-derived SNI `send_message` uses.
+        let server_name = match &identity.server_name {
+            Some(name) => ServerName::try_from(name.clone())
+                .map_err(|e| {
+                    Error::TlsHandshakeFailed(format!(
+                        "invalid per-call SNI server_name {:?}: {}",
+                        name, e
+                    ))
+                })
+                .map(Some)?,
+            None => tls_server_name_for_message(&message, destination),
+        };
+        let bytes = message.to_bytes();
+        self.send_to_addr(
+            bytes.into(),
+            destination,
+            server_name,
+            Some(identity.client.clone()),
+        )
+        .await
     }
 
     fn local_addr(&self) -> Result<SocketAddr> {
@@ -642,9 +764,11 @@ impl Transport for TlsTransport {
         // `try_lock` so this is non-blocking — the multiplexer may call
         // it from inside its own dispatch path. A momentary lock-busy
         // is acceptable to report `false` (the multiplexer will fall
-        // through to its default transport).
+        // through to its default transport). Matches on address only
+        // (any identity) — this answers "is TLS reachable here at all"
+        // for scheme selection, not "which identity's connection".
         match self.connections.try_lock() {
-            Ok(guard) => guard.iter().any(|(addr, _)| *addr == remote_addr),
+            Ok(guard) => guard.iter().any(|(addr, _, _)| *addr == remote_addr),
             Err(_) => false,
         }
     }
@@ -658,7 +782,7 @@ impl Transport for TlsTransport {
         // A fresh dial would defeat the purpose — the flow we'd keep
         // alive is already gone.
         let connections_guard = self.connections.lock().await;
-        let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == destination) else {
+        let Some((_, _, tx)) = connections_guard.iter().find(|(a, _, _)| *a == destination) else {
             return Err(Error::InvalidState(format!(
                 "No active TLS connection to {} for send_raw",
                 destination
@@ -679,7 +803,7 @@ impl Transport for TlsTransport {
         // No server-name hint — verbatim-bytes callers pre-canonicalised
         // their request; we route by destination IP. Auto-dial when no
         // pooled connection exists (modulo ServerOnly role).
-        self.send_to_addr(bytes, destination, None).await
+        self.send_to_addr(bytes, destination, None, None).await
     }
 }
 

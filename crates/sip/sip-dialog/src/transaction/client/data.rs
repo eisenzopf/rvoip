@@ -23,7 +23,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::Transport;
+use rvoip_sip_transport::{OutboundTlsConfig, Transport};
 
 use crate::transaction::error::{Error, Result};
 use crate::transaction::runner::{
@@ -100,6 +100,14 @@ pub struct ClientTransactionData {
 
     /// Configuration for transaction timers (T1, T2, etc.)
     pub timer_config: TimerSettings,
+
+    /// Per-call outbound TLS/WSS client identity override, propagated
+    /// from the originating `Dialog`. `None` uses the transport's
+    /// baked-in default identity (unchanged behavior). Applied on every
+    /// wire send this transaction performs (initial send, retransmits,
+    /// and the non-2xx ACK) so a whole transaction consistently uses one
+    /// identity.
+    pub tls_override: Option<OutboundTlsConfig>,
 }
 
 impl Drop for ClientTransactionData {

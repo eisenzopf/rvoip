@@ -29,11 +29,17 @@ pub trait DialogStore {
     ) -> impl std::future::Future<Output = DialogResult<DialogId>> + Send;
 
     /// Create an outgoing dialog for client-initiated requests
+    ///
+    /// `tls_override` is a per-call outbound TLS/WSS client identity
+    /// override (client cert/truststore/SNI). `None` uses the process's
+    /// default transport identity, unchanged from before this parameter
+    /// existed.
     fn create_outgoing_dialog(
         &self,
         local_uri: Uri,
         remote_uri: Uri,
         call_id: Option<String>,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
     ) -> impl std::future::Future<Output = DialogResult<DialogId>> + Send;
 
     /// Store a dialog in the manager
@@ -152,6 +158,7 @@ impl DialogStore for DialogManager {
         local_uri: Uri,
         remote_uri: Uri,
         call_id: Option<String>,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
     ) -> DialogResult<DialogId> {
         debug!("Creating outgoing dialog for UAC request");
 
@@ -167,6 +174,7 @@ impl DialogStore for DialogManager {
             None,              // remote_tag (will be set from response)
             true,              // is_initiator = true (we're UAC)
         );
+        dialog.tls_override = tls_override;
 
         // RFC 3608 §5.2 preload: if a prior REGISTER 2xx populated the
         // Service-Route cache for this AoR (the From URI of the
