@@ -1,6 +1,6 @@
 # rvoip-sip Beta Performance Report
 
-Date: 2026-06-16
+Date: 2026-07-24
 
 This report summarizes the current beta-candidate performance evidence and the
 claim policy for the next release. The current reference report is pinned
@@ -19,6 +19,39 @@ Current reference report:
 - Environment: `crates/sip/rvoip-sip/beta-report/20260616T014649Z/environment/environment.md`
 - Raw performance artifacts: `crates/sip/rvoip-sip/beta-report/20260616T014649Z/perf-results/`
 - Current release train and runtime crate version: `0.2.5`
+
+The pinned report is historical reference evidence. Current release policy is
+defined by `BETA_RELEASE_CHECKLIST.md` and requires a new clean full report.
+
+## Current Release-Gate Policy
+
+| Gate | Current requirement |
+|------|---------------------|
+| High-density media burst | Full RTP decode and application `AudioFrame` delivery; `160 CPS` for the 90-second burst phase; ASR `>= 0.995`; answer timeouts count against ASR while every non-timeout error counter must be zero; exact-zero drain; RSS `<= 15 MB/hour` |
+| Monolithic soak | 3,600 seconds, 30 cycling full-media calls, every call succeeds, all error and retained-resource counters zero, final 600-second active-tail RSS `<= 15 MB/hour` |
+| Split soak | 3,600 seconds, 500 cycling full-media calls, full delivery, zero call/media/teardown and retained-resource errors, caller and receiver RSS `<= 15 MB/hour` |
+| Reporting | `summary.md` includes observed-vs-limit tables; `performance-gate-metrics.json` contains the same checks; attestation hashes both and rejects config/result disagreement |
+
+Diagnostic audio-delivery suppression is not release evidence. Full
+qualification fails closed unless
+`RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0`.
+
+Focused high-density evidence collected on 2026-07-24 passed the revised gate:
+`17,967 / 18,000` calls, ASR `0.9982`, peak active calls `9,989`,
+`10,095,392` delivered audio frames, and zero media setup, teardown, retained
+object, active-receiver, and post-drain transaction failures. The `33` answer
+timeouts are reflected in ASR and remain within the `0.5%` failure allowance.
+
+Focused monolithic-soak evidence collected on 2026-07-24 also passed the
+revised gate: `587 / 587` calls, ASR `1.0`, `5,379,899` delivered audio
+frames, zero call, media, teardown, retained-object, active-receiver,
+controlled-drain, transaction-manager, and transaction-runner failures, and
+an active-tail RSS slope of `13.17 MB/hour` against the `15 MB/hour` limit.
+The measured active-tail window was `595.51` seconds and the post-drain slope
+was `0.27 MB/hour`.
+
+These focused runs clear the two failures from the preceding full attempt but
+do not replace the required clean full report.
 
 ## Claim Policy
 
@@ -96,7 +129,7 @@ and
 
 | Duration | Offered | Succeeded | ASR | Held media calls | Peak RSS | Post-drain RSS gate | Retained objects after drain | Active Bob audio receivers after drain | Transaction runners after drain |
 |----------|---------|-----------|-----|------------------|----------|---------------------|------------------------------|----------------------------------------|---------------------------------|
-| 3,600 s | 9,898 | 9,898 | 1.0 | 500 | caller 157.3 MB / receiver 211.5 MB | caller 0.42 MB/hr / receiver 0.21 MB/hr against 10 MB/hr default | 0 | 0 | 0 |
+| 3,600 s | 9,898 | 9,898 | 1.0 | 500 | caller 157.3 MB / receiver 211.5 MB | caller 0.42 MB/hr / receiver 0.21 MB/hr against the historical 10 MB/hr policy (also below the current 15 MB/hr policy) | 0 | 0 | 0 |
 
 The receiver observed `89,629,787` audio frames and completed `9,898` audio
 receivers before the post-drain checks.

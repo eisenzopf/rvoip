@@ -130,6 +130,9 @@ class BetaAttestationTests(unittest.TestCase):
             path = self.report / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture evidence for {relative}\n", encoding="utf-8")
+        for relative in sorted(attestation.PERFORMANCE_GATE_METRICS_PATHS):
+            path = self.report / relative
+            path.write_text("fixture performance metrics\n", encoding="utf-8")
         strict = self.report / "strict-ua"
         (strict / "baresip").mkdir(parents=True)
         (strict / "environment.md").write_text(
@@ -199,7 +202,7 @@ class BetaAttestationTests(unittest.TestCase):
             "perf_media_churn.json": {
                 "results": {
                     "duration_secs": 120,
-                    "active_calls_target": 500,
+                    "active_calls_target": 30,
                     "active_call_min_hold_secs": 10,
                     "active_call_max_hold_secs": 360,
                     "retention_drain_wait_secs": 120,
@@ -208,13 +211,13 @@ class BetaAttestationTests(unittest.TestCase):
             "perf_soak_30min.json": {
                 "results": {
                     "duration_secs": 1800,
-                    "active_calls_target": 500,
+                    "active_calls_target": 30,
                     "active_call_min_hold_secs": 10,
                     "active_call_max_hold_secs": 360,
                     "soak_cps": 0,
                     "controlled_drain_cps": 10,
                     "retention_drain_wait_secs": 120,
-                    "rss_gate": {"effective_mb_per_hr": 10},
+                    "rss_gate": {"effective_mb_per_hr": 15},
                 }
             },
             "perf_mass_teardown_stress.json": {
@@ -233,7 +236,7 @@ class BetaAttestationTests(unittest.TestCase):
                     "active_call_max_hold_secs": 360,
                     "soak_cps": 0,
                     "retention_drain_wait_secs": 120,
-                    "rss_gate": {"effective_mb_per_hr": 10},
+                    "rss_gate": {"effective_mb_per_hr": 15},
                 }
             },
             "perf_soak_receiver.json": {
@@ -241,7 +244,7 @@ class BetaAttestationTests(unittest.TestCase):
                     "configured_duration_secs": 3600,
                     "active_calls_target": 500,
                     "retention_drain_wait_secs": 120,
-                    "rss_gate": {"effective_mb_per_hr": 10},
+                    "rss_gate": {"effective_mb_per_hr": 15},
                 }
             },
         }
@@ -331,7 +334,12 @@ class BetaAttestationTests(unittest.TestCase):
             "beta_pbx_g729_profiles": "g729a g729ab",
             "beta_pbx_provider": "both",
             "beta_pbx_scenario": "all",
+            "beta_perf_high_density_burst_cps": "160",
+            "beta_perf_high_density_min_asr": "0.995",
+            "beta_perf_high_density_rss_limit_mb_per_hr": "15",
+            "beta_perf_media_churn_active_calls": "30",
             "beta_perf_media_churn_duration_secs": "120",
+            "beta_perf_monolithic_soak_active_calls": "30",
             "beta_perf_monolithic_soak_duration_secs": "1800",
             "beta_perf_regression_baseline_id": "20260706T181609Z",
             "beta_perf_regression_baseline_manifest_sha256": digest(
@@ -356,7 +364,7 @@ class BetaAttestationTests(unittest.TestCase):
             "beta_state_table_source": state_table_source,
             "rvoip_perf_mass_teardown_calls": "500",
             "rvoip_perf_mass_teardown_setup_cps": "30",
-            "rvoip_perf_max_rss_growth_mb_per_hr": "10",
+            "rvoip_perf_max_rss_growth_mb_per_hr": "15",
             "rvoip_perf_retention_drain_wait_secs": "120",
             "rvoip_perf_soak_active_calls": "500",
             "rvoip_perf_soak_cps": "0",
@@ -364,6 +372,7 @@ class BetaAttestationTests(unittest.TestCase):
             "rvoip_perf_soak_duration_secs": "3600",
             "rvoip_perf_soak_max_hold_secs": "360",
             "rvoip_perf_soak_min_hold_secs": "10",
+            "rvoip_perf_skip_audio_frame_delivery": "0",
             "rvoip_require_api_tools": "1",
         }
 

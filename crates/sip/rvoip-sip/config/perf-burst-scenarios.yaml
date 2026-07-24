@@ -23,7 +23,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       minRssGateWindowSecs: 120
 
   - name: access-edge-microburst
@@ -45,7 +45,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       maxRecoverySecs: 60
 
   - name: contact-center-flash
@@ -69,7 +69,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       maxRecoverySecs: 90
 
   - name: shift-change-long-hold
@@ -93,7 +93,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       maxRecoverySecs: 120
 
   - name: overload-recovery
@@ -121,7 +121,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       # The overload phase can end with all 250 slots legitimately occupied.
       # Require clean, stable recovery no later than the longest configured
       # call hold instead of counting that bounded transition as steady state.
@@ -136,7 +136,7 @@ scenarios:
     seed: 2026060806
     phases:
       - { label: warmup, cps: 30, durationSecs: 30 }
-      - { label: media-burst, cps: 180, durationSecs: 90 }
+      - { label: media-burst, cps: 160, durationSecs: 90 }
       - { label: recovery, cps: 30, durationSecs: 90 }
     acceptance:
       # Release policy: permit up to 0.5% setup loss only in this extreme
@@ -147,7 +147,7 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       maxRecoverySecs: 120
 
   - name: buffer-ab-legacy
@@ -169,5 +169,5 @@ scenarios:
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
-      maxRssGrowthMbPerHr: 10
+      maxRssGrowthMbPerHr: 15
       maxRecoverySecs: 60

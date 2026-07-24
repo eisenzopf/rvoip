@@ -162,9 +162,13 @@ Environment:
                                   high-CPS tiers are qualified by the server profiles.
   BETA_PERF_MEDIA_CHURN_DURATION_SECS
                                   Isolated media-churn duration. Defaults to 120 seconds.
+  BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS
+                                  Isolated media-churn active-call target. Defaults to 30.
   BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS
                                   Monolithic-soak duration. Defaults to 3600 seconds so the
                                   final ten-minute RSS gate follows allocator warm-up.
+  BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS
+                                  Monolithic-soak active-call target. Defaults to 30.
   BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
   BETA_PERF_INFRA_MEMORY_DIAGNOSTICS=1
                                   Compile SIP/infra memory diagnostics for perf gates.
@@ -223,9 +227,10 @@ Environment:
                                   Enable macOS MallocStackLogging for child soak processes.
   RVOIP_PERF_LEAKS_SNAPSHOTS=1   Also run macOS leaks at heap snapshot offsets.
   RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=1
-                                  Decode RTP media but skip app-facing AudioFrame delivery.
+                                  Diagnostic-only: decode RTP media but skip app-facing
+                                  AudioFrame delivery. Full release qualification requires 0.
   RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR
-                                  Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
+                                  Beta RSS growth threshold. Defaults to 15 MB/hr.
   RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY
                                   App-facing event buffer capacity for perf soaks.
                                   Defaults to Config's recipe value.
@@ -899,8 +904,13 @@ write_summary_gate_table_header() {
 - beta_perf_regression_fail: \`${BETA_PERF_REGRESSION_FAIL:-0}\`
 - beta_perf_regression_baseline_id: \`${perf_regression_baseline_id}\`
 - beta_perf_regression_baseline_manifest_sha256: \`${perf_regression_baseline_manifest_sha256}\`
+- beta_perf_high_density_burst_cps: \`160\`
+- beta_perf_high_density_min_asr: \`0.995\`
+- beta_perf_high_density_rss_limit_mb_per_hr: \`15\`
 - beta_perf_media_churn_duration_secs: \`${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}\`
+- beta_perf_media_churn_active_calls: \`${BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS:-30}\`
 - beta_perf_monolithic_soak_duration_secs: \`${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-3600}\`
+- beta_perf_monolithic_soak_active_calls: \`${BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS:-30}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
 - beta_perf_features: \`$(perf_features)\`
 - beta_perf_infra_memory_diagnostics: \`${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}\`
@@ -942,7 +952,7 @@ write_summary_gate_table_header() {
 - rvoip_perf_malloc_stack_logging: \`${RVOIP_PERF_MALLOC_STACK_LOGGING:-0}\`
 - rvoip_perf_leaks_snapshots: \`${RVOIP_PERF_LEAKS_SNAPSHOTS:-0}\`
 - rvoip_perf_skip_audio_frame_delivery: \`${RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY:-0}\`
-- rvoip_perf_max_rss_growth_mb_per_hr: \`${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-Config default (10)}\`
+- rvoip_perf_max_rss_growth_mb_per_hr: \`${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}\`
 - rvoip_perf_app_event_channel_capacity: \`${RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY:-Config default}\`
 - rvoip_perf_rss_tail_window_secs: \`${RVOIP_PERF_RSS_TAIL_WINDOW_SECS:-60}\`
 
@@ -1179,6 +1189,28 @@ capture_current_perf_results() {
 - captured_artifact_directory: $destination
 - captured_file_count: $(find "$PERF_RESULTS_DIR" -type f | wc -l | tr -d ' ')
 EOF
+}
+
+write_performance_gate_metrics() {
+  local -a arguments=(
+    --perf-root "$ARTIFACT_DIR/perf-results"
+    --output-json "$ARTIFACT_DIR/performance-gate-metrics.json"
+    --output-markdown "$ARTIFACT_DIR/performance-gate-metrics.md"
+    --high-density-cps 160
+    --high-density-min-asr 0.995
+    --rss-limit-mb-per-hr "${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}"
+    --monolithic-duration-secs "${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-3600}"
+    --monolithic-active-calls "${BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS:-30}"
+  )
+  if [ "${BETA_RUN_BURST_MATRIX:-0}" = "1" ]; then
+    case " ${BETA_BURST_MATRIX:-all} " in
+      *" all "*|*" high-density-media-burst "*) arguments+=(--require-high-density) ;;
+    esac
+  fi
+  if [ "${BETA_RUN_PERF_ALL:-0}" = "1" ]; then
+    arguments+=(--require-monolithic)
+  fi
+  python3 "$SCRIPT_DIR/beta_performance_gate_metrics.py" "${arguments[@]}"
 }
 
 copy_perf_results_into_report() {
@@ -1628,6 +1660,7 @@ run_local_gates() {
   run_gate_continue "format check" cargo fmt --all -- --check
   run_gate_continue "beta evidence helper tests" python3 -m unittest \
     crates/sip/rvoip-sip/scripts/test_beta_attestation.py \
+    crates/sip/rvoip-sip/scripts/test_beta_performance_gate_metrics.py \
     crates/sip/rvoip-sip/scripts/test_beta_gate_source.py \
     crates/sip/rvoip-sip/scripts/test_perf_audit.py \
     crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py \
@@ -1786,6 +1819,7 @@ run_perf_gates() {
       BETA_RUN_BURST_MATRIX="${BETA_RUN_BURST_MATRIX:-0}" \
       BETA_BURST_MATRIX="${BETA_BURST_MATRIX:-all}" \
       BETA_RUN_LONG_SOAK="${BETA_RUN_LONG_SOAK:-1}" \
+      RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY="${RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY:-0}" \
       bash -c '
         set -euo pipefail
         [ "$BETA_RUN_BURST_MATRIX" = "1" ] || {
@@ -1798,6 +1832,10 @@ run_perf_gates() {
         }
         [ "$BETA_RUN_LONG_SOAK" = "1" ] || {
           echo "BETA_RUN_PERF_ALL=1 requires BETA_RUN_LONG_SOAK=1" >&2
+          exit 1
+        }
+        [ "$RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY" = "0" ] || {
+          echo "BETA_RUN_PERF_ALL=1 requires full app-facing AudioFrame delivery" >&2
           exit 1
         }
       '
@@ -1849,10 +1887,13 @@ run_perf_gates() {
     # media churn diagnostic and the one-hour monolithic soak.
     run_gate_continue "perf media churn" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}" \
+      RVOIP_PERF_SOAK_ACTIVE_CALLS="${BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS:-30}" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_media_churn perf_media_churn -- --exact --ignored --nocapture
     run_gate_continue "perf monolithic soak" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-3600}" \
+      RVOIP_PERF_SOAK_ACTIVE_CALLS="${BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS:-30}" \
       RVOIP_PERF_SOAK_DRAIN_CPS="${RVOIP_PERF_SOAK_DRAIN_CPS:-10}" \
+      RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR="${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}" \
       RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
       RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}" \
       RVOIP_PERF_ARCHIVE_DIR="$ARTIFACT_DIR/perf-results" \
@@ -1899,6 +1940,8 @@ run_perf_gates() {
         RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
         RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
         RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+        RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 \
+        RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR="${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}" \
         "$SCRIPT_DIR/perf_burst_matrix.sh"
     fi
   else
@@ -1913,6 +1956,8 @@ run_perf_gates() {
       RVOIP_PERF_ALLOCATOR_DIAGNOSTICS="${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:-0}" \
       RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS="${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:-5}" \
       RVOIP_PERF_MIMALLOC_COLLECT_AT="${RVOIP_PERF_MIMALLOC_COLLECT_AT:-off}" \
+      RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 \
+      RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR="${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}" \
       "$SCRIPT_DIR/perf_burst_matrix.sh"
   fi
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
@@ -1934,6 +1979,7 @@ run_perf_gates() {
       RVOIP_PERF_MALLOC_STACK_LOGGING="${RVOIP_PERF_MALLOC_STACK_LOGGING:-0}" \
       RVOIP_PERF_LEAKS_SNAPSHOTS="${RVOIP_PERF_LEAKS_SNAPSHOTS:-0}" \
       RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY="${RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY:-0}" \
+      RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR="${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-15}" \
       RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER="${RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER:-1}" \
       "$SCRIPT_DIR/perf_soak_split.sh"
   else
@@ -1995,6 +2041,15 @@ esac
 if [ "$MODE" = "full" ] || [ "$MODE" = "perf" ]; then
   if perf_results_capture_ready; then
     run_gate_continue "perf results evidence capture" capture_current_perf_results
+    run_gate_continue "performance gate metrics report" \
+      write_performance_gate_metrics
+    if [ -f "$ARTIFACT_DIR/performance-gate-metrics.md" ]; then
+      printf '\n' >> "$SUMMARY"
+      cat "$ARTIFACT_DIR/performance-gate-metrics.md" >> "$SUMMARY"
+    fi
+  else
+    skip_gate "performance gate metrics report" \
+      "The isolated performance result capture is unavailable."
   fi
 fi
 

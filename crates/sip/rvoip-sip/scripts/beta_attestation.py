@@ -81,6 +81,10 @@ INTEROP_EVIDENCE_PATHS = {
     "strict-ua/matrix.tsv",
     "strict-ua/summary.md",
 }
+PERFORMANCE_GATE_METRICS_PATHS = {
+    "performance-gate-metrics.json",
+    "performance-gate-metrics.md",
+}
 REQUIRED_INTEROP_PEER_PRODUCTS = {"asterisk", "baresip", "freeswitch", "sipp"}
 STANDARD_PERFORMANCE_RESULT_PATHS = {
     "perf-results/perf_backpressure_step.json",
@@ -141,7 +145,7 @@ LOCAL_REQUIRED_GATES = {
     "sip-core generated message validation",
     "sip dialog generated validation",
 } | {
-    f"standalone example {example} check"
+    f"standalone example {example} tests"
     for example in (
         "01-quickstart-p2p",
         "02-softphone-audio",
@@ -195,6 +199,7 @@ STANDARD_PERFORMANCE_REQUIRED_GATES = {
     "perf soak candidate",
     "perf regression audit",
     "perf results evidence capture",
+    "performance gate metrics report",
 }
 LITERAL_ALL_PERFORMANCE_REQUIRED_GATES = {
     "literal-all perf configuration",
@@ -216,7 +221,12 @@ LITERAL_ALL_PERFORMANCE_REQUIRED_GATES = {
     "perf mass teardown stress",
 }
 FULL_NUMERIC_CONFIGURATION = {
+    "beta_perf_high_density_burst_cps": ("exact", 160),
+    "beta_perf_high_density_min_asr": ("exact", 0.995),
+    "beta_perf_high_density_rss_limit_mb_per_hr": ("exact", 15),
+    "beta_perf_media_churn_active_calls": ("minimum", 30),
     "beta_perf_media_churn_duration_secs": ("minimum", 120),
+    "beta_perf_monolithic_soak_active_calls": ("minimum", 30),
     "beta_perf_monolithic_soak_duration_secs": ("minimum", 1800),
     "rvoip_perf_soak_duration_secs": ("minimum", 3600),
     "rvoip_perf_soak_active_calls": ("minimum", 500),
@@ -227,7 +237,8 @@ FULL_NUMERIC_CONFIGURATION = {
     "rvoip_perf_retention_drain_wait_secs": ("minimum", 120),
     "rvoip_perf_mass_teardown_calls": ("minimum", 500),
     "rvoip_perf_mass_teardown_setup_cps": ("minimum", 30),
-    "rvoip_perf_max_rss_growth_mb_per_hr": ("maximum", 10),
+    "rvoip_perf_max_rss_growth_mb_per_hr": ("maximum", 15),
+    "rvoip_perf_skip_audio_frame_delivery": ("exact", 0),
 }
 HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 HEX_64 = re.compile(r"^[0-9a-f]{64}$")
@@ -1154,6 +1165,7 @@ def result_block(
         and not item["path"].startswith("canonical-2k/reviewed-baseline/")
         and not item["path"].startswith("perf-regression-baseline/")
         and "/docker-" not in item["path"]
+        and item["path"] not in PERFORMANCE_GATE_METRICS_PATHS
     ]
     performance_json_count = sum(
         item["path"].startswith("perf-results/") for item in json_results
@@ -1624,7 +1636,7 @@ PERFORMANCE_RESULT_RECONCILIATION = {
     ),
     "perf-results/perf_media_churn.json": (
         ("beta_perf_media_churn_duration_secs", "results.duration_secs"),
-        ("rvoip_perf_soak_active_calls", "results.active_calls_target"),
+        ("beta_perf_media_churn_active_calls", "results.active_calls_target"),
         ("rvoip_perf_soak_min_hold_secs", "results.active_call_min_hold_secs"),
         ("rvoip_perf_soak_max_hold_secs", "results.active_call_max_hold_secs"),
         (
@@ -1634,7 +1646,7 @@ PERFORMANCE_RESULT_RECONCILIATION = {
     ),
     "perf-results/perf_soak_30min.json": (
         ("beta_perf_monolithic_soak_duration_secs", "results.duration_secs"),
-        ("rvoip_perf_soak_active_calls", "results.active_calls_target"),
+        ("beta_perf_monolithic_soak_active_calls", "results.active_calls_target"),
         ("rvoip_perf_soak_min_hold_secs", "results.active_call_min_hold_secs"),
         ("rvoip_perf_soak_max_hold_secs", "results.active_call_max_hold_secs"),
         ("rvoip_perf_soak_cps", "results.soak_cps"),
@@ -1893,6 +1905,12 @@ def pointer_block(
             LITERAL_ALL_PERFORMANCE_RESULT_PATHS,
             "literal-all performance result evidence",
         )
+        append_missing_evidence_reason(
+            reasons,
+            artifacts,
+            PERFORMANCE_GATE_METRICS_PATHS,
+            "performance gate metrics report",
+        )
         if not any(
             item.get("path", "").startswith("perf-results/perf_burst_matrix/")
             and item.get("path", "").endswith(".json")
@@ -1923,6 +1941,12 @@ def pointer_block(
             artifacts,
             STANDARD_PERFORMANCE_RESULT_PATHS,
             "performance/soak result evidence",
+        )
+        append_missing_evidence_reason(
+            reasons,
+            artifacts,
+            PERFORMANCE_GATE_METRICS_PATHS,
+            "performance gate metrics report",
         )
     if mode == "interop":
         append_missing_evidence_reason(

@@ -13,7 +13,10 @@ export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 : "${RVOIP_PERF_BURST_ALICE_PORT:=26062}"
 : "${RVOIP_PERF_BURST_SCENARIO_FILE:=${CRATE_DIR}/config/perf-burst-scenarios.yaml}"
 : "${RVOIP_PERF_BURST_SCENARIOS:=carrier-smoke}"
-: "${RVOIP_PERF_CALL_TIMEOUT_SECS:=30}"
+# RFC 3261 Timer B/F can run for 32 seconds. Keep the harness observation
+# horizon beyond that protocol deadline so it never manufactures a timeout
+# while the transaction layer is still behaving correctly.
+: "${RVOIP_PERF_CALL_TIMEOUT_SECS:=40}"
 # Burst acceptance first waits through the 90-second SIP-retention horizon,
 # captures exact structural diagnostics, then leaves a 5-second settle and a
 # quiet 60-second RSS tail. The Rust harness clamps shorter overrides to this

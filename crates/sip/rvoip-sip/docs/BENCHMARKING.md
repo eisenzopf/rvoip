@@ -421,8 +421,8 @@ again after resource sampling stops; both must independently report zero
 retained call structures. The settle snapshot remains allocated for the whole
 RSS window so its own memory is present in both endpoint bands rather than
 appearing as mid-window growth. The one-hour monolithic and one-hour split
-soaks enforce the same unadjusted 10 MB/hour slope and remain authoritative for
-sustained-growth claims.
+soaks use the reviewed 15 MB/hour beta limit as of 2026-07-24 and remain
+authoritative for sustained-growth claims.
 
 For monolithic and split soaks with a complete active phase of at least 600
 seconds, `results.rss_gate_window` must be `active_tail_600s` and
@@ -432,8 +432,11 @@ emits `rss_active_tail_growth_mb_per_hr`,
 `rss_active_tail_sample_count`, `rss_active_tail_window_secs`, and
 `rss_active_tail_window_complete`. The post-drain slope remains diagnostic;
 zero `retained_objects_after_drain` and the other final structural-retention
-checks remain separate hard requirements. Short diagnostic runs may fall back
-to `post_drain` or `tail`, but that fallback is not long-soak qualification.
+checks remain separate hard requirements. The beta monolithic and split-soak
+limit is 15 MB/hour as of 2026-07-24; the canonical 2K cleanup control above
+retains its independent 10 MB/hour acceptance. Short diagnostic runs may fall
+back to `post_drain` or `tail`, but that fallback is not long-soak
+qualification.
 
 `diagnostics.measurement_identity` records the ordered conditioning points,
 their offered/succeeded calls, shared-peer lifetime, resource phase names, and

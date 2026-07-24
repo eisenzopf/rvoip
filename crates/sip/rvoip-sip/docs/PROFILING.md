@@ -145,8 +145,9 @@ the end of the settle and retained throughout the RSS window; both snapshots
 must converge exactly to zero. No endpoint retention scan runs inside the
 active or RSS gate measurement. The endpoint estimator uses bands capped at 60
 seconds and acceptance requires at least 360 seconds between their
-representative timestamps. The 30-minute and one-hour soaks remain
-authoritative for the same unadjusted 10 MB/hour slope.
+representative timestamps. The beta monolithic and split soaks use the
+reviewed 15 MB/hour limit as of 2026-07-24; the canonical 2K cleanup control
+retains its independent 10 MB/hour intent.
 
 A qualifying monolithic or split soak gates RSS on the final 600 seconds under
 active load, reported as `rss_gate_window: "active_tail_600s"` and

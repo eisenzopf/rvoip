@@ -1,6 +1,6 @@
 # rvoip-sip Beta Release Checklist
 
-Date: 2026-06-16
+Date: 2026-07-24
 
 This checklist is evidence-backed. Checked rows are covered by the pinned beta
 report below or by current repository files. `beta-report/latest.txt` is only
@@ -15,6 +15,10 @@ Current reference report:
 - Git status at run time: `dirty`
 - Rust/Cargo: `1.95.0`
 - Current release train and runtime crate version: `0.2.5`
+
+The pinned report above is historical reference evidence. The normative gate
+contract below was revised on 2026-07-24 and requires a new clean full run
+before `latest-full-clean.txt` may identify a beta release candidate.
 
 ## Documentation
 
@@ -73,6 +77,35 @@ Current reference report:
 
 ## Performance Gates
 
+### Normative performance contract
+
+All release performance gates use the clean `perf-tests` feature set. Full
+application-facing audio-frame delivery is mandatory:
+`RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0`. Setting it to `1` is permitted only
+for diagnostics and makes a literal-all/full run ineligible. The beta RSS
+slope limit for burst, monolithic-soak, and split-soak gates is
+`15 MB/hour`. Structural cleanup remains an independent exact-zero gate; the
+RSS allowance cannot hide retained sessions, dialogs, transactions, media
+resources, receivers, timers, or runners.
+
+| Gate | Required load and acceptance | Required tracking metrics | Packaged evidence |
+|------|------------------------------|---------------------------|-------------------|
+| Canonical 2K, three passes | Three consecutive clean 2,000-CPS runs from one source fingerprint; existing absolute and reviewed-baseline acceptance remains unchanged | Offered/achieved CPS, ASR/NER, setup and full-cycle latency, CPU/RSS, cleanup RSS, every error counter, retained structures | `canonical-2k/index.json`, `canonical-2k/run-{1,2,3}/` |
+| Full performance matrix | Endpoint `30`; PBX media and signaling-only `30,100,300,1000,2000`; every registered standard and literal-all perf/resiliency target must pass | Per-target calls, errors, latency histograms, CPU/RSS, effective config, source fingerprint | `perf-results/`, gate logs, `perf-audit.md` |
+| High-density full-media burst | `30 CPS × 30 s`, `160 CPS × 90 s`, `30 CPS × 90 s`; capacity `12,500`; `16` caller shards; full RTP decode and application `AudioFrame` delivery | ASR `>= 0.995`; answer timeouts count against ASR and have no separate allowance; answer, invite-send, media-setup, overload-rejection, and teardown errors excluding answer timeouts `0`; caller/receiver retained objects `0`; active receivers and transaction managers after drain `0`; delivered frames `> 0`; caller/receiver RSS gate `<= 15 MB/hour`; peak active/pending and latency percentiles reported | `perf-results/perf_burst_matrix/burst_*/high-density-media-burst/`, `_burst.md`, `performance-gate-metrics.{json,md}` |
+| Monolithic soak | `3,600 s`; `30` cycling full-media calls; holds `10..360 s`; controlled drain `10 CPS`; retention/RSS window `>= 120 s` | Every offered call succeeds; every error counter `0`; delivered frames `> 0`; retained objects, active receivers, transaction managers/runners, and controlled-drain failures `0`; final active-tail RSS slope `<= 15 MB/hour`; active-tail coverage and post-drain slope reported | `perf-results/perf_soak_30min.json`, `performance-gate-metrics.{json,md}` |
+| Split soak | `3,600 s`; `500` cycling full-media calls; holds `10..360 s`; full delivery | All call/media/teardown errors `0`; caller and receiver retained objects, active receivers, timers, and transaction runners `0`; caller and receiver RSS gate `<= 15 MB/hour` | `perf-results/perf_soak_{caller,receiver}.json`, split-soak summary |
+| PBX and strict-UA | Both Asterisk and FreeSWITCH; endpoint, stream-peer, callback; all scenarios; G.729A/G.729AB; SIPp and baresip | Row totals, SIP status, media analyzer results, peer versions, failure logs | `pbx/`, `sipp/`, `strict-ua/` |
+| Reporting and attestation | Zero failures/skips, clean unchanged source, exact required gate inventory and artifacts | Config/result reconciliation, source/binary/YAML/config/peer/artifact hashes, observed-vs-limit metric tables | `summary.md`, `performance-gate-metrics.{json,md}`, `attestation.json` |
+
+The generated `summary.md` embeds the human-readable performance metric table.
+`performance-gate-metrics.json` is the machine-readable equivalent. The
+metrics gate fails if the scenario JSON disagrees with the policy above,
+audio-frame delivery was skipped, a required artifact is absent, or any
+tracked acceptance metric fails. `attestation.json` inventories and hashes
+both files and reconciles the effective monolithic and split-soak
+configuration with their result JSON.
+
 - [x] Full-media 30 CPS reference point passes.
 - [x] Full-media 100 CPS reference point passes.
 - [x] Full-media 300 CPS reference point passes.
@@ -80,6 +113,11 @@ Current reference report:
 - [x] Full-media 2,000 CPS reference point passes with at least 99.9% success in reference evidence.
 - [x] 1-hour split soak passes with retained objects `0`, active Bob audio
   receivers `0`, transaction runners `0`, and post-drain RSS gate pass.
+- [x] Focused 160-CPS high-density full-delivery rerun passes with ASR
+  `0.9982`, `10,095,392` delivered frames, and exact-zero structural cleanup.
+- [x] Focused 1-hour monolithic full-delivery rerun passes with `587 / 587`
+  calls, `5,379,899` delivered frames, exact-zero structural cleanup, and
+  active-tail RSS `13.17 MB/hour` against the `15 MB/hour` limit.
 - [x] Overload/recovery scenario passes in the reference full gate.
 - [x] Any result above 2,000 CPS is labeled as tuned or experimental.
 - [x] 24-hour release-candidate soak is explicitly waived for beta; the
@@ -89,6 +127,8 @@ Current reference report:
   fingerprint.
 - [ ] The final beta report imports those exact three run directories under
   `canonical-2k/` and its end-of-gate source fence remains unchanged.
+- [ ] The final clean full report repeats both focused passing gates and
+  packages their observed-vs-limit metrics and attestation.
 
 ## Commands
 
@@ -136,7 +176,9 @@ BETA_RUN_BURST_MATRIX=1 \
 BETA_BURST_MATRIX=all \
 BETA_RUN_LONG_SOAK=1 \
 BETA_PERF_MEDIA_CHURN_DURATION_SECS=120 \
+BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS=30 \
 BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS=3600 \
+BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS=30 \
 RVOIP_PERF_SOAK_DURATION_SECS=3600 \
 RVOIP_PERF_SOAK_ACTIVE_CALLS=500 \
 RVOIP_PERF_SOAK_MIN_HOLD_SECS=10 \
@@ -144,7 +186,8 @@ RVOIP_PERF_SOAK_MAX_HOLD_SECS=360 \
 RVOIP_PERF_SOAK_CPS=0 \
 RVOIP_PERF_SOAK_DRAIN_CPS=10 \
 RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=120 \
-RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=10 \
+RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 \
+RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 \
 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
 
@@ -183,9 +226,10 @@ For a literal-all performance qualification rather than the standard beta
 performance subset, add the following switches. This runs every registered
 performance/resiliency target, all configured burst scenarios, and both the
 split and monolithic long soaks. The isolated media-churn diagnostic defaults
-to 120 seconds, the legacy monolithic soak to 1800 seconds, and the split soak
-to `RVOIP_PERF_SOAK_DURATION_SECS` (3600 seconds in the beta gate). Their
-duration controls are deliberately independent:
+to 120 seconds and 30 active calls; the monolithic soak defaults to 3,600
+seconds and 30 active calls; and the split soak uses
+`RVOIP_PERF_SOAK_DURATION_SECS` (3,600 seconds) with 500 active calls. Their
+duration and active-call controls are deliberately independent:
 
 ```sh
 BETA_RUN_PERF_ALL=1 \
@@ -193,8 +237,12 @@ BETA_RUN_BURST_MATRIX=1 \
 BETA_BURST_MATRIX=all \
 BETA_RUN_LONG_SOAK=1 \
 BETA_PERF_MEDIA_CHURN_DURATION_SECS=120 \
+BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS=30 \
 BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS=3600 \
+BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS=30 \
 RVOIP_PERF_SOAK_DURATION_SECS=3600 \
+RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 \
+RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 \
 crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
 ```
 

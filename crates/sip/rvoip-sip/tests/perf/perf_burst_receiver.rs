@@ -284,6 +284,13 @@ async fn perf_burst_receiver() {
         .result("rss_gate_window", rss.gate_window)
         .result("rss_gate_enforced", rss_gate_enforced)
         .result("rss_gate_reason", rss_gate_reason)
+        .result(
+            "rss_acceptance_limit_mb_per_hr",
+            scenario
+                .acceptance
+                .max_rss_growth_mb_per_hr
+                .unwrap_or(rss_gate.effective_mb_per_hr),
+        )
         .result_block("rss_gate", rss_gate.to_json())
         .result("retained_objects_after_drain", retained_after_drain)
         .result(

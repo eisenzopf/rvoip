@@ -618,15 +618,16 @@ impl SessionHandle {
         if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
-        match self.coordinator.hangup_exact(&handle).await {
-            Ok(()) => {}
-            Err(e) if e.is_session_gone() => {
-                if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
-                    return Ok(reason);
-                }
-                return Err(e);
+        if let Err(error) = self.coordinator.hangup_exact(&handle).await {
+            // The state-machine lifecycle is the completion authority. A
+            // transaction can time out after the peer has already ended the
+            // call (or after the local transition committed), so reconcile
+            // every wire-operation error with that canonical terminal state
+            // before reporting teardown failure.
+            if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
+                return Ok(reason);
             }
-            Err(e) => return Err(e),
+            return Err(error);
         }
 
         wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
