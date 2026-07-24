@@ -21,8 +21,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
-#[cfg(feature = "wss")]
 pub use crate::transport::tls::TlsClientConfig;
+use crate::transport::OutboundTlsConfig;
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsConnector;
 
@@ -46,7 +46,14 @@ struct WebSocketTransportInner {
     secure: bool,
     /// Full connection pool: async mutex, holds the write half of each socket.
     /// Used by the send/close paths that already run inside async tasks.
-    connections: Mutex<HashMap<SocketAddr, Arc<WebSocketConnection>>>,
+    ///
+    /// Keyed by remote address **and** the per-call outbound TLS/WSS
+    /// client identity used to dial it — `None` is the transport's
+    /// baked-in default identity (`tls_connector`, unchanged behavior).
+    /// This means two calls to the same destination under different
+    /// identities never share a connection. Plain `ws://` connections
+    /// always register under `None` (no identity concept applies).
+    connections: Mutex<HashMap<(SocketAddr, Option<TlsClientConfig>), Arc<WebSocketConnection>>>,
     /// Sync mirror of which peers are currently connected.
     ///
     /// `has_connection_to()` is a synchronous trait method called from the
@@ -238,14 +245,17 @@ impl WebSocketTransport {
                         let connection_arc = Arc::new(connection);
                         {
                             let mut connections = inner.connections.lock().await;
-                            connections.insert(peer_addr, connection_arc.clone());
+                            // Inbound (server-accepted) connections always
+                            // register under the default identity — the
+                            // server side doesn't select per-call.
+                            connections.insert((peer_addr, None), connection_arc.clone());
                             inner.active_peers.write().unwrap().insert(peer_addr);
                         }
 
                         // Handle the connection
                         transport
                             .clone()
-                            .spawn_connection_reader(connection_arc, reader);
+                            .spawn_connection_reader(connection_arc, reader, None);
                     }
                     Err(e) => {
                         if inner.closed.load(Ordering::Relaxed) {
@@ -280,6 +290,7 @@ impl WebSocketTransport {
         mut reader: futures_util::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<SipWsStream>,
         >,
+        identity: Option<TlsClientConfig>,
     ) {
         let transport = self.clone();
         let peer_addr = connection.peer_addr();
@@ -405,8 +416,15 @@ impl WebSocketTransport {
             // false for this address.
             {
                 let mut connections = inner.connections.lock().await;
-                connections.remove(&peer_addr);
-                inner.active_peers.write().unwrap().remove(&peer_addr);
+                connections.remove(&(peer_addr, identity));
+                // Only clear the sync `active_peers` entry once no
+                // connection (under any identity) to this address
+                // remains — a different identity's connection to the
+                // same address may still be live.
+                let any_left = connections.keys().any(|(addr, _)| *addr == peer_addr);
+                if !any_left {
+                    inner.active_peers.write().unwrap().remove(&peer_addr);
+                }
             }
 
             // Ensure the connection is closed
@@ -456,11 +474,15 @@ impl WebSocketTransport {
             tokio_rustls::rustls::pki_types::ServerName<'static>,
         >,
         #[cfg(not(feature = "wss"))] _server_name_hint: (),
+        identity: Option<TlsClientConfig>,
     ) -> Result<Arc<WebSocketConnection>> {
-        // Check if we already have an open connection
+        // Check if we already have an open connection under this exact
+        // (address, identity) pair. A connection dialed under a
+        // different identity to the same address is a different pool
+        // entry and must not be reused here.
         {
             let connections = self.inner.connections.lock().await;
-            if let Some(conn) = connections.get(&addr) {
+            if let Some(conn) = connections.get(&(addr, identity.clone())) {
                 if !conn.is_closed() {
                     return Ok(conn.clone());
                 }
@@ -469,16 +491,17 @@ impl WebSocketTransport {
 
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-        // Pre-flight: for WSS dials, the TlsConnector must have been
-        // configured at bind time (via `bind_with_client_tls`).
-        // Surface this BEFORE opening TCP so the failure mode is
-        // obvious and doesn't depend on whether the destination is
+        // Pre-flight: for WSS dials, a `TlsConnector` must be available
+        // — either the transport's baked-in default (configured at bind
+        // time via `bind_with_client_tls`) or a per-call `identity`
+        // override. Surface this BEFORE opening TCP so the failure mode
+        // is obvious and doesn't depend on whether the destination is
         // listening.
         #[cfg(feature = "wss")]
-        if self.inner.secure && self.inner.tls_connector.is_none() {
+        if self.inner.secure && self.inner.tls_connector.is_none() && identity.is_none() {
             return Err(Error::NotImplemented(
                 "WSS client requires TlsClientConfig — use \
-                 WebSocketTransport::bind_with_client_tls instead of bind()"
+                 WebSocketTransport::bind_with_client_tls or a per-call identity override"
                     .into(),
             ));
         }
@@ -500,11 +523,22 @@ impl WebSocketTransport {
         ) = if self.inner.secure {
             #[cfg(feature = "wss")]
             {
-                let connector = self
-                    .inner
-                    .tls_connector
-                    .as_ref()
-                    .expect("pre-flight guarantees tls_connector is Some when secure");
+                // A per-call identity override builds an ad-hoc
+                // connector from that `TlsClientConfig`; otherwise reuse
+                // the transport's baked-in default connector (unchanged
+                // behavior).
+                let ad_hoc_connector = match &identity {
+                    Some(cfg) => Some(TlsConnector::from(std::sync::Arc::new(
+                        crate::transport::tls::build_client_config(cfg)?,
+                    ))),
+                    None => None,
+                };
+                let connector = ad_hoc_connector.as_ref().unwrap_or_else(|| {
+                    self.inner
+                        .tls_connector
+                        .as_ref()
+                        .expect("pre-flight guarantees tls_connector is Some when secure and no identity override")
+                });
                 let server_name = server_name_hint
                     .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
                 let tls_stream = connector
@@ -574,7 +608,7 @@ impl WebSocketTransport {
         // Register in both the async pool and the sync peer index.
         {
             let mut connections = self.inner.connections.lock().await;
-            connections.insert(addr, connection_arc.clone());
+            connections.insert((addr, identity.clone()), connection_arc.clone());
             self.inner.active_peers.write().unwrap().insert(addr);
         }
 
@@ -582,7 +616,7 @@ impl WebSocketTransport {
         // case — UAS replies on the same WS the UAC opened) reach
         // TransportEvent::MessageReceived.
         self.clone()
-            .spawn_connection_reader(connection_arc.clone(), ws_reader);
+            .spawn_connection_reader(connection_arc.clone(), ws_reader, identity);
 
         debug!(
             "WebSocket client connected to {} (subprotocol={})",
@@ -630,7 +664,7 @@ impl Transport for WebSocketTransport {
             #[cfg(not(feature = "wss"))]
             let server_name = ();
 
-            let connection = self.connect_to(destination, server_name).await?;
+            let connection = self.connect_to(destination, server_name, None).await?;
 
             // Send the message
             connection.send_message(&message).await
@@ -663,8 +697,59 @@ impl Transport for WebSocketTransport {
             #[cfg(not(feature = "wss"))]
             let server_name = ();
 
-            let connection = self.connect_to(destination, server_name).await?;
+            let connection = self.connect_to(destination, server_name, None).await?;
             connection.send_raw_bytes(bytes).await
+        }
+
+        #[cfg(not(feature = "ws"))]
+        Err(Error::NotImplemented(
+            "WebSocket transport not implemented".into(),
+        ))
+    }
+
+    async fn send_message_with_tls_identity(
+        &self,
+        message: Message,
+        destination: SocketAddr,
+        identity: Option<&OutboundTlsConfig>,
+    ) -> Result<()> {
+        let Some(identity) = identity else {
+            return self.send_message(message, destination).await;
+        };
+
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+
+        #[cfg(feature = "ws")]
+        {
+            #[cfg(feature = "wss")]
+            let server_name_hint = match &identity.server_name {
+                Some(name) => Some(
+                    tokio_rustls::rustls::pki_types::ServerName::try_from(name.clone()).map_err(
+                        |e| {
+                            Error::TlsHandshakeFailed(format!(
+                                "invalid per-call SNI server_name {:?}: {}",
+                                name, e
+                            ))
+                        },
+                    )?,
+                ),
+                None => {
+                    if self.inner.secure {
+                        crate::transport::tls::tls_server_name_for_message(&message, destination)
+                    } else {
+                        None
+                    }
+                }
+            };
+            #[cfg(not(feature = "wss"))]
+            let server_name_hint = ();
+
+            let connection = self
+                .connect_to(destination, server_name_hint, Some(identity.client.clone()))
+                .await?;
+            connection.send_message(&message).await
         }
 
         #[cfg(not(feature = "ws"))]
@@ -679,7 +764,7 @@ impl Transport for WebSocketTransport {
 
         // Close all connections and clear both indexes.
         let mut connections = self.inner.connections.lock().await;
-        for (addr, conn) in connections.drain() {
+        for ((addr, _), conn) in connections.drain() {
             if let Err(e) = conn.close().await {
                 error!("Error closing WebSocket connection to {}: {}", addr, e);
             }
