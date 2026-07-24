@@ -2842,11 +2842,22 @@ impl MediaAdapter {
     }
 
     /// Set media direction (for hold/resume)
+    ///
+    /// No-op in `MediaMode::SignalingOnly` — `create_session` never
+    /// registers `media_id` with the media-core controller in that mode
+    /// (see the early return there), so calling through would fail with
+    /// "session not found" for a media session that was never meant to
+    /// exist. Hold/resume re-INVITEs on a signaling-only session still
+    /// negotiate SDP and update dialog state; there's just no local RTP
+    /// direction to flip.
     pub async fn set_media_direction(
         &self,
         media_id: crate::types::MediaSessionId,
         direction: crate::types::MediaDirection,
     ) -> Result<()> {
+        if self.signaling_only_local_port().is_some() {
+            return Ok(());
+        }
         let media_direction = match direction {
             crate::types::MediaDirection::SendRecv => {
                 rvoip_media_core::types::MediaDirection::SendRecv
