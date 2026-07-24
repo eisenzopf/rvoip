@@ -129,6 +129,8 @@ pub enum PortPairingStrategy {
 mod allocator;
 #[cfg(feature = "dtls-webrtc")]
 pub mod dtls_bridge;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_datagram_bridge;
 #[cfg(feature = "ice")]
 mod ice_bridge;
 pub mod security_transport;
@@ -145,7 +147,10 @@ pub use allocator::{
 pub use ice_bridge::IceUdpSocketAdapter;
 pub use security_transport::SecurityRtpTransport;
 pub use tcp::TcpRtpTransport;
-pub use udp::{set_diagnostics as set_udp_diagnostics, UdpRtpTransport};
+pub use udp::{
+    classify_rtp_mux_packet, set_diagnostics as set_udp_diagnostics, RtpMuxPacketClass,
+    UdpRtpTransport,
+};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 #[cfg(test)]

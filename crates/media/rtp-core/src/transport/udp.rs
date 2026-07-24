@@ -54,8 +54,15 @@ where
     tokio::spawn(future)
 }
 
+/// RFC 7983 §7 datagram classification for a shared RTP/RTCP/STUN/DTLS
+/// port, plus the RFC 5761 §4 RTP-vs-RTCP split within the media range.
+/// Public so callers bridging their own socket/reactor into this crate's
+/// media or DTLS-SRTP handshake (e.g. `transport::dtls_datagram_bridge`)
+/// can classify inbound datagrams the same way
+/// [`UdpRtpTransport`](super::udp::UdpRtpTransport)'s own receive loop
+/// does, via [`classify_rtp_mux_packet`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RtpMuxPacketClass {
+pub enum RtpMuxPacketClass {
     Rtp,
     Rtcp,
     Stun,
@@ -67,7 +74,7 @@ enum RtpMuxPacketClass {
 }
 
 impl RtpMuxPacketClass {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Rtp => "rtp",
             Self::Rtcp => "rtcp",
@@ -80,7 +87,7 @@ impl RtpMuxPacketClass {
         }
     }
 
-    fn is_media(self) -> bool {
+    pub fn is_media(self) -> bool {
         matches!(self, Self::Rtp | Self::Rtcp)
     }
 }
@@ -98,7 +105,12 @@ fn rtp_diagnostics_enabled() -> bool {
     RTP_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed)
 }
 
-fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
+/// Classify one inbound datagram per RFC 7983 §7 (STUN/ZRTP/DTLS/TURN
+/// ChannelData ranges) plus RFC 5761 §4 (RTP-vs-RTCP within the media
+/// range 128-191). Pure and allocation-free — safe to call from any
+/// context (an external `mio` reactor, a test, etc.), not just this
+/// crate's own receive loop.
+pub fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
     if buffer.len() < 2 {
         return RtpMuxPacketClass::TooSmall;
     }
