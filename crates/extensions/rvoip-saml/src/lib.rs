@@ -16,8 +16,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use users_core::{
-    AuthenticationResult, AuthenticationService, CreateUserRequest, Error as UsersError,
-    TokenIssueContext, UpdateUserRequest, UpsertExternalIdentityRequest, User,
+    validation::PasswordValidator, AuthenticationResult, AuthenticationService, CreateUserRequest,
+    Error as UsersError, TokenIssueContext, UpdateUserRequest, UpsertExternalIdentityRequest, User,
 };
 use uuid::Uuid;
 
@@ -285,8 +285,8 @@ impl SamlServiceProvider {
                 None => {
                     self.auth_service
                         .create_user(CreateUserRequest {
+                            password: provisioning_password(&username),
                             username,
-                            password: format!("SamlProvisioned!{}Aa1", Uuid::new_v4().simple()),
                             email: identity.email.clone(),
                             display_name: identity.display_name.clone(),
                             roles: self.roles_from_groups(identity),
@@ -330,6 +330,27 @@ impl SamlServiceProvider {
             roles.insert("user".to_string());
         }
         roles.into_iter().collect()
+    }
+}
+
+fn provisioning_password(username: &str) -> String {
+    loop {
+        // Delimit every two random characters so UUID entropy can never
+        // accidentally form a validator-rejected four-character run.
+        let nonce = Uuid::new_v4().simple().to_string();
+        let delimited_nonce = nonce
+            .as_bytes()
+            .chunks(2)
+            .map(|chunk| std::str::from_utf8(chunk).expect("UUID text is ASCII"))
+            .collect::<Vec<_>>()
+            .join("!");
+        let candidate = format!("A!a!1!{delimited_nonce}");
+        if PasswordValidator::with_default_policy()
+            .validate(&candidate, username)
+            .is_ok()
+        {
+            return candidate;
+        }
     }
 }
 
@@ -456,5 +477,16 @@ mod tests {
         let (_temp, service) = test_service(identity).await;
         let rejected = service.consume_assertion("<signed/>").await;
         assert!(matches!(rejected, Err(SamlError::Rejected(ref msg)) if msg.contains("audience")));
+    }
+
+    #[test]
+    fn provisioning_passwords_always_satisfy_the_users_policy() {
+        let validator = PasswordValidator::with_default_policy();
+        for username in ["alice", "A_a", "12-34", "provisioned.user"] {
+            for _ in 0..1_000 {
+                let password = provisioning_password(username);
+                validator.validate(&password, username).unwrap();
+            }
+        }
     }
 }
