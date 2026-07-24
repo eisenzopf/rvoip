@@ -40,9 +40,17 @@ impl UdpListener {
     ) -> Result<Self> {
         let std_socket =
             bind_std_udp_socket(addr, socket_options).map_err(|e| Error::BindFailed(addr, e))?;
-        let socket = UdpSocket::from_std(std_socket).map_err(|e| Error::BindFailed(addr, e))?;
-
-        let local_addr = socket.local_addr().map_err(Error::LocalAddrFailed)?;
+        let local_addr = std_socket.local_addr().map_err(Error::LocalAddrFailed)?;
+        // Register the socket with the same reactor that owns the bounded SIP
+        // UDP poller. Sends may still await this socket from callers on other
+        // executors; Tokio's registration wakes the polling task normally.
+        let socket =
+            crate::transport::runtime::spawn_sip_udp_io(
+                async move { UdpSocket::from_std(std_socket) },
+            )
+            .await
+            .map_err(|_| Error::Other("SIP UDP socket registration task failed".to_string()))?
+            .map_err(|e| Error::BindFailed(addr, e))?;
 
         Ok(Self {
             socket: Arc::new(socket),

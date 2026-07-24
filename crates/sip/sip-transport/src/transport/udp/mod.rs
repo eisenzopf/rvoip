@@ -352,7 +352,7 @@ impl UdpTransport {
 
             let events_tx = self.inner.events_tx.clone();
             let shutdown_rx = self.inner.shutdown_rx.clone();
-            worker_handles.push(tokio::spawn(async move {
+            worker_handles.push(crate::transport::runtime::spawn_sip_udp_io(async move {
                 udp_parse_worker(worker_id, rx, events_tx, shutdown_rx).await;
             }));
         }
@@ -367,7 +367,7 @@ impl UdpTransport {
         let events_tx = self.inner.events_tx.clone();
         let round_robin_worker = Arc::clone(&round_robin_worker);
 
-        let handle = tokio::spawn(async move {
+        let handle = crate::transport::runtime::spawn_sip_udp_io(async move {
             let mut last_receive_completed_at: Option<Instant> = None;
             loop {
                 let receive_poll_started = diagnostics::enabled().then(Instant::now);

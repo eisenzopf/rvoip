@@ -20,16 +20,19 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::burst::{BurstPhase, BurstScenario, BurstScenarioBook};
+use support::burst::{
+    validate_same_host_burst_port_layout, BurstPhase, BurstScenario, BurstScenarioBook,
+    BURST_ALICE_MEDIA_END, BURST_ALICE_MEDIA_START, BURST_BOB_MEDIA_END, BURST_BOB_MEDIA_START,
+};
 use support::soak::{
-    admission_diagnostics, diagnostic_artifact_path, diagnostic_sample_path,
-    endpoint_global_retained_total, endpoint_metric, endpoint_retained_total,
-    endpoint_retention_summary, in_process_resource_sampler_enabled, media_receive_diagnostics,
-    media_setup_raw_diagnostics, media_setup_timing_diagnostics, memory_diagnostic_interval,
-    memory_diagnostic_summary, read_required_u16_env, resource_sampling_diagnostics,
-    retention_drain_wait, round2, round4, sip_dialog_raw_diagnostics,
+    admission_diagnostics, burst_retention_drain_wait, diagnostic_artifact_path,
+    diagnostic_sample_path, endpoint_global_retained_total, endpoint_metric,
+    endpoint_retained_total, endpoint_retention_summary, in_process_resource_sampler_enabled,
+    media_receive_diagnostics, media_setup_raw_diagnostics, media_setup_timing_diagnostics,
+    memory_diagnostic_interval, memory_diagnostic_summary, read_required_u16_env,
+    resource_sampling_diagnostics, round2, round4, sip_dialog_raw_diagnostics,
     sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
-    MemoryDiagnosticSampler, RssGrowthGate,
+    MemoryDiagnosticSampler, RssGrowthGate, MIN_RETENTION_DRAIN_WAIT_SECS,
 };
 use support::{
     CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary,
@@ -40,11 +43,6 @@ const BOB_PORT_ENV: &str = "RVOIP_PERF_BURST_BOB_PORT";
 const ALICE_PORT_ENV: &str = "RVOIP_PERF_BURST_ALICE_PORT";
 const RUN_DIR_ENV: &str = "RVOIP_PERF_BURST_RUN_DIR";
 const SKIP_AUDIO_SOURCE_ENV: &str = "RVOIP_PERF_BURST_SKIP_AUDIO_SOURCE";
-
-const BOB_MEDIA_START: u16 = 16_384;
-const BOB_MEDIA_END: u16 = 40_999;
-const ALICE_MEDIA_START: u16 = 51_000;
-const ALICE_MEDIA_END: u16 = 65_535;
 
 #[derive(Clone)]
 struct LoadClient {
@@ -279,6 +277,13 @@ async fn perf_burst_caller() {
     let scenario = load_scenario();
     let bob_port = read_required_u16_env(BOB_PORT_ENV);
     let alice_base_port = read_required_u16_env(ALICE_PORT_ENV);
+    validate_same_host_burst_port_layout(
+        bob_port,
+        alice_base_port,
+        scenario.alice_shards,
+        scenario.capacity,
+    )
+    .unwrap_or_else(|error| panic!("invalid same-host burst port topology: {error}"));
     let run_dir = burst_run_dir(&scenario);
     let receiver_cfg = burst_config(
         &format!("burst-bob-{}", scenario.name),
@@ -286,8 +291,8 @@ async fn perf_burst_caller() {
         &scenario.server_profile,
         scenario.capacity,
         Some(scenario.retained_lifecycle_capacity()),
-        BOB_MEDIA_START,
-        BOB_MEDIA_END,
+        BURST_BOB_MEDIA_START,
+        BURST_BOB_MEDIA_END,
     );
     let rss_gate = {
         let first_alice_cfg = burst_config(
@@ -296,12 +301,12 @@ async fn perf_burst_caller() {
             &scenario.client_profile,
             scenario.capacity.div_ceil(scenario.alice_shards).max(1),
             None,
-            ALICE_MEDIA_START,
-            ALICE_MEDIA_END,
+            BURST_ALICE_MEDIA_START,
+            BURST_ALICE_MEDIA_END,
         );
         RssGrowthGate::resolve(&first_alice_cfg, &receiver_cfg)
     };
-    let retention_drain_wait = retention_drain_wait();
+    let retention_drain_wait = burst_retention_drain_wait();
     let skip_audio_source = read_bool_env(SKIP_AUDIO_SOURCE_ENV);
     let call_timeout = Duration::from_secs(
         std::env::var("RVOIP_PERF_CALL_TIMEOUT_SECS")
@@ -391,19 +396,28 @@ async fn perf_burst_caller() {
     .await;
     let active_wall = started.elapsed();
 
-    tokio::time::sleep(retention_drain_wait).await;
-    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
-    let active_series = stop_active_sampler(active_sampler).await;
+    let retention_snapshot_wait =
+        Duration::from_secs(MIN_RETENTION_DRAIN_WAIT_SECS.try_into().unwrap());
+    tokio::time::sleep(retention_snapshot_wait).await;
     let retention_series = retention_sampler.stop().await;
+    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
+    // Keep captured diagnostics allocated but quiescent during the final RSS
+    // tail. This measures the runtime after SIP retention expiry without
+    // measuring periodic diagnostic JSON construction.
+    tokio::time::sleep(retention_drain_wait.saturating_sub(retention_snapshot_wait)).await;
+    // End process sampling at the declared drain boundary. Retention capture
+    // and report construction allocate diagnostic data and are not part of
+    // the runtime-under-test RSS window.
+    let mut resources = match sampler {
+        Some(sampler) => sampler.stop().await,
+        None => ResourceSummary::empty(),
+    };
+    let active_series = stop_active_sampler(active_sampler).await;
     let memory_series = match memory_sampler {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
     let retained_after_drain = final_retention_all.retained_total;
-    let mut resources = match sampler {
-        Some(sampler) => sampler.stop().await,
-        None => ResourceSummary::empty(),
-    };
     let rss = support::soak::rss_result_metrics(
         &resources,
         active_wall.as_secs_f64(),
@@ -1022,6 +1036,14 @@ async fn run_one_call(
             return;
         }
     };
+    // Outbound INVITEs derive their wire Call-ID deterministically from the
+    // exact session id. Record only the keyed, process-local correlation used
+    // by SIP transport diagnostics so a failed load call can be joined to its
+    // wire trace without retaining protocol identifiers in evidence.
+    let wire_call_correlation = rvoip_sip_core::diagnostics::opaque_call_correlation(&format!(
+        "{}@rvoip-sip",
+        call_id.as_str()
+    ));
     let handle = client.peer.session(&call_id);
     match handle.wait_for_answered(Some(call_timeout)).await {
         Ok(_) => {
@@ -1058,6 +1080,7 @@ async fn run_one_call(
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
+                "wire_call_correlation": wire_call_correlation,
                 "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
                 "error": err.to_string(),
                 "looks_like_overload": looks_like_overload,
@@ -1110,6 +1133,7 @@ async fn run_one_call(
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
+                "wire_call_correlation": wire_call_correlation,
                 "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
                 "hangup_elapsed_ms": round2(hangup_started.elapsed().as_secs_f64() * 1000.0),
                 "hangup_result": match hangup_result {
@@ -1154,6 +1178,7 @@ async fn run_one_call(
                 "from": from,
                 "to": target_uri,
                 "call_id": call_id.to_string(),
+                "wire_call_correlation": wire_call_correlation,
                 "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
                 "teardown_elapsed_ms": round2(teardown_start.elapsed().as_secs_f64() * 1000.0),
                 "error": err.to_string(),
@@ -1550,12 +1575,12 @@ fn write_burst_markdown(run_dir: &Path, scenario: &BurstScenario, report_json: &
 }
 
 fn alice_media_subrange(shard: usize, shards: usize) -> (u16, u16) {
-    let total = media_port_range_capacity(ALICE_MEDIA_START, ALICE_MEDIA_END);
+    let total = media_port_range_capacity(BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END);
     let base = total / shards;
     let remainder = total % shards;
     let len = base + usize::from(shard < remainder);
     let offset = shard * base + shard.min(remainder);
-    let start = ALICE_MEDIA_START + u16::try_from(offset).expect("Alice offset fits u16");
+    let start = BURST_ALICE_MEDIA_START + u16::try_from(offset).expect("Alice offset fits u16");
     let end = start + u16::try_from(len - 1).expect("Alice range length fits u16");
     (start, end)
 }

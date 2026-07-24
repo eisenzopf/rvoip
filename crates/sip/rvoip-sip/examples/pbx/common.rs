@@ -3926,7 +3926,7 @@ pub fn assert_audio_path(
     let label = path.display().to_string();
     assert_best_window_tone(
         &label,
-        analysis_slice_for_window(&samples, SAMPLE_RATE as usize),
+        &samples,
         SAMPLE_RATE as usize,
         FRAME_SIZE,
         expected_hz,
@@ -4671,5 +4671,30 @@ mod tests {
 
         assert!(scan.passing_windows > 0);
         assert!(scan.longest_passing_run < scan.required_passing_run);
+    }
+
+    #[test]
+    fn audio_path_scans_full_capture_for_one_continuous_second() {
+        let samples = tone_samples(&[
+            (SAMPLE_RATE as usize, 8_000.0, 875.0),
+            (SAMPLE_RATE as usize, 8_000.0, 440.0),
+        ]);
+        assert!(
+            assert_best_window_tone(
+                "cropped-middle",
+                stable_middle_half(&samples),
+                SAMPLE_RATE as usize,
+                FRAME_SIZE,
+                880.0,
+                440.0,
+            )
+            .is_err(),
+            "the middle-only slice intentionally lacks one continuous valid second"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = save_wav(temp.path(), "full-capture.wav", &samples).unwrap();
+        assert_audio_path(&path, 880.0, 440.0)
+            .expect("the full capture contains one continuous valid second");
     }
 }

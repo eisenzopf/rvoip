@@ -13,11 +13,11 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex, Semaphore};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
@@ -190,17 +190,145 @@ impl Default for RtpSessionConfig {
     }
 }
 
-/// Lock-free handle for sending RTP packets through an existing
-/// [`RtpSession`] without touching the outer `Arc<Mutex<RtpSession>>`.
-///
-/// Cheap to clone (3 Arcs + 2 small scalars). Issued by
-/// [`RtpSession::send_handle`]; multiple handles for the same session
-/// stay in sync because they share the same sequence atomic.
-#[derive(Clone)]
-pub struct RtpSendHandle {
-    sender: mpsc::Sender<RtpPacket>,
+struct RtpPacketSender {
+    transport: Arc<dyn RtpTransport>,
+    remote_addr: parking_lot::RwLock<Option<SocketAddr>>,
     ssrc: RtpSsrc,
     sequence: Arc<AtomicU16>,
+    stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
+    event_tx: broadcast::Sender<RtpSessionEvent>,
+    state: Mutex<RtpPacketSenderState>,
+    slots: Arc<Semaphore>,
+    capacity: usize,
+    closed: AtomicBool,
+}
+
+struct RtpPacketSenderState {
+    send_buffer: BytesMut,
+}
+
+impl RtpPacketSender {
+    fn new(
+        transport: Arc<dyn RtpTransport>,
+        remote_addr: Option<SocketAddr>,
+        ssrc: RtpSsrc,
+        sequence: Arc<AtomicU16>,
+        stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
+        event_tx: broadcast::Sender<RtpSessionEvent>,
+        capacity: usize,
+    ) -> Self {
+        let capacity = capacity.max(1);
+        Self {
+            transport,
+            remote_addr: parking_lot::RwLock::new(remote_addr),
+            ssrc,
+            sequence,
+            stats,
+            event_tx,
+            state: Mutex::new(RtpPacketSenderState {
+                send_buffer: BytesMut::with_capacity(crate::DEFAULT_MAX_PACKET_SIZE),
+            }),
+            slots: Arc::new(Semaphore::new(capacity)),
+            capacity,
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    async fn send_payload(
+        &self,
+        timestamp: RtpTimestamp,
+        payload: Bytes,
+        marker: bool,
+        payload_type: u8,
+    ) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::SessionError("RTP session is closed".to_string()));
+        }
+
+        // Preserve the configured per-session backpressure bound without a
+        // second per-session queue and forwarding task. The state lock below
+        // is also the exact wire-order authority for sequence assignment.
+        let _slot = self
+            .slots
+            .acquire()
+            .await
+            .map_err(|_| Error::SessionError("RTP session is closed".to_string()))?;
+        let mut state = self.state.lock().await;
+
+        if self.closed.load(Ordering::Acquire) {
+            return Err(Error::SessionError("RTP session is closed".to_string()));
+        }
+
+        let destination = if let Some(udp) =
+            self.transport.as_any().downcast_ref::<UdpRtpTransport>()
+        {
+            udp.remote_rtp_addr()
+                .await
+                .or_else(|| *self.remote_addr.read())
+        } else {
+            *self.remote_addr.read()
+        }
+        .ok_or_else(|| Error::SessionError("No destination address for RTP packet".to_string()))?;
+
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
+        header.marker = marker;
+        let packet = RtpPacket::new(header, payload);
+
+        debug!(
+            "Sending RTP packet to {} (seq={}, timestamp={})",
+            destination, packet.header.sequence_number, packet.header.timestamp
+        );
+
+        let send_result =
+            if let Some(udp) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
+                udp.send_rtp_with_buffer(&packet, destination, &mut state.send_buffer)
+                    .await
+            } else {
+                self.transport.send_rtp(&packet, destination).await
+            };
+
+        match send_result {
+            Ok(()) => {
+                let mut stats = self.stats.lock();
+                stats.packets_sent += 1;
+                stats.bytes_sent += packet.size() as u64;
+                Ok(())
+            }
+            Err(err) => {
+                error!("Failed to send RTP packet: {}", err);
+                let _ = self.event_tx.send(RtpSessionEvent::Error(err.clone()));
+                Err(err)
+            }
+        }
+    }
+
+    fn set_remote_addr(&self, addr: SocketAddr) {
+        *self.remote_addr.write() = Some(addr);
+    }
+
+    fn queue_diagnostics(&self) -> (usize, usize) {
+        (
+            self.capacity.saturating_sub(self.slots.available_permits()),
+            self.capacity,
+        )
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.slots.close();
+    }
+}
+
+/// Handle for sending RTP packets through an existing
+/// [`RtpSession`] without touching the outer `Arc<Mutex<RtpSession>>`.
+///
+/// Cheap to clone. Issued by
+/// [`RtpSession::send_handle`]; multiple handles for the same session
+/// use the same ordered transport writer and sequence cursor.
+#[derive(Clone)]
+pub struct RtpSendHandle {
+    packet_sender: Arc<RtpPacketSender>,
     default_payload_type: u8,
 }
 
@@ -225,19 +353,14 @@ impl RtpSendHandle {
         marker: bool,
         payload_type: u8,
     ) -> Result<()> {
-        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
-        header.marker = marker;
-        let packet = RtpPacket::new(header, payload);
-        self.sender
-            .send(packet)
+        self.packet_sender
+            .send_payload(timestamp, payload, marker, payload_type)
             .await
-            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
 
     /// Get the session's SSRC (immutable post-construction).
     pub fn ssrc(&self) -> RtpSsrc {
-        self.ssrc
+        self.packet_sender.ssrc
     }
 }
 
@@ -367,8 +490,8 @@ pub struct RtpSession {
     /// Channel for receiving packets
     receiver: mpsc::Receiver<RtpPacket>,
 
-    /// Channel for sending packets
-    sender: mpsc::Sender<RtpPacket>,
+    /// Canonical ordered RTP writer shared by every session send handle.
+    packet_sender: Arc<RtpPacketSender>,
 
     /// Whether received RTP packets should also be mirrored into the legacy
     /// polling receive queue.
@@ -379,9 +502,6 @@ pub struct RtpSession {
 
     /// Receiving task handle
     recv_task: Option<JoinHandle<()>>,
-
-    /// Sending task handle
-    send_task: Option<JoinHandle<()>>,
 
     /// Session statistics. `parking_lot::Mutex` because every guard is
     /// CPU-only (counter updates, snapshot reads); the std variant
@@ -478,9 +598,7 @@ impl RtpSession {
                 .await?,
         );
 
-        // Create channels for internal communication.
-        let (sender_tx, sender_rx) =
-            mpsc::channel(session_buffer_config.sender_channel_capacity.max(1));
+        // Create channels for receive-side internal communication.
         let (receiver_tx, receiver_rx) =
             mpsc::channel(session_buffer_config.receiver_channel_capacity.max(1));
         let (event_tx, _) = broadcast::channel(session_buffer_config.event_channel_capacity.max(1));
@@ -490,6 +608,19 @@ impl RtpSession {
             config.clock_rate,
             rand::thread_rng().gen::<u16>(), // Random starting sequence
             rand::thread_rng().gen::<u32>(), // Random starting timestamp
+        ));
+        let stats = Arc::new(parking_lot::Mutex::new(RtpSessionStats::default()));
+        let packet_sender = Arc::new(RtpPacketSender::new(
+            transport.clone(),
+            config.remote_addr,
+            ssrc,
+            scheduler
+                .as_ref()
+                .expect("RTP session scheduler")
+                .sequence_handle(),
+            stats.clone(),
+            event_tx.clone(),
+            session_buffer_config.sender_channel_capacity,
         ));
 
         // Create RTCP report generator
@@ -509,12 +640,11 @@ impl RtpSession {
             streams: Arc::new(DashMap::new()),
             scheduler,
             receiver: receiver_rx,
-            sender: sender_tx,
+            packet_sender,
             receive_queue_enabled,
             event_tx,
             recv_task: None,
-            send_task: None,
-            stats: Arc::new(parking_lot::Mutex::new(RtpSessionStats::default())),
+            stats,
             media_sync: None,
             active: false,
             rtcp_generator: Some(rtcp_generator),
@@ -544,26 +674,20 @@ impl RtpSession {
         };
 
         // Start the session
-        session.start(sender_rx, receiver_tx).await?;
+        session.start(receiver_tx).await?;
 
         Ok(session)
     }
 
     /// Start the session tasks
-    async fn start(
-        &mut self,
-        mut sender_rx: mpsc::Receiver<RtpPacket>,
-        receiver_tx: mpsc::Sender<RtpPacket>,
-    ) -> Result<()> {
+    async fn start(&mut self, receiver_tx: mpsc::Sender<RtpPacket>) -> Result<()> {
         if self.active {
             return Ok(());
         }
 
         let transport = self.transport.clone();
-        let stats_send = self.stats.clone();
         let stats_recv = self.stats.clone();
         let remote_addr = self.config.remote_addr;
-        let event_tx_send = self.event_tx.clone();
         let event_tx_recv = self.event_tx.clone();
         let clock_rate = self.config.clock_rate;
         let _payload_type = self.config.payload_type;
@@ -584,92 +708,17 @@ impl RtpSession {
             }
         }
 
-        // Prepare the scheduler's sequence state, but do not start its
-        // millisecond polling task. The current send paths route directly to
-        // `sender_tx` and only need the shared sequence atomic; no production
-        // code uses the scheduler queue. Starting one 1 ms timer per call was
-        // measurable CPU load under SIPp fan-out.
+        // Prepare the scheduler's timestamp state, but do not start its
+        // millisecond polling task. Session sends use the single ordered
+        // packet writer above; no production code uses the scheduler queue.
+        // Starting one 1 ms timer per call was measurable CPU load under
+        // SIPp fan-out.
         if let Some(scheduler) = &mut self.scheduler {
-            let sender_tx = self.sender.clone();
-            scheduler.set_sender(sender_tx);
-
             // Set appropriate timestamp increment based on packet interval
             let interval_ms = 20; // Default 20ms packet interval
             let samples_per_packet = (clock_rate as f64 * (interval_ms as f64 / 1000.0)) as u32;
             scheduler.set_interval(interval_ms, samples_per_packet);
         }
-
-        // Start sending task
-        let send_transport = transport.clone();
-        let send_task = spawn_memory_tracked("rtp_core.rtp_session.send_task", async move {
-            let mut last_remote_addr = remote_addr;
-            let mut rtp_send_buffer = BytesMut::with_capacity(crate::DEFAULT_MAX_PACKET_SIZE);
-
-            while let Some(packet) = sender_rx.recv().await {
-                // Always try to get the current remote address from transport first
-                let dest =
-                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                        // Check transport for current remote address
-                        match t.remote_rtp_addr().await {
-                            Some(addr) => {
-                                // Update our cached value
-                                last_remote_addr = Some(addr);
-                                addr
-                            }
-                            None => {
-                                // Fall back to cached value if transport doesn't have one
-                                if let Some(addr) = last_remote_addr {
-                                    addr
-                                } else {
-                                    // No destination address, can't send
-                                    warn!("No destination address for RTP packet, dropping");
-                                    continue;
-                                }
-                            }
-                        }
-                    } else {
-                        // Not a UDP transport, use cached value
-                        if let Some(addr) = last_remote_addr {
-                            addr
-                        } else {
-                            // No destination address, can't send
-                            warn!("No destination address for RTP packet, dropping");
-                            continue;
-                        }
-                    };
-
-                // Send the packet
-                debug!(
-                    "Sending RTP packet to {} (seq={}, timestamp={})",
-                    dest, packet.header.sequence_number, packet.header.timestamp
-                );
-
-                let send_result =
-                    if let Some(t) = send_transport.as_any().downcast_ref::<UdpRtpTransport>() {
-                        t.send_rtp_with_buffer(&packet, dest, &mut rtp_send_buffer)
-                            .await
-                    } else {
-                        send_transport.send_rtp(&packet, dest).await
-                    };
-
-                if let Err(e) = send_result {
-                    error!("Failed to send RTP packet: {}", e);
-
-                    // Broadcast error event
-                    let _ = event_tx_send.send(RtpSessionEvent::Error(e));
-                    continue;
-                }
-
-                debug!("Successfully sent RTP packet to {}", dest);
-
-                // Update stats
-                {
-                    let mut session_stats = stats_send.lock();
-                    session_stats.packets_sent += 1;
-                    session_stats.bytes_sent += packet.size() as u64;
-                }
-            }
-        });
 
         // Start receiving task
         let recv_transport = transport.clone();
@@ -1017,7 +1066,6 @@ impl RtpSession {
         }
 
         self.recv_task = Some(recv_task);
-        self.send_task = Some(send_task);
         self.active = true;
 
         info!("Started RTP session with SSRC={:08x}", ssrc);
@@ -1025,11 +1073,11 @@ impl RtpSession {
     }
 
     /// Send an RTP packet with payload. Now `&self` — sequence
-    /// numbers are managed by an atomic shared with the scheduler,
-    /// and the `sender` mpsc clone is intrinsically `Send + Sync`,
-    /// so this no longer requires exclusive borrow. Lets concurrent
-    /// callers (audio TX, DTMF transmitter, bridge forwarder) send
-    /// without serialising on `Arc<Mutex<RtpSession>>`.
+    /// numbers are managed by the ordered writer shared with the
+    /// scheduler, so this no longer requires exclusive borrow. Lets
+    /// concurrent callers (audio TX, DTMF transmitter, bridge
+    /// forwarder) send without serialising on
+    /// `Arc<Mutex<RtpSession>>`.
     pub async fn send_packet(
         &self,
         timestamp: RtpTimestamp,
@@ -1054,44 +1102,25 @@ impl RtpSession {
         marker: bool,
         payload_type: u8,
     ) -> Result<()> {
-        // The whole point of this method is that the caller controls
-        // PT + timestamp explicitly — RFC 4733 telephone-event needs
-        // every packet of a tone to share the start timestamp, and
-        // the scheduler's `schedule_packet` would overwrite it with
-        // its audio-rate cursor. So we bypass the scheduler's
-        // queueing path and route directly to the sender channel.
-        // Sequence numbers still come from the scheduler (when
-        // present) so DTMF + audio share the seq-number space the
-        // peer expects.
-        let sequence = self
-            .scheduler
-            .as_ref()
-            .map(|s| s.next_sequence())
-            .unwrap_or(0);
-        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
-        header.marker = marker;
-        let packet = RtpPacket::new(header, payload);
-
-        self.sender
-            .send(packet)
+        // The caller controls PT + timestamp explicitly — RFC 4733
+        // telephone-event needs every packet of a tone to share the
+        // start timestamp. The common packet writer supplies the
+        // session's one sequence space and wire-order authority.
+        self.packet_sender
+            .send_payload(timestamp, payload, marker, payload_type)
             .await
-            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
 
     /// Get a lock-free send handle for this session.
     ///
     /// `RtpSendHandle` is `Send + Sync + Clone` and bypasses the
     /// outer `Arc<Mutex<RtpSession>>` that wraps this session in
-    /// media-core. It shares the same sequence atomic as the
-    /// scheduler, so the wire-side sees one monotonic seq number
-    /// space across both the audio TX path and any scheduler /
-    /// `send_packet` call.
+    /// media-core. Every handle shares the session's ordered packet
+    /// writer, so the wire-side sees one monotonic sequence space
+    /// across audio, DTMF, bridge, and direct session sends.
     pub fn send_handle(&self) -> Option<RtpSendHandle> {
-        let scheduler = self.scheduler.as_ref()?;
         Some(RtpSendHandle {
-            sender: self.sender.clone(),
-            ssrc: self.ssrc,
-            sequence: scheduler.sequence_handle(),
+            packet_sender: self.packet_sender.clone(),
             default_payload_type: self.config.payload_type,
         })
     }
@@ -1111,14 +1140,15 @@ impl RtpSession {
 
     /// Get current bounded-queue occupancy for leak/perf diagnostics.
     pub fn queue_diagnostics(&self) -> RtpSessionQueueDiagnostics {
-        let sender_capacity_packets = self.sender.max_capacity();
+        let (sender_queue_packets, sender_capacity_packets) =
+            self.packet_sender.queue_diagnostics();
         let (receiver_queue_packets, receiver_capacity_packets) = if self.receive_queue_enabled {
             (self.receiver.len(), self.receiver.max_capacity())
         } else {
             (0, 0)
         };
         RtpSessionQueueDiagnostics {
-            sender_queue_packets: sender_capacity_packets.saturating_sub(self.sender.capacity()),
+            sender_queue_packets,
             sender_capacity_packets,
             receiver_queue_packets,
             receiver_capacity_packets,
@@ -1140,6 +1170,7 @@ impl RtpSession {
         }
 
         // Update the transport's remote address
+        self.packet_sender.set_remote_addr(addr);
         if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
             t.set_remote_rtp_addr(addr).await;
         }
@@ -1193,11 +1224,7 @@ impl RtpSession {
             let _ = handle.await;
         }
 
-        // Stop the send task
-        if let Some(handle) = self.send_task.take() {
-            handle.abort();
-            let _ = handle.await;
-        }
+        self.packet_sender.close();
 
         // Stop the RTCP task
         if let Some(handle) = self.rtcp_task.take() {
@@ -1596,8 +1623,7 @@ impl RtpSession {
     /// but don't want to clone the entire session.
     pub fn create_sender_handle(&self) -> RtpSessionSender {
         RtpSessionSender {
-            sender: self.sender.clone(),
-            ssrc: self.ssrc,
+            packet_sender: self.packet_sender.clone(),
             payload_type: self.config.payload_type,
             clock_rate: self.config.clock_rate,
         }
@@ -1630,9 +1656,7 @@ impl Drop for RtpSession {
         if let Some(handle) = self.recv_task.take() {
             handle.abort();
         }
-        if let Some(handle) = self.send_task.take() {
-            handle.abort();
-        }
+        self.packet_sender.close();
         if let Some(handle) = self.rtcp_task.take() {
             handle.abort();
         }
@@ -1647,11 +1671,8 @@ impl Drop for RtpSession {
 #[derive(Clone)]
 #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct RtpSessionSender {
-    /// Channel for sending packets
-    sender: mpsc::Sender<RtpPacket>,
-
-    /// SSRC for this session
-    ssrc: RtpSsrc,
+    /// Canonical ordered packet writer for this session.
+    packet_sender: Arc<RtpPacketSender>,
 
     /// Payload type
     payload_type: u8,
@@ -1669,25 +1690,9 @@ impl RtpSessionSender {
         payload: Bytes,
         marker: bool,
     ) -> Result<()> {
-        // Create RTP header
-        let mut header = RtpHeader::new(
-            self.payload_type,
-            0, // Sequence number will be set by scheduler
-            timestamp,
-            self.ssrc,
-        );
-
-        // Set marker bit if needed
-        header.marker = marker;
-
-        // Create packet
-        let packet = RtpPacket::new(header, payload);
-
-        // Send the packet
-        self.sender
-            .send(packet)
+        self.packet_sender
+            .send_payload(timestamp, payload, marker, self.payload_type)
             .await
-            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
 }
 
@@ -1715,5 +1720,65 @@ mod tests {
             config.transport_buffer_config,
             RtpTransportBufferConfig::default()
         );
+    }
+
+    #[tokio::test]
+    async fn send_handles_share_one_ordered_writer_and_close_fence() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer.local_addr().unwrap();
+        let mut config = RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer_addr),
+            ssrc: Some(0x1020_3040),
+            payload_type: 0,
+            ..RtpSessionConfig::default()
+        };
+        config.session_buffer_config.sender_channel_capacity = 3;
+
+        let mut session = RtpSession::new(config).await.unwrap();
+        let handle = session.send_handle().unwrap();
+        let second_handle = handle.clone();
+
+        handle
+            .send_packet(160, Bytes::from_static(&[0x11; 160]), true)
+            .await
+            .unwrap();
+        second_handle
+            .send_packet_with_pt(320, Bytes::from_static(&[0x22; 4]), false, 101)
+            .await
+            .unwrap();
+
+        let mut buffer = [0u8; 2048];
+        let (first_len, _) =
+            tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        let first = RtpPacket::parse(&buffer[..first_len]).unwrap();
+        let (second_len, _) =
+            tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+                .await
+                .unwrap()
+                .unwrap();
+        let second = RtpPacket::parse(&buffer[..second_len]).unwrap();
+
+        assert_eq!(first.header.ssrc, 0x1020_3040);
+        assert_eq!(first.header.payload_type, 0);
+        assert!(first.header.marker);
+        assert_eq!(second.header.payload_type, 101);
+        assert_eq!(
+            second.header.sequence_number,
+            first.header.sequence_number.wrapping_add(1)
+        );
+        assert_eq!(session.get_stats().packets_sent, 2);
+        assert_eq!(session.queue_diagnostics().sender_capacity_packets, 3);
+        assert_eq!(session.queue_diagnostics().sender_queue_packets, 0);
+
+        session.close().await.unwrap();
+        let error = handle
+            .send_packet(480, Bytes::from_static(&[0x33; 4]), false)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, Error::SessionError(_)));
     }
 }

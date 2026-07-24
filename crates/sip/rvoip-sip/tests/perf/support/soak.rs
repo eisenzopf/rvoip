@@ -25,6 +25,10 @@ pub const RETENTION_DRAIN_MARGIN_SECS: usize = 5;
 pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
     RETAINED_INVITE_STATE_TTL_SECS + RETENTION_DRAIN_MARGIN_SECS;
 pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
+pub const BURST_RSS_DIAGNOSTIC_SETTLE_SECS: usize = 5;
+pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
+pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
+    MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
 /// Full endpoint-retention snapshots walk and serialize every owned runtime
 /// index. Keep that diagnostic off the 5-second RSS sampling hot path so the
 /// leak gate does not measure allocator page growth caused by its own report.
@@ -1092,10 +1096,23 @@ pub fn retention_drain_wait() -> Duration {
     ))
 }
 
+pub fn burst_retention_drain_wait() -> Duration {
+    burst_retention_drain_wait_for_configured(read_positive_usize_env(
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS",
+    ))
+}
+
 pub fn retention_drain_wait_for_configured(configured_secs: Option<usize>) -> Duration {
     let seconds = configured_secs
         .unwrap_or(DEFAULT_RETENTION_DRAIN_WAIT_SECS)
         .max(MIN_RETENTION_DRAIN_WAIT_SECS);
+    Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
+}
+
+pub fn burst_retention_drain_wait_for_configured(configured_secs: Option<usize>) -> Duration {
+    let seconds = configured_secs
+        .unwrap_or(MIN_BURST_RETENTION_DRAIN_WAIT_SECS)
+        .max(MIN_BURST_RETENTION_DRAIN_WAIT_SECS);
     Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
 }
 
@@ -2064,8 +2081,9 @@ pub enum RssGatePolicy {
     /// Long-soak authority: qualify the final ten minutes under load and fail
     /// separately if that complete window was not captured.
     ActiveTail600,
-    /// Short/burst authority: retain the scenario-specific post-drain gate,
-    /// falling back to the sampler tail only when no drain samples exist.
+    /// Short/burst authority: require the full scenario-specific post-drain
+    /// coverage, then qualify its settled final 60 seconds. The full-window
+    /// slope remains diagnostic so bounded cleanup settling stays visible.
     PostDrainOrTail,
 }
 
@@ -2119,9 +2137,10 @@ pub fn rss_result_metrics(
         _ => 0.0,
     };
     // A long soak must be qualified by sustained behavior under active load.
-    // A short post-drain slope can prove allocator settling but can also hide
-    // a per-call leak that plateaus once load stops. Short scenarios retain the
-    // legacy post-drain/tail fallback and are not represented as long soaks.
+    // A short scenario retains its complete post-drain evidence window, but
+    // its authoritative slope comes from the final 60 seconds after bounded
+    // cleanup settling. Because the sampler is stopped at the drain boundary,
+    // report allocations cannot contaminate this settled-runtime estimate.
     let (gate_growth_mb_per_hr, gate_window) = match gate_policy {
         RssGatePolicy::ActiveTail600 => (
             active_tail_growth_mb_per_hr,
@@ -2132,7 +2151,7 @@ pub fn rss_result_metrics(
             },
         ),
         RssGatePolicy::PostDrainOrTail if post_drain_samples.len() >= 2 => {
-            (post_drain_growth_mb_per_hr, "post_drain")
+            (sustained_growth_mb_per_hr, "post_drain_tail_60s")
         }
         RssGatePolicy::PostDrainOrTail => (sustained_growth_mb_per_hr, "tail"),
     };

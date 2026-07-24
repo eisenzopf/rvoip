@@ -311,6 +311,38 @@ mod tests {
         panic!("failed to find adjacent UDP ports for retry test");
     }
 
+    fn bind_contiguous_port_block(count: usize) -> (Vec<StdUdpSocket>, u16) {
+        assert!(count > 1);
+        for _ in 0..1_000 {
+            let first = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let base_port = first.local_addr().unwrap().port();
+            let Ok(last_offset) = u16::try_from(count - 1) else {
+                break;
+            };
+            if base_port.checked_add(last_offset).is_none() {
+                continue;
+            }
+
+            let mut sockets = vec![first];
+            let mut complete = true;
+            for offset in 1..count {
+                let port = base_port + u16::try_from(offset).unwrap();
+                match StdUdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
+                    Ok(socket) => sockets.push(socket),
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                return (sockets, base_port);
+            }
+        }
+
+        panic!("failed to find {count} contiguous UDP ports for retry test");
+    }
+
     #[tokio::test]
     async fn controllers_with_same_bind_domain_share_port_reservations() {
         let (range_probe, base_port) = bind_adjacent_port_probe();
@@ -395,6 +427,50 @@ mod tests {
             .stop_media(&dialog_id)
             .await
             .expect("session should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn start_media_scans_beyond_eight_bind_collisions() {
+        const RANGE_LEN: usize = 12;
+        let (mut held_sockets, base_port) = bind_contiguous_port_block(RANGE_LEN);
+        let expected_port = base_port + u16::try_from(RANGE_LEN - 1).unwrap();
+        drop(held_sockets.pop());
+
+        let mut controller = MediaSessionController::new();
+        let mut port_config = PortAllocatorConfig::default();
+        port_config.port_range_start = base_port;
+        port_config.port_range_end = expected_port;
+        port_config.allocation_strategy = AllocationStrategy::Incremental;
+        port_config.pairing_strategy = PairingStrategy::Muxed;
+        port_config.prefer_port_reuse = false;
+        port_config.validate_ports = false;
+        controller.port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
+
+        let dialog_id = DialogId::new("full_range_bind_retry");
+        controller
+            .start_media(
+                dialog_id.clone(),
+                MediaConfig {
+                    local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    remote_addr: None,
+                    preferred_codec: None,
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .expect("one complete range scan should reach the free candidate");
+
+        let session_info = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("session after range scan");
+        assert_eq!(session_info.rtp_port, Some(expected_port));
+
+        controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("session should stop cleanly");
+        drop(held_sockets);
     }
 
     #[tokio::test]

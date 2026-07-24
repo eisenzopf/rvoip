@@ -162,6 +162,25 @@ performanceProfiles:
         rtpBufferInitialCount: 64
         rtpBufferMaxCount: 256
 
+  carrier-burst-uac-high-density:
+    description: "High-density UAC profile with sharded transport, transaction, dialog, and session delivery."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 4
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 4
+      sipTransactionDispatchQueueCapacity: "$capacity"
+      sipDialogDispatchWorkers: 8
+      sipDialogDispatchQueueCapacity: "$capacity"
+      sessionEventDispatcherWorkers: 16
+      sessionEventDispatcherChannelCapacity: "$capacity"
+      sipTransactionCommandChannelCapacity: 512
+      mediaMode: enabled
+
   carrier-burst-memory-tight:
     description: "Carrier burst media profile with smaller RTP/media queues and media pools for memory-sensitive overload tests."
     requiresCapacity: true

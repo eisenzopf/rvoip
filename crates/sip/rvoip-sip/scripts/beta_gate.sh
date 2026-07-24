@@ -163,7 +163,8 @@ Environment:
   BETA_PERF_MEDIA_CHURN_DURATION_SECS
                                   Isolated media-churn duration. Defaults to 120 seconds.
   BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS
-                                  Legacy monolithic-soak duration. Defaults to 1800 seconds.
+                                  Monolithic-soak duration. Defaults to 3600 seconds so the
+                                  final ten-minute RSS gate follows allocator warm-up.
   BETA_PERFORMANCE_RECIPE_FILE   Optional YAML recipe book path.
   BETA_PERF_INFRA_MEMORY_DIAGNOSTICS=1
                                   Compile SIP/infra memory diagnostics for perf gates.
@@ -899,7 +900,7 @@ write_summary_gate_table_header() {
 - beta_perf_regression_baseline_id: \`${perf_regression_baseline_id}\`
 - beta_perf_regression_baseline_manifest_sha256: \`${perf_regression_baseline_manifest_sha256}\`
 - beta_perf_media_churn_duration_secs: \`${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}\`
-- beta_perf_monolithic_soak_duration_secs: \`${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}\`
+- beta_perf_monolithic_soak_duration_secs: \`${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-3600}\`
 - beta_performance_recipe_file: \`${BETA_PERFORMANCE_RECIPE_FILE:-bundled config/performance-recipes.yaml}\`
 - beta_perf_features: \`$(perf_features)\`
 - beta_perf_infra_memory_diagnostics: \`${BETA_PERF_INFRA_MEMORY_DIAGNOSTICS:-0}\`
@@ -1845,12 +1846,12 @@ run_perf_gates() {
     # scripts below. These two ignored standalone tests need explicit gates.
     # Do not let the split-soak duration leak into these standalone targets.
     # They intentionally have independent evidence windows: a short isolated
-    # media churn diagnostic and the legacy 30-minute monolithic soak.
+    # media churn diagnostic and the one-hour monolithic soak.
     run_gate_continue "perf media churn" env \
       RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MEDIA_CHURN_DURATION_SECS:-120}" \
       cargo test -p rvoip-sip --release --features "$all_features" --test perf_media_churn perf_media_churn -- --exact --ignored --nocapture
     run_gate_continue "perf monolithic soak" env \
-      RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-1800}" \
+      RVOIP_PERF_SOAK_DURATION_SECS="${BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS:-3600}" \
       RVOIP_PERF_SOAK_DRAIN_CPS="${RVOIP_PERF_SOAK_DRAIN_CPS:-10}" \
       RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT="${RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT:-32}" \
       RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS="${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:-130}" \

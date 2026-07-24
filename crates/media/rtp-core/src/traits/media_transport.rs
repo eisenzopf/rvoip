@@ -86,6 +86,8 @@ impl MediaTransport for RtpMediaTransport {
 mod tests {
     use super::*;
     use crate::session::RtpSessionConfig;
+    use tokio::net::UdpSocket;
+    use tokio::time::{timeout, Duration};
 
     #[tokio::test]
     async fn test_rtp_media_transport() {
@@ -100,10 +102,27 @@ mod tests {
         let addr = transport.local_addr().await.unwrap();
         assert_ne!(addr.port(), 0);
 
-        // Test sending media
+        // A send is successful only when the session has an actual wire
+        // destination. The former asynchronous queue accepted this test's
+        // packet before discovering that no remote address was configured,
+        // which made the public result a false success.
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        transport
+            .set_remote_addr(receiver.local_addr().unwrap())
+            .await
+            .unwrap();
+
+        // Test sending media and prove that the packet reached the peer.
         let payload = Bytes::from_static(b"test payload");
         let result = transport.send_media(0, 12345, payload, true).await;
         assert!(result.is_ok());
+        let mut datagram = [0_u8; 1500];
+        let (received, source) = timeout(Duration::from_secs(1), receiver.recv_from(&mut datagram))
+            .await
+            .expect("RTP datagram timeout")
+            .expect("receive RTP datagram");
+        assert!(received > 12);
+        assert_eq!(source.port(), addr.port());
 
         // Close the transport
         let result = transport.close().await;

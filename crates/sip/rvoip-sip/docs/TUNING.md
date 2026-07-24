@@ -259,6 +259,7 @@ The bundled burst recipes are starting points:
 | --- | --- |
 | `carrier-burst-balanced` | Default carrier media burst profile. |
 | `carrier-burst-high-density` | Larger SIP/media queues and media pools for dense bursts. |
+| `carrier-burst-uac-high-density` | Sharded UAC transport, transaction, dialog, and session-delivery lanes for dense bursts; no server admission or media watchdog policy. |
 | `carrier-burst-memory-tight` | Smaller RTP/media queues and media pools for memory-sensitive overload tests. |
 
 Carrier burst recipes enable `activeCallNoMediaTimeoutSecs: 60` and

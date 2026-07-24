@@ -274,6 +274,17 @@ impl PortAllocator {
         }
     }
 
+    /// Number of distinct candidate ports in this allocator's configured
+    /// range. Media controllers use this to bound authoritative bind retries
+    /// to one complete scan rather than an arbitrary small attempt count.
+    pub fn configured_port_capacity(&self) -> usize {
+        usize::from(
+            self.config
+                .port_range_end
+                .saturating_sub(self.config.port_range_start),
+        ) + 1
+    }
+
     fn indexed_pool_enabled(config: &PortAllocatorConfig) -> bool {
         matches!(
             config.allocation_strategy,

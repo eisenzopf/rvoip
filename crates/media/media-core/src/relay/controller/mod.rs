@@ -51,8 +51,6 @@ use rvoip_rtp_core::{
     RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
 };
 
-const RTP_SESSION_BIND_RETRIES: usize = 8;
-
 /// Releases a media-controller port reservation if `start_media` is cancelled
 /// before ownership is committed to the controller maps.
 struct MediaPortReservationGuard {
@@ -869,7 +867,12 @@ impl MediaSessionController {
         let dialog_session_id = format!("dialog_{}", dialog_id);
         let mut last_bind_error: Option<rtp_core::Error> = None;
         let mut created_session = None;
-        for attempt in 1..=RTP_SESSION_BIND_RETRIES {
+        // The real RTP socket bind is authoritative. Scan at most one complete
+        // configured range so occupied candidates are quarantined and skipped
+        // without either failing after an arbitrary eight ports or looping
+        // forever when the host has no usable port left.
+        let bind_attempt_limit = allocator.configured_port_capacity().max(1);
+        for attempt in 1..=bind_attempt_limit {
             let allocate_started = Instant::now();
             let allocation = allocator
                 .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
@@ -937,10 +940,10 @@ impl MediaSessionController {
                         // authoritative availability check.
                         debug!(
                             "RTP bind failed for {} on {} (attempt {}/{}); retrying with another port: {}",
-                            dialog_id, local_rtp_addr, attempt, RTP_SESSION_BIND_RETRIES, e
+                            dialog_id, local_rtp_addr, attempt, bind_attempt_limit, e
                         );
                         last_bind_error = Some(e);
-                        if attempt < RTP_SESSION_BIND_RETRIES {
+                        if attempt < bind_attempt_limit {
                             continue;
                         }
                         break;
@@ -959,7 +962,7 @@ impl MediaSessionController {
             created_session.ok_or_else(|| {
                 Error::config(format!(
                     "Media allocation failed [kind=rtp_bind_collision] after {} bind attempts: {}",
-                    RTP_SESSION_BIND_RETRIES,
+                    bind_attempt_limit,
                     last_bind_error
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| "no bind attempt completed".to_string())

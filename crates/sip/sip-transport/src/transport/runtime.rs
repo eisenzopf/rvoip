@@ -4,14 +4,55 @@ use std::hash::Hash;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
+use tokio::runtime::{Builder, Runtime};
 use tokio::sync::{oneshot, watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::Instant;
 
 use crate::error::{Error, Result};
+
+/// SIP UDP socket polling and parsing run on one bounded executor.
+///
+/// Dense RTP/media workloads can keep thousands of otherwise independent
+/// session continuations runnable. If the UDP socket poller shares that
+/// executor, valid SIP retransmissions may remain unread for seconds even
+/// though every downstream transport/transaction/dialog queue is empty. This
+/// runtime changes only where the existing UDP receive/parse futures are
+/// polled: their sole output remains the same `TransportEvent` channel and the
+/// authoritative signaling route is unchanged.
+static SIP_UDP_IO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+fn sip_udp_io_worker_threads_for(parallelism: usize) -> usize {
+    // Dense endpoints can own many independently bound UDP sockets and parse
+    // workers. Allocate up to one quarter of the host while keeping this much
+    // smaller than an application-sized executor.
+    parallelism.div_ceil(4).clamp(2, 4)
+}
+
+fn sip_udp_io_runtime() -> &'static Runtime {
+    SIP_UDP_IO_RUNTIME.get_or_init(|| {
+        let parallelism = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4);
+        Builder::new_multi_thread()
+            .worker_threads(sip_udp_io_worker_threads_for(parallelism))
+            .thread_name("rvoip-sip-udp")
+            .enable_all()
+            .build()
+            .expect("build dedicated rvoip SIP UDP runtime")
+    })
+}
+
+pub(crate) fn spawn_sip_udp_io<F>(future: F) -> JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    sip_udp_io_runtime().spawn(future)
+}
 
 /// Admission policy for TLS and WebSocket handshakes.
 ///
@@ -535,6 +576,32 @@ impl Drop for TransportTaskSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sip_udp_io_worker_policy_is_bounded() {
+        assert_eq!(sip_udp_io_worker_threads_for(1), 2);
+        assert_eq!(sip_udp_io_worker_threads_for(4), 2);
+        assert_eq!(sip_udp_io_worker_threads_for(8), 2);
+        assert_eq!(sip_udp_io_worker_threads_for(12), 3);
+        assert_eq!(sip_udp_io_worker_threads_for(16), 4);
+        assert_eq!(sip_udp_io_worker_threads_for(128), 4);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sip_udp_io_task_runs_on_isolated_executor() {
+        let application_thread = std::thread::current().id();
+        let (io_thread, io_thread_name) = spawn_sip_udp_io(async {
+            (
+                std::thread::current().id(),
+                std::thread::current().name().map(ToString::to_string),
+            )
+        })
+        .await
+        .expect("SIP UDP I/O task");
+
+        assert_ne!(application_thread, io_thread);
+        assert_eq!(io_thread_name.as_deref(), Some("rvoip-sip-udp"));
+    }
 
     #[test]
     fn handshake_admission_rejects_zero_values() {

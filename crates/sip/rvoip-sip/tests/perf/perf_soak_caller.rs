@@ -88,6 +88,24 @@ fn retention_drain_horizon_covers_invite_state_ttl_with_margin() {
         support::soak::retention_drain_wait_for_configured(Some(120)),
         Duration::from_secs(120)
     );
+    assert_eq!(
+        support::soak::burst_retention_drain_wait_for_configured(Some(130)),
+        Duration::from_secs(
+            support::soak::MIN_BURST_RETENTION_DRAIN_WAIT_SECS
+                .try_into()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        support::soak::burst_retention_drain_wait_for_configured(Some(200)),
+        Duration::from_secs(200)
+    );
+    assert_eq!(
+        support::soak::MIN_BURST_RETENTION_DRAIN_WAIT_SECS,
+        support::soak::MIN_RETENTION_DRAIN_WAIT_SECS
+            + support::soak::BURST_RSS_DIAGNOSTIC_SETTLE_SECS
+            + support::soak::BURST_RSS_QUIET_TAIL_SECS
+    );
 }
 
 #[ignore]

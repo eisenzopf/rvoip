@@ -2398,14 +2398,17 @@ mod tests {
     }
 
     #[test]
-    fn shared_burst_policy_keeps_post_drain_gate_for_long_wall_time() {
+    fn shared_burst_policy_qualifies_settled_post_drain_tail() {
         let mut resources = support::ResourceSummary::empty();
         resources.samples = linear_rss_samples(680);
         for sample in &mut resources.samples {
-            if sample.t_secs >= 640.0 {
+            if sample.t_secs >= 640.0 && sample.t_secs < 650.0 {
                 sample.rss_mb = 106.4;
+            } else if sample.t_secs >= 650.0 {
+                sample.rss_mb = 106.5;
             }
         }
+        resources.rss_tail_growth_mb_per_min = 0.0;
         resources.sample_interval_estimate_secs = 5.0;
         let rss = support::soak::rss_result_metrics(
             &resources,
@@ -2414,9 +2417,38 @@ mod tests {
             40.0,
             support::soak::RssGatePolicy::PostDrainOrTail,
         );
-        assert_eq!(rss.gate_window, "post_drain");
+        assert_eq!(rss.gate_window, "post_drain_tail_60s");
         assert!(rss.gate_growth_mb_per_hr.abs() < 0.000_001);
+        assert!(rss.post_drain_growth_mb_per_hr > 0.0);
         assert!(rss.active_tail_growth_mb_per_hr > 30.0);
+    }
+
+    #[test]
+    fn shared_burst_policy_rejects_persistent_settled_tail_growth() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = (0..=136)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 100.0 + 10.01 * t_secs / 3600.0,
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect();
+        resources.rss_tail_growth_mb_per_min = 10.01 / 60.0;
+        resources.sample_interval_estimate_secs = 5.0;
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            550.0,
+            550.0,
+            130.0,
+            support::soak::RssGatePolicy::PostDrainOrTail,
+        );
+
+        assert_eq!(rss.gate_window, "post_drain_tail_60s");
+        assert!((rss.gate_growth_mb_per_hr - 10.01).abs() < 0.000_001);
+        assert!(rss.gate_growth_mb_per_hr > 10.0);
     }
 
     #[test]

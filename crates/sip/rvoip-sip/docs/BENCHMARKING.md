@@ -420,7 +420,7 @@ Compact structural snapshots are taken at the end of the 95-second settle and
 again after resource sampling stops; both must independently report zero
 retained call structures. The settle snapshot remains allocated for the whole
 RSS window so its own memory is present in both endpoint bands rather than
-appearing as mid-window growth. The 30-minute monolithic and one-hour split
+appearing as mid-window growth. The one-hour monolithic and one-hour split
 soaks enforce the same unadjusted 10 MB/hour slope and remain authoritative for
 sustained-growth claims.
 

@@ -14,10 +14,11 @@ export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 : "${RVOIP_PERF_BURST_SCENARIO_FILE:=${CRATE_DIR}/config/perf-burst-scenarios.yaml}"
 : "${RVOIP_PERF_BURST_SCENARIOS:=carrier-smoke}"
 : "${RVOIP_PERF_CALL_TIMEOUT_SECS:=30}"
-# The burst acceptance profiles require a complete 120-second post-drain RSS
-# window. Allow enough margin for the first and last 5-second sampler ticks so
-# direct matrix runs enforce that gate instead of silently reporting it only.
-: "${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:=130}"
+# Burst acceptance first waits through the 90-second SIP-retention horizon,
+# captures exact structural diagnostics, then leaves a 5-second settle and a
+# quiet 60-second RSS tail. The Rust harness clamps shorter overrides to this
+# same 160-second minimum.
+: "${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:=160}"
 : "${RVOIP_PERF_MEMORY_DIAGNOSTICS:=0}"
 : "${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:=0}"
 : "${RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS:=5}"

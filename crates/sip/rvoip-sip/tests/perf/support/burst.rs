@@ -13,6 +13,82 @@ const DEFAULT_SCENARIO_FILE: &str = concat!(
     "/config/perf-burst-scenarios.yaml"
 );
 
+/// Same-host burst media topology.
+///
+/// The two media pools are deliberately disjoint. The gap from 26000 through
+/// 26999 is reserved for the receiver SIP socket and every sharded caller SIP
+/// socket used by the canonical matrix. Keeping the upper media pool below
+/// 49152 also avoids the default IANA dynamic/private port range. A real bind
+/// remains authoritative, so unrelated processes occupying a candidate are
+/// handled by allocator quarantine and retry.
+pub const BURST_BOB_MEDIA_START: u16 = 4_000;
+pub const BURST_BOB_MEDIA_END: u16 = 25_999;
+pub const BURST_ALICE_MEDIA_START: u16 = 27_000;
+pub const BURST_ALICE_MEDIA_END: u16 = 49_151;
+
+pub fn validate_same_host_burst_port_layout(
+    bob_sip_port: u16,
+    alice_base_sip_port: u16,
+    alice_shards: usize,
+    required_media_sessions: usize,
+) -> Result<(), String> {
+    if alice_shards == 0 {
+        return Err("Alice shard count must be greater than zero".to_string());
+    }
+
+    let bob_capacity = media_port_range_capacity(BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END);
+    if bob_capacity < required_media_sessions {
+        return Err(format!(
+            "Bob media range {}-{} has capacity {}, below the required {} sessions",
+            BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END, bob_capacity, required_media_sessions
+        ));
+    }
+
+    let alice_capacity = media_port_range_capacity(BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END);
+    if alice_capacity < required_media_sessions {
+        return Err(format!(
+            "Alice media range {}-{} has capacity {}, below the required {} sessions",
+            BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END, alice_capacity, required_media_sessions
+        ));
+    }
+
+    let mut signaling_ports = Vec::with_capacity(alice_shards + 1);
+    signaling_ports.push(("Bob", bob_sip_port));
+    for shard in 0..alice_shards {
+        let offset = u16::try_from(shard)
+            .map_err(|_| format!("Alice shard index {shard} does not fit in a UDP port"))?
+            .checked_mul(2)
+            .ok_or_else(|| format!("Alice shard index {shard} overflows its SIP port offset"))?;
+        let port = alice_base_sip_port.checked_add(offset).ok_or_else(|| {
+            format!(
+                "Alice SIP port range overflows u16 for base {} and shard {}",
+                alice_base_sip_port, shard
+            )
+        })?;
+        signaling_ports.push(("Alice", port));
+    }
+
+    for (role, port) in signaling_ports {
+        if port_in_range(port, BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END)
+            || port_in_range(port, BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END)
+        {
+            return Err(format!(
+                "{role} SIP port {port} overlaps a same-host RTP media range"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn media_port_range_capacity(start: u16, end: u16) -> usize {
+    usize::from(end.saturating_sub(start)) + 1
+}
+
+fn port_in_range(port: u16, start: u16, end: u16) -> bool {
+    (start..=end).contains(&port)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BurstScenarioBook {
@@ -423,6 +499,31 @@ fn default_server_profile() -> String {
 
 fn default_client_profile() -> String {
     "endpoint".to_string()
+}
+
+#[cfg(test)]
+mod port_layout_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_same_host_layout_covers_high_density_without_sip_overlap() {
+        validate_same_host_burst_port_layout(26_060, 26_062, 16, 12_500)
+            .expect("canonical burst layout");
+    }
+
+    #[test]
+    fn same_host_layout_rejects_runtime_sip_port_inside_media_pool() {
+        let error = validate_same_host_burst_port_layout(BURST_BOB_MEDIA_START, 26_062, 16, 12_500)
+            .expect_err("overlap must fail closed");
+        assert!(error.contains("overlaps"));
+    }
+
+    #[test]
+    fn same_host_layout_rejects_insufficient_media_capacity() {
+        let error = validate_same_host_burst_port_layout(26_060, 26_062, 16, 30_000)
+            .expect_err("capacity must fail closed");
+        assert!(error.contains("below the required"));
+    }
 }
 
 fn default_capacity() -> usize {

@@ -337,7 +337,7 @@ performance. The report records scheduled and actual capture times.
 
 For time-series retention through an extended cooldown, use the split soak
 harness. A short 2,000-CPS run identifies peak state and cleanup backlog; it
-does not replace the final 30-minute monolithic or one-hour split soak.
+does not replace the final one-hour monolithic or one-hour split soak.
 
 ## Troubleshooting
 

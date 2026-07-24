@@ -30,7 +30,13 @@ impl UdpSender {
     ) -> Result<Self> {
         let std_socket =
             bind_std_udp_socket(addr, socket_options).map_err(|e| Error::BindFailed(addr, e))?;
-        let socket = UdpSocket::from_std(std_socket).map_err(|e| Error::BindFailed(addr, e))?;
+        let socket =
+            crate::transport::runtime::spawn_sip_udp_io(
+                async move { UdpSocket::from_std(std_socket) },
+            )
+            .await
+            .map_err(|_| Error::Other("SIP UDP socket registration task failed".to_string()))?
+            .map_err(|e| Error::BindFailed(addr, e))?;
         Ok(Self {
             socket: Arc::new(socket),
         })

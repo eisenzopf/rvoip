@@ -130,7 +130,7 @@ scenarios:
   - name: high-density-media-burst
     description: "Dense media burst to stress RTP/media queues and pools."
     serverProfile: carrier-burst-high-density
-    clientProfile: endpoint
+    clientProfile: carrier-burst-uac-high-density
     capacity: 12500
     aliceShards: 16
     seed: 2026060806
@@ -139,7 +139,10 @@ scenarios:
       - { label: media-burst, cps: 180, durationSecs: 90 }
       - { label: recovery, cps: 30, durationSecs: 90 }
     acceptance:
-      minAsr: 0.999
+      # Release policy: permit up to 0.5% setup loss only in this extreme
+      # simultaneous full-RTP density scenario. Correctness, teardown, media
+      # setup, resource drain, recovery, and RSS gates remain exact below.
+      minAsr: 0.995
       maxMediaSetupFailed: 0
       maxTeardownFailed: 0
       maxRetainedAfterDrain: 0

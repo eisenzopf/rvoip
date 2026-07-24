@@ -250,6 +250,32 @@ fn test_carrier_burst_recipes_provision_dialog_causal_lanes() {
 }
 
 #[test]
+fn test_carrier_burst_uac_high_density_provisions_existing_delivery_lanes_only() {
+    let c = Config::local("alice", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-uac-high-density").with_capacity(782),
+        )
+        .unwrap();
+
+    assert_eq!(c.sip_udp_parse_workers, Some(4));
+    assert_eq!(c.sip_udp_parse_queue_capacity, Some(782));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
+    assert_eq!(c.sip_transaction_dispatch_workers, Some(4));
+    assert_eq!(c.sip_transaction_dispatch_queue_capacity, Some(782));
+    assert_eq!(c.sip_dialog_dispatch_workers, Some(8));
+    assert_eq!(c.sip_dialog_dispatch_queue_capacity, Some(782));
+    assert_eq!(c.session_event_dispatcher_workers, 16);
+    assert_eq!(c.session_event_dispatcher_channel_capacity, 782);
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(512));
+    assert!(!c.fast_auto_accept_incoming_calls);
+    assert_eq!(c.server_call_capacity, None);
+    assert_eq!(c.server_call_admission_limit, None);
+    assert_eq!(c.server_call_admission_soft_limit, None);
+    assert_eq!(c.active_call_no_media_timeout_secs, 0);
+    assert_eq!(c.active_call_media_idle_timeout_secs, 0);
+}
+
+#[test]
 fn test_config_profile_defaults_can_be_overridden_after_profile() {
     let c = Config::local("alice", 5060)
         .with_pbx_media_server_performance(2_000)
