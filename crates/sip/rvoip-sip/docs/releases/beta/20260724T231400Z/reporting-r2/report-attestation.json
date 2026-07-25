@@ -1,0 +1,50 @@
+{
+  "assurance": {
+    "cryptographically_signed": false,
+    "kind": "integrity-and-reproducibility",
+    "note": "SHA-256 integrity evidence; not third-party signing."
+  },
+  "binding_mode": "post-run-v1-backfill",
+  "correction_record_sha256": "012008d3e40676756fff3c0f450ac9a6a1983d6649262e20b18d11f5bc482c7f",
+  "generated_files": {
+    "BETA_GATE_REPORT.md": {
+      "bytes": 190712,
+      "sha256": "ab2edf9fcb9d9522c15727244204bf347a3a8f763a730a3a0da0912042ae34e0"
+    },
+    "BETA_PERFORMANCE_REPORT.md": {
+      "bytes": 20912,
+      "sha256": "4b9546eb513e32d0f48b41a036b491055a690eff388bbb198f38a29632f26db5"
+    },
+    "BETA_RELEASE_REPORT.md": {
+      "bytes": 12903,
+      "sha256": "f03f99c1899830c9de11341a334a35f3f72592a860eb861c7118c3e38239d4e5"
+    },
+    "effective-gate-config.json": {
+      "bytes": 19854,
+      "sha256": "b8f46690d8f2f0d93db800a0a41a79a2211ec69311c80cedd61f5689db7c24b0"
+    },
+    "gate-results.json": {
+      "bytes": 279834,
+      "sha256": "01ca7651a47f3b924d4d2b8242a3cf722f502eac95767930921becba7ceeb753"
+    },
+    "inputs/beta-release-policy.yaml": {
+      "bytes": 23450,
+      "sha256": "8cddb4b097971714f62d3c705e8ed3de20f6fec995e8e7251f926b584d7d3180"
+    },
+    "inputs/beta_release_report.py": {
+      "bytes": 93774,
+      "sha256": "59e6d9c6240b7d44b3adee1223e6d18c8044bd7b8fcd0ab85f30235a83defdca"
+    },
+    "release-evidence.json": {
+      "bytes": 365535,
+      "sha256": "4ca2ebac65e408453ac921de94cb2212053cdfa3354b36230abd0031956db05d"
+    }
+  },
+  "generator_sha256": "59e6d9c6240b7d44b3adee1223e6d18c8044bd7b8fcd0ab85f30235a83defdca",
+  "policy_catalog_sha256": "8cddb4b097971714f62d3c705e8ed3de20f6fec995e8e7251f926b584d7d3180",
+  "report_revision": 2,
+  "run_id": "20260724T231400Z",
+  "schema": "rvoip-sip-report-attestation-v1",
+  "source_attestation_sha256": "ace54bb7867c533c03edabcf148bf7f0bc4a5118ba050ad32b5e8db2cb93519c",
+  "tested_commit": "8d44fb3574e40f62526aa68f19833e95274cd06b"
+}

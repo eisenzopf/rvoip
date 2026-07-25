@@ -89,6 +89,26 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(reporting.safe_relative("../outside.json"))
         self.assertFalse(reporting.safe_relative("/absolute/path"))
 
+    def test_latency_policy_and_extraction_are_complete_and_fail_closed(self) -> None:
+        policy = reporting.load_policy(POLICY_PATH)
+        self.assertEqual(
+            reporting.canonical_latency_limits(policy)["setup_latency"],
+            {"p50": 13.97, "p95": 15.36, "p99": 16.69},
+        )
+        report = {
+            "latency_ns": {
+                "setup_latency": {"p50": 1, "p95": 2, "p99": 3},
+                "full_cycle": {"p50": 4, "p95": 5, "p99": 6},
+            }
+        }
+        self.assertEqual(
+            reporting.latency_percentiles(report, "fixture")["full_cycle"]["p99"],
+            6,
+        )
+        del report["latency_ns"]["setup_latency"]["p99"]
+        with self.assertRaises(reporting.ReportError):
+            reporting.latency_percentiles(report, "fixture")
+
     def test_native_gate_fragments_are_typed_and_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -184,6 +204,31 @@ class CurrentCandidateIntegrationTests(unittest.TestCase):
             for name in reporting.REPORT_FILES + reporting.MACHINE_FILES:
                 text = (output / name).read_text()
                 self.assertNotIn("/Users/", text, name)
+
+    def test_performance_report_promotes_latency_values_and_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            reporting.generate(self.report_root, POLICY_PATH, output)
+            performance = (output / "BETA_PERFORMANCE_REPORT.md").read_text()
+            self.assertIn("### Canonical 2K latency acceptance", performance)
+            self.assertIn("p50 observed", performance)
+            self.assertIn("p95 limit", performance)
+            self.assertIn("p99 observed", performance)
+            self.assertIn("| 1 | Call setup | 0.636 | ≤ 13.970 |", performance)
+            self.assertIn("## Complete call-setup profile matrix", performance)
+            self.assertIn("## Regression evidence", performance)
+            self.assertIn("Baseline ms | Limit ms | Observed ms", performance)
+            evidence = json.loads((output / "release-evidence.json").read_text())
+            self.assertEqual(
+                len(evidence["performance"]["regression"]["latency_checks"]), 6
+            )
+            self.assertTrue(
+                all(
+                    check["passed"]
+                    for run in evidence["performance"]["canonical_2k"]
+                    for check in run["latency_checks"]
+                )
+            )
 
 
 if __name__ == "__main__":

@@ -144,7 +144,7 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
 fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     let crate_dir = manifest_dir();
     let docs = crate_dir.join("docs");
-    let snapshot = docs.join("releases/beta/20260724T231400Z");
+    let snapshot = docs.join("releases/beta/20260724T231400Z/reporting-r2");
     let reports = [
         "BETA_RELEASE_REPORT.md",
         "BETA_GATE_REPORT.md",
@@ -177,6 +177,11 @@ fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     assert!(gates.contains("workspace unit tests"));
     assert!(gates.contains("SIPp standalone target start"));
     assert!(performance.contains("All **59** JSON files"));
+    assert!(performance.contains("### Canonical 2K latency acceptance"));
+    assert!(performance.contains("p50 observed"));
+    assert!(performance.contains("p95 limit"));
+    assert!(performance.contains("p99 observed"));
+    assert!(performance.contains("Baseline ms | Limit ms | Observed ms"));
     assert!(performance
         .to_ascii_lowercase()
         .contains("full application audio-frame delivery"));

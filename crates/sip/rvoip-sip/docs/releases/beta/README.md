@@ -4,6 +4,7 @@ Immutable, post-run-derived release documentation. The marker identifies the cur
 
 | Run | Current | Release report | Gate report | Performance report |
 |---|---|---|---|---|
-| `20260724T231400Z` | **yes** | [release](20260724T231400Z/BETA_RELEASE_REPORT.md) | [gates](20260724T231400Z/BETA_GATE_REPORT.md) | [performance](20260724T231400Z/BETA_PERFORMANCE_REPORT.md) |
+| `20260724T231400Z` | **yes** | [release](20260724T231400Z/reporting-r2/BETA_RELEASE_REPORT.md) | [gates](20260724T231400Z/reporting-r2/BETA_GATE_REPORT.md) | [performance](20260724T231400Z/reporting-r2/BETA_PERFORMANCE_REPORT.md) |
 
 Current candidate: `20260724T231400Z`.
+Current reporting derivation: `20260724T231400Z/reporting-r2`.
