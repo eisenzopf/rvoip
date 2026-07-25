@@ -11,7 +11,6 @@
 desktop.ini
 Cargo.lock
 publish_order.sh
-bump_version.sh
 # crates.io release tooling — run locally, never tracked in the repo.
 scripts/check-publish-readiness.sh
 scripts/publish-beta.sh
@@ -162,4 +161,3 @@ dhat-heap-*.json
 ## Local release helpers
 /scripts/sync_beta_train_versions.sh
 /scripts/publish_beta_train_0.2.2.sh
-/scripts/publish_train.sh
