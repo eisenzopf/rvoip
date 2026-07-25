@@ -2043,10 +2043,6 @@ if [ "$MODE" = "full" ] || [ "$MODE" = "perf" ]; then
     run_gate_continue "perf results evidence capture" capture_current_perf_results
     run_gate_continue "performance gate metrics report" \
       write_performance_gate_metrics
-    if [ -f "$ARTIFACT_DIR/performance-gate-metrics.md" ]; then
-      printf '\n' >> "$SUMMARY"
-      cat "$ARTIFACT_DIR/performance-gate-metrics.md" >> "$SUMMARY"
-    fi
   else
     skip_gate "performance gate metrics report" \
       "The isolated performance result capture is unavailable."
@@ -2071,6 +2067,15 @@ elif bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
       --workspace-root "$WORKSPACE_ROOT" \
       --beta-start "$BETA_SOURCE_AT_START"
+fi
+
+# Keep every gate row contiguous under the summary's `## Gates` heading.
+# Attestation parsing intentionally stops at the next level-two section, so
+# detailed performance Markdown must follow the terminal source-integrity gates.
+if { [ "$MODE" = "full" ] || [ "$MODE" = "perf" ]; } \
+  && [ -f "$ARTIFACT_DIR/performance-gate-metrics.md" ]; then
+  printf '\n' >> "$SUMMARY"
+  cat "$ARTIFACT_DIR/performance-gate-metrics.md" >> "$SUMMARY"
 fi
 
 ENDED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"

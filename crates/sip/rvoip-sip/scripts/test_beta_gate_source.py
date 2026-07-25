@@ -135,6 +135,19 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
         self.assertIn('write_beta_attestation "$ARTIFACT_DIR"', BETA_GATE)
         self.assertIn("package_beta_report", BETA_GATE)
 
+    def test_terminal_source_gates_remain_in_attested_gate_table(self) -> None:
+        final_source_gate = BETA_GATE.index(
+            'run_gate_continue "beta final source fingerprint capture"'
+        )
+        unchanged_source_gate = BETA_GATE.index(
+            'run_gate_continue "canonical 2k beta source unchanged"'
+        )
+        performance_details = BETA_GATE.index(
+            'cat "$ARTIFACT_DIR/performance-gate-metrics.md" >> "$SUMMARY"'
+        )
+        self.assertLess(final_source_gate, performance_details)
+        self.assertLess(unchanged_source_gate, performance_details)
+
     def test_docker_peer_evidence_is_sanitized_before_disk_capture(self) -> None:
         capture = shell_function("capture_docker_snapshot")
         self.assertIn('python3 "$DOCKER_PEER_SNAPSHOT_HELPER"', capture)
