@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_nat_core::{IceAgent, IceRole};
+use rvoip_nat_core::{CandidateKind, Error, IceAgent, IceCandidate, IceRole};
 
 /// Loopback-only, so the test doesn't depend on which of the machine's
 /// (possibly several) real network interfaces the OS happens to prefer
@@ -80,4 +80,68 @@ async fn independent_agents_complete_a_real_connectivity_check() {
     assert!(controlled_addr.ip().is_loopback());
     assert_ne!(controlling_addr.port(), 0);
     assert_ne!(controlled_addr.port(), 0);
+}
+
+/// Regression test: `IceAgent::connect()` must not hang forever when the
+/// only remote candidate is unreachable. Before the fix, `webrtc_ice::
+/// Agent::dial`/`accept` only unblocked on a *successful* pair selection
+/// — they never observed their own `ConnectionState::Failed` transition
+/// — so a call that can never connect (every candidate unreachable, no
+/// peer ever answers) hung indefinitely instead of resolving with an
+/// error.
+///
+/// Runs for ~30s: that's `webrtc-ice`'s own default
+/// `disconnected_timeout` (5s) + `failed_timeout` (25s), the time it
+/// takes the agent's checklist to give up on an unreachable candidate
+/// and transition to `Failed`. The outer 40s timeout is the actual
+/// regression check — it must never fire; if it does, `connect()` is
+/// hanging again.
+#[tokio::test]
+async fn connect_terminates_with_connect_failed_for_unreachable_candidates() {
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let agent = IceAgent::new_with_ip_filter(IceRole::Controlling, &[], Some(loopback_only()))
+        .await
+        .unwrap();
+
+    // Real gathering (unused below) proves this agent's own local setup
+    // is fine — the failure exercised here comes purely from the remote
+    // side never answering, not from a broken local agent.
+    let local_candidates = agent.gather_candidates().await.unwrap();
+    assert!(!local_candidates.is_empty());
+
+    // A well-formed but unreachable remote candidate: loopback, a port
+    // nothing is bound to. No peer will ever answer these connectivity
+    // checks, so the pair can never succeed.
+    let unreachable = IceCandidate {
+        foundation: "1".to_string(),
+        component: 1,
+        transport: "udp".to_string(),
+        priority: 2_130_706_431,
+        address: "127.0.0.1".parse().unwrap(),
+        port: 1,
+        kind: CandidateKind::Host,
+        related_address: None,
+        related_port: None,
+    };
+    agent.add_remote_candidate(&unreachable).unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(40),
+        agent.connect(
+            "unreachable-remote-ufrag".to_string(),
+            "unreachable-remote-password-000000".to_string(),
+        ),
+    )
+    .await
+    .expect(
+        "connect() must terminate within a bounded time for unreachable candidates, \
+         not hang forever",
+    );
+
+    assert!(
+        matches!(result, Err(Error::ConnectFailed)),
+        "expected Err(ConnectFailed) for unreachable candidates, got: {:?}",
+        result
+    );
 }
