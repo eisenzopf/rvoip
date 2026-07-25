@@ -19,6 +19,7 @@ use webrtc_ice::agent::agent_config::AgentConfig;
 use webrtc_ice::agent::Agent as InnerAgent;
 use webrtc_ice::candidate::{candidate_base::unmarshal_candidate, Candidate, CandidateType};
 use webrtc_ice::network_type::NetworkType;
+use webrtc_ice::state::ConnectionState;
 use webrtc_ice::udp_mux::UDPMux;
 use webrtc_ice::udp_network::UDPNetwork;
 use webrtc_ice::url::Url;
@@ -271,22 +272,60 @@ impl IceAgent {
     /// received the peer's — blocking either side's SDP send on this
     /// would deadlock the same way an early version of this session's
     /// DTLS-SRTP handshake wiring did.
+    ///
+    /// Terminates with [`Error::ConnectFailed`] once the underlying agent
+    /// gives up (`ConnectionState::Failed`/`Closed` — e.g. every remote
+    /// candidate is unreachable). `webrtc_ice::Agent::dial`/`accept` only
+    /// unblock their own future on a *successful* pair selection; they
+    /// never observe their own connection-state transition to `Failed`,
+    /// so left alone this future would hang forever on a call that can
+    /// never connect. We watch that transition ourselves and use
+    /// `dial`/`accept`'s own cancellation channel to unblock it.
     pub async fn connect(&self, remote_ufrag: String, remote_pwd: String) -> Result<SocketAddr> {
-        let (_cancel_tx, cancel_rx) = mpsc::channel(1);
+        let (cancel_tx, cancel_rx) = mpsc::channel(1);
+
+        self.inner
+            .on_connection_state_change(Box::new(move |state| {
+                let cancel_tx = cancel_tx.clone();
+                Box::pin(async move {
+                    if matches!(state, ConnectionState::Failed | ConnectionState::Closed) {
+                        // Best-effort: if `dial`/`accept` already returned
+                        // (success or a prior cancel), nothing is listening
+                        // and the send is simply dropped.
+                        let _ = cancel_tx.send(()).await;
+                    }
+                })
+            }));
+
         // `dial`/`accept` each return a distinct opaque `impl Conn` type, so
         // they can't share one match-arm binding; we don't need the
         // returned Conn here (only the side effect of running checks to
-        // completion), so just await each branch on its own.
-        match self.role {
-            IceRole::Controlling => {
-                self.inner.dial(cancel_rx, remote_ufrag, remote_pwd).await?;
-            }
-            IceRole::Controlled => {
-                self.inner
-                    .accept(cancel_rx, remote_ufrag, remote_pwd)
-                    .await?;
-            }
+        // completion), so erase it to `()` and keep just the error.
+        let dial_result: std::result::Result<(), webrtc_ice::Error> = match self.role {
+            IceRole::Controlling => self
+                .inner
+                .dial(cancel_rx, remote_ufrag, remote_pwd)
+                .await
+                .map(|_| ()),
+            IceRole::Controlled => self
+                .inner
+                .accept(cancel_rx, remote_ufrag, remote_pwd)
+                .await
+                .map(|_| ()),
+        };
+        if let Err(e) = dial_result {
+            // Nothing external ever holds a sender for `cancel_rx` — the
+            // only source of `ErrCanceledByCaller` here is our own
+            // Failed/Closed watcher above, so surface it as the
+            // connectivity failure it actually is instead of a generic
+            // agent error.
+            return Err(if e == webrtc_ice::Error::ErrCanceledByCaller {
+                Error::ConnectFailed
+            } else {
+                Error::from(e)
+            });
         }
+
         let pair = self
             .inner
             .get_selected_candidate_pair()
