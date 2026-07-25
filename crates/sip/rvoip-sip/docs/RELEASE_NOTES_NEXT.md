@@ -2,15 +2,28 @@
 
 Date: 2026-07-25
 
-These notes are a draft for the beta line. A development checkpoint is not a
-release attestation. Keep release claims only when they are backed by the
-current clean beta report, compatibility matrix, RFC matrix, interop results,
-security posture, and performance report.
+These notes describe the unified `0.3.0` workspace release. A development
+checkpoint is not a release attestation. Keep behavioral claims only when they
+are backed by the current clean beta report, compatibility matrix, RFC matrix,
+interop results, security posture, and performance report.
 
 ## Headline
 
-`rvoip-sip` is moving from alpha toward beta as a Rust-native SIP application
-layer for bounded client, server, PBX, and gateway scenarios.
+All 38 publishable crates now ship at one `0.3.0` version. The SIP product
+retains its release-gated beta scope as a Rust-native application layer for
+bounded client, server, PBX, and gateway scenarios. Optional non-SIP surfaces
+remain experimental where documented.
+
+## Unified Workspace Publication
+
+- Every publishable crate inherits `[workspace.package].version`.
+- Every internal registry dependency targets the same `0.3.0` release.
+- Publication follows one Cargo-derived dependency graph rather than separate
+  alpha and beta trains.
+- The `0.3.0` version migration changes manifests, package resolution, and
+  publication metadata; it does not rewrite the verified `0.2.5` beta
+  evidence or claim that the version-only commit reran PBX, performance, or
+  soak gates.
 
 ## `SessionState` Copy-on-Write Migration
 

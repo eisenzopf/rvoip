@@ -1,6 +1,6 @@
 # rvoip-harness
 
-> ⚠️ **Alpha** (`0.1.x`) — early and API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 Pluggable provider trait surfaces for ASR, TTS, DialogManager, RecordingSink — consumed by rvoip-core for the AI / recording harness.
 

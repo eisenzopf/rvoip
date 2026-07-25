@@ -18,12 +18,13 @@
 ---
 
 > [!NOTE]
-> **Release status.** Maturity is encoded in the version number (no `-alpha`/`-beta`
-> suffixes): **`0.1.x` = alpha, `0.2.x` = beta, `1.0` = stable**. The SIP product
-> (`rvoip-sip` + its spine) is a **beta candidate at `0.2.5`** for bounded SIP client,
-> server, PBX, gateway, and B2BUA scenarios. The rest of the workspace — WebRTC, QUIC,
-> WebTransport, WebSocket, UCTP, vCon, identity, AI harness — is **alpha, published at
-> `0.1.0`** (API-unstable; expect breaking changes before `1.0`).
+> **Release status.** All 38 publishable workspace crates ship together at
+> **`0.3.0`**. Package versions no longer encode separate alpha/beta trains.
+> The SIP product retains its release-gated beta scope; its behavioral evidence
+> comes from the verified `0.2.5` candidate, while `0.3.0` changes package
+> versions and publication metadata only. Other surfaces remain experimental
+> where their feature tables say so, and breaking changes remain possible
+> before `1.0`.
 > The [rvoip 3 vision](docs/voip-3-conversation-model.md) describes the destination.
 
 ## ⚡ rvoip in one breath
@@ -44,6 +45,7 @@ The full design lives under [`docs/`](docs/):
 | [GAP_PLAN.md](docs/GAP_PLAN.md) | Implementation status (v1 shipped May 2026) |
 | [CONVERSATION_PROTOCOL.md](docs/CONVERSATION_PROTOCOL.md) | UCTP wire specification |
 | [BRIDGEFU_FOUNDATIONS_MIGRATION.md](docs/BRIDGEFU_FOUNDATIONS_MIGRATION.md) | Principal, DataMessage, MediaGraph, and WebRTC fork migration notes |
+| [RELEASING.md](docs/RELEASING.md) | Unified versioning, verification, crates.io publishing, and recovery |
 
 <a id="build-with-rvoip-today"></a>
 ## 🎯 Build with rvoip today
@@ -69,7 +71,7 @@ switching stacks.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.2.5"
+rvoip-sip = "0.3.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -132,8 +134,8 @@ PBX interop), see [`crates/sip/rvoip-sip/examples/`](crates/sip/rvoip-sip/exampl
 <a id="feature-support"></a>
 ## 📊 Feature support
 
-> ✅ **Beta** (`0.2.5`) = RFC-correct, tested · 🚧 **Alpha** (`0.1.0`) = published,
-> API-unstable · 🔮 **Roadmap** = planned, not yet implemented
+> ✅ **Beta** = release-gated and tested · 🚧 **Experimental** = published in the
+> unified release but API-unstable · 🔮 **Roadmap** = planned, not implemented
 
 ### 📞 SIP methods (RFC 3261 + extensions)
 
@@ -253,7 +255,7 @@ without the substrates knowing about each other.
 
 ## 📦 Crate matrix
 
-### ✅ Beta — `0.2.5` release candidate in this checkout
+### ✅ Release-gated SIP surface — unified `0.3.0` release
 
 | Crate | Purpose |
 | --- | --- |
@@ -272,11 +274,11 @@ without the substrates knowing about each other.
 | [rvoip-codec-core](crates/media/codec-core) | G.711 plus optional G.729A/G.729AB codec implementation |
 | [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
-### 🚧 Alpha — published to crates.io at `0.1.0`
+### 🚧 Experimental surfaces — unified `0.3.0` release
 
-These publish at `0.1.0` (API-unstable) so the [`rvoip`](crates/rvoip) facade can expose
-them behind feature flags (`webrtc`, `uctp`, `voip-3`, `sip-stir-shaken`, `client`). Expect
-breaking changes before each graduates to beta.
+These publish at the same `0.3.0` package version so the [`rvoip`](crates/rvoip)
+facade and its optional features resolve as one coherent release. Their APIs
+remain experimental until their individual compatibility claims graduate.
 
 | Crate | Why it's alpha |
 | --- | --- |

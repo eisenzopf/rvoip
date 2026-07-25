@@ -1,6 +1,6 @@
 # rvoip-stir-shaken
 
-> ⚠️ **Alpha** (`0.1.x`) — early and API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip
 

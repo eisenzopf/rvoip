@@ -2,7 +2,7 @@
 name = "rvoip-sip-dialog"
 # Flow-aware transaction routing is a public semver-breaking change coordinated
 # with rvoip-sip-transport 0.3.
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

@@ -2,7 +2,7 @@
 name = "rvoip-sip-transport"
 # 0.3 removes the unsupervised WebSocketListener::accept API and adds exact
 # authority/flow routing. See MIGRATING-0.3.md.
-version = "0.3.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true

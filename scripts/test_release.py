@@ -171,10 +171,11 @@ serde = { version = "1.0" }
 
     def test_current_workspace_has_all_38_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
-        metadata = release.cargo_metadata(root, locked=True)
-        packages = release.publishable_packages(metadata)
+        packages, ordered = release.validate_workspace(
+            root, "0.3.0", locked=True
+        )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
-        self.assertEqual(len(release.topological_order(packages)), 38)
+        self.assertEqual(len(ordered), 38)
         self.assertIn("rvoip-sip-dialog", packages)
         self.assertIn("rvoip-sip-transport", packages)
         self.assertIn("rvoip-moq", packages)
