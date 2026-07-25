@@ -1,19 +1,18 @@
 # rvoip-sip Beta Standards Evidence Matrix
 
-Date: 2026-07-20
+Date: 2026-07-25
 
 This document maps each retained beta-profile claim to exact, non-ignored
 executable test sources. It is a claim boundary, not a declaration that the
 entire RFC is implemented and not a statement that every listed test passed on
 the current source tree.
 
-The supplied July 20 evidence is bound by the immutable
-[baseline manifest](BETA_BASELINE_EVIDENCE_20260720T055257Z.json). That evidence
-belongs to dirty revision `85b932e4` with source fingerprint
-`20f57cedfc2c6691e2f872b6aa505345cac690d34b6f4aa288bbe4f5abb41461`.
-It is diagnostic evidence only: the supplied local summary is absent, and the
-performance run failed its monolithic soak gate. A clean, source-matched beta
-attestation is still required before release.
+The earlier July 20 evidence remains bound by the immutable
+[baseline manifest](BETA_BASELINE_EVIDENCE_20260720T055257Z.json) and remains
+diagnostic-only. Current execution evidence is the clean, source-matched
+candidate `20260724T231400Z`: see the
+[Beta Release Candidate Report](BETA_RELEASE_REPORT.md) and exact
+[108-gate report](BETA_GATE_REPORT.md).
 
 ## Status and evidence rules
 

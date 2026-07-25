@@ -1,11 +1,12 @@
 # rvoip-sip Beta Security Posture
 
-Date: 2026-05-26
+Date: 2026-07-25
 
 This document records the security claims that may be made for the beta line
-and the evidence required before release notes are cut. The final clean beta
-gate is `crates/sip/rvoip-sip/beta-report/20260526T221457Z`, from git revision
-`865430d4` with `git_status: clean`.
+and the evidence required before release notes are cut. The current clean
+candidate is run `20260724T231400Z`, tested commit `8d44fb35`, documented by
+the [Beta Release Candidate Report](BETA_RELEASE_REPORT.md) and
+[complete gate report](BETA_GATE_REPORT.md).
 
 ## Beta Claims
 
@@ -18,8 +19,8 @@ Developer-facing auth API and crate-boundary guidance is in
 | SIP Basic auth | Supported, explicit opt-in | `crates/sip/rvoip-sip/src/auth/mod.rs`, `crates/sip/rvoip-sip/tests/oob_auth_retry.rs` | Legacy compatibility only. Basic is disabled over cleartext SIP unless explicitly allowed; prefer TLS and Digest/Bearer where possible. |
 | SIP Bearer auth | Supported | `crates/identity/auth-core/src/bearer.rs`, `crates/identity/auth-core/src/jwt.rs`, `crates/identity/auth-core/src/jwks.rs`, `crates/sip/rvoip-sip/src/auth/mod.rs`, `crates/sip/rvoip-sip/tests/oob_auth_retry.rs` | `rvoip-sip` exposes UAC Bearer challenge response and UAS validation through `auth-core` validators, mapping accepted tokens into `AuthIdentity`. |
 | IMS AKA auth | Provider-backed | `crates/sip/rvoip-sip/src/auth/mod.rs`, `crates/sip/rvoip-sip/src/api/respond/challenge.rs` | `rvoip-sip` negotiates AKA as a Digest-family SIP auth scheme through application-provided client/vector providers. It does not claim built-in SIM/USIM infrastructure or carrier IMS certification. |
-| SIP TLS client | Supported | `crates/sip/rvoip-sip-transport/tests/tls_handshake_test.rs`, `crates/sip/rvoip-sip/tests/tls_call_integration.rs`, PBX TLS rows in `crates/sip/rvoip-sip/beta-report/20260526T221457Z/pbx/matrix.tsv` | Server validation, custom roots, SNI, failure behavior, and TLS call setup are covered for beta. |
-| SIP TLS server | Supported | `crates/sip/rvoip-sip/tests/tls_call_integration.rs`, `crates/sip/rvoip-sip-transport/tests/tls_handshake_test.rs`, PBX TLS rows in the beta report | Cert/key loading and TLS listener behavior are beta-supported where configured. |
+| SIP TLS client | Supported | `crates/sip/rvoip-sip-transport/tests/tls_handshake_test.rs`, `crates/sip/rvoip-sip/tests/tls_call_integration.rs`, and the PBX TLS evidence summarized by `BETA_GATE_REPORT.md` | Server validation, custom roots, SNI, failure behavior, and TLS call setup are covered for beta. |
+| SIP TLS server | Supported | `crates/sip/rvoip-sip/tests/tls_call_integration.rs`, `crates/sip/rvoip-sip-transport/tests/tls_handshake_test.rs`, PBX TLS evidence in `BETA_GATE_REPORT.md` | Cert/key loading and TLS listener behavior are beta-supported where configured. |
 | mTLS | Partial | `Config::validate` cert/key pairing checks in `crates/sip/rvoip-sip/src/api/unified.rs`; TLS transport tests cover TLS basics | Do not market broad mTLS interop until external peer-verification matrices are archived. |
 | Trace redaction | Supported | `crates/foundation/infra-common/src/events/cross_crate.rs`, `crates/sip/rvoip-sip/tests/trace_redaction.rs` | Default tracing redacts auth/proxy-auth, cookies, token-like headers, identity headers, SDES `a=crypto`, and ICE password lines. Wire bytes are unaffected. |
 | SDES-SRTP | Partial | `crates/sip/rvoip-sip/tests/srtp_call_integration.rs`, SRTP negotiation tests in `crates/sip/rvoip-sip/src/adapters/media_adapter.rs`, config validation in `crates/sip/rvoip-sip/tests/config_channel_capacity_integration.rs`, PBX SRTP rows where present | Beta claims are limited to tested SDES suites. DTLS-SRTP is not included. |
@@ -42,18 +43,18 @@ The gate archives:
 - `security/fuzz/header.log`
 - `security/fuzz/sdp.log`
 
-The final release gate includes the same security evidence under the final
-clean beta report directory. Any future unaccepted dependency advisory or
-parser fuzz crash blocks beta.
+The final release gate includes the same security evidence in its immutable,
+attested package. Any future unaccepted dependency advisory or parser fuzz
+crash blocks beta.
 
-Final security evidence:
+Current security evidence:
 
-- Summary: `crates/sip/rvoip-sip/beta-report/20260526T221457Z/summary.md`
-- Fuzz smoke: passed for SIP message, URI, header, and SDP parsing with
-  archived logs under `security/fuzz/`.
-- Dependency audit: passed with no vulnerabilities. Remaining advisory output
-  is limited to allowed/documented warnings for `async-std`, `audiopus_sys`,
-  `paste`, `rustls-pemfile`, `yaml-rust`, and `lru`.
+- [Gate report](BETA_GATE_REPORT.md): the dependency audit and all ten parser
+  fuzz-smoke targets are individually required and hashed.
+- Fuzz scope: SIP message, URI, header, SDP, RTP, RTCP, SRTP unprotect, DTLS
+  record, STUN response, and G.711 unpack.
+- Dependency audit: PASS under the recorded accepted-advisory policy. PASS
+  does not prove the absence of vulnerabilities.
 
 ## Explicit Non-Claims
 
@@ -74,7 +75,7 @@ Final security evidence:
 
 | Check | Status |
 |-------|--------|
-| Dependency advisory audit archived with no unaccepted advisories | Complete in the final Rust 1.88 clean report. |
-| Parser fuzz smoke logs archived for SIP message, URI, header, and SDP parsing | Complete in the final Rust 1.88 clean report. |
-| Final full beta gate run from clean commit | Complete: `865430d4`, `0` failures, `0` skips. |
-| 24-hour soak evidence archived | Waived for beta in `BETA_RELEASE_CHECKLIST.md`; 30-minute soak accepted as the beta bar. |
+| Dependency advisory audit archived with no unaccepted advisories | Complete in candidate `20260724T231400Z`. |
+| Ten parser fuzz-smoke logs archived | Complete in candidate `20260724T231400Z`. |
+| Final full beta gate run from clean commit | Complete: `8d44fb35`, `108` passed, `0` failed, `0` skipped. |
+| Long-duration evidence | The policy accepts the recorded one-hour monolithic and split soak configurations; this is not a 24-hour claim. |

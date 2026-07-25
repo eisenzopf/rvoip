@@ -79,40 +79,23 @@ across commits to track regressions.
 All generated benchmark artifacts live under the workspace root
 `target/perf-results/`. `crates/target/` is not a valid output location.
 
-## Clean Beta Comparison: 2026-06-15
+## Current beta candidate evidence
 
-The 2026-06-15 clean beta run is packaged at
-`beta-report/20260615T105337Z`. It used the clean `perf-tests` feature set,
-`BETA_SIPP_DIAGNOSTICS=0`, `RVOIP_PERF_MEMORY_DIAGNOSTICS=0`, and
-`RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0`. No media/RTP/infra diagnostic features,
-RTP/audio pacing default, or shared RTP TX scheduler default were enabled.
+The canonical current values are generated from clean full run
+`20260724T231400Z` and published in the
+[Beta Performance Report](BETA_PERFORMANCE_REPORT.md). That report contains:
 
-Use `20260612T211608Z` as the comparison baseline for this RCA, not the
-diagnostic-contaminated `20260615T030513Z` run.
+- all three canonical 2,000-CPS runs;
+- every endpoint, PBX-media-server, and signaling-only profile-matrix point;
+- the 160-CPS high-density full-delivery burst and every tracked threshold;
+- monolithic and split one-hour soak results;
+- regression status and all 59 packaged performance JSON artifacts.
 
-| Standard beta gate | 20260612 baseline | 20260615 clean fix run | Read |
-| --- | --- | --- | --- |
-| Full beta result | `0` failures, `0` skips | `0` failures, `0` skips | Pass |
-| `pbx-media-server` @ 1000 CPS | p99 `12.4 ms`, ASR `1.0000`, no knee | p99 `13.0 ms`, ASR `1.0000`, no knee | Recovered |
-| `pbx-media-server` headline | `1857.1` achieved CPS @ target `2000`, p99 `12.7 ms` | `1857.1` achieved CPS @ target `2000`, p99 `12.8 ms` | Equivalent |
-| `signaling-only-server-high-performance` headline | `1857.1` achieved CPS, p99 `12.6 ms` | `1857.1` achieved CPS, p99 `12.9 ms` | Equivalent |
-| `perf_backpressure_step` | max setup `113.6 ms`; p99 phases `13.2/12.7/13.5 ms` | max setup `23.8 ms`; p99 phases `14.1/12.9/14.1 ms` | 100 ms tail removed |
-| `perf_soak_candidate` caller | p99 `49.9 ms`, max `114.9 ms`, CPU `60.5%` | p99 `44.1 ms`, max `95.1 ms`, CPU `57.2%` | Improved |
-| `perf_soak_candidate` receiver | CPU `41.4%`, post-drain RSS gate `1.00 MB/hr` | CPU `38.8%`, post-drain RSS gate `0.10 MB/hr` | Improved |
-| Artifact root | older logs referenced `crates/target/perf-results` | report packaged from `target/perf-results`; `crates/target/` absent | Fixed |
-
-The root cause for the 100 ms setup tail was a fixed post-initiation wait in
-`TransactionManager::send_request` for successful INVITE client sends. The
-fix removes that wait for `InviteClient` transactions and keeps the old
-non-INVITE safety window until the pending-options/auth-retry lifecycle is
-cleaned up.
-
-The standard beta run had two single-run p99 values higher than the baseline:
-`perf_rtp_steady_state` (`28.7 ms` vs `17.5 ms`) and
-`perf_concurrent_active_calls` (`55.1 ms` vs `51.6 ms`). Follow-up repeat checks
-did not reproduce those as persistent regressions. RTP steady-state repeated at
-`16.4`, `23.2`, `19.8`, `20.4`, and `16.8 ms`; sequential concurrent-call
-repeats passed at `45.7`, `47.6`, and `47.8 ms`.
+The candidate used the clean `perf-tests` feature set with diagnostic hot-path
+instrumentation disabled, full application `AudioFrame` delivery enabled, and
+the reviewed `20260706T181609Z` regression baseline. The complete release
+result is in [BETA_RELEASE_REPORT.md](BETA_RELEASE_REPORT.md); do not use
+ignored, untracked run directories as documentation references.
 
 > **`--release` is mandatory.** Every scenario asserts
 > `!cfg!(debug_assertions)` at startup. Debug-build numbers are not

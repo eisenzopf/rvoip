@@ -60,7 +60,7 @@ Validation:
 | Clean backpressure short repeats | `3/3` passed; phase p99 range `12.7-27.9 ms`, drops/timeouts `0` |
 | Focused INVITE regression test | `send_request` returns under `80 ms` and still sends the INVITE |
 | NOTIFY auth retry regression | Passed after keeping the non-INVITE safety wait |
-| Full beta gate `20260615T105337Z` | `0` failures, `0` skips, PBX enabled, clean `perf-tests` feature set |
+| Historical full beta gate `20260615T105337Z` | `0` failures, `0` skips, PBX enabled, clean `perf-tests` feature set; not the current release reference |
 
 Clean beta comparison against `20260612T211608Z`:
 
@@ -82,12 +82,12 @@ repeats passed at `45.7`, `47.6`, and `47.8 ms`. One attempted concurrent-call
 repeat failed with `Address already in use` because it was run in parallel with
 the RTP repeat and is not treated as product evidence.
 
-The beta run used `beta_perf_features=perf-tests`,
+That historical tuning run used `beta_perf_features=perf-tests`,
 `rvoip_perf_memory_diagnostics=0`, `rvoip_perf_allocator_diagnostics=0`, no
 media/RTP/infra diagnostic features, no RTP/audio pacing default, and no shared
-RTP TX scheduler default. The packaged report is
-`beta-report/20260615T105337Z`, and all generated perf artifacts were under the
-workspace root `target/`; `crates/target/` was not recreated.
+RTP TX scheduler default. Current release values are published in
+[BETA_PERFORMANCE_REPORT.md](BETA_PERFORMANCE_REPORT.md); all generated
+performance artifacts belong under the workspace root `target/`.
 
 ## Common Test Shape
 

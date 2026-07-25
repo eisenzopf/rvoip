@@ -1,6 +1,6 @@
 # rvoip-sip Next Release Notes Draft
 
-Date: 2026-07-20
+Date: 2026-07-25
 
 These notes are a draft for the beta line. A development checkpoint is not a
 release attestation. Keep release claims only when they are backed by the
@@ -26,11 +26,10 @@ the field normally, or clone the state and assign the field afterward; do not
 depend on `SessionState` field offsets.
 
 The measured inline layout fell from `1,984` bytes to `576` bytes (`1,408`
-bytes, about 71%, removed from each hot clone). The 2026-07-20 qualification
-work also demonstrated materially improved throughput, latency, and peak RSS,
-but it did not complete the release gate because cleanup and soak failures
-remain. The layout result and current performance measurements are engineering
-evidence, not final release-performance qualification.
+bytes, about 71%, removed from each hot clone). The later clean
+`20260724T231400Z` qualification completed the release gate; use the generated
+current reports for release-performance claims rather than the earlier
+development checkpoint.
 
 ## Exact Outbound Request Event Contract
 
@@ -76,9 +75,8 @@ and is not release or security evidence.
   load scenarios, and baresip strict-UA behavior in the current reference
   report.
 - General full-media performance claims remain capped at the documented 2,000
-  CPS beta profile. The current measured point is provisional until three
-  consecutive canonical runs and the complete beta performance gate pass from
-  the same clean source fingerprint.
+  CPS beta profile. Three consecutive canonical runs and the complete beta
+  performance gate passed from the same clean source fingerprint.
 - Higher CPS results are advanced tuned profiles and must include tuning,
   hardware, topology, and caveats.
 - SIP trace output redacts authorization data, authentication challenges,
@@ -86,46 +84,21 @@ and is not release or security evidence.
 - The release gate includes local tests, interop/performance modes, dependency
   audit, and parser fuzz smoke targets.
 
-## Current Qualification Snapshot — Not a Release Attestation
+## Current Qualification Snapshot
 
-The latest qualification bundle was generated on 2026-07-20 from base
-revision `85b932e4` with source-tree fingerprint
-`20f57cedfc2c6691e2f872b6aa505345cac690d34b6f4aa288bbe4f5abb41461`.
-The tree was dirty because the candidate changes were staged but not committed,
-so this evidence cannot serve as a clean-commit release attestation.
+Run `20260724T231400Z` qualifies tested commit
+`8d44fb3574e40f62526aa68f19833e95274cd06b` as a beta release candidate:
+108 required gates passed, with zero failures and zero skips, from a clean and
+unchanged source tree. The result includes workspace unit/integration/doctests,
+security, Asterisk and FreeSWITCH matrices, SIPp, baresip strict-UA, the full
+performance matrix, three canonical 2K passes, high-density full-delivery
+media burst, monolithic and split soaks, and final source fences.
 
-Passing evidence from that bundle includes:
-
-- Interoperability completed with `0` failures and `0` skips. Asterisk and
-  FreeSWITCH passed their PBX matrices with real bidirectional spectral audio;
-  the SIPp ladder passed through 2,000 CPS; and baresip strict-UA passed.
-- Dependency audit and all ten parser fuzz-smoke targets passed, subject to the
-  explicitly documented accepted transitive advisories.
-- The canonical 2,000-CPS point completed 65,000 of 65,000 calls at 1,857.11
-  achieved CPS, ASR/NER `1.0`, setup p50/p95/p99
-  `0.647/0.926/4.960 ms`, full-cycle p99 `7.881 ms`, zero call errors, and
-  1,375.19 MB peak RSS.
-- Twenty-three performance and resiliency stages passed before the monolithic
-  soak stopped the remaining sequence.
-
-The candidate is still blocked by:
-
-- Six retained `transaction_dialog_route_hash` entries after the canonical
-  run. Cleanup convergence therefore failed, and the reported cleanup-endpoint
-  RSS rate was 29.94 MB/hour against the 10 MB/hour gate.
-- The 30-minute real-media soak completed 5,012 of 5,016 calls and processed
-  42,873,129 received audio frames, but failed with three media-setup errors,
-  one teardown error, one live session/audio receiver after the 120-second
-  drain, and 27 retained objects.
-- Two BYE-dispatch failures observed in the high-rate signaling-only run and
-  short sustained-call setup/tail failures that require resolution or an
-  explicitly reviewed qualification decision.
-- The burst matrix and split one-hour soak did not run after the monolithic
-  soak failure. Three consecutive clean canonical runs have not been archived.
-
-The earlier 2026-05-26 report at
-`crates/sip/rvoip-sip/beta-report/20260526T221457Z/summary.md` is historical
-evidence for revision `865430d4`; it does not attest the current candidate.
+See the [current release report](BETA_RELEASE_REPORT.md), the
+[complete 108-gate report](BETA_GATE_REPORT.md), and the
+[current performance report](BETA_PERFORMANCE_REPORT.md). These are post-run
+reporting derivations: the candidate remains the tested commit, and later
+documentation-only commits were not exercised by the run.
 
 ## Must Not Claim Yet
 
@@ -137,20 +110,12 @@ evidence for revision `865430d4`; it does not attest the current candidate.
 - WSS outbound support.
 - PUBLISH end-to-end application support.
 - General-user 10,000 CPS full-media capability.
-- A clean, leak-free beta release-candidate qualification for the current
-  source tree.
 
-## Evidence Required Before Release
+## Release Promotion Notes
 
-- Commit the reviewed candidate and run every gate from that clean revision.
-- Archive three consecutive canonical 2,000-CPS passes with the same source
-  fingerprint and all absolute/regression checks green.
-- Resolve the route-hash and live-media cleanup defects, then pass the complete
-  monolithic soak, burst matrix, and split caller/receiver soak sequence.
-- Re-run and archive local, security, interoperability, PBX, SIPp, and strict-UA
-  evidence without source changes between phases.
-- Update `COMPATIBILITY_MATRIX.md`, `RFC_COMPLIANCE_MATRIX.md`,
-  `BETA_PERFORMANCE_REPORT.md`, and `SECURITY_POSTURE.md` with links to the
-  resulting immutable evidence bundle.
-- Require `scripts/beta_gate.sh --full --require-external` to pass with no
-  failures or hidden skips before describing the candidate as beta-ready.
+- Preserve candidate identity `8d44fb35`; do not imply that reporting-only
+  commits were included in the executed candidate.
+- Verify the immutable report attestation and packaged v1 source attestation
+  before publishing.
+- Keep claims bounded by the compatibility, security, topology, RFC, and
+  performance non-claims in the current documentation.

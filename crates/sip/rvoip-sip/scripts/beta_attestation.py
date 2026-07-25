@@ -16,7 +16,11 @@ import sys
 from typing import Any, Iterable
 
 
-SCHEMA = "rvoip-sip-beta-attestation-v1"
+SCHEMA_V1 = "rvoip-sip-beta-attestation-v1"
+SCHEMA_V2 = "rvoip-sip-beta-attestation-v2"
+SCHEMA = SCHEMA_V1
+STRUCTURED_CONFIG_SCHEMA = "rvoip-sip-effective-gate-config-v1"
+STRUCTURED_RESULTS_SCHEMA = "rvoip-sip-gate-results-v1"
 HASH_ALGORITHM = "sha256"
 ATTESTATION_NAME = "attestation.json"
 CHECKSUM_NAME = "attestation.json.sha256"
@@ -1979,6 +1983,105 @@ def qualification_block(mode: str, pointers: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def structured_reporting_block(
+    root: pathlib.Path, inputs: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    config_path = relative_file(
+        root, "effective-gate-config.json", "structured effective gate configuration"
+    )
+    results_path = relative_file(
+        root, "gate-results.json", "structured gate results"
+    )
+    config = load_json(config_path, "structured effective gate configuration")
+    results = load_json(results_path, "structured gate results")
+    if config.get("schema") != STRUCTURED_CONFIG_SCHEMA:
+        raise AttestationError("structured effective gate configuration schema is invalid")
+    if results.get("schema") != STRUCTURED_RESULTS_SCHEMA:
+        raise AttestationError("structured gate results schema is invalid")
+    values = config.get("values")
+    values_by_key = config.get("values_by_key")
+    records = results.get("records")
+    if (
+        not isinstance(values, list)
+        or not isinstance(values_by_key, dict)
+        or len(values) != len(values_by_key)
+    ):
+        raise AttestationError("structured effective gate configuration is incomplete")
+    if not isinstance(records, list) or not records:
+        raise AttestationError("structured gate results are empty")
+    ids = [item.get("id") for item in records if isinstance(item, dict)]
+    sequences = [item.get("sequence") for item in records if isinstance(item, dict)]
+    if (
+        len(ids) != len(records)
+        or len(ids) != len(set(ids))
+        or sequences != list(range(1, len(records) + 1))
+    ):
+        raise AttestationError("structured gate results have duplicate or non-contiguous identities")
+    expected_counts = {
+        "required_count": len(records),
+        "passed": sum(item.get("status") == "PASS" for item in records),
+        "failed": sum(item.get("status") == "FAIL" for item in records),
+        "skipped": sum(item.get("status") == "SKIP" for item in records),
+    }
+    for key, expected in expected_counts.items():
+        if results.get(key) != expected:
+            raise AttestationError(f"structured gate result count {key} is inconsistent")
+    policy = inputs.get("beta-release-policy")
+    generator = inputs.get("beta-release-report-generator")
+    if not policy or not generator:
+        raise AttestationError(
+            "v2 attestation requires beta-release-policy and "
+            "beta-release-report-generator inputs"
+        )
+    return {
+        "binding_mode": "native-v2-input",
+        "effective_gate_config": {
+            "path": config_path.relative_to(root).as_posix(),
+            "sha256": sha256_file(config_path),
+            "schema": config["schema"],
+            "value_count": len(values),
+        },
+        "gate_results": {
+            "path": results_path.relative_to(root).as_posix(),
+            "sha256": sha256_file(results_path),
+            "schema": results["schema"],
+            "mode": results.get("mode"),
+            "ordered_gate_ids_sha256": canonical_json_sha256(ids),
+            "ordered_gate_names_sha256": canonical_json_sha256(
+                [item.get("name") for item in records]
+            ),
+            **expected_counts,
+        },
+        "policy_catalog": {
+            "path": policy["path"],
+            "sha256": policy["sha256"],
+        },
+        "report_generator": {
+            "path": generator["path"],
+            "sha256": generator["sha256"],
+        },
+    }
+
+
+def reconcile_structured_reporting(
+    structured: dict[str, Any],
+    gates: list[dict[str, Any]],
+    mode: str,
+    failures: int,
+    skips: int,
+) -> None:
+    gate_results = structured["gate_results"]
+    names = [gate["name"] for gate in gates]
+    if gate_results.get("mode") != mode:
+        raise AttestationError("structured gate result mode disagrees with the run")
+    if gate_results.get("ordered_gate_names_sha256") != canonical_json_sha256(names):
+        raise AttestationError("structured gate result order disagrees with summary gates")
+    if gate_results.get("required_count") != len(gates):
+        raise AttestationError("structured gate result count disagrees with summary gates")
+    if gate_results.get("failed") != failures or gate_results.get("skipped") != skips:
+        raise AttestationError("structured gate result totals disagree with run totals")
+
+
 def create_attestation(args: argparse.Namespace) -> pathlib.Path:
     root = pathlib.Path(args.report_root).expanduser().resolve()
     if not root.is_dir():
@@ -2074,8 +2177,9 @@ def create_attestation(args: argparse.Namespace) -> pathlib.Path:
         result_reconciliation,
     )
 
+    schema = SCHEMA_V2 if getattr(args, "schema_version", 1) == 2 else SCHEMA_V1
     manifest: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": schema,
         "created_at_utc": utc_now(),
         "run": {
             "id": args.run_id,
@@ -2140,6 +2244,11 @@ def create_attestation(args: argparse.Namespace) -> pathlib.Path:
             "note": "SHA-256 binds copied evidence but does not provide third-party authenticity.",
         },
     }
+    if schema == SCHEMA_V2:
+        manifest["structured_reporting"] = structured_reporting_block(root, inputs)
+        reconcile_structured_reporting(
+            manifest["structured_reporting"], gates, args.mode, failures, skips
+        )
     validate_structure(manifest)
     output = root / ATTESTATION_NAME
     temporary = root / f".{ATTESTATION_NAME}.tmp"
@@ -2162,7 +2271,7 @@ def require_hash(value: Any, label: str) -> None:
 
 
 def validate_structure(manifest: dict[str, Any]) -> None:
-    if manifest.get("schema") != SCHEMA:
+    if manifest.get("schema") not in {SCHEMA_V1, SCHEMA_V2}:
         raise AttestationError(
             f"unsupported attestation schema: {manifest.get('schema')!r}"
         )
@@ -2694,6 +2803,23 @@ def validate_structure(manifest: dict[str, Any]) -> None:
         raise AttestationError("mode-specific pointer evidence is inconsistent")
     if manifest.get("qualification") != qualification_block(mode, pointers):
         raise AttestationError("release qualification evidence is inconsistent")
+    if manifest["schema"] == SCHEMA_V2:
+        structured = manifest.get("structured_reporting")
+        if not isinstance(structured, dict) or structured.get("binding_mode") != "native-v2-input":
+            raise AttestationError("v2 structured reporting binding is missing")
+        for name in (
+            "effective_gate_config",
+            "gate_results",
+            "policy_catalog",
+            "report_generator",
+        ):
+            block = structured.get(name)
+            if not isinstance(block, dict):
+                raise AttestationError(f"v2 structured reporting block {name} is missing")
+            relative_path(block.get("path"), f"v2 {name} path")
+            require_hash(block.get("sha256"), f"v2 {name} hash")
+    elif "structured_reporting" in manifest:
+        raise AttestationError("v1 attestation must not contain a v2 structured binding")
     artifacts = manifest.get("artifacts")
     if (
         not isinstance(artifacts, dict)
@@ -2836,6 +2962,19 @@ def verify_report(
         raise AttestationError(
             "effective configuration evidence is incomplete or inconsistent"
         )
+    if manifest["schema"] == SCHEMA_V2:
+        expected_structured = structured_reporting_block(root, manifest["inputs"])
+        if manifest.get("structured_reporting") != expected_structured:
+            raise AttestationError(
+                "v2 policy, generator, configuration, or gate-result binding changed"
+            )
+        reconcile_structured_reporting(
+            expected_structured,
+            manifest["gates"],
+            manifest["run"]["mode"],
+            manifest["result"]["failures"],
+            manifest["result"]["skips"],
+        )
     expected_state_config = {
         "beta_state_table_source": manifest["state_table"]["selected_source"],
         "beta_state_table_fallback_reason": manifest["state_table"]["fallback_reason"]
@@ -2962,6 +3101,13 @@ def parser() -> argparse.ArgumentParser:
         "create", help="create and self-verify an attestation"
     )
     creator.add_argument("--report-root", required=True)
+    creator.add_argument(
+        "--schema-version",
+        type=int,
+        choices=(1, 2),
+        default=1,
+        help="v2 directly binds native policy/configuration/gate-result reporting inputs",
+    )
     creator.add_argument(
         "--source-start", default="environment/source-at-beta-start.json"
     )

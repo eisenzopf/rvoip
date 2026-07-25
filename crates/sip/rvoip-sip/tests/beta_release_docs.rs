@@ -106,6 +106,8 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
         "TOPOLOGY_PROFILES.md",
         "INTEROP_CI_PLAN.md",
         "SECURITY_POSTURE.md",
+        "BETA_RELEASE_REPORT.md",
+        "BETA_GATE_REPORT.md",
         "BETA_PERFORMANCE_REPORT.md",
         "RELEASE_NOTES_NEXT.md",
         "TUNING.md",
@@ -136,6 +138,50 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
             "{file} must exist under docs/archived"
         );
     }
+}
+
+#[test]
+fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
+    let crate_dir = manifest_dir();
+    let docs = crate_dir.join("docs");
+    let snapshot = docs.join("releases/beta/20260724T231400Z");
+    let reports = [
+        "BETA_RELEASE_REPORT.md",
+        "BETA_GATE_REPORT.md",
+        "BETA_PERFORMANCE_REPORT.md",
+    ];
+
+    for report in reports {
+        let current = docs.join(report);
+        let immutable = snapshot.join(report);
+        assert!(
+            immutable.is_file(),
+            "missing immutable beta report {report}"
+        );
+        assert_eq!(
+            fs::read(&current).unwrap(),
+            fs::read(&immutable).unwrap(),
+            "current {report} must match the immutable candidate snapshot"
+        );
+    }
+
+    let release = read(docs.join("BETA_RELEASE_REPORT.md"));
+    let gates = read(docs.join("BETA_GATE_REPORT.md"));
+    let performance = read(docs.join("BETA_PERFORMANCE_REPORT.md"));
+    let policy = read(crate_dir.join("config/beta-release-policy.yaml"));
+    let index = read(docs.join("releases/beta/README.md"));
+
+    assert!(release.contains("108/108 passed, 0 failed, 0 skipped"));
+    assert!(release.contains("8d44fb3574e40f62526aa68f19833e95274cd06b"));
+    assert!(gates.contains("All 108 recorded entries are required"));
+    assert!(gates.contains("workspace unit tests"));
+    assert!(gates.contains("SIPp standalone target start"));
+    assert!(performance.contains("All **59** JSON files"));
+    assert!(performance
+        .to_ascii_lowercase()
+        .contains("full application audio-frame delivery"));
+    assert!(policy.contains("\"expected_selected_gate_count\": 108"));
+    assert!(index.contains("Current candidate: `20260724T231400Z`."));
 }
 
 #[test]

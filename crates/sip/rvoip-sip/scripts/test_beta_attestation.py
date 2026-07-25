@@ -404,6 +404,7 @@ class BetaAttestationTests(unittest.TestCase):
         require_external=False,
         config_overrides=None,
         omit_gate=None,
+        schema_version=1,
     ):
         if dirty:
             self.write_source("source-at-beta-start.json", self.fingerprint, True)
@@ -436,6 +437,59 @@ class BetaAttestationTests(unittest.TestCase):
             "performance-regression-baseline="
             f"{self.performance_baseline_manifest}",
         ]
+        if schema_version == 2:
+            policy = self.base / "beta-release-policy.yaml"
+            generator = self.base / "beta_release_report.py"
+            policy.write_text('{"schema":"fixture-policy"}\n', encoding="utf-8")
+            generator.write_text("# fixture generator\n", encoding="utf-8")
+            inputs.extend(
+                [
+                    f"beta-release-policy={policy}",
+                    f"beta-release-report-generator={generator}",
+                ]
+            )
+            config = {
+                "schema": attestation.STRUCTURED_CONFIG_SCHEMA,
+                "binding_mode": "native-v2-input",
+                "mode": mode,
+                "values": [
+                    {
+                        "key": "beta_gate_mode",
+                        "type": "enum",
+                        "value": mode,
+                        "source": "derived-setting",
+                    }
+                ],
+                "values_by_key": {"beta_gate_mode": mode},
+            }
+            (self.report / "effective-gate-config.json").write_text(
+                json.dumps(config, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            summary_gates = attestation.parse_gates(self.report.resolve())
+            records = [
+                {
+                    "sequence": sequence,
+                    "id": f"fixture.gate-{sequence}",
+                    "name": gate["name"],
+                    "status": gate["status"],
+                }
+                for sequence, gate in enumerate(summary_gates, 1)
+            ]
+            structured = {
+                "schema": attestation.STRUCTURED_RESULTS_SCHEMA,
+                "binding_mode": "native-v2-input",
+                "mode": mode,
+                "required_count": len(records),
+                "passed": sum(item["status"] == "PASS" for item in records),
+                "failed": sum(item["status"] == "FAIL" for item in records),
+                "skipped": sum(item["status"] == "SKIP" for item in records),
+                "records": records,
+            }
+            (self.report / "gate-results.json").write_text(
+                json.dumps(structured, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
         if omit_input is not None:
             inputs = [
                 value for value in inputs if not value.startswith(f"{omit_input}=")
@@ -458,6 +512,7 @@ class BetaAttestationTests(unittest.TestCase):
             failures=failures,
             skips=skips,
             overall="FAIL" if failures else "PASS",
+            schema_version=schema_version,
         )
         return attestation.create_attestation(args)
 
@@ -564,6 +619,7 @@ class BetaAttestationTests(unittest.TestCase):
             manifest["state_table"]["selected_yaml_sha256"],
             digest(self.state_yaml.read_bytes()),
         )
+
         self.assertEqual(
             manifest["state_table"]["selected_yaml_path"],
             manifest["inputs"]["state-machine-yaml"]["path"],
@@ -605,6 +661,26 @@ class BetaAttestationTests(unittest.TestCase):
         )
         shutil.rmtree(self.base / "report")
         attestation.verify_report(copied, require_pass=True)
+
+    def test_v2_directly_binds_structured_reporting_inputs(self):
+        self.create(require_external=True, schema_version=2)
+        manifest = attestation.verify_report(self.report)
+        self.assertEqual(manifest["schema"], attestation.SCHEMA_V2)
+        structured = manifest["structured_reporting"]
+        self.assertEqual(structured["binding_mode"], "native-v2-input")
+        self.assertEqual(
+            structured["gate_results"]["required_count"],
+            len(manifest["gates"]),
+        )
+        path = self.report / "gate-results.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["records"][0]["name"] = "tampered"
+        path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(attestation.AttestationError):
+            attestation.verify_report(self.report)
 
     def test_sanitized_docker_peer_snapshot_is_attested(self):
         docker_dir = self.environment / "docker-after-freeswitch"

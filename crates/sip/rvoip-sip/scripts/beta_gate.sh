@@ -35,14 +35,20 @@ BETA_SOURCE_AT_START="$ARTIFACT_DIR/environment/source-at-beta-start.json"
 BETA_SOURCE_AT_END="$ARTIFACT_DIR/environment/source-at-beta-end.json"
 CANONICAL_2K_EVIDENCE_HELPER="$SCRIPT_DIR/canonical_2k_evidence.py"
 BETA_ATTESTATION_HELPER="$SCRIPT_DIR/beta_attestation.py"
+BETA_RELEASE_REPORT_HELPER="$SCRIPT_DIR/beta_release_report.py"
+BETA_RELEASE_POLICY="$CRATE_DIR/config/beta-release-policy.yaml"
 DOCKER_PEER_SNAPSHOT_HELPER="$SCRIPT_DIR/docker_peer_snapshot.py"
 PERF_REGRESSION_BASELINE_HELPER="$SCRIPT_DIR/perf_regression_baseline.py"
 PERF_RESULTS_DIR="$WORKSPACE_ROOT/target/perf-results"
 PERF_RESULTS_ARCHIVE_ROOT="$WORKSPACE_ROOT/target/perf-results-archive"
 PERF_RESULTS_CAPTURE_MARKER="$ARTIFACT_DIR/environment/perf-results-capture.md"
+EFFECTIVE_GATE_CONFIG="$ARTIFACT_DIR/effective-gate-config.json"
+GATE_RESULTS_DIR="$ARTIFACT_DIR/gate-results.d"
+GATE_RESULTS="$ARTIFACT_DIR/gate-results.json"
 ENDED_AT_UTC=""
 FAILURES=0
 SKIPS=0
+GATE_SEQUENCE=0
 SIPP_LISTENER_PID=""
 PBX_RESTORE_ARMED=0
 PBX_RESTORE_ENABLED=0
@@ -406,6 +412,7 @@ if ! python3 "$CANONICAL_2K_EVIDENCE_HELPER" fingerprint \
 fi
 mkdir -p "$ARTIFACT_DIR/environment"
 mv "$source_at_start_tmp" "$BETA_SOURCE_AT_START"
+mkdir -p "$GATE_RESULTS_DIR"
 cat > "$SUMMARY" <<EOF
 # rvoip-sip Beta Gate Summary
 
@@ -426,6 +433,41 @@ record() {
   local log="$3"
   local duration="${4:--}"
   printf '| %s | %s | %s | `%s` |\n' "$status" "$name" "$duration" "${log#$ARTIFACT_DIR/}" >> "$SUMMARY"
+}
+
+file_sha256() {
+  python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+}
+
+record_structured_gate() {
+  local status="$1"
+  local name="$2"
+  local log="$3"
+  local duration_seconds="$4"
+  local started_at="$5"
+  local ended_at="$6"
+  local exit_status="$7"
+  shift 7
+  GATE_SEQUENCE=$((GATE_SEQUENCE + 1))
+  python3 "$BETA_RELEASE_REPORT_HELPER" record-gate \
+    --policy "$BETA_RELEASE_POLICY" \
+    --results-dir "$GATE_RESULTS_DIR" \
+    --sequence "$GATE_SEQUENCE" \
+    --name "$name" \
+    --status "$status" \
+    --started "$started_at" \
+    --ended "$ended_at" \
+    --duration "$duration_seconds" \
+    --exit-status "$exit_status" \
+    --log "${log#$ARTIFACT_DIR/}" \
+    --log-sha256 "$(file_sha256 "$log")" \
+    -- "$@"
 }
 
 run_gate() {
@@ -465,9 +507,13 @@ run_gate() {
   } >> "$log"
   if [ "$status" -eq 0 ]; then
     record "PASS" "$name" "$log" "$duration"
+    record_structured_gate "PASS" "$name" "$log" "$((end_epoch - start_epoch))" \
+      "$started_at" "$ended_at" "$status" "$@"
     return 0
   else
     record "FAIL" "$name" "$log" "$duration"
+    record_structured_gate "FAIL" "$name" "$log" "$((end_epoch - start_epoch))" \
+      "$started_at" "$ended_at" "$status" "$@"
     FAILURES=$((FAILURES + 1))
     echo "FAIL: $name (see $log)" >&2
     return 1
@@ -486,11 +532,20 @@ skip_gate() {
   local name="$1"
   local reason="$2"
   local log="$ARTIFACT_DIR/$(slugify "$name").log"
+  local recorded_at
+  recorded_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   {
-    echo "SKIP: $name"
-    echo "$reason"
+    echo "gate: $name"
+    echo "started_at_utc: $recorded_at"
+    echo "ended_at_utc: $recorded_at"
+    echo "command: skip-gate $reason"
+    echo "duration_seconds: 0"
+    echo "exit_status: 0"
+    echo "SKIP: $reason"
   } > "$log"
   record "SKIP" "$name" "$log" "0s"
+  record_structured_gate "SKIP" "$name" "$log" 0 \
+    "$recorded_at" "$recorded_at" 0 skip-gate "$reason"
   SKIPS=$((SKIPS + 1))
   echo "SKIP: $name - $reason"
   if [ "$REQUIRE_EXTERNAL" = "1" ]; then
@@ -1054,6 +1109,7 @@ write_beta_attestation() {
   burst_file="$(attestation_input_path "${BETA_BURST_SCENARIO_FILE:-$CRATE_DIR/config/perf-burst-scenarios.yaml}")"
   python3 "$BETA_ATTESTATION_HELPER" create \
     --report-root "$report_root" \
+    --schema-version 2 \
     --mode "$MODE" \
     --run-id "$TIMESTAMP" \
     --started-at "$STARTED_AT_UTC" \
@@ -1068,6 +1124,8 @@ write_beta_attestation() {
     --input "performance-regression-baseline-helper=$PERF_REGRESSION_BASELINE_HELPER" \
     --input "sipp-scenario=$CRATE_DIR/tests/perf/sipp_scenarios/uac_perf.xml" \
     --input "attestation-verifier=$BETA_ATTESTATION_HELPER" \
+    --input "beta-release-policy=$BETA_RELEASE_POLICY" \
+    --input "beta-release-report-generator=$BETA_RELEASE_REPORT_HELPER" \
     --failures "$FAILURES" \
     --skips "$SKIPS" \
     --overall "$overall"
@@ -1095,6 +1153,8 @@ write_report_manifest() {
 
 - \`summary.md\`
 - \`attestation.json\` and \`attestation.json.sha256\`
+- \`effective-gate-config.json\` and \`gate-results.json\` (native typed
+  reporting inputs; Markdown is display-only)
 - \`inputs/attestation-verifier.py\` (copied standalone verifier)
 - \`environment/environment.md\`
 - \`pbx/summary.md\`
@@ -1111,6 +1171,8 @@ write_report_manifest() {
 - \`perf-audit.md\` (current-vs-reviewed-baseline regression audit)
 - \`canonical-2k/index.json\` and \`canonical-2k/run-{1,2,3}/\`
   (required release evidence when enabled)
+- \`release-reports/\` (generated and independently verified before a
+  qualifying full-run release pointer can update)
 
 The report directory is a packaged copy of the beta-gate artifact tree,
 including the isolated current-run perf result capture when performance gates
@@ -1250,6 +1312,15 @@ package_beta_report() {
 
   write_report_manifest "$report_dir" "$perf_results_status"
   write_beta_attestation "$report_dir"
+  if [ "$MODE" = "full" ] && [ "$FAILURES" -eq 0 ] && [ "$SKIPS" -eq 0 ]; then
+    python3 "$BETA_RELEASE_REPORT_HELPER" generate \
+      --report-root "$report_dir" \
+      --policy "$BETA_RELEASE_POLICY" \
+      --output-dir "$report_dir/release-reports"
+    python3 "$BETA_RELEASE_REPORT_HELPER" verify \
+      --generated-dir "$report_dir/release-reports" \
+      --policy "$BETA_RELEASE_POLICY"
+  fi
   python3 "$BETA_ATTESTATION_HELPER" update-pointers \
     --report-root "$report_dir" \
     --index-root "$root"
@@ -1299,6 +1370,12 @@ run_local_pbx_gate() {
   PBX_RESTORE_ASTERISK_DIR="$asterisk_dir"
   PBX_RESTORE_FREESWITCH_DIR="$freeswitch_dir"
   PBX_RESTORE_ARMED=1
+  python3 "$BETA_RELEASE_REPORT_HELPER" update-config \
+    --policy "$BETA_RELEASE_POLICY" \
+    --config "$EFFECTIVE_GATE_CONFIG" \
+    --derived "beta_restore_local_pbx=$restore" \
+    --derived "beta_restore_asterisk_up=$initially_asterisk" \
+    --derived "beta_restore_freeswitch_up=$initially_freeswitch"
   mkdir -p "$pbx_output_root"
   rm -f "$pbx_output_root/matrix.tsv" "$pbx_output_root/summary.md"
   capture_docker_snapshot before-local-pbx
@@ -1362,9 +1439,12 @@ start_managed_sipp_target() {
   local host="${BETA_SIPP_TARGET_HOST:-127.0.0.1}"
   local port="${BETA_SIPP_TARGET_PORT:-35060}"
   local sipp_dir="$ARTIFACT_DIR/sipp"
-  local log="$sipp_dir/rvoip_perf_listener.log"
+  local listener_log="$sipp_dir/rvoip_perf_listener.log"
+  local gate_log="$ARTIFACT_DIR/$(slugify "SIPp standalone target start").log"
   local started_at
+  local ended_at
   local start_epoch
+  local end_epoch
   local duration
   mkdir -p "$sipp_dir"
 
@@ -1394,51 +1474,107 @@ start_managed_sipp_target() {
     echo "workspace: $WORKSPACE_ROOT"
     echo "command: ${listener_cmd[*]}"
     echo
-  } > "$log"
-  "${listener_cmd[@]}" >> "$log" 2>&1 &
+  } > "$gate_log"
+  {
+    echo "managed_by_gate: SIPp standalone target start"
+    echo "command: ${listener_cmd[*]}"
+  } > "$listener_log"
+  "${listener_cmd[@]}" >> "$listener_log" 2>&1 &
   SIPP_LISTENER_PID=$!
   for _ in $(seq 1 100); do
-    if grep -q 'listening on' "$log" 2>/dev/null; then
-      duration="$(($(date +%s) - start_epoch))s"
-      record "PASS" "SIPp standalone target start" "$log" "$duration"
+    if grep -q 'listening on' "$listener_log" 2>/dev/null; then
+      ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      end_epoch="$(date +%s)"
+      duration="$((end_epoch - start_epoch))s"
+      {
+        echo "listener_evidence: sipp/rvoip_perf_listener.log"
+        echo "ended_at_utc: $ended_at"
+        echo "duration_seconds: $((end_epoch - start_epoch))"
+        echo "exit_status: 0"
+      } >> "$gate_log"
+      record "PASS" "SIPp standalone target start" "$gate_log" "$duration"
+      record_structured_gate "PASS" "SIPp standalone target start" "$gate_log" \
+        "$((end_epoch - start_epoch))" "$started_at" "$ended_at" 0 "${listener_cmd[@]}"
       BETA_SIPP_TARGET_HOST="$host"
       BETA_SIPP_TARGET_PORT="$port"
       export BETA_SIPP_TARGET_HOST BETA_SIPP_TARGET_PORT
       return 0
     fi
     if ! kill -0 "$SIPP_LISTENER_PID" >/dev/null 2>&1; then
-      duration="$(($(date +%s) - start_epoch))s"
-      record "FAIL" "SIPp standalone target start" "$log" "$duration"
+      ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      end_epoch="$(date +%s)"
+      duration="$((end_epoch - start_epoch))s"
+      {
+        echo "listener_evidence: sipp/rvoip_perf_listener.log"
+        echo "ended_at_utc: $ended_at"
+        echo "duration_seconds: $((end_epoch - start_epoch))"
+        echo "exit_status: 1"
+      } >> "$gate_log"
+      record "FAIL" "SIPp standalone target start" "$gate_log" "$duration"
+      record_structured_gate "FAIL" "SIPp standalone target start" "$gate_log" \
+        "$((end_epoch - start_epoch))" "$started_at" "$ended_at" 1 "${listener_cmd[@]}"
       FAILURES=$((FAILURES + 1))
-      echo "FAIL: SIPp standalone target exited before listening (see $log)" >&2
+      echo "FAIL: SIPp standalone target exited before listening (see $listener_log)" >&2
       return 1
     fi
     sleep 0.1
   done
-  duration="$(($(date +%s) - start_epoch))s"
-  record "FAIL" "SIPp standalone target start" "$log" "$duration"
+  ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  end_epoch="$(date +%s)"
+  duration="$((end_epoch - start_epoch))s"
+  {
+    echo "listener_evidence: sipp/rvoip_perf_listener.log"
+    echo "ended_at_utc: $ended_at"
+    echo "duration_seconds: $((end_epoch - start_epoch))"
+    echo "exit_status: 1"
+  } >> "$gate_log"
+  record "FAIL" "SIPp standalone target start" "$gate_log" "$duration"
+  record_structured_gate "FAIL" "SIPp standalone target start" "$gate_log" \
+    "$((end_epoch - start_epoch))" "$started_at" "$ended_at" 1 "${listener_cmd[@]}"
   FAILURES=$((FAILURES + 1))
-  echo "FAIL: SIPp standalone target did not become ready (see $log)" >&2
+  echo "FAIL: SIPp standalone target did not become ready (see $listener_log)" >&2
   return 1
 }
 
 stop_managed_sipp_target() {
-  local log="$ARTIFACT_DIR/sipp/rvoip_perf_listener.log"
+  local log="$ARTIFACT_DIR/$(slugify "SIPp standalone target stop").log"
+  local listener_log="$ARTIFACT_DIR/sipp/rvoip_perf_listener.log"
+  local started_at
+  local ended_at
   local start_epoch
+  local end_epoch
   local duration
   if [ -z "$SIPP_LISTENER_PID" ]; then
     return 0
   fi
   echo
   echo "==> SIPp standalone target stop"
+  started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   start_epoch="$(date +%s)"
+  {
+    echo "gate: SIPp standalone target stop"
+    echo "started_at_utc: $started_at"
+    echo "workspace: $WORKSPACE_ROOT"
+    echo "command: managed-sipp-listener-stop"
+    echo "listener_evidence: ${listener_log#$ARTIFACT_DIR/}"
+    echo
+  } > "$log"
   if kill -0 "$SIPP_LISTENER_PID" >/dev/null 2>&1; then
     kill -INT "$SIPP_LISTENER_PID" >/dev/null 2>&1 || true
     wait "$SIPP_LISTENER_PID" >/dev/null 2>&1 || true
   fi
   SIPP_LISTENER_PID=""
-  duration="$(($(date +%s) - start_epoch))s"
+  ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  end_epoch="$(date +%s)"
+  duration="$((end_epoch - start_epoch))s"
+  {
+    echo "ended_at_utc: $ended_at"
+    echo "duration_seconds: $((end_epoch - start_epoch))"
+    echo "exit_status: 0"
+  } >> "$log"
   record "PASS" "SIPp standalone target stop" "$log" "$duration"
+  record_structured_gate "PASS" "SIPp standalone target stop" "$log" \
+    "$((end_epoch - start_epoch))" "$started_at" "$ended_at" 0 managed-sipp-listener-stop
 }
 
 run_sipp_standalone_gate() {
@@ -2001,6 +2137,24 @@ run_isolated_perf_gates() {
 }
 
 write_environment_report
+env \
+  BETA_GATE_REQUIRE_EXTERNAL="$REQUIRE_EXTERNAL" \
+  BETA_REQUIRE_CLEAN_SOURCE="$BETA_REQUIRE_CLEAN_SOURCE" \
+  BETA_REQUIRE_CANONICAL_2K_EVIDENCE="${BETA_REQUIRE_CANONICAL_2K_EVIDENCE:-0}" \
+  python3 "$BETA_RELEASE_REPORT_HELPER" capture-config \
+    --policy "$BETA_RELEASE_POLICY" \
+    --output "$EFFECTIVE_GATE_CONFIG" \
+    --mode "$MODE" \
+    --environment-dir "$ARTIFACT_DIR/environment" \
+    --derived "beta_attestation_features=$(attestation_features)" \
+    --derived "beta_attestation_target=${BETA_ATTESTATION_TARGET:-${CARGO_BUILD_TARGET:-rustc-host}}" \
+    --derived "beta_state_table_source=$BETA_STATE_TABLE_SOURCE" \
+    --derived "beta_state_table_fallback_reason=${BETA_STATE_TABLE_FALLBACK_REASON:-none}" \
+    --derived "beta_state_table_sha256=$selected_state_table_sha256" \
+    --derived "beta_profile_matrix=$(perf_profile_matrix)" \
+    --derived "beta_perf_features=$(perf_features)" \
+    --derived "beta_perf_regression_baseline_id=$perf_regression_baseline_id" \
+    --derived "beta_perf_regression_baseline_manifest_sha256=$perf_regression_baseline_manifest_sha256"
 write_summary_gate_table_header
 
 if bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
@@ -2067,6 +2221,14 @@ elif bool_env_enabled "$BETA_REQUIRE_CLEAN_SOURCE"; then
     python3 "$CANONICAL_2K_EVIDENCE_HELPER" verify-source \
       --workspace-root "$WORKSPACE_ROOT" \
       --beta-start "$BETA_SOURCE_AT_START"
+fi
+
+if ! python3 "$BETA_RELEASE_REPORT_HELPER" finalize-gates \
+  --results-dir "$GATE_RESULTS_DIR" \
+  --output "$GATE_RESULTS" \
+  --mode "$MODE"; then
+  FAILURES=$((FAILURES + 1))
+  echo "FAIL: structured gate result finalization" >&2
 fi
 
 # Keep every gate row contiguous under the summary's `## Gates` heading.
