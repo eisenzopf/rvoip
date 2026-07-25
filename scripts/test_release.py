@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -116,6 +117,63 @@ serde = { version = "1.0" }
             release.assert_existing_checksum(
                 "demo", "0.3.0", "abc", {"checksum": "def"}
             )
+
+    def test_package_file_manifest_is_hashed_and_rejects_unsafe_paths(self) -> None:
+        class FakeLog:
+            def __init__(self, output: str):
+                self.output = output
+                self.events: list[tuple[str, dict]] = []
+
+            def command_capture(self, argv: list[str], cwd: Path) -> str:
+                return self.output
+
+            def event(self, kind: str, **values: object) -> None:
+                self.events.append((kind, values))
+
+        safe = FakeLog(
+            ".cargo_vcs_info.json\nCargo.lock\nCargo.toml\n"
+            "Cargo.toml.orig\nREADME.md\nsrc/lib.rs\n"
+        )
+        paths, digest = release.package_file_manifest(
+            Path("/repo"), "demo", "0.3.0", safe
+        )
+        self.assertEqual(paths[-1], "src/lib.rs")
+        self.assertEqual(len(digest), 64)
+        self.assertEqual(safe.events[0][0], "package-file-manifest")
+
+        unsafe = FakeLog("Cargo.toml\nCargo.toml.orig\n../secret\n")
+        with self.assertRaises(release.ReleaseError):
+            release.package_file_manifest(
+                Path("/repo"), "demo", "0.3.0", unsafe
+            )
+
+    def test_verification_receipt_allows_deferred_archive_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = (
+                root / "target/release-logs/0.3.0/verification.json"
+            )
+            receipt_path.parent.mkdir(parents=True)
+            receipt_path.write_text(
+                json.dumps(
+                    {
+                        "schema": "rvoip-unified-release-verification-v2",
+                        "version": "0.3.0",
+                        "git_commit": "abc",
+                        "package_count": 2,
+                        "ordered_packages": ["leaf", "dependent"],
+                        "package_sha256": {"leaf": "a" * 64},
+                        "package_file_manifest_sha256": {
+                            "leaf": "b" * 64,
+                            "dependent": "c" * 64,
+                        },
+                    }
+                )
+            )
+            receipt = release.read_verification_receipt(
+                root, "0.3.0", "abc", ["leaf", "dependent"]
+            )
+            self.assertEqual(set(receipt["package_sha256"]), {"leaf"})
 
     def test_visibility_timeout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

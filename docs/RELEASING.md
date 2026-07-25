@@ -40,10 +40,14 @@ scripts/release.sh verify --version X.Y.Z \
 ```
 
 Verification checks the tracked beta reporting attestation, workspace metadata,
-all targets, unit tests, integration/example targets, doctests, and packaged
-contents for every crate. Its receipt under
+all targets, unit tests, integration/example targets, doctests, and the exact
+packaged file manifest for every crate. Before first publication, Cargo cannot
+build a dependent `.crate` archive until that crate's new internal dependency
+version is visible on crates.io, so verification hashes archives only where
+the target-version registry graph is already resolvable. Its receipt under
 `target/release-logs/X.Y.Z/verification.json` binds the exact Git commit,
-ordered 38-crate graph, and package hashes used by publication.
+ordered 38-crate graph, all 38 file-manifest hashes, and every archive hash
+available before publication.
 
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.
@@ -64,8 +68,10 @@ scripts/release.sh publish --version X.Y.Z --execute
 
 Publication requires a clean `main` equal to `origin/main`, the matching
 verification receipt, and an unused `vX.Y.Z` tag. Each crate is packaged and
-dry-run immediately before publication. The tool waits for each version to
-become visible on crates.io before publishing dependents.
+dry-run immediately before publication, and its file manifest must match the
+verified receipt. The tool records the final archive hash, waits for each
+version to become visible on crates.io, and only then packages and publishes
+dependents.
 
 An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;

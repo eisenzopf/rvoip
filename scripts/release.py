@@ -447,6 +447,32 @@ class ReleaseLog:
         if code:
             raise ReleaseError(f"command failed ({code}): {' '.join(argv)}")
 
+    def command_capture(self, argv: list[str], cwd: Path) -> str:
+        self.message(f"$ {' '.join(argv)}")
+        self.event("command", argv=argv)
+        completed = subprocess.run(
+            argv,
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+        output = completed.stdout or ""
+        print(output, end="", flush=True)
+        with self.text_path.open("a") as stream:
+            stream.write(output)
+        self.event(
+            "command-result",
+            argv=argv,
+            exit_status=completed.returncode,
+        )
+        if completed.returncode:
+            raise ReleaseError(
+                f"command failed ({completed.returncode}): {' '.join(argv)}"
+            )
+        return output
+
 
 def verify_beta_reporting(root: Path, beta_report_root: str | None, log: ReleaseLog) -> None:
     crate = root / "crates/sip/rvoip-sip"
@@ -487,6 +513,33 @@ def package_artifact(
     return artifact, digest
 
 
+def package_file_manifest(
+    root: Path, name: str, version: str, log: ReleaseLog
+) -> tuple[list[str], str]:
+    output = log.command_capture(
+        ["cargo", "package", "-p", name, "--list", "--locked"],
+        root,
+    )
+    paths = [line.strip() for line in output.splitlines() if line.strip()]
+    if not paths or len(paths) != len(set(paths)):
+        raise ReleaseError(f"invalid or duplicate package file list for {name}")
+    for path in paths:
+        candidate = Path(path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ReleaseError(f"unsafe package path for {name}: {path!r}")
+    if "Cargo.toml" not in paths or "Cargo.toml.orig" not in paths:
+        raise ReleaseError(f"package file list for {name} lacks Cargo manifests")
+    digest = hashlib.sha256(("\n".join(paths) + "\n").encode()).hexdigest()
+    log.event(
+        "package-file-manifest",
+        crate=name,
+        version=version,
+        file_count=len(paths),
+        sha256=digest,
+    )
+    return paths, digest
+
+
 def write_verification_receipt(
     root: Path,
     version: str,
@@ -494,15 +547,22 @@ def write_verification_receipt(
     ordered: list[str],
     log: ReleaseLog,
     package_hashes: dict[str, str],
+    package_file_hashes: dict[str, str],
 ) -> None:
     receipt = {
-        "schema": "rvoip-unified-release-verification-v1",
+        "schema": "rvoip-unified-release-verification-v2",
         "verified_at": utc_now(),
         "version": version,
         "git_commit": head,
         "package_count": len(ordered),
         "ordered_packages": ordered,
         "package_sha256": package_hashes,
+        "package_file_manifest_sha256": package_file_hashes,
+        "package_hash_scope": (
+            "Pre-publication .crate hashes exist only where all target-version "
+            "registry dependencies were already resolvable. Publication records "
+            "every final .crate hash after leaf-first dependency visibility."
+        ),
         "log_directory": log.directory.relative_to(root).as_posix(),
     }
     destination = root / "target/release-logs" / version / "verification.json"
@@ -538,11 +598,45 @@ def verify(
     for command in commands:
         log.command(command, root)
     package_hashes: dict[str, str] = {}
+    package_file_hashes: dict[str, str] = {}
+    visibility_cache: dict[str, bool] = {}
+
+    def registry_visible(name: str) -> bool:
+        if name not in visibility_cache:
+            visibility_cache[name] = crates_io_version(name, version) is not None
+        return visibility_cache[name]
+
     for index, name in enumerate(ordered, 1):
         log.message(f"== package {index}/{len(ordered)}: {name}")
+        _, package_file_hashes[name] = package_file_manifest(
+            root, name, version, log
+        )
+        dependencies = internal_dependencies(packages[name], set(packages))
+        unresolved = sorted(
+            dependency
+            for dependency in dependencies
+            if not registry_visible(dependency)
+        )
+        if unresolved:
+            log.message(
+                "archive deferred until target-version dependencies are visible: "
+                + ", ".join(unresolved)
+            )
+            log.event(
+                "package-archive-deferred",
+                crate=name,
+                dependencies=unresolved,
+            )
+            continue
         _, package_hashes[name] = package_artifact(root, name, version, log)
     write_verification_receipt(
-        root, version, head, ordered, log, package_hashes
+        root,
+        version,
+        head,
+        ordered,
+        log,
+        package_hashes,
+        package_file_hashes,
     )
     log.event("complete", operation="verify", package_count=len(packages))
     log.message(f"verified {len(packages)} packages at {version}")
@@ -555,12 +649,18 @@ def read_verification_receipt(
     if not path.is_file():
         raise ReleaseError(f"missing verification receipt: {path}")
     receipt = json.loads(path.read_text())
+    file_hashes = receipt.get("package_file_manifest_sha256")
+    package_hashes = receipt.get("package_sha256")
     expected = (
-        receipt.get("schema") == "rvoip-unified-release-verification-v1"
+        receipt.get("schema") == "rvoip-unified-release-verification-v2"
         and receipt.get("version") == version
         and receipt.get("git_commit") == head
         and receipt.get("ordered_packages") == ordered
         and receipt.get("package_count") == len(ordered)
+        and isinstance(file_hashes, dict)
+        and set(file_hashes) == set(ordered)
+        and isinstance(package_hashes, dict)
+        and set(package_hashes) <= set(ordered)
     )
     if not expected:
         raise ReleaseError("verification receipt does not match this release commit")
@@ -623,8 +723,14 @@ def publish(
     packages, ordered = validate_workspace(root, version, locked=True)
     receipt = read_verification_receipt(root, version, head, ordered)
     verified_hashes = receipt.get("package_sha256")
-    if not isinstance(verified_hashes, dict) or set(verified_hashes) != set(ordered):
-        raise ReleaseError("verification receipt lacks complete package hashes")
+    verified_file_hashes = receipt.get("package_file_manifest_sha256")
+    if (
+        not isinstance(verified_hashes, dict)
+        or not isinstance(verified_file_hashes, dict)
+        or set(verified_hashes) > set(ordered)
+        or set(verified_file_hashes) != set(ordered)
+    ):
+        raise ReleaseError("verification receipt lacks valid package evidence")
     log = ReleaseLog(root, version, "publish" if execute else "dry-run")
     log.event(
         "start",
@@ -638,19 +744,14 @@ def publish(
     visible: set[str] = set()
     for index, name in enumerate(ordered, 1):
         log.message(f"== {index}/{len(ordered)} {name}@{version}")
-        _, local_sha256 = package_artifact(root, name, version, log)
-        if local_sha256 != verified_hashes[name]:
+        _, file_manifest_sha256 = package_file_manifest(
+            root, name, version, log
+        )
+        if file_manifest_sha256 != verified_file_hashes[name]:
             raise ReleaseError(
-                f"package {name} differs from the verified artifact "
-                f"({verified_hashes[name]} != {local_sha256})"
+                f"package file manifest for {name} differs from verification "
+                f"({verified_file_hashes[name]} != {file_manifest_sha256})"
             )
-        remote = crates_io_version(name, version)
-        if remote is not None:
-            assert_existing_checksum(name, version, local_sha256, remote)
-            visible.add(name)
-            log.message(f"resume: verified existing {name}@{version}")
-            log.event("resume", crate=name, version=version, sha256=local_sha256)
-            continue
         dependencies = internal_dependencies(packages[name], set(packages))
         missing_dependencies = sorted(dependencies - visible)
         if missing_dependencies and not execute:
@@ -669,6 +770,20 @@ def publish(
                 f"topological publish invariant failed for {name}: "
                 f"{missing_dependencies}"
             )
+        _, local_sha256 = package_artifact(root, name, version, log)
+        verified_sha256 = verified_hashes.get(name)
+        if verified_sha256 is not None and local_sha256 != verified_sha256:
+            raise ReleaseError(
+                f"package {name} differs from its pre-publication verified artifact "
+                f"({verified_sha256} != {local_sha256})"
+            )
+        remote = crates_io_version(name, version)
+        if remote is not None:
+            assert_existing_checksum(name, version, local_sha256, remote)
+            visible.add(name)
+            log.message(f"resume: verified existing {name}@{version}")
+            log.event("resume", crate=name, version=version, sha256=local_sha256)
+            continue
         log.command(
             [
                 "cargo",
