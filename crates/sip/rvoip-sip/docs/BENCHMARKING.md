@@ -491,7 +491,7 @@ load.
 
 **Citing a result** — pick the highest sweep point where ASR ≥ 0.99
 and setup-p99 stays inside your SLA budget, and report that as the
-sustained capacity. Example: "rvoip-sip 0.2.5 sustains 500 CPS at
+sustained capacity. Example: "rvoip-sip 0.3.1 sustains 500 CPS at
 98.7% ASR with setup p99 < 90 ms on Apple M3 Max." Always include the
 hardware spec block from §6.
 
@@ -518,7 +518,7 @@ extra keys is fine, removing a canonical one is a breaking change.
     "total_ram_gb": 64.0,
     "build_profile": "release",
     "global_allocator": "mimalloc",
-    "rvoip_sip_version": "0.2.5",
+    "rvoip_sip_version": "0.3.1",
     "git_rev": "a9a3383c",
     "git_commit": "a9a3383c...",
     "git_dirty": false,

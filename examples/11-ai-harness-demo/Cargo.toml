@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-example-ai-harness-demo"
-version = "0.1.0"
+version = "0.3.1"
 edition = "2021"
 publish = false
 
@@ -10,7 +10,7 @@ publish = false
 async-trait = "0.1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-rvoip-core-traits = { version = "0.2.5", path = "../../crates/foundation/rvoip-core-traits" }
-rvoip-harness = { version = "0.1.0", path = "../../crates/extensions/rvoip-harness" }
-rvoip-vcon = { version = "0.1.0", path = "../../crates/extensions/rvoip-vcon" }
+rvoip-core-traits = { version = "0.3.1", path = "../../crates/foundation/rvoip-core-traits" }
+rvoip-harness = { version = "0.3.1", path = "../../crates/extensions/rvoip-harness" }
+rvoip-vcon = { version = "0.3.1", path = "../../crates/extensions/rvoip-vcon" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

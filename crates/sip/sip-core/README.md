@@ -418,7 +418,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rvoip-sip-core = "0.3.0"
+rvoip-sip-core = "0.3.1"
 bytes = "1.4"  # For handling raw message data
 tokio = { version = "1.0", features = ["full"] }  # For async examples
 ```
