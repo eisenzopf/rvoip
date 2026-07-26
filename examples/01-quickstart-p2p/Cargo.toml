@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-example-quickstart-p2p"
-version = "0.1.0"
+version = "0.3.1"
 edition = "2021"
 publish = false
 
@@ -13,8 +13,8 @@ publish = false
 # version + path: builds against the LOCAL tree now (so the example always
 # reflects current code and breaks loudly on API drift) while recording the
 # crates.io version used at publish time. Copying this example into your own
-# project? Drop the `path` and keep: rvoip-sip = "0.2.5"
-rvoip-sip = { version = "0.2.5", path = "../../crates/sip/rvoip-sip" }
+# project? Drop the `path` and keep: rvoip-sip = "0.3.1"
+rvoip-sip = { version = "0.3.1", path = "../../crates/sip/rvoip-sip" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

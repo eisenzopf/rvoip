@@ -5,17 +5,20 @@ rvoip — organized by *what you want to build*, not by which API you use. Each 
 a standalone Cargo project with its own README and (for multi-process demos) a
 `./run_demo.sh` that boots every process and checks the result.
 
-## Beta scope
+## Maturity scope
 
-Examples 01-10 target **`rvoip-sip`, the beta-candidate crate** — the only crate
-in the workspace under the beta contract. Examples 11-12 are explicitly
-experimental: 11 demonstrates the in-process AI harness path, and 12 proves a
-cross-transport customer escalation workflow using WebRTC plus SIP.
+Examples 01-10 target **`rvoip-sip`, the beta-qualified product** — the only
+workspace product covered by the SIP release gate. Examples 11-13 demonstrate
+available developer-preview products: the AI harness and vCon path,
+cross-transport WebRTC-to-SIP escalation, and Amazon Connect integration.
 
-Beta media defaults to **PCMU/PCMA**; **G.729A/G.729AB** is optional and not
-exercised by these examples. Transports are **UDP** (interop-tested) and
-**TCP/TLS** (supported); **SDES-SRTP** has limited-suite support. **Opus/G.722,
-DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
+Beta media defaults to **PCMU/PCMA**; the fully integrated optional
+**G.729A/G.729AB** path is developer preview and is not exercised here.
+Transports are **UDP** (interop-tested) and **TCP/TLS** (supported), with
+**SDES-SRTP** in the qualified SIP media envelope. **Opus/G.722** are
+developer-preview additions. **DTLS-SRTP, ICE, external TURN configuration,
+and WebRTC are available as developer previews outside the SIP beta gate.**
+The source of truth is
 [`crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`](../crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md).
 
 ## Recommended path
@@ -40,14 +43,14 @@ DTLS-SRTP, ICE/TURN, and WebRTC are post-beta.** The source of truth is
 | 10 | [call-center-b2bua](10-call-center-b2bua/) | B2BUA bridge + routing | `UnifiedCoordinator` + `server::b2bua` | `./run_demo.sh` |
 | 11 | [ai-harness-demo](11-ai-harness-demo/) | Fake ASR/TTS/dialog + vCon evidence | `rvoip-harness` | `cargo run` |
 | 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
+| 13 | [sip-to-amazon-connect](13-sip-to-amazon-connect/) | SIP headers become Amazon Connect attributes with a live audio bridge | `rvoip-amazon-connect` | `cargo run` |
 
 ## Conventions
 
-- **Self-contained projects.** Each example is its own Cargo workspace and
-  depends on the local crate via `rvoip-sip = { version = "0.2.5", path =
-  "../../crates/sip/rvoip-sip" }`. That builds against the live tree today and
-  records the crates.io version for when you copy it into your own project
-  (drop the `path`, keep the `version`).
+- **Self-contained projects.** Each example is its own Cargo workspace and uses
+  local rvoip crates through `version = "0.3.1"` plus `path`. That builds
+  against the live tree today and records the crates.io version for when you
+  copy it into your own project (drop `path`, keep `version`).
 - **`./run_demo.sh`** builds release binaries, boots every process with port
   readiness checks, prints the combined logs, and exits non-zero on failure.
   Logs land in each example's `logs/`.
