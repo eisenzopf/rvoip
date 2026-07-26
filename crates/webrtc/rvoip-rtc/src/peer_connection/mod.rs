@@ -604,6 +604,12 @@ where
     /// # }
     /// ```
     pub fn build(self) -> Result<RTCPeerConnection<I>> {
+        // This fork deliberately compiles rustls with the `ring` provider. Install
+        // it before any DTLS configuration is built so an rvoip-rtc consumer does
+        // not have to perform process-global rustls setup merely to create a peer
+        // connection. If the application already selected a provider, preserve it.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         RTCPeerConnection::new(
             self.configuration,
             self.media_engine,
