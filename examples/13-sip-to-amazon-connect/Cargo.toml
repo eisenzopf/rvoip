@@ -13,12 +13,8 @@ aws-live = ["rvoip-amazon-connect/aws-control"]
 
 [dependencies]
 # `server` pulls the batteries-included SIP UAS + media bridge.
-rvoip-amazon-connect = { version = "0.1.0", path = "../../crates/webrtc/rvoip-amazon-connect", features = ["server"] }
+rvoip-amazon-connect = { version = "0.3.1", path = "../../crates/webrtc/rvoip-amazon-connect", features = ["server"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# This standalone workspace does not inherit the repository root patch.
-[patch.crates-io]
-rtc = { git = "https://github.com/eisenzopf/rtc", rev = "1e5b7d4be6d94850694f2519f4c235d16c871d53" }

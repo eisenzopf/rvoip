@@ -2,14 +2,14 @@
 
 Date: 2026-07-25
 
-These notes describe the unified `0.3.0` workspace release. A development
+These notes describe the unified `0.3.1` workspace release. A development
 checkpoint is not a release attestation. Keep behavioral claims only when they
 are backed by the current clean beta report, compatibility matrix, RFC matrix,
 interop results, security posture, and performance report.
 
 ## Headline
 
-All 38 publishable crates now ship at one `0.3.0` version. The SIP product
+All 43 publishable crates now ship at one `0.3.1` version. The SIP product
 retains its release-gated beta scope as a Rust-native application layer for
 bounded client, server, PBX, and gateway scenarios. Optional non-SIP surfaces
 remain experimental where documented.
@@ -17,19 +17,24 @@ remain experimental where documented.
 ## Unified Workspace Publication
 
 - Every publishable crate inherits `[workspace.package].version`.
-- Every internal registry dependency targets the same `0.3.0` release.
+- Every internal registry dependency targets the same `0.3.1` release.
 - Publication follows one Cargo-derived dependency graph rather than separate
   alpha and beta trains.
-- The `0.3.0` version migration changes manifests, package resolution, and
-  publication metadata; it does not rewrite the verified `0.2.5` beta
-  evidence or claim that the version-only commit reran PBX, performance, or
-  soak gates.
+- The `0.3.1` version migration changes manifests, package resolution,
+  publication metadata, and the package identities used to ship the already
+  qualified MOQT and RTC/WebRTC source forks. It does not rewrite the verified
+  `0.2.5` beta evidence or claim that the packaging commit reran PBX,
+  performance, or soak gates.
+- The first 11 packages of an incomplete `0.3.0` publication were stopped
+  before `rvoip-moq` when its Git-only dependency could not be represented by
+  crates.io. Those partial versions are superseded and yanked; `0.3.1` is the
+  first complete unified train.
 
 ## `SessionState` Copy-on-Write Migration
 
 The next release moves infrequently used `SessionState` fields into a shared,
 copy-on-write cold block. This is an intentional pre-1.0 source break and must
-ship as a minor release (for example, `0.3.0`), not as a `0.2.5` patch.
+ship as a minor release (for example, `0.3.1`), not as a `0.2.5` patch.
 
 Normal constructor calls such as `SessionState::new(...)` and ordinary field
 reads and writes keep their existing spelling through `Deref`/`DerefMut`.
@@ -64,7 +69,7 @@ contract used between dialog-core and session-core:
 This is an intentional pre-1.0 source break: code constructing or
 destructuring `AuthRequired` must account for the new fields, and exhaustive
 matches over `DialogToSessionEvent` must account for the new variant. It is
-therefore part of the next minor beta revision (the planned `0.3.0` line), not
+therefore part of the next minor beta revision (the planned `0.3.1` line), not
 a patch release. Missing new `AuthRequired` fields remain accepted when
 deserializing older serialized events through their defaults; transaction and
 Request-URI values remain private signaling metadata and are redacted from the

@@ -227,16 +227,21 @@ serde = { version = "1.0" }
                 Path("/repo"), "0.3.0", require_no_tag=True
             )
 
-    def test_current_workspace_has_all_38_unique_publishable_packages(self) -> None:
+    def test_current_workspace_has_all_43_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
         packages, ordered = release.validate_workspace(
-            root, "0.3.0", locked=True
+            root, "0.3.1", locked=True
         )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
-        self.assertEqual(len(ordered), 38)
+        self.assertEqual(len(ordered), 43)
         self.assertIn("rvoip-sip-dialog", packages)
         self.assertIn("rvoip-sip-transport", packages)
         self.assertIn("rvoip-moq", packages)
+        self.assertIn("rvoip-moq-native", packages)
+        self.assertIn("rvoip-moq-relay", packages)
+        self.assertIn("rvoip-moq-transport", packages)
+        self.assertIn("rvoip-rtc", packages)
+        self.assertIn("rvoip-webrtc-stack", packages)
 
 
 if __name__ == "__main__":

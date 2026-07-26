@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 
-EXPECTED_PACKAGE_COUNT = 38
+EXPECTED_PACKAGE_COUNT = 43
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
@@ -756,7 +756,7 @@ def publish(
         missing_dependencies = sorted(dependencies - visible)
         if missing_dependencies and not execute:
             log.message(
-                "pending dry-run until these 0.3.0 dependencies are live: "
+                f"pending dry-run until these {version} dependencies are live: "
                 + ", ".join(missing_dependencies)
             )
             log.event(

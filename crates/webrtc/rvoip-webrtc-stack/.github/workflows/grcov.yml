@@ -1,0 +1,83 @@
+name: coverage
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  grcov:
+    name: Test with runtime (${{ matrix.runtime.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+        toolchain:
+          - nightly
+        runtime:
+          - name: tokio
+            flags: ""
+          - name: smol
+            flags: "--no-default-features --features runtime-smol"
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: llvm-tools-preview
+
+      - name: Install grcov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: grcov
+
+      - name: Test
+        run: cargo test --all --no-fail-fast ${{ matrix.runtime.flags }}
+        env:
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-Cinstrument-coverage"
+          LLVM_PROFILE_FILE: "cargo-test-%p-%m.profraw"
+
+      - name: Generate coverage data
+        id: grcov
+        run: |
+          grcov . \
+              --binary-path ./target/debug/ \
+              --source-dir . \
+              --output-type lcov \
+              --output-path lcov.info \
+              --branch \
+              --ignore='/**' \
+              --ignore='C:/**' \
+              --ignore='../**' \
+              --ignore-not-existing \
+              --excl-line "#\\[derive\\(" \
+              --excl-br-line "#\\[derive\\(" \
+              --excl-start "#\\[cfg\\(test\\)\\]" \
+              --excl-br-start "#\\[cfg\\(test\\)\\]"
+      - name: Upload coverage as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov-${{ matrix.runtime.name }}.info
+          path: lcov.info
+
+      - name: Upload coverage to codecov.io
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: ${{ matrix.runtime.name }}
+          fail_ci_if_error: true

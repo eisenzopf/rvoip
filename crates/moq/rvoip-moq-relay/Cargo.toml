@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2024-2026 Cloudflare Inc., Luke Curley, Mike English and contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[package]
+name = "rvoip-moq-relay"
+description = "Attributed rvoip fork of the embeddable MOQT draft-19 relay"
+authors = ["moq-rs contributors"]
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+version.workspace = true
+edition = "2021"
+autobins = false
+
+keywords = ["quic", "http3", "webtransport", "media", "live"]
+categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+name = "moq_relay_ietf"
+path = "src/lib.rs"
+
+[dependencies]
+moq-transport.workspace = true
+moq-native-ietf.workspace = true
+web-transport = { workspace = true, optional = true }
+
+# QUIC
+url = { version = "2", optional = true }
+
+# Async stuff
+tokio = { version = "1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
+futures = { version = "0.3", optional = true }
+async-trait = "0.1"
+
+hex = "0.4"
+ring = "0.17"
+
+# Serialization
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+
+# Error handling
+anyhow = { version = "1", features = ["backtrace"] }
+
+# Logging
+tracing = { workspace = true, optional = true }
+thiserror = "2.0.17"
+
+# Runtime metrics use the zero-cost facade when no recorder is installed.
+# The metrics-prometheus feature adds the optional Prometheus exporter and
+# therefore also enables the relay runtime.
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.16", optional = true }
+
+[features]
+default = []
+relay-runtime = [
+    "dep:web-transport",
+    "dep:url",
+    "tokio/full",
+    "tokio/test-util",
+    "dep:tokio-util",
+    "dep:futures",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:tracing",
+    "dep:metrics",
+]
+metrics-prometheus = ["relay-runtime", "dep:metrics-exporter-prometheus"]
+
+[dev-dependencies]
+rcgen = { version = "0.13", features = ["pem"] }
+tempfile = "3"
+time = "0.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("runtime"))'] }

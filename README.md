@@ -18,13 +18,14 @@
 ---
 
 > [!NOTE]
-> **Release status.** All 38 publishable workspace crates ship together at
-> **`0.3.0`**. Package versions no longer encode separate alpha/beta trains.
+> **Release status.** All 43 publishable workspace crates ship together at
+> **`0.3.1`**. Package versions no longer encode separate alpha/beta trains.
 > The SIP product retains its release-gated beta scope; its behavioral evidence
-> comes from the verified `0.2.5` candidate, while `0.3.0` changes package
-> versions and publication metadata only. Other surfaces remain experimental
-> where their feature tables say so, and breaking changes remain possible
-> before `1.0`.
+> comes from the verified `0.2.5` candidate. The release delta centralizes
+> versions and publication metadata and gives the qualified MOQT and RTC code
+> explicit, attributed rvoip package identities. Other surfaces remain
+> experimental where their feature tables say so, and breaking changes remain
+> possible before `1.0`.
 > The [rvoip 3 vision](docs/voip-3-conversation-model.md) describes the destination.
 
 ## ⚡ rvoip in one breath
@@ -71,7 +72,7 @@ switching stacks.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.0"
+rvoip-sip = "0.3.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -255,7 +256,7 @@ without the substrates knowing about each other.
 
 ## 📦 Crate matrix
 
-### ✅ Release-gated SIP surface — unified `0.3.0` release
+### ✅ Release-gated SIP surface — unified `0.3.1` release
 
 | Crate | Purpose |
 | --- | --- |
@@ -274,9 +275,9 @@ without the substrates knowing about each other.
 | [rvoip-codec-core](crates/media/codec-core) | G.711 plus optional G.729A/G.729AB codec implementation |
 | [rvoip-auth-core](crates/identity/auth-core) | OAuth2 + Bearer + token primitives |
 
-### 🚧 Experimental surfaces — unified `0.3.0` release
+### 🚧 Experimental surfaces — unified `0.3.1` release
 
-These publish at the same `0.3.0` package version so the [`rvoip`](crates/rvoip)
+These publish at the same `0.3.1` package version so the [`rvoip`](crates/rvoip)
 facade and its optional features resolve as one coherent release. Their APIs
 remain experimental until their individual compatibility claims graduate.
 

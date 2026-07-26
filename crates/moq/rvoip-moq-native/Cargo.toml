@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2024-2026 Cloudflare Inc., Luke Curley, Mike English and contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[package]
+name = "rvoip-moq-native"
+description = "Attributed rvoip fork of the native MOQT draft-19 helper"
+authors = ["Luke Curley"]
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+version.workspace = true
+edition = "2021"
+
+keywords = ["quic", "http3", "webtransport", "media", "live"]
+categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+name = "moq_native_ietf"
+path = "src/lib.rs"
+
+[dependencies]
+moq-transport.workspace = true
+web-transport = { workspace = true }
+web-transport-quinn = { version = "0.11.8", default-features = false, features = ["ring"] }
+
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.7"
+quinn = { version = "0.11.9", features = ["ring", "qlog"] }
+ring = "0.17"
+webpki = "0.22"
+
+hex = "0.4"
+url = "2"
+http = "1"
+rand = "0.8"
+
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+socket2 = "0.5"
+
+anyhow = { version = "1", features = ["backtrace"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { version = "0.13", features = ["pem"] }
+tempfile = "3"
+time = "0.3"
