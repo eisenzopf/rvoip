@@ -1,56 +1,146 @@
-# rvoip — Universal real-time gateway library
+# rvoip — universal real-time gateway facade
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip.svg)](https://crates.io/crates/rvoip)
 [![Documentation](https://docs.rs/rvoip/badge.svg)](https://docs.rs/rvoip)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
 
-> **Unified workspace release:** every publishable crate ships at `0.3.0`.
-> The `sip` surface retains its release-gated beta scope; `app`, `webrtc`,
-> `uctp`, the `voip-3` extensions, and `client` remain experimental until their
-> individual compatibility claims graduate. Breaking changes remain possible
-> before `1.0`.
+`rvoip` is the facade for the workspace's shared conversation model and
+transport adapters. It always provides the transport-independent
+`Orchestrator` and the `Conversation`/`Session`/`Connection`/`Stream`/
+`Message`/`Participant` types, defaults to the SIP product, and lets
+applications opt into WebRTC, UCTP, client, application-builder, and
+conversation-extension surfaces.
 
-`rvoip` is the **facade crate** for the rvoip workspace. It always compiles the **voip-3
-substrate** (`rvoip-core`'s `Orchestrator` + the shared `Conversation`/`Session`/
-`Connection`/`Stream`/`Message`/`Participant` model) and lets you opt into transports and
-extensions behind cargo features — defaulting to the SIP product. One process, one
-`Orchestrator`, many protocols, bridged through a single conversation model.
+> **Unified `0.3.1` release.** The `sip` feature is the release-gated beta
+> surface. Other facade features are available today as developer previews:
+> they are implemented and published, but API-unstable or outside the SIP beta
+> attestation. Breaking changes remain possible before `1.0`.
 
 ## Quick start
 
+The default feature is `sip`:
+
 ```toml
 [dependencies]
-rvoip = "0.3.0"   # default feature: sip
+rvoip = "0.3.1"
 ```
 
+The shared orchestrator is available with every feature combination:
+
 ```rust
-use rvoip::{Orchestrator, Config};
+use rvoip::{Config, Orchestrator};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // `Orchestrator::new` returns an `Arc<Orchestrator>`.
     let orchestrator = Orchestrator::new(Config::default());
 
-    // Register interop adapters (e.g. a SIP adapter built from a configured
-    // `rvoip::sip::UnifiedCoordinator`) with `orchestrator.register(adapter)?`.
+    // Construct enabled transport adapters and register them with:
+    // orchestrator.register(adapter)?;
 
     let mut events = orchestrator.subscribe_events();
     while let Ok(event) = events.recv().await {
-        // handle each orchestrator event (inbound call, bridge, recording, …)
+        // Route, bridge, or handle the conversation event.
         drop(event);
     }
     Ok(())
 }
 ```
 
-The unifying nouns are re-exported at the crate root from [`rvoip-core-traits`](../foundation/rvoip-core-traits) as `rvoip::core_traits`.
-For a SIP softphone with microphone/speaker audio, see the `rvoip-sip` examples — [`sip_client`](../sip/rvoip-sip/examples/sip_client) (a terminal softphone with CPAL device I/O) and [`pbx`](../sip/rvoip-sip/examples/pbx).
+For the fastest path to a SIP endpoint, use
+[`rvoip-sip`](../sip/rvoip-sip) directly. Its `Endpoint`, `StreamPeer`,
+`CallbackPeer`, and `UnifiedCoordinator` APIs are also re-exported through
+`rvoip::sip` when the default `sip` feature is enabled.
 
-For a compact cross-transport gateway, enable `app` and declare roles,
-transports, assignment, and callbacks through `rvoip::app`:
+## Cargo features
+
+This table mirrors `crates/rvoip/Cargo.toml`.
+
+| Feature | Default | Maturity | Enables |
+| --- | :---: | --- | --- |
+| `sip` | ✅ | **Beta-qualified** | SIP application and interop surface under `rvoip::sip` |
+| `g729` |  | Developer preview | End-to-end G.729A/G.729AB media, SDP, RTP, and transcoding support; implies `sip` |
+| `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
+| `uctp` |  | Developer preview | UCTP protocol plus QUIC, WebTransport, and WebSocket adapters under `rvoip::uctp` |
+| `sip-stir-shaken` |  | Developer preview | STIR/SHAKEN signing/verification under `rvoip::stir_shaken`; implies `sip` |
+| `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
+| `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
+| `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
+| `full` |  | Developer preview | `voip-3` + `sip-stir-shaken` + `client` + `app` |
+
+Examples:
 
 ```toml
-rvoip = { version = "0.3.0", features = ["app"] }
+# Shared conversation model plus SIP, WebRTC, UCTP, vCon, identity, and AI.
+rvoip = { version = "0.3.1", features = ["voip-3"] }
+
+# High-level cross-transport application builder.
+rvoip = { version = "0.3.1", features = ["app"] }
+
+# Every facade-owned feature.
+rvoip = { version = "0.3.1", features = ["full"] }
+```
+
+`full` means every **facade feature**, not every crate in the rvoip workspace.
+
+## Module layout
+
+| Module/path | Required feature | Source product |
+| --- | --- | --- |
+| `rvoip::{Orchestrator, Config}` | Always | [`rvoip-core`](../foundation/rvoip-core) |
+| `rvoip::core_traits` | Always | [`rvoip-core-traits`](../foundation/rvoip-core-traits) |
+| `rvoip::sip` | `sip` | [`rvoip-sip`](../sip/rvoip-sip) |
+| `rvoip::stir_shaken` | `sip-stir-shaken` | [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken) |
+| `rvoip::webrtc` | `webrtc` | [`rvoip-webrtc`](../webrtc/rvoip-webrtc) |
+| `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
+| `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |
+| `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |
+| `rvoip::app` | `app` | Facade-owned application/gateway layer |
+
+## Extension routing
+
+Some extensions are re-exported by facade features; deployment-specific
+providers stay separate so protocol applications do not pull in backends they
+do not use.
+
+| Need | How to enable | Crates |
+| --- | --- | --- |
+| vCon, identity surface, and AI-provider harness | `rvoip` feature `voip-3` | `rvoip-vcon`, `rvoip-identity`, `rvoip-harness` |
+| STIR/SHAKEN | `rvoip` feature `sip-stir-shaken` | `rvoip-stir-shaken` |
+| OIDC or Keycloak | Add directly | `rvoip-oidc`, `rvoip-keycloak` |
+| LDAP, Redis, or IMS AKA authentication | Add directly | `rvoip-ldap`, `rvoip-redis`, `rvoip-ims-aka` |
+| SAML, SCIM, or WebAuthn user lifecycle | Add directly | `rvoip-saml`, `rvoip-scim`, `rvoip-webauthn` |
+| Redacted audit and SIEM exports | Add directly | `rvoip-audit` |
+| Postgres vCon storage | Add directly | `rvoip-vcon-postgres` |
+
+For example:
+
+```toml
+[dependencies]
+rvoip = { version = "0.3.1", features = ["sip"] }
+rvoip-keycloak = "0.3.1"
+rvoip-redis = "0.3.1"
+rvoip-audit = "0.3.1"
+```
+
+## Specialized workspace products
+
+These products publish in the unified `0.3.1` train but are intentionally not
+facade feature flags:
+
+| Product | Crate | Why it stays separate |
+| --- | --- | --- |
+| Media over QUIC | [`rvoip-moq`](../moq/rvoip-moq) | MOQT transport/relay and broadcast deployments have their own runtime and security configuration |
+| Amazon Connect | [`rvoip-amazon-connect`](../webrtc/rvoip-amazon-connect) | Optional AWS control-plane dependencies and Amazon Chime media |
+| OS audio devices | [`rvoip-audio-device`](../media/rvoip-audio-device) | Optional CPAL/native device dependencies |
+| Enterprise identity providers | [`crates/extensions`](../extensions) | Applications select only the identity, provisioning, and audit backends they operate |
+
+## High-level gateway builder
+
+Enable `app` to declare transports, roles, assignment, and callbacks through
+one builder:
+
+```toml
+rvoip = { version = "0.3.1", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -58,79 +148,51 @@ use rvoip::app::*;
 
 # async fn run() -> rvoip::app::AppResult<()> {
 let app = RvoipApp::builder()
-    .webrtc(WebRtcConfig::ws("127.0.0.1:8081")
-        .allow(Role::Customer, [Capability::Text, Capability::Voice]))
-    .sip(SipConfig::bind("127.0.0.1:5060")
-        .domain("callcenter.local")
-        .allow(Role::Employee, [Capability::Voice])
-        .registrar_users([("alice", "password123")]))
+    .webrtc(
+        WebRtcConfig::ws("127.0.0.1:8081")
+            .allow(Role::Customer, [Capability::Text, Capability::Voice]),
+    )
+    .sip(
+        SipConfig::bind("127.0.0.1:5060")
+            .domain("callcenter.local")
+            .allow(Role::Employee, [Capability::Voice])
+            .registrar_users([("alice", "password123")]),
+    )
     .employees(EmployeePolicy::named(["alice"]))
     .customers(CustomerPolicy::webrtc_only())
     .assignment(AssignmentPolicy::fixed("alice"))
     .on_message(|ctx, msg| async move {
-        ctx.reply("Alice", format!("Alice received: {}", msg.text)).await
+        ctx.reply("Alice", format!("Alice received: {}", msg.text))
+            .await
     })
     .build()
     .await?;
+
 app.run().await
 # }
 ```
 
-## Cargo features
+See the repository's
+[`12-customer-escalation-sip-webrtc`](../../examples/12-customer-escalation-sip-webrtc)
+example for a complete cross-transport application.
 
-| Feature | Default | Tier | Pulls in |
-|---|:---:|:---:|---|
-| `sip` | ✅ | beta | SIP interop adapter (`rvoip::sip`) |
-| `g729` | | beta optional | G.729A/G.729AB media support for SIP; **requires `sip`** |
-| `webrtc` | | alpha | WebRTC interop adapter (`rvoip::webrtc`) |
-| `uctp` | | alpha | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) |
-| `sip-stir-shaken` | | alpha | RFC 8224 caller-ID attestation; **requires `sip`** (`rvoip::stir_shaken`) |
-| `voip-3` | | alpha | The full experience: every transport **+** the vCon / identity / AI-harness extensions |
-| `client` | | alpha | Cross-transport client SDK (`rvoip::client`) |
-| `app` | | alpha | High-level gateway builder (`rvoip::app`) for WebRTC/SIP/UCTP app policy |
-| `full` | | | `voip-3` + `sip-stir-shaken` + `client` + `app` |
+## Maturity boundaries
 
-The transport-agnostic conversation-model extensions — **vCon** emission, **identity**
-backends, and the **AI harness** — are reachable only through the `voip-3` feature.
-
-```toml
-# e.g. the full multi-transport rvoip-3 experience
-rvoip = { version = "0.3.0", features = ["voip-3"] }
-```
-
-## Module layout
-
-| Path | Feature | Source crate |
-|---|---|---|
-| `rvoip::{Orchestrator, Config}` | always | [`rvoip-core`](../foundation/rvoip-core) |
-| `rvoip::core_traits` | always | [`rvoip-core-traits`](../foundation/rvoip-core-traits) |
-| `rvoip::sip` | `sip` | [`rvoip-sip`](../sip/rvoip-sip) |
-| `rvoip::stir_shaken` | `sip-stir-shaken` | [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken) |
-| `rvoip::webrtc` | `webrtc` | [`rvoip-webrtc`](../webrtc/rvoip-webrtc) |
-| `rvoip::uctp` (`::protocol`/`::quic`/`::webtransport`/`::websocket`) | `uctp` | [`rvoip-uctp`](../uctp/rvoip-uctp) + substrates |
-| `rvoip::vcon` / `::identity` / `::harness` | `voip-3` | [`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-identity`](../identity/rvoip-identity) · [`rvoip-harness`](../extensions/rvoip-harness) |
-| `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |
-| `rvoip::app` | `app` | facade-owned app/gateway layer |
-
-## Crate map
-
-**Release-gated SIP surface in the unified `0.3.0` release:** `rvoip` (facade),
-[`rvoip-core`](../foundation/rvoip-core), [`rvoip-core-traits`](../foundation/rvoip-core-traits),
-[`rvoip-infra-common`](../foundation/infra-common), the media engine
-([`rvoip-media-core`](../media/media-core) · [`rvoip-rtp-core`](../media/rtp-core) · [`rvoip-codec-core`](../media/codec-core)),
-the SIP stack ([`rvoip-sip`](../sip/rvoip-sip) + [`sip-core`](../sip/sip-core) · [`sip-transport`](../sip/sip-transport) · [`sip-dialog`](../sip/sip-dialog) · [`sip-proxy`](../sip/sip-proxy) · [`sip-registrar`](../sip/sip-registrar)),
-and [`rvoip-auth-core`](../identity/auth-core).
-
-**Experimental opt-in surfaces in the same `0.3.0` release:** [`rvoip-webrtc`](../webrtc/rvoip-webrtc);
-the UCTP family ([`rvoip-uctp`](../uctp/rvoip-uctp) · [`rvoip-quic`](../uctp/rvoip-quic) · [`rvoip-webtransport`](../uctp/rvoip-webtransport) · [`rvoip-websocket`](../uctp/rvoip-websocket));
-[`rvoip::app`](src/app.rs) · [`rvoip-vcon`](../extensions/rvoip-vcon) · [`rvoip-harness`](../extensions/rvoip-harness) · [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken);
-[`rvoip-identity`](../identity/rvoip-identity) · [`rvoip-users-core`](../identity/users-core); [`rvoip-client`](../rvoip-client).
+- SIP beta evidence does not qualify WebRTC, UCTP, MoQ, Amazon Connect, or
+  extension products.
+- WebRTC includes ICE and DTLS-SRTP; that does not make them SIP beta
+  capabilities.
+- Published developer-preview crates are available to build with now, but do
+  not carry a blanket production-readiness or API-compatibility guarantee.
+- Product READMEs define exact supported scope, configuration, and non-claims.
 
 ## Documentation
 
-- API docs: [docs.rs/rvoip](https://docs.rs/rvoip)
-- Workspace overview: [repository README](../../README.md)
-- Architecture & protocol design: [`PRD.md`](../../docs/PRD.md), [`INTERFACE_DESIGN.md`](../../docs/INTERFACE_DESIGN.md), [`CONVERSATION_PROTOCOL.md`](../../docs/CONVERSATION_PROTOCOL.md)
+- [Workspace overview and complete extension catalog](../../README.md)
+- [Facade API](https://docs.rs/rvoip)
+- [SIP API](https://docs.rs/rvoip-sip)
+- [SIP beta evidence](../sip/rvoip-sip/docs/)
+- [Architecture and protocol design](../../docs/)
 
 ## License
 
