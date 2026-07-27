@@ -35,6 +35,11 @@ This unified release advances the reusable Bridgefu 1.0 foundation across all
   retention, explicit SIP/RTP advertisement, and example 14's shared Vapi
   agent server.
 
+### Fixed
+
+- SCIM provisioning now generates policy-safe bootstrap passwords without
+  random failures from repeated/sequential characters or username overlap.
+
 ### Breaking protocol changes
 
 - UCTP media datagrams now carry a complete RTP packet after the UCTP header.

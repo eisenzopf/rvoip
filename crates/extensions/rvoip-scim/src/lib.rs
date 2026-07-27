@@ -546,7 +546,7 @@ impl ScimService {
         self.auth_service
             .create_user(CreateUserRequest {
                 username: scim_user.user_name.clone(),
-                password: format!("ScimProvisioned!{}Aa1", Uuid::new_v4().simple()),
+                password: provisioning_password(),
                 email: primary_email(scim_user),
                 display_name: scim_user.display_name.clone(),
                 roles: self.roles_from_groups(scim_user),
@@ -635,6 +635,21 @@ impl ScimService {
         }
         roles.into_iter().collect()
     }
+}
+
+fn provisioning_password() -> String {
+    // Separate every alphanumeric character so a random UUID cannot contain a
+    // repeated/sequential four-character run or a valid SCIM username. The
+    // fixed prefix supplies every required character class and, together with
+    // the UUID version/variant nibbles, at least six unique characters.
+    let token = Uuid::new_v4().simple().to_string();
+    let mut password = String::with_capacity(6 + token.len() * 2);
+    password.push_str("Q!a!7!");
+    for character in token.chars() {
+        password.push(character);
+        password.push('!');
+    }
+    password
 }
 
 type JsonHandlerResult<T> = std::result::Result<Json<T>, (StatusCode, String)>;
@@ -1058,6 +1073,7 @@ mod tests {
     use rvoip_core_traits::ids::IdentityId;
     use users_core::config::{PasswordConfig, TlsSettings};
     use users_core::jwt::JwtConfig;
+    use users_core::validation::PasswordValidator;
     use users_core::{init, UsersConfig};
 
     #[derive(Clone)]
@@ -1122,6 +1138,17 @@ mod tests {
         });
         let service = ScimService::new(auth, bearer, ScimConfig::new("okta")).unwrap();
         (temp, service)
+    }
+
+    #[test]
+    fn provisioning_passwords_always_satisfy_the_users_policy() {
+        let validator = PasswordValidator::with_default_policy();
+        for _ in 0..64 {
+            let password = provisioning_password();
+            for username in ["alice", "scim", "abcd", "1234", "qqqq"] {
+                validator.validate(&password, username).unwrap();
+            }
+        }
     }
 
     #[tokio::test]

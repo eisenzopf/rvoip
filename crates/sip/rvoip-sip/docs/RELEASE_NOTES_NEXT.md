@@ -42,6 +42,11 @@ status where they are outside the SIP attestation.
   call events, startup-safe event retention, explicit SIP/RTP advertisement,
   and example 14's shared Vapi agent server.
 
+## Fixed
+
+- SCIM provisioning passwords are structurally guaranteed to satisfy the
+  users-core password policy, eliminating random provisioning failures.
+
 ## Compatibility Notes
 
 - UCTP media datagrams now contain a complete RTP packet after the UCTP header.
