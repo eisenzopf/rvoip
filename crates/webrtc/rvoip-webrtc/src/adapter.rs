@@ -5466,6 +5466,18 @@ mod media_stream_codec_tests {
         });
         assert_eq!(stereo.channels, 2);
     }
+
+    #[test]
+    fn internal_pcm_key_is_never_used_as_a_webrtc_rtp_payload_type() {
+        let pcm = CodecInfo {
+            name: "pcm_s16le".into(),
+            clock_rate_hz: 16_000,
+            channels: 1,
+            fmtp: None,
+        };
+
+        assert_ne!(payload_type_for_audio_codec(&pcm), 120);
+    }
 }
 
 #[cfg(test)]

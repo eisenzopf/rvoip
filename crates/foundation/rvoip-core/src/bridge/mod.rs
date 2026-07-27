@@ -67,7 +67,10 @@ impl DirectionalMediaBridgePlan {
 }
 
 /// Map an `audio_codecs` codec name (per CONVERSATION_PROTOCOL.md §8)
-/// to its standard RTP payload type.
+/// to its media-graph codec key.
+///
+/// Most keys are the codec's conventional RTP payload type. `pcm_s16le`
+/// uses the internal-only key 120; transports must not advertise or emit it.
 ///
 /// Returns `None` for codec names not in the table so the bridge layer
 /// can produce a clear "unsupported codec" diagnostic
@@ -80,7 +83,21 @@ pub fn codec_to_pt(name: &str) -> Option<u8> {
         "pcma" | "g.711-a" | "g711-a" => Some(8),
         "g729" | "g.729" => Some(18),
         "opus" => Some(111),
+        "pcm_s16le" | "pcm-s16le" => Some(rvoip_media_core::codec::audio::payload_type::PCM_S16LE),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod codec_mapping_tests {
+    use super::codec_to_pt;
+    use rvoip_media_core::codec::audio::payload_type::PCM_S16LE;
+
+    #[test]
+    fn maps_internal_pcm_name_to_reserved_key() {
+        assert_eq!(codec_to_pt("pcm_s16le"), Some(PCM_S16LE));
+        assert_eq!(codec_to_pt("PCM_S16LE"), Some(PCM_S16LE));
+        assert_eq!(PCM_S16LE, 120);
     }
 }
 

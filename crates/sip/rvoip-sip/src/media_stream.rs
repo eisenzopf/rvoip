@@ -1221,6 +1221,10 @@ mod negotiated_codec_tests {
         let config = negotiated("peer-controlled-unknown", 8_000, 1);
         assert!(codec_descriptor(&config).is_err());
         assert!(SipPayloadCodec::from_negotiated(&config).is_err());
+
+        let internal_pcm = negotiated("pcm_s16le", 16_000, 1);
+        assert!(codec_descriptor(&internal_pcm).is_err());
+        assert!(SipPayloadCodec::from_negotiated(&internal_pcm).is_err());
     }
 }
 

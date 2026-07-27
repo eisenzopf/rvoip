@@ -59,6 +59,7 @@ members = [
     "crates/extensions/rvoip-vcon",
     "crates/extensions/rvoip-vcon-postgres",
     "crates/extensions/rvoip-harness",
+    "crates/extensions/rvoip-vapi",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
     "crates/extensions/rvoip-redis",
@@ -227,12 +228,14 @@ rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.3.1" }
 rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.3.1" }
 rvoip-users-core    = { path = "crates/identity/users-core", version = "0.3.1" }
 
-# Optional and top-of-stack crates are part of the same release. rvoip-core
-# lists rvoip-vcon / rvoip-harness as optional runtime dependencies, so their
-# versions must resolve on crates.io regardless of feature activation.
+# Optional and top-of-stack crates are part of the same release. Facade and
+# core packages list extension crates such as rvoip-vcon, rvoip-harness, and
+# rvoip-vapi as optional runtime dependencies, so their versions must resolve
+# on crates.io regardless of feature activation.
 rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.3.1" }
 rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.3.1" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.3.1" }
+rvoip-vapi          = { path = "crates/extensions/rvoip-vapi", version = "0.3.1" }
 rvoip               = { path = "crates/rvoip", version = "0.3.1" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.3.1" }
 rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.3.1" }

@@ -17,6 +17,9 @@ pub enum Transport {
     /// Amazon Chime SDK media). Like [`Transport::WebRtc`] this is an
     /// `AdapterKind::Interop` gateway to a foreign protocol.
     AmazonConnect,
+    /// Vapi's bidirectional WebSocket agent transport. The adapter owns the
+    /// remote AI session while rvoip owns the SIP or WebRTC caller leg.
+    Vapi,
     InProcessAi,
 }
 

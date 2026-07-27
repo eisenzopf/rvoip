@@ -7,7 +7,7 @@
 # API drift break loudly.
 #
 # Two jobs:
-#   build  — compile every example (the drift guard; covers all 13, incl. the
+#   build  — compile every example (the drift guard; covers all 14, incl. the
 #            ones that need external infra to RUN, like register-to-pbx / TLS).
 #   smoke  — actually run the hardware-free, no-external-dependency demos and
 #            assert they succeed.
@@ -46,6 +46,7 @@ jobs:
           - 11-ai-harness-demo
           - 12-customer-escalation-sip-webrtc
           - 13-sip-to-amazon-connect
+          - 14-vapi-agent
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

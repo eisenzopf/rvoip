@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use rvoip_media_core::codec::audio::{AudioCodec, OpusApplication, OpusCodec, OpusConfig};
+use rvoip_media_core::codec::audio::{
+    payload_type::PCM_S16LE, AudioCodec, OpusApplication, OpusCodec, OpusConfig, PcmS16LeCodec,
+};
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
 use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
@@ -933,6 +935,7 @@ fn canonical_codec_name(codec: &CodecInfo, payload_type: u8) -> String {
         8 => "pcma".into(),
         18 => "g729".into(),
         111 => "opus".into(),
+        PCM_S16LE => "pcm_s16le".into(),
         _ => codec.name.trim().to_ascii_lowercase(),
     }
 }
@@ -1121,6 +1124,10 @@ fn create_configured_codec(
                 config,
             )?))
         }
+        PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
+            codec.clock_rate_hz,
+            codec.channels,
+        )?)),
         _ => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
     }
 }
@@ -2169,6 +2176,7 @@ fn codec_for_payload_type(payload_type: u8) -> Option<CodecInfo> {
         8 => ("pcma", 8_000),
         18 => ("g729", 8_000),
         111 => ("opus", 48_000),
+        PCM_S16LE => ("pcm_s16le", 16_000),
         _ => return None,
     };
     Some(CodecInfo {
@@ -3345,6 +3353,44 @@ mod tests {
         assert_eq!(source_info.channels, 1);
         assert_eq!(target_info.sample_rate, 48_000);
         assert_eq!(target_info.channels, 1);
+    }
+
+    #[test]
+    fn configured_transcoder_converts_pcm_s16le_and_g711() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let linear = (0..320)
+            .map(|sample| ((sample as f32 * 0.2).sin() * 10_000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        for (g711_name, g711_pt) in [("pcmu", 0), ("pcma", 8)] {
+            let g711 = codec(g711_name, 8_000);
+            let mut to_g711 =
+                ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &g711, g711_pt).unwrap();
+            let encoded = to_g711.transcode(&linear).unwrap();
+            assert_eq!(encoded.len(), 160);
+
+            let mut to_pcm =
+                ConfiguredTranscodingSession::new(&g711, g711_pt, &pcm, PCM_S16LE).unwrap();
+            assert_eq!(to_pcm.transcode(&encoded).unwrap().len(), 640);
+        }
+    }
+
+    #[test]
+    fn configured_transcoder_preserves_pcm_wideband_path_through_opus() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let opus = codec("opus", 48_000);
+        let linear = (0..320)
+            .map(|sample| ((sample as f32 * 0.2).sin() * 10_000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let mut to_opus = ConfiguredTranscodingSession::new(&pcm, PCM_S16LE, &opus, 111).unwrap();
+        let encoded = to_opus.transcode(&linear).unwrap();
+        assert!(!encoded.is_empty());
+
+        let mut to_pcm = ConfiguredTranscodingSession::new(&opus, 111, &pcm, PCM_S16LE).unwrap();
+        assert_eq!(to_pcm.transcode(&encoded).unwrap().len(), 640);
     }
 
     #[tokio::test]

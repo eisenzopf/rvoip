@@ -68,6 +68,7 @@ impl CodecInfo {
             "g.711-a" | "PCMA" | "pcma" => (8_000, 1),
             "g.722" => (16_000, 1),
             "g.729" => (8_000, 1),
+            "pcm_s16le" | "PCM_S16LE" => (16_000, 1),
             _ => (48_000, 1),
         };
         Self {
@@ -481,6 +482,14 @@ impl fmt::Debug for StreamOffer<'_> {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn internal_pcm_codec_uses_wideband_mono_defaults() {
+        let codec = CodecInfo::from_name_with_defaults("pcm_s16le");
+        assert_eq!(codec.clock_rate_hz, 16_000);
+        assert_eq!(codec.channels, 1);
+        assert!(codec.fmtp.is_none());
+    }
 
     #[test]
     fn capability_diagnostics_never_render_peer_strings() {

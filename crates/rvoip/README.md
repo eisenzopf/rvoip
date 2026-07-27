@@ -8,8 +8,8 @@
 transport adapters. It always provides the transport-independent
 `Orchestrator` and the `Conversation`/`Session`/`Connection`/`Stream`/
 `Message`/`Participant` types, defaults to the SIP product, and lets
-applications opt into WebRTC, UCTP, client, application-builder, and
-conversation-extension surfaces.
+applications opt into WebRTC, UCTP, Vapi voice agents, client,
+application-builder, and conversation-extension surfaces.
 
 > **Unified `0.3.1` release.** The `sip` feature is the release-gated beta
 > surface. Other facade features are available today as developer previews:
@@ -61,11 +61,12 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `g729` |  | Developer preview | End-to-end G.729A/G.729AB media, SDP, RTP, and transcoding support; implies `sip` |
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
 | `uctp` |  | Developer preview | UCTP protocol plus QUIC, WebTransport, and WebSocket adapters under `rvoip::uctp` |
+| `vapi` |  | Developer preview | Vapi bidirectional WebSocket agent adapter under `rvoip::vapi` |
 | `sip-stir-shaken` |  | Developer preview | STIR/SHAKEN signing/verification under `rvoip::stir_shaken`; implies `sip` |
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
-| `full` |  | Developer preview | `voip-3` + `sip-stir-shaken` + `client` + `app` |
+| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
 
 Examples:
 
@@ -92,6 +93,7 @@ rvoip = { version = "0.3.1", features = ["full"] }
 | `rvoip::stir_shaken` | `sip-stir-shaken` | [`rvoip-stir-shaken`](../extensions/rvoip-stir-shaken) |
 | `rvoip::webrtc` | `webrtc` | [`rvoip-webrtc`](../webrtc/rvoip-webrtc) |
 | `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
+| `rvoip::vapi` | `vapi` | [`rvoip-vapi`](../extensions/rvoip-vapi) |
 | `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |
 | `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |
 | `rvoip::app` | `app` | Facade-owned application/gateway layer |
@@ -105,6 +107,7 @@ do not use.
 | Need | How to enable | Crates |
 | --- | --- | --- |
 | vCon, identity surface, and AI-provider harness | `rvoip` feature `voip-3` | `rvoip-vcon`, `rvoip-identity`, `rvoip-harness` |
+| Vapi-hosted voice agents over SIP or WebRTC | `rvoip` feature `vapi` | `rvoip-vapi` |
 | STIR/SHAKEN | `rvoip` feature `sip-stir-shaken` | `rvoip-stir-shaken` |
 | OIDC or Keycloak | Add directly | `rvoip-oidc`, `rvoip-keycloak` |
 | LDAP, Redis, or IMS AKA authentication | Add directly | `rvoip-ldap`, `rvoip-redis`, `rvoip-ims-aka` |

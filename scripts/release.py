@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 
-EXPECTED_PACKAGE_COUNT = 43
+EXPECTED_PACKAGE_COUNT = 44
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15

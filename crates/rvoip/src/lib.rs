@@ -43,11 +43,12 @@
 //! | `sip` | ✅ | SIP interop adapter (`rvoip::sip`) — **beta** |
 //! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — developer preview |
 //! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — developer preview |
+//! | `vapi` | | Vapi bidirectional WebSocket agent adapter (`rvoip::vapi`) — developer preview |
 //! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — developer preview |
-//! | `voip-3` | | The full experience: every transport **+** vCon / identity / AI-harness extensions — developer preview |
+//! | `voip-3` | | SIP + WebRTC + UCTP **+** vCon / identity / AI-harness extensions — developer preview |
 //! | `client` | | Cross-transport client SDK (`rvoip::client`) — developer preview |
 //! | `app` | | High-level gateway builder (`rvoip::app`) — developer preview |
-//! | `full` | | `voip-3` + `sip-stir-shaken` + `client` + `app` |
+//! | `full` | | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
 //!
 //! The `vcon`, `identity`, and `harness` conversation-model extensions are
 //! transport-agnostic and reachable **only** through the `voip-3` feature.
@@ -58,7 +59,7 @@
 //! `rvoip::core_traits`; the `Orchestrator` + `Config` at the root directly.
 //! Each transport/extension lives under its own feature-gated module
 //! (`rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`, `rvoip::app`,
-//! `rvoip::client`, …).
+//! `rvoip::vapi`, `rvoip::client`, …).
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -123,6 +124,18 @@ pub mod uctp {
     pub use rvoip_websocket as websocket;
     /// UCTP-over-WebTransport substrate adapter.
     pub use rvoip_webtransport as webtransport;
+}
+
+// ---------------------------------------------------------------------------
+// Vapi agent transport (developer preview)
+// ---------------------------------------------------------------------------
+
+/// Vapi bidirectional WebSocket agent adapter. It lets rvoip retain ownership
+/// of a SIP or WebRTC caller leg while Vapi runs the remote voice-AI pipeline.
+/// Off by default; enable the `vapi` feature.
+#[cfg(feature = "vapi")]
+pub mod vapi {
+    pub use rvoip_vapi::*;
 }
 
 // ---------------------------------------------------------------------------

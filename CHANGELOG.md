@@ -24,12 +24,22 @@ not yet a published rvoip release.
   authorization, compatibility, reconnect, health, and drain abstractions.
 - Configurable symmetric RTP, advertised SIP/RTP addresses, RFC 3581 `rport`,
   WebRTC ICE server/NAT policy, and per-exchange WHIP/WHEP versus WS gathering.
+- Developer-preview `rvoip-vapi` bidirectional WebSocket agent adapter, exposed
+  by the facade's opt-in `vapi` feature and included in `full`.
+- High-level `rvoip::app` voice-only admission for SIP or WebRTC customers,
+  including transport-neutral accepted-call events, startup-safe event
+  retention, explicit SIP/RTP advertisement, and example 14's shared Vapi
+  agent server.
 
 ### Breaking protocol changes
 
 - UCTP media datagrams now carry a complete RTP packet after the UCTP header.
 - Wire-incompatible MOQT draft changes are semver-breaking at the
   `rvoip-moq` compatibility boundary.
+- `rvoip_core_traits::connection::Transport` adds the `Vapi` variant; downstream
+  exhaustive matches over this public enum must add a corresponding arm.
+- `rvoip::app::AppEvent` adds the `InboundCallAccepted` variant; downstream
+  exhaustive matches over this public enum must add a corresponding arm.
 
 The private WebRTC/RTC TURN candidate and the dynamic moq-rs publisher-lease
 candidate remain outside the consumed dependency graph until project-owner

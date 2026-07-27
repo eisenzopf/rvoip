@@ -6,6 +6,7 @@ pub mod dtmf;
 pub mod g711; // G.711 codec implementation
 pub mod g729; // Add G.729 codec
 pub mod opus; // Opus codec implementation // RFC 4733 DTMF telephone-event codec
+pub mod pcm; // Internal raw signed 16-bit little-endian PCM
 
 pub use common::*;
 
@@ -30,6 +31,13 @@ pub mod payload_type {
 
     /// Telephone-event (DTMF) RFC 4733
     pub const TELEPHONE_EVENT: u8 = 101;
+
+    /// Internal raw signed 16-bit little-endian PCM at 16 kHz, mono.
+    ///
+    /// This dynamic payload-type-shaped key is reserved for routing inside
+    /// rvoip only. It is not an RTP payload type and must never be advertised
+    /// in SDP or emitted on an RTP transport.
+    pub const PCM_S16LE: u8 = 120;
 }
 
 // Re-export G.711 codec types
@@ -37,6 +45,9 @@ pub use g711::G711Codec;
 
 // Re-export Opus codec types
 pub use opus::{OpusApplication, OpusCodec, OpusConfig};
+
+// Re-export internal raw PCM codec.
+pub use pcm::PcmS16LeCodec;
 
 // Re-export G.729 codec types
 pub use g729::{G729Annexes, G729Codec, G729Config};

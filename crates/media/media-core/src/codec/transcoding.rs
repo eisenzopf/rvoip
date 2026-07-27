@@ -4,6 +4,7 @@
 //! enabling mixed-codec calls and codec negotiation fallbacks.
 
 use crate::codec::audio::common::AudioCodec;
+use crate::codec::audio::payload_type::PCM_S16LE;
 #[cfg(feature = "g729")]
 use crate::codec::audio::G729Codec;
 use crate::codec::audio::{OpusApplication, OpusCodec};
@@ -159,8 +160,8 @@ impl Transcoder {
     /// Create a codec instance for the given payload type
     fn create_codec(&self, payload_type: PayloadType) -> Result<Box<dyn AudioCodec>> {
         match payload_type {
-            0 | 8 => {
-                // PCMU or PCMA - use factory
+            0 | 8 | PCM_S16LE => {
+                // PCMU, PCMA, or internal raw PCM - use factory
                 CodecFactory::create_codec_default(payload_type)
             }
             #[cfg(feature = "g729")]
@@ -215,6 +216,7 @@ impl Transcoder {
             #[cfg(feature = "g729")]
             18u8, // G.729
             111u8, // Opus
+            PCM_S16LE, // Internal pcm_s16le 16 kHz mono
         ];
         let mut paths = Vec::new();
 
@@ -327,6 +329,26 @@ impl Transcoder {
     pub async fn opus_to_g729(&mut self, opus_data: &[u8]) -> Result<Vec<u8>> {
         self.transcode(opus_data, 111, 18).await
     }
+
+    /// Transcode raw 16 kHz mono PCM to G.711 PCMU.
+    pub async fn pcm_s16le_to_pcmu(&mut self, pcm_data: &[u8]) -> Result<Vec<u8>> {
+        self.transcode(pcm_data, PCM_S16LE, 0).await
+    }
+
+    /// Transcode G.711 PCMU to raw 16 kHz mono PCM.
+    pub async fn pcmu_to_pcm_s16le(&mut self, pcmu_data: &[u8]) -> Result<Vec<u8>> {
+        self.transcode(pcmu_data, 0, PCM_S16LE).await
+    }
+
+    /// Transcode raw 16 kHz mono PCM to Opus.
+    pub async fn pcm_s16le_to_opus(&mut self, pcm_data: &[u8]) -> Result<Vec<u8>> {
+        self.transcode(pcm_data, PCM_S16LE, 111).await
+    }
+
+    /// Transcode Opus to raw 16 kHz mono PCM.
+    pub async fn opus_to_pcm_s16le(&mut self, opus_data: &[u8]) -> Result<Vec<u8>> {
+        self.transcode(opus_data, 111, PCM_S16LE).await
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +375,14 @@ mod tests {
             from_codec: 0,
             to_codec: 111
         }));
+        assert!(paths.contains(&TranscodingPath {
+            from_codec: PCM_S16LE,
+            to_codec: 0
+        }));
+        assert!(paths.contains(&TranscodingPath {
+            from_codec: 111,
+            to_codec: PCM_S16LE
+        }));
     }
 
     #[tokio::test]
@@ -378,6 +408,21 @@ mod tests {
         let pcma_data = result.unwrap();
         assert_eq!(pcma_data.len(), 80); // Same length for G.711 variants (10ms frame)
         assert_ne!(pcma_data, pcmu_data); // Should be different encoding
+    }
+
+    #[tokio::test]
+    async fn test_pcm_s16le_and_pcmu_transcoding_frame_sizes() {
+        let mut transcoder = create_test_transcoder();
+        let pcm = (0..320)
+            .map(|sample| ((sample as f32 * 0.2).sin() * 10_000.0) as i16)
+            .flat_map(i16::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let pcmu = transcoder.pcm_s16le_to_pcmu(&pcm).await.unwrap();
+        assert_eq!(pcmu.len(), 160);
+
+        let decoded = transcoder.pcmu_to_pcm_s16le(&pcmu).await.unwrap();
+        assert_eq!(decoded.len(), 640);
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 # Unified Workspace Release
 
-All 43 publishable workspace crates use `[workspace.package].version` and ship
+All 44 publishable workspace crates use `[workspace.package].version` and ship
 together. `scripts/release.sh` is the only release authority; it discovers the
 package graph from Cargo metadata and publishes normal/build dependencies
 before their dependents.
@@ -24,7 +24,7 @@ git push origin HEAD:main
 
 `prepare` rejects unstable SemVer strings, version downgrades, versions already
 present on crates.io, dirty trees, missing internal dependency versions, and a
-workspace inventory other than the expected 43 publishable packages. It
+workspace inventory other than the expected 44 publishable packages. It
 updates package inheritance and the lockfile transactionally and runs the
 workspace all-target check.
 
@@ -46,7 +46,7 @@ build a dependent `.crate` archive until that crate's new internal dependency
 version is visible on crates.io, so verification hashes archives only where
 the target-version registry graph is already resolvable. Its receipt under
 `target/release-logs/X.Y.Z/verification.json` binds the exact Git commit,
-ordered 43-crate graph, all 43 file-manifest hashes, and every archive hash
+ordered 44-crate graph, all 44 file-manifest hashes, and every archive hash
 available before publication.
 
 This verification is the version/package delta boundary. It does not claim
@@ -77,7 +77,7 @@ An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;
 any mismatch fails closed.
 
-After all 43 versions are visible, create the annotated tag and GitHub release:
+After all 44 versions are visible, create the annotated tag and GitHub release:
 
 ```sh
 git tag -a vX.Y.Z -m "rvoip X.Y.Z"
