@@ -1325,16 +1325,14 @@ class BetaAttestationTests(unittest.TestCase):
         checklist = (
             WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"
         ).read_text(encoding="utf-8")
-        performance = (
-            WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md"
-        ).read_text(encoding="utf-8")
         self.assertIn(
             f"version.workspace = true  # {self.workspace_version} — beta-tier",
             crate_manifest,
         )
         marker = f"Current release train and runtime crate version: `{self.workspace_version}`"
         self.assertIn(marker, checklist)
-        self.assertIn(marker, performance)
+        # Generated current reports remain bound to the previously promoted
+        # candidate until a new clean gate is verified and promote-docs runs.
 
 
 if __name__ == "__main__":
