@@ -303,7 +303,7 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
             (WORKSPACE_ROOT / "Cargo.toml").read_text(encoding="utf-8")
         )
         version = root_manifest["workspace"]["package"]["version"]
-        self.assertEqual(version, "0.2.5")
+        self.assertEqual(version, "0.3.2")
 
         active_files = [
             WORKSPACE_ROOT / "README.md",
@@ -329,13 +329,10 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
             )
 
     def test_release_procedures_pin_api_retention_and_regression_baseline(self) -> None:
-        documents = [
-            CRATE_DIR / "docs/BETA_RELEASE_CHECKLIST.md",
-            CRATE_DIR / "docs/SIP_SIGNALING_SINGLE_AUTHORITY_IMPLEMENTATION_PLAN.md",
-        ]
+        documents = [CRATE_DIR / "docs/BETA_RELEASE_CHECKLIST.md"]
         required = [
             "RVOIP_REQUIRE_API_TOOLS=1",
-            "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=120",
+            "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160",
             "BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z",
             "BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json",
         ]

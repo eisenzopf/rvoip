@@ -19,7 +19,7 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.1` release.** All 44 publishable workspace crates ship on the
+> **Unified `0.3.2` release.** All 44 publishable workspace crates ship on the
 > same version. The SIP product is the release-gated beta surface. WebRTC,
 > UCTP, MoQ, the cross-transport APIs, Amazon Connect, and extension crates are
 > available today as developer-preview surfaces unless their own documentation
@@ -48,7 +48,7 @@ them.
 
 - **Beta-qualified** — covered by the SIP release gate and its bounded
   interoperability, security, standards, performance, and soak evidence.
-- **Available — developer preview** — implemented and published in `0.3.1`,
+- **Available — developer preview** — implemented and included in `0.3.2`,
   but API-unstable or outside the SIP beta attestation.
 - **Planned** — not implemented; listed only in the [roadmap](#roadmap).
 
@@ -73,7 +73,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.1"
+rvoip-sip = "0.3.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -178,7 +178,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates publish at `0.3.1`. They are first-class workspace
+All 14 extension crates ship at `0.3.2`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
@@ -200,22 +200,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.1", features = ["voip-3"] }
+rvoip = { version = "0.3.2", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.1", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.2", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.1"
-rvoip-redis = "0.3.1"
-rvoip-audit = "0.3.1"
+rvoip-keycloak = "0.3.2"
+rvoip-redis = "0.3.2"
+rvoip-audit = "0.3.2"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,

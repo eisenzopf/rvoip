@@ -8,7 +8,7 @@
 //!
 //! ## Maturity tiers
 //!
-//! All published workspace crates are aligned at **`0.3.1`**. Maturity is
+//! All workspace crates are aligned at **`0.3.2`**. Maturity is
 //! product-specific rather than encoded in the version number: the `sip`
 //! surface is beta-qualified, while `webrtc`, `uctp`, the `voip-3`
 //! extensions, and `client` are available as developer previews.

@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased — Bridgefu 1.0 foundation
+## Unreleased
 
-The following reusable work is present in the coordinated working tree and is
-not yet a published rvoip release.
+No changes yet.
+
+## 0.3.2 — 2026-07-26
+
+This unified release advances the reusable Bridgefu 1.0 foundation across all
+44 publishable workspace crates.
 
 ### Added
 

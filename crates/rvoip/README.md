@@ -11,7 +11,7 @@ transport adapters. It always provides the transport-independent
 applications opt into WebRTC, UCTP, Vapi voice agents, client,
 application-builder, and conversation-extension surfaces.
 
-> **Unified `0.3.1` release.** The `sip` feature is the release-gated beta
+> **Unified `0.3.2` release.** The `sip` feature is the release-gated beta
 > surface. Other facade features are available today as developer previews:
 > they are implemented and published, but API-unstable or outside the SIP beta
 > attestation. Breaking changes remain possible before `1.0`.
@@ -22,7 +22,7 @@ The default feature is `sip`:
 
 ```toml
 [dependencies]
-rvoip = "0.3.1"
+rvoip = "0.3.2"
 ```
 
 The shared orchestrator is available with every feature combination:
@@ -72,13 +72,13 @@ Examples:
 
 ```toml
 # Shared conversation model plus SIP, WebRTC, UCTP, vCon, identity, and AI.
-rvoip = { version = "0.3.1", features = ["voip-3"] }
+rvoip = { version = "0.3.2", features = ["voip-3"] }
 
 # High-level cross-transport application builder.
-rvoip = { version = "0.3.1", features = ["app"] }
+rvoip = { version = "0.3.2", features = ["app"] }
 
 # Every facade-owned feature.
-rvoip = { version = "0.3.1", features = ["full"] }
+rvoip = { version = "0.3.2", features = ["full"] }
 ```
 
 `full` means every **facade feature**, not every crate in the rvoip workspace.
@@ -119,15 +119,15 @@ For example:
 
 ```toml
 [dependencies]
-rvoip = { version = "0.3.1", features = ["sip"] }
-rvoip-keycloak = "0.3.1"
-rvoip-redis = "0.3.1"
-rvoip-audit = "0.3.1"
+rvoip = { version = "0.3.2", features = ["sip"] }
+rvoip-keycloak = "0.3.2"
+rvoip-redis = "0.3.2"
+rvoip-audit = "0.3.2"
 ```
 
 ## Specialized workspace products
 
-These products publish in the unified `0.3.1` train but are intentionally not
+These products ship in the unified `0.3.2` train but are intentionally not
 facade feature flags:
 
 | Product | Crate | Why it stays separate |
@@ -143,7 +143,7 @@ Enable `app` to declare transports, roles, assignment, and callbacks through
 one builder:
 
 ```toml
-rvoip = { version = "0.3.1", features = ["app"] }
+rvoip = { version = "0.3.2", features = ["app"] }
 ```
 
 ```rust,no_run

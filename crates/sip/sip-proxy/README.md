@@ -25,7 +25,7 @@ you want the raw transaction-layer primitives:
 
 ```toml
 [dependencies]
-rvoip-sip-proxy = "0.3.1"
+rvoip-sip-proxy = "0.3.2"
 ```
 
 ## License

@@ -4,7 +4,7 @@ This document defines the promotion procedure. It does not duplicate a
 candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
-Current release train and runtime crate version: `0.2.5`.
+Current release train and runtime crate version: `0.3.2`.
 
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)
@@ -61,6 +61,59 @@ conditions. The beta profile additionally fixes these release-critical values:
 
 Changing a threshold or workload requires a reviewed policy change before the
 run. Reporting may not reinterpret or silently relax recorded policy.
+
+## Reference full invocation
+
+After three successful `perf_call_setup_2k_profile.sh clean` runs, export their
+absolute directories in chronological order and a host address reachable by
+the strict-UA environment. The release invocation is:
+
+```sh
+: "${RVOIP_STRICT_UA_HOST_IP:?export a reachable strict-UA host IP}"
+: "${BETA_CANONICAL_2K_RUN_DIRS:?export three canonical run directories}"
+
+RVOIP_STRICT_UA_HOST_IP="$RVOIP_STRICT_UA_HOST_IP" \
+RVOIP_REQUIRE_API_TOOLS=1 \
+BETA_REPORT_PACKAGE=1 \
+BETA_REQUIRE_CLEAN_SOURCE=1 \
+BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1 \
+BETA_CANONICAL_2K_RUN_DIRS="$BETA_CANONICAL_2K_RUN_DIRS" \
+BETA_RUN_LOCAL_PBX=1 \
+BETA_RESTORE_LOCAL_PBX=1 \
+BETA_PBX_PROVIDER=both \
+BETA_PBX_API=all \
+BETA_PBX_SCENARIO=all \
+BETA_PBX_G729_PROFILES="g729a g729ab" \
+BETA_RUN_SIPP=1 \
+BETA_SIPP_CPS="30 100 300 1000 2000" \
+BETA_SIPP_DIAGNOSTICS=0 \
+BETA_RUN_STRICT_UA=1 \
+BETA_RUN_FUZZ_SMOKE=1 \
+BETA_RUN_PERF_ALL=1 \
+BETA_PERF_REGRESSION_FAIL=1 \
+BETA_PERF_REGRESSION_BASELINE_ROOT=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z \
+BETA_PERF_REGRESSION_BASELINE_MANIFEST=crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json \
+BETA_RUN_BURST_SMOKE=1 \
+BETA_RUN_BURST_MATRIX=1 \
+BETA_BURST_MATRIX=all \
+BETA_RUN_LONG_SOAK=1 \
+BETA_PERF_MEDIA_CHURN_DURATION_SECS=120 \
+BETA_PERF_MEDIA_CHURN_ACTIVE_CALLS=30 \
+BETA_PERF_MONOLITHIC_SOAK_DURATION_SECS=3600 \
+BETA_PERF_MONOLITHIC_SOAK_ACTIVE_CALLS=30 \
+RVOIP_PERF_SOAK_DURATION_SECS=3600 \
+RVOIP_PERF_SOAK_ACTIVE_CALLS=500 \
+RVOIP_PERF_SOAK_MIN_HOLD_SECS=10 \
+RVOIP_PERF_SOAK_MAX_HOLD_SECS=360 \
+RVOIP_PERF_SOAK_CPS=0 \
+RVOIP_PERF_SOAK_DRAIN_CPS=10 \
+RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160 \
+RVOIP_PERF_MASS_TEARDOWN_CALLS=500 \
+RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS=30 \
+RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 \
+RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 \
+crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
+```
 
 ## Performance pass meaning
 

@@ -230,7 +230,7 @@ serde = { version = "1.0" }
     def test_current_workspace_has_all_44_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
         packages, ordered = release.validate_workspace(
-            root, "0.3.1", locked=True
+            root, "0.3.2", locked=True
         )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
         self.assertEqual(len(ordered), 44)
