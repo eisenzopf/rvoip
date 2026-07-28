@@ -17,6 +17,7 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use ring::signature::{Ed25519KeyPair, KeyPair};
@@ -25,7 +26,8 @@ use rvoip_auth_core::sig9421::{
     jcs_canonicalize, EnvelopeSignature, Sig9421Verifier, StaticKeyResolver,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::{auth, control};
+use rvoip_uctp::ids::EnvelopeId;
+use rvoip_uctp::payloads::{auth, connection, control};
 use rvoip_uctp::state::{
     default_v0_descriptor, rejecting_handler, Sig9421Policy, UctpCoordinator, UctpCoordinatorCaps,
     ENVELOPE_CHANNEL_CAP,
@@ -164,6 +166,7 @@ async fn tampered_signature_rejected_with_401_invalid_signature() {
         build_coordinator(verifier, Sig9421Policy::auth_envelopes_only());
 
     let mut hello = fresh_hello();
+    let hello_id = hello.id.clone();
     sign_envelope(&mut hello, "key:peer-1", &kp);
 
     // Tamper after signing: change a payload field. Signature canon
@@ -185,6 +188,18 @@ async fn tampered_signature_rejected_with_401_invalid_signature() {
     assert_eq!(err.code, 401);
     assert_eq!(err.category, "auth");
     assert_eq!(err.reason, "invalid-signature");
+
+    // Invalid signatures must not burn the coordinator replay slot. A valid
+    // signature over the same envelope ID must still reach the auth handler.
+    let mut corrected = fresh_hello();
+    corrected.id = hello_id;
+    sign_envelope(&mut corrected, "key:peer-1", &kp);
+    in_tx.send(corrected).await.expect("send corrected hello");
+    let challenge = tokio::time::timeout(std::time::Duration::from_secs(2), out_rx.recv())
+        .await
+        .expect("corrected reply within deadline")
+        .expect("channel open");
+    assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
 }
 
 #[tokio::test]
@@ -241,4 +256,59 @@ async fn unsigned_non_required_type_passes_gate() {
     }
     // And the in_reply_to must still correlate to our envelope id.
     assert_eq!(reply.in_reply_to.as_deref(), Some(env_id.as_str()));
+}
+
+#[tokio::test]
+async fn invalidly_signed_correlated_reply_is_rejected_before_waiter_delivery() {
+    let (kp, pubkey) = signing_keypair();
+    let mut resolver = StaticKeyResolver::new();
+    resolver.insert("key:peer-1", pubkey);
+    let verifier = Arc::new(Sig9421Verifier::new(Arc::new(resolver)));
+    let (coord, in_tx, mut out_rx) = build_coordinator(verifier, Sig9421Policy::opportunistic());
+    common::drive_auth_handshake(&in_tx, &mut out_rx).await;
+
+    let pending = coord.pending();
+    let waiter = {
+        let pending = Arc::clone(&pending);
+        tokio::spawn(async move {
+            pending
+                .wait_for(
+                    EnvelopeId::from_string("env_signed_request"),
+                    Duration::from_millis(250),
+                )
+                .await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    let mut reply = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::ConnectionUpdate,
+        id: format!("env_{}", Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: None,
+        sid: Some("sess_x".into()),
+        connid: Some("conn_x".into()),
+        in_reply_to: Some("env_signed_request".into()),
+        payload: serde_json::to_value(connection::ConnectionUpdate {
+            action: "renegotiate-media".into(),
+            streams: vec![],
+            codec_preferences: vec!["opus".into()],
+            details: serde_json::Value::Null,
+        })
+        .unwrap(),
+        signature: None,
+    };
+    sign_envelope(&mut reply, "key:peer-1", &kp);
+    reply.payload["action"] = serde_json::json!("tampered-after-signing");
+    in_tx.send(reply).await.unwrap();
+
+    let error = out_rx.recv().await.expect("signature error");
+    let payload: control::Error = error.decode_payload().unwrap();
+    assert_eq!(payload.code, 401);
+    assert_eq!(payload.reason, "invalid-signature");
+    assert!(
+        waiter.await.unwrap().is_err(),
+        "invalid reply must not resolve the correlated waiter"
+    );
 }

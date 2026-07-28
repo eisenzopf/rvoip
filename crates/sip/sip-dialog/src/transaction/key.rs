@@ -300,26 +300,18 @@ impl FromStr for TransactionKey {
         // Split by colons
         let parts: Vec<&str> = parts_str.split(':').collect();
         if parts.len() != 3 {
-            return Err(format!(
-                "Invalid transaction key format: {}, expected branch:METHOD:side",
-                s
-            ));
+            return Err("invalid transaction key format".to_string());
         }
 
         let branch = parts[0].to_string();
         let method = match Method::from_str(parts[1]) {
             Ok(m) => m,
-            Err(_) => return Err(format!("Invalid method: {}", parts[1])),
+            Err(_) => return Err("invalid transaction key method".to_string()),
         };
         let is_server = match parts[2] {
             "server" => true,
             "client" => false,
-            _ => {
-                return Err(format!(
-                    "Invalid side: {}, expected 'server' or 'client'",
-                    parts[2]
-                ))
-            }
+            _ => return Err("invalid transaction key side".to_string()),
         };
 
         Ok(Self::new(branch, method, is_server))
@@ -561,14 +553,32 @@ mod tests {
     fn test_transaction_key_from_str_error() {
         // Invalid format - not enough parts
         let invalid_str = "z9hG4bKalpha:INVITE";
-        assert!(TransactionKey::from_str(invalid_str).is_err());
+        assert_eq!(
+            TransactionKey::from_str(invalid_str).unwrap_err(),
+            "invalid transaction key format"
+        );
 
         // Empty method - actually invalid
         let empty_method = "z9hG4bKalpha::server";
-        assert!(TransactionKey::from_str(empty_method).is_err());
+        assert_eq!(
+            TransactionKey::from_str(empty_method).unwrap_err(),
+            "invalid transaction key method"
+        );
 
         // Invalid side
         let invalid_side = "z9hG4bKalpha:INVITE:invalid";
-        assert!(TransactionKey::from_str(invalid_side).is_err());
+        assert_eq!(
+            TransactionKey::from_str(invalid_side).unwrap_err(),
+            "invalid transaction key side"
+        );
+
+        for secret_input in [
+            "malformed-key-secret",
+            "branch-secret:INVITE:side-secret",
+            "branch-secret:INVITE:server:trailing-secret",
+        ] {
+            let error = TransactionKey::from_str(secret_input).unwrap_err();
+            assert!(!error.contains("secret"));
+        }
     }
 }

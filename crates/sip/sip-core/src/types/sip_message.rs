@@ -101,12 +101,56 @@ use crate::types::to::To;
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Message {
     /// SIP request
     Request(Request),
     /// SIP response
     Response(Response),
+}
+
+fn message_method_class(method: &Method) -> &'static str {
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
+
+impl fmt::Debug for Message {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Request(request) => formatter
+                .debug_struct("Message::Request")
+                .field("method", &message_method_class(&request.method))
+                .field("header_count", &request.headers.len())
+                .field("body_bytes", &request.body.len())
+                .finish(),
+            Self::Response(response) => formatter
+                .debug_struct("Message::Response")
+                .field("status", &response.status.as_u16())
+                .field("reason_present", &response.reason.is_some())
+                .field(
+                    "reason_bytes",
+                    &response.reason.as_ref().map_or(0, String::len),
+                )
+                .field("header_count", &response.headers.len())
+                .field("body_bytes", &response.body.len())
+                .finish(),
+        }
+    }
 }
 
 impl Message {
@@ -927,5 +971,99 @@ mod tests {
 
         // Check body
         assert_eq!(message.body(), "Hello World");
+    }
+
+    #[test]
+    fn response_and_message_debug_never_reflect_start_line_headers_or_body() {
+        const REASON: &str = "reason-message-debug-canary";
+        const CALL_ID: &str = "call-id-message-debug-canary";
+        const BODY: &str = "body-message-debug-canary";
+        const METHOD: &str = "method-message-debug-canary";
+        const URI: &str = "uri-message-debug-canary";
+
+        let mut response = Response::new(StatusCode::Ok);
+        response.reason = Some(REASON.into());
+        response
+            .headers
+            .push(TypedHeader::CallId(types::CallId::new(CALL_ID)));
+        response.body = Bytes::from_static(BODY.as_bytes());
+
+        for debug in [
+            format!("{response:?}"),
+            format!("{:?}", Message::Response(response.clone())),
+        ] {
+            for secret in [REASON, CALL_ID, BODY] {
+                assert!(!debug.contains(secret), "debug reflected {secret}: {debug}");
+            }
+            assert!(debug.contains("status"));
+            assert!(debug.contains("header_count"));
+            assert!(debug.contains("body_bytes"));
+        }
+
+        let request = Request::new(
+            Method::Extension(METHOD.into()),
+            format!("sip:{URI}@example.invalid").parse().unwrap(),
+        )
+        .with_header(TypedHeader::CallId(types::CallId::new(CALL_ID)))
+        .with_body(Bytes::from_static(BODY.as_bytes()));
+        let request_debug = format!("{:?}", Message::Request(request.clone()));
+        for secret in [METHOD, URI, CALL_ID, BODY] {
+            assert!(
+                !request_debug.contains(secret),
+                "message Debug reflected {secret}: {request_debug}"
+            );
+        }
+        assert!(request_debug.contains("extension"));
+
+        assert!(response.to_string().contains(REASON));
+        assert!(response.to_string().contains(CALL_ID));
+        assert!(response.to_string().contains(BODY));
+        assert!(request.to_string().contains(METHOD));
+        assert!(request.to_string().contains(URI));
+        let message = Message::Response(response);
+        let serialized = serde_json::to_string(&message).unwrap();
+        let restored: Message = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, message);
+    }
+
+    #[test]
+    fn response_and_message_cannot_regain_derived_or_value_bearing_debug() {
+        for (source, declaration, implementation, next_marker) in [
+            (
+                include_str!("sip_response.rs"),
+                "pub struct Response",
+                "impl fmt::Debug for Response",
+                "impl Response",
+            ),
+            (
+                include_str!("sip_message.rs"),
+                "pub enum Message",
+                "impl fmt::Debug for Message",
+                "impl Message",
+            ),
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            assert!(!source[derive_offset..declaration_offset].contains("Debug"));
+
+            let implementation_offset = source.find(implementation).unwrap();
+            let end = source[implementation_offset..]
+                .find(next_marker)
+                .map(|offset| implementation_offset + offset)
+                .unwrap();
+            let debug_source = &source[implementation_offset..end];
+            for forbidden in [
+                ".field(\"uri\"",
+                ".field(\"reason\"",
+                ".field(\"headers\"",
+                ".field(\"body\"",
+                "format_args!",
+            ] {
+                assert!(
+                    !debug_source.contains(forbidden),
+                    "{declaration} Debug regained value-bearing field through {forbidden}"
+                );
+            }
+        }
     }
 }

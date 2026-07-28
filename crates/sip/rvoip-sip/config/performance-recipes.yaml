@@ -77,7 +77,10 @@ performanceProfiles:
       sipUdpParseQueueCapacity: "$capacity"
       sipUdpParseDispatch: round-robin
       sipTransactionDispatchWorkers: 2
-      sipDialogDispatchWorkers: 4
+      # Incoming INVITE delivery awaits the authoritative session/state-machine
+      # commit. Keep enough call-id-sharded workers to avoid unrelated calls
+      # holding ACK/BYE transaction events behind that causal setup work.
+      sipDialogDispatchWorkers: 16
       sessionEventDispatcherWorkers: 4
       sipTransactionCommandChannelCapacity: 256
       serverCallCapacity: "$capacity"
@@ -125,7 +128,9 @@ performanceProfiles:
       sipUdpParseQueueCapacity: "$capacity"
       sipUdpParseDispatch: round-robin
       sipTransactionDispatchWorkers: 4
-      sipDialogDispatchWorkers: 4
+      # Dense bursts need additional call-id shards because each initial
+      # INVITE remains ordered with its authoritative session commit.
+      sipDialogDispatchWorkers: 32
       sessionEventDispatcherWorkers: 4
       sipTransactionCommandChannelCapacity: 512
       serverCallCapacity: "$capacity"
@@ -156,6 +161,25 @@ performanceProfiles:
         rtpBufferSize: 480
         rtpBufferInitialCount: 64
         rtpBufferMaxCount: 256
+
+  carrier-burst-uac-high-density:
+    description: "High-density UAC profile with sharded transport, transaction, dialog, and session delivery."
+    requiresCapacity: true
+    config:
+      channelCapacity: "$capacity"
+      sipUdpRecvBufferSize: 8388608
+      sipUdpSendBufferSize: 8388608
+      sipUdpParseWorkers: 4
+      sipUdpParseQueueCapacity: "$capacity"
+      sipUdpParseDispatch: round-robin
+      sipTransactionDispatchWorkers: 4
+      sipTransactionDispatchQueueCapacity: "$capacity"
+      sipDialogDispatchWorkers: 8
+      sipDialogDispatchQueueCapacity: "$capacity"
+      sessionEventDispatcherWorkers: 16
+      sessionEventDispatcherChannelCapacity: "$capacity"
+      sipTransactionCommandChannelCapacity: 512
+      mediaMode: enabled
 
   carrier-burst-memory-tight:
     description: "Carrier burst media profile with smaller RTP/media queues and media pools for memory-sensitive overload tests."

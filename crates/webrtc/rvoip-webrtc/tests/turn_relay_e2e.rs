@@ -1,8 +1,7 @@
 //! G9a — TURN relay E2E test.
 //!
-//! When Docker is available, spins up a coturn container and verifies the
-//! adapter can use it via `IceTransportPolicy::Relay`. When Docker isn't
-//! available, the tests skip gracefully (return without failing).
+//! Starts a hermetic in-process TURN server and verifies the adapter can use
+//! it via `IceTransportPolicy::Relay`. Relay setup failures fail the test.
 
 mod support {
     pub mod coturn_fixture;
@@ -15,7 +14,7 @@ use rvoip_core::capability::CodecInfo;
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::MediaStream;
 use rvoip_webrtc::config::IceTransportPolicy;
-use rvoip_webrtc::media::{from_tracks, silent_rtp_payload_for_ssrc};
+use rvoip_webrtc::media::{from_tracks, silent_opus_payload};
 use rvoip_webrtc::peer::{connect_loopback, PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::WebRtcConfig;
 use support::coturn_fixture::CoturnFixture;
@@ -24,10 +23,7 @@ use tokio::sync::Notify;
 #[tokio::test]
 async fn relay_policy_with_coturn_fixture_builds_peer() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let Some(coturn) = CoturnFixture::start().await else {
-        eprintln!("skipped: docker / coturn unavailable");
-        return;
-    };
+    let coturn = CoturnFixture::start().await.expect("start TURN fixture");
 
     let mut config = WebRtcConfig::loopback();
     config.ice_servers = vec![coturn.ice_config()];
@@ -49,9 +45,8 @@ async fn relay_policy_with_coturn_fixture_builds_peer() {
     )
     .await;
 
-    // RAII teardown via Drop.
     drop(peer);
-    drop(coturn);
+    coturn.close().await.expect("close TURN fixture");
 }
 
 /// G-tail closeout: two `RvoipPeerConnection`s, both configured with
@@ -65,12 +60,13 @@ async fn relay_policy_with_coturn_fixture_builds_peer() {
 /// 2. Media frames traverse the relay end to end (not just config plumbing).
 /// 3. The G4 `selected_pair` stats surface the relay candidate type.
 #[tokio::test]
+#[cfg_attr(
+    not(feature = "turn-fork-candidate"),
+    ignore = "requires the owner-reviewed UDP TURN alpha-fork candidate"
+)]
 async fn relay_only_two_peer_media_round_trip() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let Some(coturn) = CoturnFixture::start().await else {
-        eprintln!("skipped: docker / coturn unavailable");
-        return;
-    };
+    let coturn = CoturnFixture::start().await.expect("start TURN fixture");
 
     let mut config = WebRtcConfig::loopback();
     config.ice_servers = vec![coturn.ice_config()];
@@ -80,19 +76,10 @@ async fn relay_only_two_peer_media_round_trip() {
     config.gather_timeout_secs = 15;
 
     let (offerer, answerer) =
-        match tokio::time::timeout(Duration::from_secs(45), connect_loopback(&config)).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => {
-                eprintln!(
-                "skipped: relay handshake failed ({e}); coturn may not be reachable from this host"
-            );
-                return;
-            }
-            Err(_) => {
-                eprintln!("skipped: relay handshake timed out (coturn slow on this host)");
-                return;
-            }
-        };
+        tokio::time::timeout(Duration::from_secs(45), connect_loopback(&config))
+            .await
+            .expect("relay handshake timed out")
+            .expect("relay handshake failed");
 
     let codec = CodecInfo {
         name: "opus".into(),
@@ -136,7 +123,7 @@ async fn relay_only_two_peer_media_round_trip() {
     let mut inbound = answerer_stream.frames_in();
 
     for seq in 1..=20u16 {
-        let payload = silent_rtp_payload_for_ssrc(offerer_ssrc, seq, seq as u32 * 960);
+        let payload = silent_opus_payload();
         offerer_stream
             .frames_out()
             .send(rvoip_core::stream::MediaFrame {
@@ -182,5 +169,5 @@ async fn relay_only_two_peer_media_round_trip() {
 
     offerer.close().await.ok();
     answerer.close().await.ok();
-    drop(coturn);
+    coturn.close().await.expect("close TURN fixture");
 }

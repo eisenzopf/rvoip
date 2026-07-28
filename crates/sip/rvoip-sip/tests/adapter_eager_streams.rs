@@ -40,6 +40,7 @@ async fn originate_populates_connection_streams_eagerly() {
             direction: Direction::Outbound,
             capabilities: caps,
             transport: None,
+            context: Default::default(),
         },
     )
     .await

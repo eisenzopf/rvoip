@@ -3,6 +3,7 @@ use crate::error::Result;
 use crate::ids::{ConversationId, IdentityId, ParticipantId, TenantId};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use std::fmt;
 use std::sync::Arc;
 
 /// P10 — richer filter shape per PRD §10. Every field optional;
@@ -53,9 +54,18 @@ pub trait ConversationStore: Send + Sync {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct MemoryConversationStore {
     inner: Arc<DashMap<ConversationId, Conversation>>,
+}
+
+impl fmt::Debug for MemoryConversationStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MemoryConversationStore")
+            .field("conversation_count", &self.inner.len())
+            .finish()
+    }
 }
 
 impl MemoryConversationStore {
@@ -87,5 +97,38 @@ impl ConversationStore for MemoryConversationStore {
             .filter(|e| &e.value().tenant_id == tenant)
             .map(|e| e.value().clone())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use crate::conversation::ConversationPolicy;
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn memory_conversation_store_debug_is_aggregate_only() {
+        const CANARY: &str = "conversation-store-canary\r\nAuthorization: exposed";
+        let store = MemoryConversationStore::new();
+        let now = Utc::now();
+        store
+            .put(Conversation {
+                id: ConversationId::from_string(CANARY),
+                tenant_id: TenantId::from_string(CANARY),
+                state: ConversationState::Open,
+                policy: ConversationPolicy::Persistent,
+                participants: Vec::new(),
+                sessions: Vec::new(),
+                messages: Vec::new(),
+                opened_at: now,
+                closed_at: None,
+                last_activity_at: now,
+                metadata: HashMap::from([(CANARY.into(), CANARY.into())]),
+            })
+            .await
+            .unwrap();
+        let debug = format!("{store:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("conversation_count: 1"));
     }
 }

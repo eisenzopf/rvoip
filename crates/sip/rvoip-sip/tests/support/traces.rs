@@ -16,9 +16,9 @@ pub const SMOKE_HEADER_NAME: &str = "X-Test";
 /// Sentinel value paired with [`SMOKE_HEADER_NAME`].
 pub const SMOKE_HEADER_VALUE: &str = "smoke";
 
-/// `Config::local(name, port)` plus a fully-permissive sip_trace
-/// (no redaction, body included). The standard receiver config for
-/// §10 tests that need to inspect inbound wire bytes.
+/// `Config::local(name, port)` plus an explicit development-only verbatim
+/// trace policy. This loopback test helper intentionally treats SIP trace as
+/// a packet-capture oracle for §10 tests that inspect inbound wire values.
 pub fn receiver_config(name: &str, port: u16) -> Config {
     let mut cfg = Config::local(name, port);
     cfg.sip_trace = SipTraceConfig {
@@ -27,7 +27,9 @@ pub fn receiver_config(name: &str, port: u16) -> Config {
         include_body: true,
         ..SipTraceConfig::default()
     };
-    cfg
+    // The compatibility booleans alone retain production-safe redaction.
+    // Verbatim packet values require this deliberate test-only opt-in.
+    cfg.trace_passthrough_for_development()
 }
 
 /// Drains `events` until an inbound `SipTrace` whose `start_line`

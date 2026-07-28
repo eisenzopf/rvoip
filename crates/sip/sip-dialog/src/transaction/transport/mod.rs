@@ -3,14 +3,13 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, mpsc::error::TrySendError, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::Message;
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
-use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpParseDispatch, UdpSocketOptions,
@@ -91,6 +90,10 @@ pub struct TransportManagerConfig {
     pub tls_client_cert_path: Option<String>,
     /// Optional client private key for mutual TLS.
     pub tls_client_key_path: Option<String>,
+    /// Inbound TLS client-certificate verification policy. This is separate
+    /// from `tls_client_cert_path`, which is the certificate presented by
+    /// this endpoint when it acts as an outbound TLS client.
+    pub tls_server_client_auth: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
     /// **Dev only.** When `true`, server certificates are accepted
     /// without identity verification. The TLS handshake still runs
     /// end-to-end (encrypted), but a malicious peer can MITM. Required
@@ -133,6 +136,8 @@ impl Default for TransportManagerConfig {
             tls_extra_ca_path: None,
             tls_client_cert_path: None,
             tls_client_key_path: None,
+            tls_server_client_auth:
+                rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             tls_insecure_skip_verify: false,
         }
     }
@@ -149,6 +154,20 @@ fn transport_event_dispatch_queue_capacity(
     default_capacity: usize,
 ) -> usize {
     capacity.unwrap_or(default_capacity).max(1)
+}
+
+fn transport_event_class(event: &TransportEvent) -> &'static str {
+    match event {
+        TransportEvent::MessageReceived { .. } => "message_received",
+        TransportEvent::Error { .. } => "error",
+        TransportEvent::Closed => "closed",
+        TransportEvent::KeepAlivePongReceived { .. } => "keepalive_pong_received",
+        TransportEvent::ConnectionClosed { .. } => "connection_closed",
+        TransportEvent::ShutdownRequested => "shutdown_requested",
+        TransportEvent::ShutdownReady => "shutdown_ready",
+        TransportEvent::ShutdownNow => "shutdown_now",
+        TransportEvent::ShutdownComplete => "shutdown_complete",
+    }
 }
 
 fn transport_event_route_hash(event: &TransportEvent) -> Option<u64> {
@@ -235,7 +254,7 @@ async fn forward_transport_event(
         Err(TrySendError::Full(event)) => {
             let started = Instant::now();
             if let Err(e) = event_tx.send(event).await {
-                error!("Failed to forward transport event: {}", e);
+                error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to forward transport event");
                 false
             } else {
                 udp_diagnostics::record_manager_channel_backpressure(started.elapsed());
@@ -246,6 +265,38 @@ async fn forward_transport_event(
             error!("Failed to forward transport event: receiver closed");
             false
         }
+    }
+}
+
+async fn forward_control_event(
+    event_tx: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(event)) => matches!(
+            tokio::time::timeout(Duration::from_millis(100), event_tx.send(event)).await,
+            Ok(Ok(()))
+        ),
+        Err(TrySendError::Closed(_)) => false,
+    }
+}
+
+/// Forward a best-effort transport diagnostic without consuming lifecycle
+/// capacity or applying message backpressure. Errors describe already-dropped
+/// input; losing one under pressure must not terminate an otherwise healthy
+/// transport bridge.
+fn forward_diagnostic_event(
+    event_tx: &mpsc::Sender<TransportEvent>,
+    event: TransportEvent,
+) -> bool {
+    match event_tx.try_send(event) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            trace!("Dropping transport diagnostic under event backpressure");
+            true
+        }
+        Err(TrySendError::Closed(_)) => false,
     }
 }
 
@@ -291,13 +342,11 @@ pub struct TransportManager {
     default_transport: Option<Arc<dyn Transport>>,
     /// Default UDP transport (required for SIP)
     udp_transport: Option<Arc<dyn Transport>>,
-    /// Transport factory. Captured at construction so a future
-    /// dynamic transport-add path can spin new transports without
-    /// re-creating the factory.
-    #[allow(dead_code)]
-    transport_factory: Arc<TransportFactory>,
     /// Combined event channel
     event_tx: mpsc::Sender<TransportEvent>,
+    /// Separately reserved lifecycle/control lane.
+    control_event_tx: mpsc::Sender<TransportEvent>,
+    control_event_rx: Arc<Mutex<Option<mpsc::Receiver<TransportEvent>>>>,
     /// Flag indicating whether the manager is running
     running: Arc<Mutex<bool>>,
     /// Optional SIP trace publisher shared with the transaction manager.
@@ -310,30 +359,28 @@ impl TransportManager {
         config: TransportManagerConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let (event_tx, event_rx) = mpsc::channel(config.default_channel_capacity);
+        let control_capacity = (config.default_channel_capacity / 8).clamp(16, 256);
+        let (control_event_tx, control_event_rx) = mpsc::channel(control_capacity);
 
         let transports = Arc::new(Mutex::new(HashMap::new()));
-        let transport_factory = Arc::new(TransportFactory::new(TransportFactoryConfig {
-            channel_capacity: config.default_channel_capacity,
-            udp_recv_buffer_size: config.udp_recv_buffer_size,
-            udp_send_buffer_size: config.udp_send_buffer_size,
-            udp_parse_workers: config.udp_parse_workers,
-            udp_parse_queue_capacity: config.udp_parse_queue_capacity,
-            udp_parse_dispatch: config.udp_parse_dispatch,
-            ..Default::default()
-        }));
-
         let manager = Self {
             config,
             transports,
             default_transport: None,
             udp_transport: None,
-            transport_factory,
             event_tx,
+            control_event_tx,
+            control_event_rx: Arc::new(Mutex::new(Some(control_event_rx))),
             running: Arc::new(Mutex::new(false)),
             sip_trace: None,
         };
 
         Ok((manager, event_rx))
+    }
+
+    /// Take the single consumer for the reserved lifecycle/control lane.
+    pub async fn take_control_event_receiver(&self) -> Option<mpsc::Receiver<TransportEvent>> {
+        self.control_event_rx.lock().await.take()
     }
 
     /// Creates a new TransportManager with default configuration
@@ -366,7 +413,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!("Failed to initialize UDP transport on {}: {}", addr, e);
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize UDP transport");
                         initialization_errors
                             .push(format!("UDP transport on {} failed: {}", addr, e));
                     }
@@ -388,7 +435,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!("Failed to initialize TCP transport on {}: {}", addr, e);
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize TCP transport");
                         initialization_errors
                             .push(format!("TCP transport on {} failed: {}", addr, e));
                     }
@@ -441,7 +488,7 @@ impl TransportManager {
                             initialized = true;
                         }
                         Err(e) => {
-                            error!("Failed to initialize TLS transport on {}: {}", addr, e);
+                            error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize TLS transport");
                             initialization_errors
                                 .push(format!("TLS transport on {} failed: {}", addr, e));
                         }
@@ -466,10 +513,7 @@ impl TransportManager {
                         initialized = true;
                     }
                     Err(e) => {
-                        error!(
-                            "Failed to initialize WebSocket transport on {}: {}",
-                            addr, e
-                        );
+                        error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize WebSocket transport");
                         initialization_errors
                             .push(format!("WebSocket transport on {} failed: {}", addr, e));
                     }
@@ -493,7 +537,7 @@ impl TransportManager {
                                 initialized = true;
                             }
                             Err(e) => {
-                                error!("Failed to initialize WSS transport on {}: {}", addr, e);
+                                error!(%addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to initialize WSS transport");
                                 initialization_errors
                                     .push(format!("WSS transport on {} failed: {}", addr, e));
                             }
@@ -523,6 +567,13 @@ impl TransportManager {
     }
 
     /// Enable transport-boundary SIP tracing for this manager.
+    ///
+    /// The public lower-level path is safe without an application redactor:
+    /// request targets, non-allowlisted and folded header values, and body bytes
+    /// are replaced by fixed markers while `redact_sensitive_headers` remains
+    /// enabled. Verbatim diagnostics require an explicit
+    /// [`SipTraceConfig::verbatim_for_development`](rvoip_infra_common::events::cross_crate::SipTraceConfig::verbatim_for_development)
+    /// override.
     pub fn enable_sip_trace(
         &mut self,
         owner_id: String,
@@ -622,16 +673,19 @@ impl TransportManager {
             // (incoming SIP messages, errors) flow through the same
             // pipeline as UDP/TCP — no separate forwarder task needed.
             let (transport, _rx_unused) = match self.config.tls_role {
-                TlsRole::ClientOnly => {
-                    TlsTransport::client_only(bind_addr, Some(self.event_tx.clone()), client_cfg)
-                        .await
-                        .map_err(|e| {
-                            Error::Transport(format!(
-                                "Failed to configure client-only TLS transport at {}: {}",
-                                bind_addr, e
-                            ))
-                        })?
-                }
+                TlsRole::ClientOnly => TlsTransport::client_only_with_control_sender(
+                    bind_addr,
+                    Some(self.event_tx.clone()),
+                    self.control_event_tx.clone(),
+                    client_cfg,
+                )
+                .await
+                .map_err(|e| {
+                    Error::Transport(format!(
+                        "Failed to configure client-only TLS transport at {}: {}",
+                        bind_addr, e
+                    ))
+                })?,
                 TlsRole::ServerOnly | TlsRole::ClientAndServer => {
                     let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
                         Error::Transport("TLS enabled but tls_cert_path is missing".into())
@@ -640,21 +694,26 @@ impl TransportManager {
                         Error::Transport("TLS enabled but tls_key_path is missing".into())
                     })?;
                     let result = if self.config.tls_role == TlsRole::ServerOnly {
-                        TlsTransport::bind_server_only_with_client_config(
+                        TlsTransport::bind_server_only_with_configs_handshake_and_control_sender(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
+                            self.control_event_tx.clone(),
                             client_cfg,
+                            self.config.tls_server_client_auth.clone(),
+                            rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
                         )
                         .await
                     } else {
-                        TlsTransport::bind_with_client_config(
+                        TlsTransport::bind_with_configs_and_control_sender(
                             bind_addr,
                             Path::new(cert_path),
                             Path::new(key_path),
                             Some(self.event_tx.clone()),
+                            self.control_event_tx.clone(),
                             client_cfg,
+                            self.config.tls_server_client_auth.clone(),
                         )
                         .await
                     };
@@ -675,15 +734,19 @@ impl TransportManager {
             let arc: Arc<dyn Transport> = Arc::new(transport);
             (arc, format!("tls:{}", actual))
         } else {
-            let (transport, rx) =
-                TcpTransport::bind(bind_addr, Some(self.config.default_channel_capacity), None)
-                    .await
-                    .map_err(|e| {
-                        Error::Transport(format!(
-                            "Failed to bind TCP transport to {}: {}",
-                            bind_addr, e
-                        ))
-                    })?;
+            let (transport, rx) = TcpTransport::bind_with_control_sender(
+                bind_addr,
+                Some(self.config.default_channel_capacity),
+                None,
+                Some(self.control_event_tx.clone()),
+            )
+            .await
+            .map_err(|e| {
+                Error::Transport(format!(
+                    "Failed to bind TCP transport to {}: {}",
+                    bind_addr, e
+                ))
+            })?;
             let arc: Arc<dyn Transport> = Arc::new(transport);
             // TCP path retains its own event channel; bridge it into
             // the manager's combined channel.
@@ -733,54 +796,45 @@ impl TransportManager {
         // WSS return NotImplemented. bind_with_client_tls() is gated on
         // the `wss` feature; plain WS always uses bind().
         #[cfg(feature = "ws")]
-        let result = {
-            #[cfg(feature = "wss")]
-            if secure {
-                use rvoip_sip_transport::transport::ws::TlsClientConfig;
-                let client_tls = TlsClientConfig {
-                    extra_ca_path: self
-                        .config
-                        .tls_extra_ca_path
-                        .as_deref()
-                        .map(std::path::PathBuf::from),
-                    insecure_skip_verify: self.config.tls_insecure_skip_verify,
-                    client_cert_path: self
-                        .config
-                        .tls_client_cert_path
-                        .as_deref()
-                        .map(std::path::PathBuf::from),
-                    client_key_path: self
-                        .config
-                        .tls_client_key_path
-                        .as_deref()
-                        .map(std::path::PathBuf::from),
-                };
-                WebSocketTransport::bind_with_client_tls(
-                    bind_addr,
-                    true,
-                    _cert_path,
-                    _key_path,
-                    Some(self.config.default_channel_capacity),
-                    Some(client_tls),
-                )
-                .await
-            } else {
-                WebSocketTransport::bind(
-                    bind_addr,
-                    false,
-                    None,
-                    None,
-                    Some(self.config.default_channel_capacity),
-                )
-                .await
-            }
-            #[cfg(not(feature = "wss"))]
-            WebSocketTransport::bind(
+        let result = if secure {
+            let client_tls = rvoip_sip_transport::transport::tls::TlsClientConfig {
+                extra_ca_path: self
+                    .config
+                    .tls_extra_ca_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+                insecure_skip_verify: self.config.tls_insecure_skip_verify,
+                client_cert_path: self
+                    .config
+                    .tls_client_cert_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+                client_key_path: self
+                    .config
+                    .tls_client_key_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+            };
+            WebSocketTransport::bind_with_tls_configs_handshake_and_control_sender(
                 bind_addr,
-                secure,
+                true,
                 _cert_path,
                 _key_path,
                 Some(self.config.default_channel_capacity),
+                Some(client_tls),
+                self.config.tls_server_client_auth.clone(),
+                rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
+                self.control_event_tx.clone(),
+            )
+            .await
+        } else {
+            WebSocketTransport::bind_with_control_sender(
+                bind_addr,
+                false,
+                None,
+                None,
+                Some(self.config.default_channel_capacity),
+                self.control_event_tx.clone(),
             )
             .await
         };
@@ -935,9 +989,27 @@ impl TransportManager {
             let fallback_dispatch_worker = Arc::new(AtomicUsize::new(0));
 
             while let Some(event) = rx.recv().await {
-                trace!("Received event from {}: {:?}", transport_name, event);
+                trace!(
+                    transport_name_len = transport_name.len(),
+                    event_class = transport_event_class(&event),
+                    "Received transport event"
+                );
                 let mut event = event;
                 mark_transport_manager_forwarded(&mut event, Instant::now());
+
+                if matches!(&event, TransportEvent::Error { .. }) {
+                    if !forward_diagnostic_event(&self.event_tx, event) {
+                        break;
+                    }
+                    continue;
+                }
+
+                if rvoip_sip_transport::transport::is_control_event(&event) {
+                    if !forward_control_event(&self.control_event_tx, event).await {
+                        break;
+                    }
+                    continue;
+                }
 
                 // Forward the event to the main event channel. Avoid the
                 // async send fast path unless the channel is actually full so
@@ -957,6 +1029,10 @@ impl TransportManager {
 
     /// Sends a message using the appropriate transport
     pub async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        rvoip_sip_core::validation::validate_typed_outbound_message(&message).map_err(|_| {
+            Error::Transport("outbound typed SIP message failed wire-safety validation".into())
+        })?;
+
         // Get the appropriate transport
         let transport = self
             .get_transport_for_destination(destination)
@@ -978,7 +1054,7 @@ impl TransportManager {
 
         for (key, transport) in transports.iter() {
             if let Err(e) = transport.close().await {
-                error!("Failed to close transport {}: {}", key, e);
+                error!(transport_key_len=key.len(), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to close transport");
             }
         }
 
@@ -1153,7 +1229,7 @@ impl<T: rvoip_sip_transport::Transport + ?Sized> TransportCapabilitiesExt for T 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use rvoip_sip_transport::transport::TransportType;
 
     fn dispatch_request(
@@ -1179,8 +1255,10 @@ mod tests {
             source: "127.0.0.1:5060".parse().unwrap(),
             destination: "127.0.0.1:5061".parse().unwrap(),
             transport_type: TransportType::Udp,
+            flow_id: None,
             raw_bytes: None,
             timing: None,
+            connection_metadata: None,
         })
     }
 
@@ -1292,6 +1370,71 @@ mod tests {
             "Failed to close transport manager: {:?}",
             result
         );
+    }
+
+    #[tokio::test]
+    async fn reserved_control_receiver_has_single_owner() {
+        let (manager, _events) = TransportManager::new(TransportManagerConfig::default())
+            .await
+            .unwrap();
+        assert!(manager.take_control_event_receiver().await.is_some());
+        assert!(manager.take_control_event_receiver().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn saturated_diagnostic_lane_drops_error_without_closing_bridge() {
+        let (events, mut receiver) = mpsc::channel(1);
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "first malformed datagram".into(),
+            },
+        ));
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "dropped malformed datagram".into(),
+            },
+        ));
+
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TransportEvent::Error { .. })
+        ));
+        assert!(forward_diagnostic_event(
+            &events,
+            TransportEvent::Error {
+                error: "later diagnostic".into(),
+            },
+        ));
+        assert!(matches!(
+            receiver.recv().await,
+            Some(TransportEvent::Error { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dialog_transport_manager_rejects_invalid_reason_before_lookup() {
+        let config = TransportManagerConfig {
+            enable_udp: false,
+            enable_tcp: false,
+            enable_ws: false,
+            enable_tls: false,
+            bind_addresses: Vec::new(),
+            ..Default::default()
+        };
+        let (manager, _rx) = TransportManager::new(config).await.unwrap();
+        let message = Message::Response(
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: dialog-manager-secret"),
+        );
+
+        let error = manager
+            .send_message(message, "127.0.0.1:9".parse().unwrap())
+            .await
+            .expect_err("invalid reason must fail before transport lookup");
+        assert!(matches!(error, Error::Transport(_)));
+        assert!(!error.to_string().contains("dialog-manager-secret"));
+        assert!(!error.to_string().contains("No transport available"));
     }
 
     #[tokio::test]

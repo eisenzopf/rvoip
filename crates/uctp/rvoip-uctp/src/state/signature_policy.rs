@@ -64,7 +64,10 @@ impl Sig9421Policy {
         required.insert(MessageType::StreamSubscribe);
         required.insert(MessageType::StreamUnsubscribe);
         required.insert(MessageType::DtmfSend);
+        required.insert(MessageType::MessageSend);
+        required.insert(MessageType::ConnectionQuality);
         required.insert(MessageType::AuthRefresh);
+        required.insert(MessageType::IdentityStepUpResponse);
         Self {
             required_types: required,
         }

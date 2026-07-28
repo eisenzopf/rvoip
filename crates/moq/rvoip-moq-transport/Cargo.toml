@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2024-2026 Cloudflare Inc., Luke Curley, Mike English and contributors
+# SPDX-FileCopyrightText: 2023-2024 Luke Curley and contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+[package]
+name = "rvoip-moq-transport"
+description = "Attributed rvoip fork of the MOQT draft-19 transport"
+authors = ["moq-rs contributors"]
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+version.workspace = true
+edition = "2021"
+
+keywords = ["quic", "http3", "webtransport", "media", "live"]
+categories = ["multimedia", "network-programming", "web-programming"]
+
+[lib]
+name = "moq_transport"
+path = "src/lib.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytes = "1"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "io-util", "sync"] }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+url = "2"
+
+web-transport = { workspace = true }
+
+paste = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_with = "3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

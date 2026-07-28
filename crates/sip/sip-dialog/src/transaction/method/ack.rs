@@ -64,6 +64,33 @@ use uuid::Uuid;
 
 use crate::transaction::error::{Error, Result};
 
+/// Compact immutable fields from an INVITE that are required to construct a
+/// dialog-forming 2xx ACK after the client transaction has been retired.
+///
+/// This short-lived template is derived after an active INVITE or its compact
+/// serialized tombstone is parsed for ACK generation. It is not retained for
+/// the late-2xx horizon.
+#[derive(Clone, Debug)]
+pub(crate) struct Invite2xxAckTemplate {
+    request_uri: Uri,
+    from: Option<From>,
+    call_id: Option<CallId>,
+    cseq_num: Option<u32>,
+    via_transport: String,
+}
+
+impl Invite2xxAckTemplate {
+    pub(crate) fn from_invite(request: &Request) -> Self {
+        Self {
+            request_uri: request.uri().clone(),
+            from: request.from().cloned(),
+            call_id: request.call_id().cloned(),
+            cseq_num: request.cseq().map(|cseq| cseq.seq),
+            via_transport: request.first_via_transport().unwrap_or("UDP").to_owned(),
+        }
+    }
+}
+
 /// Creates an ACK request for a 2xx response to an INVITE.
 ///
 /// According to RFC 3261 Sections 13.2.2.4 and 17.1.1.3, ACK for 2xx responses:
@@ -139,6 +166,19 @@ pub fn create_ack_for_2xx(
         ));
     }
 
+    create_ack_for_2xx_from_template(
+        &Invite2xxAckTemplate::from_invite(invite_request),
+        ok_response,
+        local_addr,
+    )
+}
+
+/// Construct a 2xx ACK from the compact fields retained by a completed INVITE.
+pub(crate) fn create_ack_for_2xx_from_template(
+    template: &Invite2xxAckTemplate,
+    ok_response: &Response,
+    local_addr: &SocketAddr,
+) -> Result<Request> {
     // Validate that this is a 2xx response
     let status_code = ok_response.status_code();
     if status_code < 200 || status_code >= 300 {
@@ -154,15 +194,16 @@ pub fn create_ack_for_2xx(
             if let Some(contact_addr) = contact.addresses().next() {
                 contact_addr.uri.clone()
             } else {
-                invite_request.uri().clone()
+                template.request_uri.clone()
             }
         } else {
-            invite_request.uri().clone()
+            template.request_uri.clone()
         };
 
     // Extract required headers
-    let from = invite_request
-        .from()
+    let from = template
+        .from
+        .as_ref()
         .ok_or_else(|| Error::Other("INVITE request missing From header".to_string()))?
         .clone();
 
@@ -172,20 +213,18 @@ pub fn create_ack_for_2xx(
         .ok_or_else(|| Error::Other("Response missing To header".to_string()))?
         .clone();
 
-    let call_id = invite_request
-        .call_id()
+    let call_id = template
+        .call_id
+        .as_ref()
         .ok_or_else(|| Error::Other("INVITE request missing Call-ID header".to_string()))?
         .clone();
 
-    let cseq_num = invite_request
-        .cseq()
-        .ok_or_else(|| Error::Other("INVITE request missing CSeq header".to_string()))?
-        .seq;
+    let cseq_num = template
+        .cseq_num
+        .ok_or_else(|| Error::Other("INVITE request missing CSeq header".to_string()))?;
 
     // Create a new branch ID
     let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
-    let via_transport = invite_request.first_via_transport().unwrap_or("UDP");
-
     // Build the ACK request
     let mut builder = SimpleRequestBuilder::new(Method::Ack, &request_uri.to_string())
         .map_err(|e| Error::Other(format!("Failed to create ACK builder: {}", e)))?;
@@ -195,7 +234,11 @@ pub fn create_ack_for_2xx(
         .header(TypedHeader::To(to))
         .header(TypedHeader::CallId(call_id))
         .header(TypedHeader::CSeq(CSeq::new(cseq_num, Method::Ack)))
-        .via(&local_addr.to_string(), via_transport, Some(&branch))
+        .via(
+            &local_addr.to_string(),
+            &template.via_transport,
+            Some(&branch),
+        )
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)));
 

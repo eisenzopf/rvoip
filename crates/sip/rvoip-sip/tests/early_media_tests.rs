@@ -40,6 +40,37 @@ fn ringing_send_early_media_transitions_to_early_media() {
 }
 
 #[test]
+fn uac_ringing_183_negotiates_media_before_final_answer() {
+    let table = load();
+    let transition = table
+        .get(&key(
+            Role::UAC,
+            CallState::Ringing,
+            EventType::Dialog183SessionProgress,
+        ))
+        .expect("UAC Ringing + 183 transition must exist");
+
+    assert_eq!(transition.next_state, Some(CallState::EarlyMedia));
+    assert!(
+        transition.actions.contains(&Action::NegotiateSDPAsUAC),
+        "183 with SDP must install the negotiated RTP/SRTP context"
+    );
+    assert!(transition.actions.contains(&Action::StartMediaSession));
+
+    let ringing = table
+        .get(&key(
+            Role::UAC,
+            CallState::Initiating,
+            EventType::Dialog180Ringing,
+        ))
+        .expect("UAC Initiating + 180 transition must exist");
+    assert!(
+        !ringing.actions.contains(&Action::NegotiateSDPAsUAC),
+        "180 without SDP must not negotiate media security"
+    );
+}
+
+#[test]
 fn early_media_send_early_media_self_loops() {
     // RFC 3262 allows multiple reliable provisionals per call (each with a
     // fresh RSeq). The self-loop here is what supports re-emission — e.g.

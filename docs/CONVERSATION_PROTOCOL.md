@@ -129,7 +129,7 @@ A binary encoding is planned for v1. Likely candidates: CBOR (general-purpose, s
 ### 4.1 QUIC (native apps, embedded, server-server)
 
 - **Signaling:** one bidirectional stream per logical UCTP channel. Each envelope is length-prefixed (4-byte big-endian uint32 followed by JSON bytes). Multiple envelopes per stream are allowed.
-- **Media:** QUIC datagrams. One datagram per RTP packet. Datagrams carry standard RTP headers preceded by a 4-byte UCTP datagram header (`stream_id` reference, packet sequence). See §10.
+- **Media:** QUIC datagrams. One datagram per RTP packet. Datagrams carry standard RTP headers preceded by an 8-byte UCTP datagram header (version, flags, `stream_local_id`, and datagram sequence). See §10.
 - **Connection migration:** QUIC's native connection migration is supported; the UCTP-level Connection ID is invariant across QUIC migration events.
 - **Multiple Streams over one QUIC connection:** allowed. The UCTP `Connection` is decoupled from the QUIC connection — one QUIC connection can carry several UCTP `Connection`s (e.g., for a Participant with multiple Devices on the same physical link, though that's unusual).
 
@@ -339,6 +339,19 @@ The serialized base therefore includes the full set of envelope fields: `v`, `ty
 | Required-signed envelope arrives without `signature` field | `error 401-1 invalid-signature` reason=`signature-required` |
 
 Whether a given envelope type requires a signature is policy: by default no envelopes do, but a deployment MAY configure the verifier to require signatures on (for example) every envelope whose `sid` references a Session at `user-authorized` assurance.
+
+#### 5.5.2 rvoip secure coordinator profile
+
+Production rvoip coordinators apply the same security gate to commands and correlated replies before either reaches an application waiter: protocol version, bounded identifier validation, configured RFC 9421 verification, authenticated-principal expiry, command scope, replay protection, then Session/Connection ownership. A reply with a mismatched type, `sid`, or `connid` cannot consume another route's waiter.
+
+- Envelope and correlation IDs are limited to 128 bytes of URI-unreserved ASCII. `env_<uuid>` is canonical, but bounded ULIDs and application-defined IDs remain valid.
+- Replay caches default to five minutes and are bounded. Pre-authentication `auth.hello`/`auth.response` use a separate eight-entry cache; security-cleared authenticated traffic uses the normal bounded cache.
+- Default scopes are `uctp:session` for call/Connection control, `uctp:data` for DTMF and `message.send`, and `uctp:subscribe` for subscribe/unsubscribe. The explicit `legacy_permissive` coordinator profile disables these checks for trusted development only.
+- Payload identity fields such as `session.invite.from` and `connection.offer.by_participant` are assertions, not authority. The coordinator derives and canonicalizes ownership from the retained `AuthenticatedPrincipal`.
+- Secure defaults cap one peer at 32 Sessions, 64 Connections, and 16 cumulative opened Streams per Connection. Reoffers cannot reset the Stream budget.
+- A substrate peer must authenticate within 10 seconds. Principal expiry, signaling EOF, coordinator backpressure cancellation, or any peer-pump exit drains the coordinator and cancels sibling signaling/media tasks. QUIC and WebTransport media readers and writers share that lifecycle.
+
+Raw QUIC, WebTransport, and WebSocket use this same coordinator profile. Deployments that change a limit or scope policy should expose the effective values in diagnostics.
 
 ### 5.6 IdentityAssurance gradient
 
@@ -869,7 +882,9 @@ Emitted once a media Stream begins flowing on a Connection (after `connection.re
 }
 ```
 
-`stream_local_id` is the per-Connection 16-bit handle that appears in datagram headers (§10.1). It is assigned at `connection.ready` and announced here.
+`stream_local_id` is the physical-peer-scoped 16-bit handle that appears in
+datagram headers (§10.1). It is assigned while processing `connection.ready`,
+after the substrate has bound the negotiated Stream, and is announced here.
 
 #### `stream.closed` (S→C)
 ```json
@@ -980,7 +995,7 @@ A Session may contain any number of Participants (N ≥ 1). voip-3 §6.3 / §9.8
 - **Participant lifecycle** is per §7.2 — `session.participant.joined` / `session.participant.left` is multicast to every other Participant when membership changes.
 - **Stream publishing.** Each Participant's Streams are advertised via their own `connection.offer` / `connection.answer`. After `connection.ready` fires, those Streams become available for subscription by other Participants.
 - **Stream subscription is explicit.** After `session.started`, a Participant subscribes to peer Streams via `stream.subscribe`. They may subscribe by `strm_id`, by `from_participant`, or by Stream `kind`. A Participant does **not** receive media from Streams it has not subscribed to.
-- **Datagram fan-out is server-side.** A publisher's datagrams (§10.1) arrive at the server keyed by the publisher's Connection and `stream_local_id`. The server forwards each datagram to every Participant subscribed to that `strm_id`, rewriting the `stream_local_id` in the UCTP datagram header to match the subscriber's Connection-local mapping. `datagram_seq` MAY be re-numbered per egress Connection.
+- **Datagram fan-out is server-side.** A publisher's datagrams (§10.1) arrive at the server keyed by the authenticated physical peer and `stream_local_id`. The server resolves that binding to its canonical Session, Connection, and Stream, then forwards each datagram to every Participant subscribed to that `strm_id`, rewriting `stream_local_id` to the subscriber peer's binding. `datagram_seq` MAY be re-numbered per egress binding.
 - **Active speaker** (advisory, optional): the server MAY emit `stream.active-speaker` envelopes when audio-energy detection identifies a new dominant speaker. Clients MUST NOT rely on it for correctness; missing events do not mean no one is speaking.
 - **No SFU envelopes.** Servers may use SFU/MCU machinery internally (selective forwarding, simulcast/SVC, mixing matrices) to scale large Sessions, but no SFU-specific envelopes are exposed at the UCTP wire. From a Participant's perspective, the protocol is unchanged regardless of N.
 - **1:1 is N=2.** A 2-Participant Session uses the same envelopes and lifecycle as a 50-Participant Session.
@@ -1125,8 +1140,11 @@ Messages are atomic asynchronous events in a Conversation. They do not require a
     "msg_id": "msg_...",
     "from": "part_...",
     "to": ["part_..."] | "all",
+    "label": "rvoip-messages",        // DataChannel/application label; defaults to rvoip-messages
     "content_type": "text/plain" | "application/json" | "application/octet-stream" | "image/png" | ...,
-    "body": "Hello, world",            // string for text/json; base64 for binary; reference URL for large attachments
+    "reliability": { "mode": "reliable_ordered" },
+    "body": "Hello, world",
+    "body_encoding": "utf8" | "base64",
     "attachments": [
       {
         "id": "...",
@@ -1139,6 +1157,22 @@ Messages are atomic asynchronous events in a Conversation. They do not require a
   }
 }
 ```
+
+`label`, `reliability`, and `body_encoding` are optional on legacy payloads;
+their defaults are `rvoip-messages`, `reliable_ordered`, and `utf8`. New
+senders MUST set `body_encoding` to `base64` for arbitrary binary bytes. The
+current UCTP QUIC, WebTransport, and WebSocket signaling substrates provide
+reliable ordered delivery and reject other reliability modes with an explicit
+`422 capability/unsupported-reliability` error. A gateway may preserve richer
+reliability policies when translating directly to a WebRTC DataChannel.
+
+The transport-neutral DataMessage profile carries `connid` on the envelope so
+the receiver can enforce connection ownership and route the event to the
+correct application leg. Message IDs, labels, content types, and decoded
+bodies are validated before delivery; the decoded inline body limit is 64 KiB.
+For this profile, `payload.from` is a legacy presentation field only: receivers
+MUST derive the authoritative sender from the authenticated Connection route
+and MUST NOT use `from` for ownership or authorization.
 
 ### 9.2 Receipts
 
@@ -1229,13 +1263,29 @@ UCTP datagram header:
 +---------------------------------------------------------------+
 ```
 
-- `stream_local_id` is a per-Connection 16-bit handle assigned at `connection.ready`. Maps to a `strm_*` Stream ID.
+- `stream_local_id` is a physical-peer-scoped, nonzero 16-bit handle bound at
+  `connection.ready`. It maps to an authenticated canonical Session,
+  Connection, and `strm_*` Stream ID and is never reused during that peer's
+  lifetime.
 - `datagram_seq` lets the receiver detect loss and out-of-order arrival without parsing RTP.
 - Payload is a standard RTP packet (RFC 3550) including its own RTP header.
 
+An implementation MUST reject a datagram whose bytes after the UCTP header are
+only codec payload or otherwise do not parse as a complete RTP packet. In
+`rvoip-uctp`, the checked `pack_rtp_datagram` / `unpack_rtp_datagram` APIs are
+the conformance boundary; the opaque raw framing helpers exist only for alpha
+API compatibility.
+
 This dual-header approach (UCTP datagram header + RTP header) is intentional: the UCTP header makes the datagram self-describing for routing across many Connections on one substrate; the RTP header preserves compatibility with codecs and tooling that expect RTP.
 
-In multi-party Sessions (§7.7), `stream_local_id` is **Connection-local** — the server rewrites this header when fanning a publisher's datagram out to subscribers, mapping the publisher's Stream ID to each subscriber's Connection-local handle. The RTP payload is forwarded unchanged. `datagram_seq` MAY be re-numbered per egress Connection if loss-detection statistics differ.
+In multi-party Sessions (§7.7), `stream_local_id` names a Stream binding for a
+logical Connection, but every value MUST also be unique and non-reused for the
+lifetime of the physical QUIC/WebTransport peer. The datagram header contains
+no Session or Connection discriminator, so per-Connection allocators would be
+ambiguous when one peer multiplexes several Connections. The server rewrites
+this header during fanout using the subscriber peer's global handle while
+leaving the RTP payload unchanged. `datagram_seq` MAY be re-numbered per
+egress Connection if loss-detection statistics differ.
 
 ### 10.2 WebSocket fallback (no datagrams)
 

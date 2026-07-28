@@ -21,16 +21,38 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rvoip_sip_core::{HeaderName, Message, Request, TypedHeader, Uri};
+use rvoip_sip_core::{
+    types::uri::Host, HeaderName, HeaderValue, Message, Method, Request, TypedHeader, Uri,
+};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    OutboundTlsConfig, Transport,
+    OutboundTlsConfig, Transport, TransportAuthority, TransportFlowId, TransportRoute,
 };
 use tracing::{debug, trace, warn};
 
 use super::SipTraceRuntime;
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
+
+fn safe_method_label(method: &Method) -> &'static str {
+    match method {
+        Method::Invite => "INVITE",
+        Method::Ack => "ACK",
+        Method::Bye => "BYE",
+        Method::Cancel => "CANCEL",
+        Method::Register => "REGISTER",
+        Method::Options => "OPTIONS",
+        Method::Subscribe => "SUBSCRIBE",
+        Method::Notify => "NOTIFY",
+        Method::Update => "UPDATE",
+        Method::Refer => "REFER",
+        Method::Info => "INFO",
+        Method::Message => "MESSAGE",
+        Method::Prack => "PRACK",
+        Method::Publish => "PUBLISH",
+        Method::Extension(_) => "extension",
+    }
+}
 
 /// Returns the URI that determines the next hop for an outbound request:
 /// the first Route URI when present, otherwise the Request-URI. Route
@@ -40,6 +62,43 @@ pub fn next_hop_uri_for_request(request: &Request) -> Uri {
     top_route_uri(request).unwrap_or_else(|| request.uri().clone())
 }
 
+/// Returns the exact URI that determines the next hop, rejecting a Route
+/// header that is present but cannot be interpreted structurally. Callers
+/// that allocate a transaction or resolve DNS must use this fallible form;
+/// treating an unusable Route as absent can bypass an explicitly selected
+/// proxy and send credentials or signaling to the Request-URI instead.
+pub fn exact_next_hop_uri_for_request(request: &Request) -> TransportResult<Uri> {
+    for header in &request.headers {
+        if !header.name().wire_eq(&HeaderName::Route) {
+            continue;
+        }
+        let next_hop = match header {
+            TypedHeader::Route(route) => route.first().map(|entry| {
+                let mut uri = entry.0.uri.clone();
+                for param in &entry.0.params {
+                    uri = uri.with_parameter(param.clone());
+                }
+                uri
+            }),
+            TypedHeader::Other(_, HeaderValue::Route(entries)) => entries.first().map(|entry| {
+                let mut uri = entry.0.uri.clone();
+                for param in &entry.0.params {
+                    uri = uri.with_parameter(param.clone());
+                }
+                uri
+            }),
+            _ => None,
+        };
+        return next_hop.ok_or_else(|| {
+            TransportError::UnsupportedTransport(
+                "outbound request contains an unusable Route header".into(),
+            )
+        });
+    }
+
+    Ok(request.uri().clone())
+}
+
 /// Returns the top Route URI for an outbound request, when a route set is
 /// present.
 pub fn top_route_uri(request: &Request) -> Option<Uri> {
@@ -47,7 +106,7 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
         .headers
         .iter()
         .filter_map(|header| {
-            if header.name() == HeaderName::Route {
+            if header.name().wire_eq(&HeaderName::Route) {
                 match header {
                     TypedHeader::Route(route) => route.first().map(|entry| {
                         let mut uri = entry.0.uri.clone();
@@ -56,6 +115,15 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
                         }
                         uri
                     }),
+                    TypedHeader::Other(_, HeaderValue::Route(entries)) => {
+                        entries.first().map(|entry| {
+                            let mut uri = entry.0.uri.clone();
+                            for param in &entry.0.params {
+                                uri = uri.with_parameter(param.clone());
+                            }
+                            uri
+                        })
+                    }
                     _ => None,
                 }
             } else {
@@ -70,6 +138,78 @@ pub fn top_route_uri(request: &Request) -> Option<Uri> {
 /// and §19.1.5 (`;transport=` URI parameter).
 pub fn select_transport_for_request(request: &Request) -> TransportType {
     select_transport_for_uri(&next_hop_uri_for_request(request))
+}
+
+fn validate_next_hop_transport(uri: &Uri) -> TransportResult<()> {
+    use rvoip_sip_core::types::uri::Scheme;
+
+    if matches!(uri.scheme(), Scheme::Sips)
+        && uri.transport().is_some_and(|transport| {
+            matches!(transport.to_ascii_lowercase().as_str(), "udp" | "ws")
+        })
+    {
+        return Err(TransportError::UnsupportedTransport(
+            "sips: next hop cannot use an insecure transport".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Enforce the `sips:` confidentiality boundary at the final transport
+/// dispatch seam. Resolvers and callers may supply an explicit route, but
+/// that route is advisory and must never downgrade a secure next hop to a
+/// plaintext transport.
+fn validate_message_route_security(
+    message: &Message,
+    route: &TransportRoute,
+) -> TransportResult<()> {
+    let Message::Request(request) = message else {
+        return Ok(());
+    };
+    validate_request_route_security(request, route)
+}
+
+/// Validate an explicitly supplied client route before transaction
+/// allocation. This duplicates the final multiplexer guard intentionally:
+/// callers may construct a `TransactionManager` over a concrete TCP transport
+/// and must receive the same no-downgrade guarantee.
+pub(crate) fn validate_request_route_security(
+    request: &Request,
+    route: &TransportRoute,
+) -> TransportResult<()> {
+    use rvoip_sip_core::types::uri::Scheme;
+
+    let next_hop = exact_next_hop_uri_for_request(request)?;
+    validate_next_hop_transport(&next_hop)?;
+    let selected_transport = route
+        .transport_type
+        .unwrap_or_else(|| select_transport_for_uri(&next_hop));
+    // A sips Request-URI is an end-to-end confidentiality requirement. A
+    // plaintext `sip:` top Route must not downgrade its first hop.
+    if (matches!(request.uri().scheme(), Scheme::Sips) || matches!(next_hop.scheme(), Scheme::Sips))
+        && !matches!(selected_transport, TransportType::Tls | TransportType::Wss)
+    {
+        return Err(TransportError::UnsupportedTransport(
+            "sips: request route cannot use a plaintext transport".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the authority-bearing route selected for an outbound request.
+pub fn transport_route_for_request(
+    request: &Request,
+    destination: SocketAddr,
+) -> TransportResult<TransportRoute> {
+    let next_hop = exact_next_hop_uri_for_request(request)?;
+    validate_next_hop_transport(&next_hop)?;
+    let authority = match &next_hop.host {
+        Host::Domain(domain) => TransportAuthority::dns(domain.clone())?,
+        Host::Address(address) => TransportAuthority::ip(*address),
+    };
+    Ok(TransportRoute::new(destination)
+        .with_transport_type(select_transport_for_uri(&next_hop))
+        .with_authority(authority))
 }
 
 /// Select transport from a URI alone.
@@ -100,6 +240,12 @@ pub struct MultiplexedTransport {
 }
 
 impl MultiplexedTransport {
+    fn transport_for_kind(&self, kind: TransportType) -> Option<Arc<dyn Transport>> {
+        self.transports.get(&kind).cloned().or_else(|| {
+            (self.default.default_transport_type() == kind).then(|| self.default.clone())
+        })
+    }
+
     /// Build a multiplexer.
     ///
     /// `default` is what `local_addr()` reports and is used whenever a
@@ -142,14 +288,11 @@ impl MultiplexedTransport {
     /// - **Requests** route by top Route URI when present, otherwise
     ///   Request-URI, then by scheme + `;transport=` parameter (RFC 3261
     ///   §8.1.2, §19.1.5, §26.2).
-    /// - **Responses** must go back over the same connection-oriented
-    ///   transport that received the matching request (RFC 3261 §17.2,
-    ///   §18.2.2). The transport layer doesn't have the request
-    ///   transport stamped on the response, so we approximate: ask each
-    ///   connection-oriented transport whether it currently has a live
-    ///   connection to `destination`. The first match wins; otherwise
-    ///   fall through to the default (UDP — connectionless, can send
-    ///   anywhere).
+    /// - **Responses** on a connection-oriented transport must carry the
+    ///   exact ingress [`TransportRoute`]. Socket addresses are not flow
+    ///   identities: multiple authenticated, inbound, or outbound flows may
+    ///   share an address. Callers must supply an explicit UDP route or an
+    ///   exact stream route; this address-only path always fails closed.
     fn pick_transport(
         &self,
         message: &Message,
@@ -157,57 +300,36 @@ impl MultiplexedTransport {
     ) -> TransportResult<(TransportType, Arc<dyn Transport>)> {
         match message {
             Message::Request(request) => {
-                let want = select_transport_for_request(request);
+                let next_hop = next_hop_uri_for_request(request);
+                validate_next_hop_transport(&next_hop)?;
+                let want = select_transport_for_uri(&next_hop);
                 if let Some(transport) = self.transports.get(&want) {
                     trace!(
                         "MultiplexedTransport: routing {} to {} via URI selection",
-                        request.method(),
+                        safe_method_label(&request.method),
                         want
                     );
                     Ok((want, transport.clone()))
-                } else if want == TransportType::Tls {
+                } else if matches!(want, TransportType::Tls | TransportType::Wss) {
                     Err(TransportError::UnsupportedTransport(format!(
                         "{} requires TLS by next-hop URI {}, but no TLS transport is registered",
-                        request.method(),
+                        safe_method_label(&request.method),
                         next_hop_uri_for_request(request)
                     )))
                 } else {
                     debug!(
                         "MultiplexedTransport: no {} transport registered for {}; falling back to default",
                         want,
-                        request.method()
+                        safe_method_label(&request.method)
                     );
                     Ok((self.default.default_transport_type(), self.default.clone()))
                 }
             }
             Message::Response(response) => {
-                // Probe connection-oriented transports first. We do
-                // *not* probe UDP because it always reports false (the
-                // default-impl `has_connection_to` is a no-op) and it's
-                // the fallback anyway.
-                for kind in [
-                    TransportType::Tls,
-                    TransportType::Tcp,
-                    TransportType::Wss,
-                    TransportType::Ws,
-                ] {
-                    if let Some(transport) = self.transports.get(&kind) {
-                        if transport.has_connection_to(destination) {
-                            trace!(
-                                "MultiplexedTransport: routing {} response to {} via {} (existing connection)",
-                                response.status_code(),
-                                destination,
-                                kind
-                            );
-                            return Ok((kind, transport.clone()));
-                        }
-                    }
-                }
-                trace!(
-                    "MultiplexedTransport: no connection-oriented transport has {}; routing response via default",
-                    destination
-                );
-                Ok((self.default.default_transport_type(), self.default.clone()))
+                Err(TransportError::InvalidState(format!(
+                    "{} response to {destination} requires an explicit UDP route or exact connection flow",
+                    response.status_code()
+                )))
             }
         }
     }
@@ -246,7 +368,15 @@ impl MultiplexedTransport {
         let mut last_err: Option<TransportError> = None;
         for (idx, target) in candidates.iter().enumerate() {
             let attempt = idx + 1;
-            match self.send_message(message.clone(), target.addr).await {
+            let mut route = match &message {
+                Message::Request(request) => transport_route_for_request(request, target.addr)?,
+                Message::Response(_) => TransportRoute::new(target.addr),
+            };
+            route.transport_type = Some(target.transport);
+            if let Some(authority) = &target.authority {
+                route.authority = Some(authority.clone());
+            }
+            match self.send_message_via(message.clone(), route).await {
                 Ok(()) => {
                     if attempt > 1 {
                         debug!(
@@ -261,18 +391,12 @@ impl MultiplexedTransport {
                     return Ok(target.addr);
                 }
                 Err(e) if e.is_recoverable() => {
-                    debug!(
-                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed recoverably: {}; trying next",
-                        attempt, total, target.transport, target.addr, e
-                    );
+                    debug!(attempt, total, transport=%target.transport, destination=%target.addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Candidate failed recoverably; trying next");
                     last_err = Some(e);
                     continue;
                 }
                 Err(e) => {
-                    debug!(
-                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed non-recoverably: {}; aborting failover",
-                        attempt, total, target.transport, target.addr, e
-                    );
+                    debug!(attempt, total, transport=%target.transport, destination=%target.addr, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Candidate failed non-recoverably; aborting failover");
                     return Err(e);
                 }
             }
@@ -288,12 +412,103 @@ impl Transport for MultiplexedTransport {
         Ok(self.local_addr)
     }
 
-    async fn send_message(
+    async fn send_message(&self, message: Message, destination: SocketAddr) -> TransportResult<()> {
+        let route = match &message {
+            Message::Request(request) => transport_route_for_request(request, destination)?,
+            Message::Response(_) => TransportRoute::new(destination),
+        };
+        self.send_message_via(message, route).await
+    }
+
+    async fn send_message_via(
+        &self,
+        message: Message,
+        route: TransportRoute,
+    ) -> TransportResult<()> {
+        self.send_message_on_route(message, route).await.map(|_| ())
+    }
+
+    async fn prepare_message_route(
+        &self,
+        message: &Message,
+        mut route: TransportRoute,
+    ) -> TransportResult<TransportRoute> {
+        rvoip_sip_core::validation::validate_typed_outbound_message(message).map_err(|_| {
+            TransportError::ProtocolError(
+                "outbound typed SIP message failed wire-safety validation".into(),
+            )
+        })?;
+        validate_message_route_security(message, &route)?;
+        let kind = match route.transport_type {
+            Some(kind) => kind,
+            None => match message {
+                Message::Request(request) => {
+                    let next_hop = next_hop_uri_for_request(request);
+                    validate_next_hop_transport(&next_hop)?;
+                    select_transport_for_uri(&next_hop)
+                }
+                Message::Response(_) => {
+                    return Err(TransportError::InvalidState(
+                        "response route is missing its transport type".into(),
+                    ));
+                }
+            },
+        };
+        let transport = self.transport_for_kind(kind).ok_or_else(|| {
+            TransportError::UnsupportedTransport(format!(
+                "prepared route transport {kind} is not registered"
+            ))
+        })?;
+        route.transport_type = Some(kind);
+        transport.prepare_message_route(message, route).await
+    }
+
+    async fn send_message_on_route(
         &self,
         mut message: Message,
-        destination: SocketAddr,
-    ) -> TransportResult<()> {
-        let (mut transport_type, mut transport) = self.pick_transport(&message, destination)?;
+        route: TransportRoute,
+    ) -> TransportResult<TransportRoute> {
+        let destination = route.destination;
+        rvoip_sip_core::validation::validate_typed_outbound_message(&message).map_err(|_| {
+            TransportError::ProtocolError(
+                "outbound typed SIP message failed wire-safety validation".into(),
+            )
+        })?;
+        validate_message_route_security(&message, &route)?;
+
+        let (mut transport_type, mut transport) = if let Some(flow_id) = route.flow_id {
+            let kind = route.transport_type.ok_or_else(|| {
+                TransportError::InvalidState(format!(
+                    "exact flow {} is missing its transport type",
+                    flow_id.as_u64()
+                ))
+            })?;
+            let transport = self.transport_for_kind(kind).ok_or_else(|| {
+                TransportError::UnsupportedTransport(format!(
+                    "exact response flow transport {kind} is not registered"
+                ))
+            })?;
+            (kind, transport)
+        } else if let (Message::Response(_), Some(kind)) = (&message, route.transport_type) {
+            let transport = self.transport_for_kind(kind).ok_or_else(|| {
+                TransportError::UnsupportedTransport(format!(
+                    "response route transport {kind} is not registered"
+                ))
+            })?;
+            (kind, transport)
+        } else if let Some(kind) = route.transport_type {
+            if let Some(transport) = self.transport_for_kind(kind) {
+                (kind, transport)
+            } else if matches!(kind, TransportType::Tls | TransportType::Wss) {
+                return Err(TransportError::UnsupportedTransport(format!(
+                    "secure request route transport {kind} is not registered"
+                )));
+            } else {
+                self.pick_transport(&message, destination)?
+            }
+        } else {
+            self.pick_transport(&message, destination)?
+        };
 
         // RFC 3261 §18.1.1 — if the URI selected UDP but the request
         // would exceed UDP's safe size, fail over to TCP when a TCP
@@ -308,7 +523,7 @@ impl Transport for MultiplexedTransport {
                         Some(tcp) => {
                             debug!(
                                 "MultiplexedTransport: {} is {} bytes (UDP limit {}), failing over to TCP per RFC 3261 §18.1.1",
-                                req.method(), size, limit
+                                safe_method_label(&req.method), size, limit
                             );
                             if let Message::Request(ref mut req_mut) = message {
                                 crate::transaction::utils::set_top_via_protocol(req_mut, "TCP");
@@ -319,7 +534,7 @@ impl Transport for MultiplexedTransport {
                         None => {
                             warn!(
                                 "MultiplexedTransport: {} is {} bytes (UDP limit {}) and no TCP transport is registered; refusing to send",
-                                req.method(), size, limit
+                                safe_method_label(&req.method), size, limit
                             );
                             return Err(TransportError::MessageTooLarge(size));
                         }
@@ -338,7 +553,11 @@ impl Transport for MultiplexedTransport {
                 &message,
             );
         }
-        transport.send_message(message, destination).await
+        let mut selected_route = route;
+        selected_route.transport_type = Some(transport_type);
+        transport
+            .send_message_on_route(message, selected_route)
+            .await
     }
 
     /// Same dispatch as [`Transport::send_message`] (URI-based transport
@@ -399,47 +618,58 @@ impl Transport for MultiplexedTransport {
     }
 
     async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> TransportResult<()> {
-        for kind in [
-            TransportType::Tls,
-            TransportType::Tcp,
-            TransportType::Wss,
-            TransportType::Ws,
-        ] {
-            if let Some(transport) = self.transports.get(&kind) {
-                if transport.has_connection_to(destination) {
-                    trace!(
-                        "MultiplexedTransport: routing pre-built SIP bytes to {} via {} (existing connection)",
-                        destination,
-                        kind
-                    );
-                    return transport.send_message_raw(bytes, destination).await;
-                }
-            }
-        }
+        self.send_message_raw_via(bytes, TransportRoute::new(destination))
+            .await
+    }
 
-        trace!(
-            "MultiplexedTransport: routing pre-built SIP bytes to {} via default",
-            destination
-        );
-        self.default.send_message_raw(bytes, destination).await
+    async fn send_message_raw_via(
+        &self,
+        bytes: Bytes,
+        route: TransportRoute,
+    ) -> TransportResult<()> {
+        let destination = route.destination;
+        if let Some(flow_id) = route.flow_id {
+            let kind = route.transport_type.ok_or_else(|| {
+                TransportError::InvalidState(format!(
+                    "exact raw response flow {} is missing its transport type",
+                    flow_id.as_u64()
+                ))
+            })?;
+            let transport = self.transport_for_kind(kind).ok_or_else(|| {
+                TransportError::UnsupportedTransport(format!(
+                    "raw response flow transport {kind} is not registered"
+                ))
+            })?;
+            return transport.send_message_raw_via(bytes, route).await;
+        }
+        if let Some(kind) = route.transport_type {
+            if kind != TransportType::Udp && route.authority.is_none() {
+                return Err(TransportError::InvalidState(format!(
+                    "raw SIP on {kind} requires an outbound authority or exact flow"
+                )));
+            }
+            let transport = self.transport_for_kind(kind).ok_or_else(|| {
+                TransportError::UnsupportedTransport(format!(
+                    "raw SIP route transport {kind} is not registered"
+                ))
+            })?;
+            return transport.send_message_raw_via(bytes, route).await;
+        }
+        Err(TransportError::InvalidState(format!(
+            "raw SIP to {destination} requires an explicit UDP route, outbound authority, or exact flow"
+        )))
     }
 
     async fn close(&self) -> TransportResult<()> {
         let mut last_err: Option<TransportError> = None;
         for (kind, transport) in &self.transports {
             if let Err(e) = transport.close().await {
-                warn!(
-                    "MultiplexedTransport: error closing {} transport: {}",
-                    kind, e
-                );
+                warn!(transport=%kind, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error closing transport");
                 last_err = Some(e);
             }
         }
         if let Err(e) = self.default.close().await {
-            warn!(
-                "MultiplexedTransport: error closing default transport: {}",
-                e
-            );
+            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error closing default transport");
             last_err = Some(e);
         }
         match last_err {
@@ -457,23 +687,27 @@ impl Transport for MultiplexedTransport {
     }
 
     fn supports_tcp(&self) -> bool {
-        self.transports.contains_key(&TransportType::Tcp)
+        self.transports.contains_key(&TransportType::Tcp) || self.default.supports_tcp()
     }
 
     fn supports_tls(&self) -> bool {
-        self.transports.contains_key(&TransportType::Tls)
+        self.transports.contains_key(&TransportType::Tls) || self.default.supports_tls()
     }
 
     fn supports_ws(&self) -> bool {
-        self.transports.contains_key(&TransportType::Ws)
+        self.transports.contains_key(&TransportType::Ws) || self.default.supports_ws()
     }
 
     fn supports_wss(&self) -> bool {
-        self.transports.contains_key(&TransportType::Wss)
+        self.transports.contains_key(&TransportType::Wss) || self.default.supports_wss()
     }
 
     fn default_transport_type(&self) -> TransportType {
         self.default.default_transport_type()
+    }
+
+    fn max_safe_message_size(&self) -> usize {
+        self.default.max_safe_message_size()
     }
 
     fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
@@ -485,7 +719,7 @@ impl Transport for MultiplexedTransport {
             TransportType::Wss,
             TransportType::Ws,
         ] {
-            if let Some(transport) = self.transports.get(&kind) {
+            if let Some(transport) = self.transport_for_kind(kind) {
                 if transport.has_connection_to(remote_addr) {
                     return true;
                 }
@@ -494,33 +728,87 @@ impl Transport for MultiplexedTransport {
         false
     }
 
-    async fn send_raw(&self, destination: SocketAddr, data: Bytes) -> TransportResult<()> {
-        // RFC 5626 §3.5.1 keep-alive: probe connection-oriented
-        // transports for an existing flow to `destination` and dispatch
-        // bare bytes on the first that matches. UDP is never asked —
-        // RFC 5626 UDP keep-alive uses STUN, out of scope here.
-        for kind in [
-            TransportType::Tls,
-            TransportType::Tcp,
-            TransportType::Wss,
-            TransportType::Ws,
-        ] {
-            if let Some(transport) = self.transports.get(&kind) {
-                if transport.has_connection_to(destination) {
-                    trace!(
-                        "MultiplexedTransport::send_raw routing {} bytes to {} via {}",
-                        data.len(),
-                        destination,
-                        kind
-                    );
-                    return transport.send_raw(destination, data).await;
+    fn flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        if let Some(kind) = route.transport_type {
+            return self
+                .transport_for_kind(kind)
+                .and_then(|transport| transport.flow_id_for_route(route));
+        }
+        let mut found = None;
+        for transport in self.transports.values() {
+            let Some(flow_id) = transport.flow_id_for_route(route) else {
+                continue;
+            };
+            if found.replace(flow_id).is_some() {
+                return None;
+            }
+        }
+        if !self
+            .transports
+            .contains_key(&self.default.default_transport_type())
+        {
+            if let Some(flow_id) = self.default.flow_id_for_route(route) {
+                if found.replace(flow_id).is_some() {
+                    return None;
                 }
             }
         }
-        Err(TransportError::InvalidState(format!(
-            "No connection-oriented transport has a live connection to {} for send_raw",
-            destination
-        )))
+        found
+    }
+
+    async fn resolve_flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        if let Some(kind) = route.transport_type {
+            return match self.transport_for_kind(kind) {
+                Some(transport) => transport.resolve_flow_id_for_route(route).await,
+                None => None,
+            };
+        }
+
+        let mut found = None;
+        for transport in self.transports.values() {
+            let Some(flow_id) = transport.resolve_flow_id_for_route(route).await else {
+                continue;
+            };
+            if found.replace(flow_id).is_some() {
+                return None;
+            }
+        }
+        if !self
+            .transports
+            .contains_key(&self.default.default_transport_type())
+        {
+            if let Some(flow_id) = self.default.resolve_flow_id_for_route(route).await {
+                if found.replace(flow_id).is_some() {
+                    return None;
+                }
+            }
+        }
+        found
+    }
+
+    async fn send_raw(&self, destination: SocketAddr, data: Bytes) -> TransportResult<()> {
+        self.send_raw_via(TransportRoute::new(destination), data)
+            .await
+    }
+
+    async fn send_raw_via(&self, route: TransportRoute, data: Bytes) -> TransportResult<()> {
+        let flow_id = route.flow_id.ok_or_else(|| {
+            TransportError::InvalidState(
+                "raw lifecycle traffic requires an exact connection flow".into(),
+            )
+        })?;
+        let kind = route.transport_type.ok_or_else(|| {
+            TransportError::InvalidState(format!(
+                "exact raw flow {} is missing its transport type",
+                flow_id.as_u64()
+            ))
+        })?;
+        let transport = self.transport_for_kind(kind).ok_or_else(|| {
+            TransportError::UnsupportedTransport(format!(
+                "raw flow transport {kind} is not registered"
+            ))
+        })?;
+        transport.send_raw_via(route, data).await
     }
 }
 
@@ -543,11 +831,26 @@ mod tests {
     }
 
     #[test]
-    fn select_uri_transport_param_wins_over_scheme() {
-        // `sips:` would imply TLS, but explicit `;transport=tcp` overrides.
-        // (Not a real-world combo, but verifies parameter precedence.)
+    fn select_uri_sips_tcp_hint_still_requires_tls() {
         let uri = Uri::from_str("sips:bob@example.com;transport=tcp").unwrap();
-        assert_eq!(select_transport_for_uri(&uri), TransportType::Tcp);
+        assert_eq!(select_transport_for_uri(&uri), TransportType::Tls);
+    }
+
+    #[test]
+    fn secure_route_builder_rejects_insecure_uri_hints() {
+        let destination = "127.0.0.1:5061".parse().unwrap();
+        for target in [
+            "sips:bob@example.com;transport=udp",
+            "sips:bob@example.com;transport=ws",
+        ] {
+            let Message::Request(request) = make_invite(target) else {
+                unreachable!();
+            };
+            assert!(matches!(
+                transport_route_for_request(&request, destination),
+                Err(TransportError::UnsupportedTransport(_))
+            ));
+        }
     }
 
     #[test]
@@ -585,9 +888,11 @@ mod tests {
         addr: SocketAddr,
         sends: AtomicUsize,
         raw_sends: AtomicUsize,
+        raw_message_sends: AtomicUsize,
         /// Whether this transport reports as having a connection to any
         /// destination. Used to drive `send_raw` / response-path probes.
         has_conn: std::sync::atomic::AtomicBool,
+        last_route: std::sync::Mutex<Option<TransportRoute>>,
     }
 
     impl CountingTransport {
@@ -597,7 +902,9 @@ mod tests {
                 addr: "127.0.0.1:0".parse().unwrap(),
                 sends: AtomicUsize::new(0),
                 raw_sends: AtomicUsize::new(0),
+                raw_message_sends: AtomicUsize::new(0),
                 has_conn: std::sync::atomic::AtomicBool::new(false),
+                last_route: std::sync::Mutex::new(None),
             })
         }
 
@@ -609,8 +916,16 @@ mod tests {
             self.raw_sends.load(Ordering::SeqCst)
         }
 
+        fn raw_message_count(&self) -> usize {
+            self.raw_message_sends.load(Ordering::SeqCst)
+        }
+
         fn set_has_connection(&self, v: bool) {
             self.has_conn.store(v, Ordering::SeqCst);
+        }
+
+        fn last_route(&self) -> Option<TransportRoute> {
+            self.last_route.lock().unwrap().clone()
         }
     }
 
@@ -629,8 +944,27 @@ mod tests {
             Ok(())
         }
 
+        async fn send_message_via(
+            &self,
+            _message: Message,
+            route: TransportRoute,
+        ) -> TransportResult<()> {
+            *self.last_route.lock().unwrap() = Some(route);
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn send_raw(&self, _destination: SocketAddr, _data: Bytes) -> TransportResult<()> {
             self.raw_sends.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn send_message_raw(
+            &self,
+            _bytes: Bytes,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.raw_message_sends.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -652,6 +986,14 @@ mod tests {
 
         fn supports_tls(&self) -> bool {
             self.label == "tls"
+        }
+
+        fn supports_ws(&self) -> bool {
+            self.label == "ws"
+        }
+
+        fn supports_wss(&self) -> bool {
+            self.label == "wss"
         }
 
         fn has_connection_to(&self, _remote_addr: SocketAddr) -> bool {
@@ -696,6 +1038,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_plaintext_route_cannot_downgrade_sips() {
+        let udp = CountingTransport::new("udp");
+        let tcp = CountingTransport::new("tcp");
+        let tls = CountingTransport::new("tls");
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone());
+        by_flavour.insert(TransportType::Tcp, tcp.clone());
+        by_flavour.insert(TransportType::Tls, tls.clone());
+        let mux = MultiplexedTransport::new(udp.clone(), by_flavour, None).unwrap();
+        let destination = "127.0.0.1:5061".parse().unwrap();
+        let message = make_invite("sips:bob@example.com");
+
+        let error = mux
+            .send_message_via(
+                message.clone(),
+                TransportRoute::new(destination).with_transport_type(TransportType::Tcp),
+            )
+            .await
+            .expect_err("explicit plaintext route must be rejected");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
+
+        let malicious_candidate = rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+            destination,
+            TransportType::Tcp,
+        );
+        let error = mux
+            .send_message_with_failover(message, &[malicious_candidate])
+            .await
+            .expect_err("resolver candidate must not bypass sips policy");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
+        assert_eq!(udp.count(), 0);
+        assert_eq!(tcp.count(), 0);
+        assert_eq!(tls.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn plaintext_top_route_cannot_downgrade_sips_request_uri() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::route::Route;
+
+        let udp = CountingTransport::new("udp");
+        let tls = CountingTransport::new("tls");
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone());
+        by_flavour.insert(TransportType::Tls, tls.clone());
+        let mux = MultiplexedTransport::new(udp.clone(), by_flavour, None).unwrap();
+        let proxy: Uri = "sip:proxy.example.com;lr;transport=udp".parse().unwrap();
+        let request = SimpleRequestBuilder::new(Method::Invite, "sips:bob@example.com")
+            .unwrap()
+            .from("alice", "sips:alice@example.com", Some("tagA"))
+            .to("bob", "sips:bob@example.com", None)
+            .call_id("sips-route-downgrade")
+            .cseq(1)
+            .header(TypedHeader::Route(Route::with_uri(proxy)))
+            .build();
+
+        let error = mux
+            .send_message_via(
+                Message::Request(request),
+                TransportRoute::new("127.0.0.1:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Udp),
+            )
+            .await
+            .expect_err("sips Request-URI requires a secure first hop");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
+        assert_eq!(udp.count(), 0);
+        assert_eq!(tls.count(), 0);
+    }
+
+    #[test]
+    fn semantic_other_route_is_used_and_unstructured_route_is_rejected() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::route::Route;
+
+        let route: Uri = "sips:proxy.example.com:5061;lr".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:target.example.com")
+            .unwrap()
+            .from("alice", "sip:alice@example.com", Some("tagA"))
+            .to("target", "sip:target.example.com", None)
+            .call_id("semantic-other-route")
+            .cseq(1)
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("rOuTe".into()),
+            HeaderValue::Route(Route::with_uri(route.clone()).0),
+        ));
+        assert_eq!(top_route_uri(&request), Some(route));
+
+        request.headers.pop();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Other("Route".into()),
+            HeaderValue::Raw(b"<sip:unparsed.example.com;lr>".to_vec()),
+        ));
+        let error = validate_request_route_security(
+            &request,
+            &TransportRoute::new("127.0.0.1:5060".parse().unwrap())
+                .with_transport_type(TransportType::Udp),
+        )
+        .expect_err("unstructured semantic Route must fail closed");
+        assert!(matches!(error, TransportError::UnsupportedTransport(_)));
+    }
+
+    #[tokio::test]
     async fn dispatch_uses_top_route_before_request_uri() {
         use rvoip_sip_core::builder::SimpleRequestBuilder;
         use rvoip_sip_core::types::route::Route;
@@ -726,6 +1171,11 @@ mod tests {
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         mux.send_message(Message::Request(req), dest).await.unwrap();
         assert_eq!(tls.count(), 1, "top Route must select TLS");
+        assert_eq!(
+            tls.last_route().and_then(|route| route.authority),
+            Some(TransportAuthority::Dns("proxy.example.com".into())),
+            "top Route authority must survive transport selection and DNS resolution"
+        );
         assert_eq!(udp.count(), 0);
     }
 
@@ -815,7 +1265,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_raw_routes_to_transport_with_live_connection() {
+    async fn typed_mux_rejects_invalid_fields_before_child_dispatch() {
+        use rvoip_sip_core::types::call_info::CallInfoValue;
+        use rvoip_sip_core::types::headers::HeaderValue;
+        use rvoip_sip_core::types::param::Param;
+        use rvoip_sip_core::{Response, StatusCode};
+
+        let udp = CountingTransport::new("udp");
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
+        let destination = "127.0.0.1:5060".parse().unwrap();
+        let mut unsafe_structured = Request::new(Method::Options, Uri::sip("example.test"));
+        unsafe_structured.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Structured".into()),
+            HeaderValue::CallInfo(vec![CallInfoValue::new(Uri::sip("example.test"))
+                .with_param(Param::Other(
+                    "purpose\r\nX-Injected: mux-structured-secret".into(),
+                    None,
+                ))]),
+        ));
+        let unsafe_uri = Request::new(
+            Method::Options,
+            Uri::custom("sip:bob@example.test\r\nX-Injected: mux-uri-secret"),
+        );
+
+        for message in [
+            Message::Response(
+                Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: mux-reason-secret"),
+            ),
+            Message::Request(unsafe_structured),
+            Message::Request(unsafe_uri),
+        ] {
+            let error = mux
+                .send_message(message, destination)
+                .await
+                .expect_err("multiplexer must reject before child dispatch");
+            assert!(matches!(error, TransportError::ProtocolError(_)));
+            for secret in [
+                "mux-reason-secret",
+                "mux-structured-secret",
+                "mux-uri-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
+        assert_eq!(udp.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_raw_rejects_address_only_even_with_live_connection() {
         let udp = CountingTransport::new("udp");
         let tcp = CountingTransport::new("tcp");
         let tls = CountingTransport::new("tls");
@@ -832,21 +1332,171 @@ mod tests {
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+        let error = mux
+            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
             .await
-            .unwrap();
+            .expect_err("an address-only lifecycle send must fail closed");
+        assert!(matches!(error, TransportError::InvalidState(_)));
 
-        assert_eq!(
-            tcp.raw_count(),
-            1,
-            "send_raw must route to TCP (live connection)"
-        );
+        assert_eq!(tcp.raw_count(), 0);
         assert_eq!(tls.raw_count(), 0);
         assert_eq!(
             udp.raw_count(),
             0,
             "UDP is never used for send_raw (RFC 5626 UDP uses STUN)"
         );
+    }
+
+    #[tokio::test]
+    async fn flowless_response_fails_without_probing_ws_or_wss_children() {
+        use rvoip_sip_core::{Response, StatusCode};
+
+        for (kind, label) in [(TransportType::Ws, "ws"), (TransportType::Wss, "wss")] {
+            let udp = CountingTransport::new("udp");
+            let websocket = CountingTransport::new(label);
+            websocket.set_has_connection(true);
+            let mut transports: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+            transports.insert(TransportType::Udp, udp.clone());
+            transports.insert(kind, websocket.clone());
+            let mux = MultiplexedTransport::new_without_trace(udp.clone(), transports).unwrap();
+
+            let error = mux
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    "127.0.0.1:5090".parse().unwrap(),
+                )
+                .await
+                .expect_err("flowless response must fail closed");
+            assert!(matches!(error, TransportError::InvalidState(_)));
+
+            assert_eq!(
+                websocket.count(),
+                0,
+                "{kind} must not be selected by address"
+            );
+            assert_eq!(
+                udp.count(),
+                0,
+                "UDP also requires an explicit response route"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_udp_response_and_cached_bytes_ignore_coexisting_stream_flow() {
+        use rvoip_sip_core::{Response, StatusCode};
+
+        // `default` is deliberately not present in the registry. A TCP flow
+        // to the same peer must not steal a response that ingress explicitly
+        // bound to UDP.
+        let udp = CountingTransport::new("udp");
+        let tcp = CountingTransport::new("tcp");
+        tcp.set_has_connection(true);
+        let mut transports: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        transports.insert(TransportType::Tcp, tcp.clone());
+        let mux = MultiplexedTransport::new_without_trace(udp.clone(), transports).unwrap();
+        let destination = "127.0.0.1:5091".parse().unwrap();
+        let route = TransportRoute::new(destination).with_transport_type(TransportType::Udp);
+
+        mux.send_message_via(
+            Message::Response(Response::new(StatusCode::Ok)),
+            route.clone(),
+        )
+        .await
+        .unwrap();
+        mux.send_message_raw_via(Bytes::from_static(b"SIP/2.0 200 OK\r\n\r\n"), route)
+            .await
+            .unwrap();
+
+        assert_eq!(udp.count(), 1);
+        assert_eq!(udp.raw_message_count(), 1);
+        assert_eq!(tcp.count(), 0);
+        assert_eq!(tcp.raw_message_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn exact_websocket_flow_routes_structured_and_cached_raw_responses() {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+        use rvoip_sip_core::StatusCode;
+        use rvoip_sip_transport::WebSocketTransport;
+        use tokio::time::{timeout, Duration};
+
+        let (server_ws, mut server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let server_addr = server_ws.local_addr().unwrap();
+        let server_ws = Arc::new(server_ws);
+        let udp = CountingTransport::new("udp");
+        let mut transports: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        transports.insert(TransportType::Udp, udp.clone());
+        transports.insert(TransportType::Ws, server_ws.clone());
+        let mux = MultiplexedTransport::new_without_trace(udp.clone(), transports).unwrap();
+
+        let (client_ws, mut client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let request = match make_invite("sip:bob@ws-authority.example;transport=ws") {
+            Message::Request(request) => request,
+            Message::Response(_) => unreachable!(),
+        };
+        client_ws
+            .send_message(Message::Request(request.clone()), server_addr)
+            .await
+            .unwrap();
+
+        let (source, flow_id) = match timeout(Duration::from_secs(2), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            rvoip_sip_transport::TransportEvent::MessageReceived {
+                source,
+                flow_id: Some(flow_id),
+                ..
+            } => (source, flow_id),
+            event => panic!("expected flow-bearing WS request, got {event:?}"),
+        };
+        assert!(server_ws.has_connection_to(source));
+        let route = TransportRoute::new(source)
+            .with_transport_type(TransportType::Ws)
+            .with_flow_id(flow_id);
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .build();
+
+        mux.send_message_via(Message::Response(response.clone()), route.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            rvoip_sip_transport::TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+
+        mux.send_message_raw_via(Bytes::from(Message::Response(response).to_bytes()), route)
+            .await
+            .unwrap();
+        assert!(matches!(
+            timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            rvoip_sip_transport::TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+        assert_eq!(udp.count(), 0);
+
+        client_ws.close().await.unwrap();
+        server_ws.close().await.unwrap();
     }
 
     #[tokio::test]
@@ -873,7 +1523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_raw_prefers_tls_over_tcp_when_both_live() {
+    async fn send_raw_rejects_ambiguous_coaddressed_live_flows() {
         let udp = CountingTransport::new("udp");
         let tcp = CountingTransport::new("tcp");
         let tls = CountingTransport::new("tls");
@@ -889,13 +1539,13 @@ mod tests {
             MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
-        mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
+        let error = mux
+            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
             .await
-            .unwrap();
+            .expect_err("co-addressed flows require an exact route");
+        assert!(matches!(error, TransportError::InvalidState(_)));
 
-        // TLS is tried first in the probe order — matches the
-        // response-routing order in `pick_transport`.
-        assert_eq!(tls.raw_count(), 1);
+        assert_eq!(tls.raw_count(), 0);
         assert_eq!(tcp.raw_count(), 0);
     }
 

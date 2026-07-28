@@ -105,7 +105,10 @@ impl PlatformSocketStrategy {
     pub fn for_macos() -> Self {
         Self {
             use_reuse_addr: true,
-            use_reuse_port: true, // macOS often needs both
+            // One RTP session exclusively owns each bound media port.
+            // SO_REUSEPORT can silently fan incoming datagrams across two
+            // sockets if an external process opts into the same port.
+            use_reuse_port: false,
             set_ipv6_only: true,
             ipv6_only: true,
             buffer_size: 131072,
@@ -551,6 +554,7 @@ mod tests {
         let mac_strategy = PlatformSocketStrategy::for_macos();
         let linux_strategy = PlatformSocketStrategy::for_linux();
 
+        assert!(!mac_strategy.use_reuse_port);
         assert_ne!(win_strategy, mac_strategy);
         assert_ne!(win_strategy, linux_strategy);
         assert_ne!(mac_strategy, linux_strategy);

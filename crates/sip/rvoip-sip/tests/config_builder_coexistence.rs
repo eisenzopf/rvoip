@@ -40,7 +40,10 @@ fn cfg(name: &str, port: u16, pai: Option<&str>) -> Config {
         include_body: false,
         ..SipTraceConfig::default()
     };
-    c
+    // This test intentionally treats the local trace as a packet-capture
+    // oracle. The boolean compatibility fields alone remain production-safe;
+    // verbatim values require this explicit development-only opt-in.
+    c.trace_passthrough_for_development()
 }
 
 async fn boot_receiver(port: u16, name: &str) -> Arc<UnifiedCoordinator> {

@@ -10,7 +10,7 @@ use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config;
 use rvoip_core::events::Event;
-use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
+use rvoip_core::ids::{ParticipantId, SessionId};
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_webrtc::client::comprehensive::{
     handle_server_connection, prepare_offer_media, run_client_checks,
@@ -153,6 +153,7 @@ async fn ws_offer_with_data_channel_ping_pong() {
             sdp: offer_sdp,
             connection_id: String::new(),
             candidate: String::new(),
+            request_id: String::new(),
         })
         .unwrap()
         .into(),

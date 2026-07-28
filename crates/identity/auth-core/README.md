@@ -16,25 +16,68 @@ lets `rvoip-core` take `rvoip-vcon` as an optional dep.
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. API may
-adjust for incoming review feedback before 0.2.x beta train ships, but no
+**Release-gated SIP dependency** — published in the unified `0.3.x` workspace
+release. API may adjust for incoming review feedback before `1.0`, but no
 restructure is planned.
 
 ## Install
 
 ```toml
 [dependencies]
-rvoip-auth-core = "0.2.2"
+rvoip-auth-core = "0.3.2"
 ```
 
 ## Where to start
 
-- Token verification: see [`bearer_stub`](src/bearer_stub.rs) for the
-  minimal JWK/JWS verifier `rvoip-vcon` and `rvoip-sip-registrar` plug
-  into.
+- Token verification: implement [`BearerValidator`](src/bearer.rs) or use
+  `JwtValidator`, `JwksJwtValidator`, or `OAuth2IntrospectionValidator`.
+  Existing validators that implement only `validate` remain compatible.
+- Credential-aware integrations should call `validate_credential`. Its
+  `ValidatedBearer` result retains the complete principal plus an optional
+  bounded token ID and `SystemTime` issue time. JWT/JWKS use validated
+  `jti`/`iat` claims. Introspection accepts `jti` or `token_id` and derives a
+  SHA-256 credential fingerprint only when the provider supplies neither.
+  Token IDs and fingerprints are correlation-sensitive and must never be
+  logged; `ValidatedBearer` redacts them from `Debug` output.
+- Production JWT/JWKS deployments can enable `with_required_jti`; configuring
+  a revocation checker also requires `jti`. Introspection deployments can use
+  `with_required_token_id` when a provider-issued identifier is mandatory.
 - Integration examples live in the [rvoip-sip
   README](../../sip/rvoip-sip/README.md) and in
   [`crates/sip/rvoip-sip/examples/callback_peer/`](../../sip/rvoip-sip/examples/callback_peer/).
+
+## Clustered SIP Digest replay migration
+
+Existing `DigestReplayStore` implementations remain source compatible through
+the original `record_nonce`, `nonce_status`, and `(username, nonce)`
+`accept_nonce_count` methods. Secure clustered listeners additionally call two
+additive methods:
+
+- `admit_nonce` atomically bounds challenge state and may return an existing
+  active nonce when the tenant pool is full.
+- `accept_client_nonce_count` atomically verifies nonce activity and tracks a
+  monotonic `(username, nonce, cnonce)` sequence with fair cardinality limits.
+
+Their default implementations deliberately return `PolicyRejected`. A legacy
+store therefore compiles but fails closed when selected for a secure clustered
+listener until it implements the new contract. Use `RedisAuthProvider` as the
+first-party implementation and configure one namespace/provider per tenant.
+
+## Atomic authentication-attempt admission
+
+Secure callers reserve an authentication attempt with
+`AuthRateLimiter::reserve_auth_attempt` before checking a credential, then
+return the opaque handle exactly once with `complete_auth_attempt`. A failed
+attempt retains one count for the provider's window; a successful attempt
+releases only its own reservation. This closes the race in the legacy
+check-then-record pair and prevents one successful request from clearing an
+unrelated failure.
+
+The original `check_auth_attempt` and `record_auth_result` methods remain in
+the trait so existing implementations still compile. The additive atomic
+methods deliberately fail closed by default. A limiter selected by a secure
+SIP listener must implement both methods or use the first-party
+`RedisAuthProvider` implementation.
 
 ## License
 

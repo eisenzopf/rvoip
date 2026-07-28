@@ -321,6 +321,15 @@ mod tests {
     use crate::types::subscription_state::SubscriptionState;
     use crate::types::to::To;
 
+    fn assert_validation_detail(error: Error, expected: &str) {
+        assert!(matches!(
+            &error,
+            Error::ValidationError(detail) if detail.contains(expected)
+        ));
+        assert!(!error.to_string().contains(expected));
+        assert_eq!(error.diagnostic_class(), "validation");
+    }
+
     #[test]
     fn test_validate_publish_request_valid() {
         let mut request = Request::new(Method::Publish, "sip:alice@example.com".parse().unwrap());
@@ -339,7 +348,7 @@ mod tests {
 
         let result = validate_publish_request(&request);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Event header"));
+        assert_validation_detail(result.unwrap_err(), "Event header");
     }
 
     #[test]
@@ -354,7 +363,7 @@ mod tests {
 
         let result = validate_publish_request(&request);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Content-Type"));
+        assert_validation_detail(result.unwrap_err(), "Content-Type");
     }
 
     #[test]
@@ -383,7 +392,7 @@ mod tests {
 
         let result = validate_subscribe_request(&request);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Expires header"));
+        assert_validation_detail(result.unwrap_err(), "Expires header");
     }
 
     #[test]
@@ -418,10 +427,7 @@ mod tests {
 
         let result = validate_notify_request(&request);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Subscription-State"));
+        assert_validation_detail(result.unwrap_err(), "Subscription-State");
     }
 
     #[test]
@@ -444,6 +450,6 @@ mod tests {
 
         let result = validate_notify_request(&request);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("within a dialog"));
+        assert_validation_detail(result.unwrap_err(), "within a dialog");
     }
 }

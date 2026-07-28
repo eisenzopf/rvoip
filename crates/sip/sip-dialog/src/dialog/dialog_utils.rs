@@ -11,6 +11,8 @@ use rvoip_sip_core::Uri;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
+use crate::diagnostics::safe_log::error_class;
+
 /// Extract tag from header with parameter
 pub fn extract_tag(_header: &rvoip_sip_core::Header) -> Option<String> {
     // Just return empty tag for now
@@ -162,7 +164,7 @@ pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
     match resolver.resolve(uri).await {
         Ok(candidates) => candidates.into_iter().next().map(|t| t.addr),
         Err(e) => {
-            tracing::debug!("Default resolver returned error for {}: {}", uri, e);
+            tracing::debug!("Default resolver failed for URI class: {}", error_class(&e));
             None
         }
     }
@@ -210,7 +212,7 @@ pub async fn resolve_uri_to_candidates(
     match resolver.resolve(uri).await {
         Ok(candidates) => candidates,
         Err(e) => {
-            tracing::debug!("Default resolver returned error for {}: {}", uri, e);
+            tracing::debug!("Default resolver failed for URI class: {}", error_class(&e));
             Vec::new()
         }
     }

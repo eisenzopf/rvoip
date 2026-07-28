@@ -98,6 +98,30 @@ fn test_embedded_default_table_loads() {
 }
 
 #[test]
+fn active_auth_required_retries_for_uac_and_uas_dialog_roles() {
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
+    for role in [Role::UAC, Role::UAS] {
+        let key = StateKey {
+            role,
+            state: CallState::Active,
+            event: EventType::AuthRequired {
+                status_code: 401,
+                challenge: String::new(),
+                method: "INFO".to_string(),
+            },
+        };
+        let transition = table
+            .get(&key)
+            .unwrap_or_else(|| panic!("Active AuthRequired transition missing for {role:?}"));
+        assert_eq!(
+            transition.actions,
+            vec![Action::StoreAuthChallenge, Action::SendRequestWithAuth],
+            "both dialog roles must use the exact tracked request retry path"
+        );
+    }
+}
+
+#[test]
 fn test_hold_resume_transitions() {
     let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
@@ -192,7 +216,7 @@ fn test_error_handling_transitions() {
     for state in states_to_check {
         let error_key = StateKey {
             role: Role::Both,
-            state: state.clone(),
+            state,
             event: EventType::DialogError(String::new()),
         };
 
@@ -265,8 +289,8 @@ fn test_registration_transitions() {
         unregister_transition
             .actions
             .iter()
-            .any(|action| matches!(action, Action::SendUnREGISTER)),
-        "Unregistration transition must send REGISTER with Expires: 0"
+            .any(|action| matches!(action, Action::SendREGISTERWithOptions)),
+        "Unregistration transition must use the canonical REGISTER options action"
     );
 
     let unregister_ok_key = StateKey {
@@ -290,20 +314,31 @@ fn test_subscription_transitions() {
         event: EventType::SendOutboundSubscribe,
     };
 
-    let notify_key = StateKey {
-        role: Role::Both,
-        state: CallState::Subscribed,
-        event: EventType::ReceiveNOTIFY,
-    };
-
     assert!(
         !table.has_transition(&subscribe_key),
         "SUBSCRIBE should be direct-wired, not state-table dispatched"
     );
-    assert!(
-        !table.has_transition(&notify_key),
-        "NOTIFY should be dialog/session event-wired, not state-table dispatched"
-    );
+    for role in [Role::UAC, Role::UAS] {
+        for state in [
+            CallState::Idle,
+            CallState::Initiating,
+            CallState::Active,
+            CallState::OnHold,
+            CallState::Subscribed,
+            CallState::Terminating,
+        ] {
+            let notify_key = StateKey {
+                role,
+                state,
+                event: EventType::ReceiveNOTIFY,
+            };
+            let transition = table
+                .get(&notify_key)
+                .unwrap_or_else(|| panic!("Missing {role:?}/{state:?}/ReceiveNOTIFY transition"));
+            assert_eq!(transition.next_state, None);
+            assert_eq!(transition.actions, vec![Action::ProcessNOTIFY]);
+        }
+    }
 }
 
 #[test]

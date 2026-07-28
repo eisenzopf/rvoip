@@ -12,6 +12,7 @@ use nom::{
     multi::separated_list1,
     IResult,
 };
+use std::fmt;
 
 /// The direction in a simulcast stream description
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +33,7 @@ pub enum SimulcastStatus {
 }
 
 /// A single simulcast alternative
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SimulcastAlternative {
     /// The status of this alternative
     pub status: SimulcastStatus,
@@ -40,20 +41,49 @@ pub struct SimulcastAlternative {
     pub rid: String,
 }
 
+impl fmt::Debug for SimulcastAlternative {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastAlternative")
+            .field("status", &self.status)
+            .field("rid_bytes", &self.rid.len())
+            .finish()
+    }
+}
+
 /// A simulcast stream version
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SimulcastVersion {
     /// List of alternatives for this version
     pub alternatives: Vec<SimulcastAlternative>,
 }
 
+impl fmt::Debug for SimulcastVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastVersion")
+            .field("alternative_count", &self.alternatives.len())
+            .finish()
+    }
+}
+
 /// A complete simulcast description
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SimulcastAttribute {
     /// The direction of this simulcast attribute
     pub direction: SimulcastDirection,
     /// List of stream versions
     pub stream_versions: Vec<SimulcastVersion>,
+}
+
+impl fmt::Debug for SimulcastAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastAttribute")
+            .field("direction", &self.direction)
+            .field("version_count", &self.stream_versions.len())
+            .finish()
+    }
 }
 
 /// Parse a RID identifier according to RFC 8851
@@ -580,5 +610,47 @@ mod tests {
         assert_eq!(attrs[0].stream_versions[0].alternatives[0].rid, "a1");
         assert_eq!(attrs[0].stream_versions[0].alternatives[1].rid, "a2");
         assert_eq!(attrs[0].stream_versions[1].alternatives[0].rid, "a3");
+    }
+
+    #[test]
+    fn simulcast_debug_does_not_reflect_rid_values() {
+        const RID: &str = "simulcast-rid-direct-debug-canary";
+        let alternative = SimulcastAlternative {
+            status: SimulcastStatus::Paused,
+            rid: RID.into(),
+        };
+        let version = SimulcastVersion {
+            alternatives: vec![alternative.clone()],
+        };
+        let attribute = SimulcastAttribute {
+            direction: SimulcastDirection::Send,
+            stream_versions: vec![version.clone()],
+        };
+
+        for debug in [
+            format!("{alternative:?}"),
+            format!("{version:?}"),
+            format!("{attribute:?}"),
+        ] {
+            assert!(
+                !debug.contains(RID),
+                "simulcast Debug reflected RID: {debug}"
+            );
+        }
+        assert_eq!(alternative.rid, RID);
+    }
+
+    #[test]
+    fn simulcast_value_types_cannot_regain_derived_debug() {
+        let source = include_str!("simulcast.rs");
+        for declaration in [
+            "pub struct SimulcastAlternative",
+            "pub struct SimulcastVersion",
+            "pub struct SimulcastAttribute",
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            assert!(!source[derive_offset..declaration_offset].contains("Debug"));
+        }
     }
 }

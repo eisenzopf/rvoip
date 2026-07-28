@@ -14,8 +14,14 @@ use std::str::FromStr;
 /// The Proxy-Authorization header is used by clients to provide authentication credentials
 /// to a proxy server in response to a Proxy-Authenticate challenge. It is similar to the
 /// Authorization header but scoped to proxy authentication.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProxyAuthorization(pub Credentials); // Holds Credentials
+
+impl fmt::Debug for ProxyAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ProxyAuthorization([redacted])")
+    }
+}
 
 impl fmt::Display for ProxyAuthorization {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

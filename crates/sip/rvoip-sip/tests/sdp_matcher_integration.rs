@@ -25,7 +25,7 @@ fn audio_offer(formats: &[&str]) -> SdpSession {
         .media_audio(16000, "RTP/AVP")
         .formats(formats);
     for fmt in formats {
-        b = b.rtpmap(*fmt, &format!("CODEC{}/8000", fmt));
+        b = b.rtpmap(*fmt, format!("CODEC{}/8000", fmt));
     }
     let sdp = b
         .attribute("sendrecv", None::<String>)

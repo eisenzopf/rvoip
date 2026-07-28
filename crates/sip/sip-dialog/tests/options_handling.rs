@@ -94,6 +94,7 @@ async fn manager_with_options_config(
         config
     };
     manager.set_config(config.build());
+    assert_eq!(manager.should_auto_respond_to_options(), auto_options);
 
     let manager = Arc::new(manager);
     if attach_event_hub {
@@ -144,27 +145,36 @@ async fn assert_single_options_ok(
     rvoip_sip_core::validation::validate_wire_response(&response).unwrap();
 
     let (_, server_transactions) = transaction_manager.active_transactions().await;
-    assert_eq!(server_transactions.len(), 1);
-    let reached_completed = transaction_manager
-        .wait_for_transaction_state(
-            &server_transactions[0],
-            TransactionState::Completed,
-            Duration::from_millis(250),
-        )
-        .await
-        .unwrap();
-    let state = transaction_manager
-        .transaction_state(&server_transactions[0])
-        .await
-        .unwrap();
-    assert!(
-        reached_completed
-            || matches!(
-                state,
-                TransactionState::Completed | TransactionState::Terminated
-            ),
-        "OPTIONS transaction did not enter a final-response state; current state: {state:?}"
-    );
+    if let Some(transaction_id) = server_transactions.first() {
+        let reached_completed = transaction_manager
+            .wait_for_transaction_state(
+                transaction_id,
+                TransactionState::Completed,
+                Duration::from_millis(250),
+            )
+            .await
+            .unwrap();
+        let state = transaction_manager
+            .transaction_state(transaction_id)
+            .await
+            .unwrap();
+        assert!(
+            reached_completed
+                || matches!(
+                    state,
+                    TransactionState::Completed | TransactionState::Terminated
+                ),
+            "OPTIONS transaction did not enter a final-response state; current state: {state:?}"
+        );
+    } else {
+        assert_eq!(
+            transaction_manager
+                .retention_counts()
+                .compact_non_invite_tombstones,
+            1,
+            "completed UDP OPTIONS must retain one compact Timer J replay owner"
+        );
+    }
     assert!(
         manager.list_dialogs().is_empty(),
         "OPTIONS must not create dialog state"

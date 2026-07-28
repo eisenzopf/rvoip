@@ -30,13 +30,17 @@ Connect, and bridges the inbound audio to the agent.
 | Plane | Module | What it does |
 |---|---|---|
 | Control | [`control`](src/control.rs) | `StartWebRTCContact` via `aws-sdk-connect`. Attributes (≤32 KB) become contact attributes — the screen-pop channel. Returns the Chime meeting + attendee `ConnectionData`. |
-| Media | [`signaling`](src/signaling/chime.rs) | Joins the Chime meeting over the proprietary **protobuf-over-secure-WebSocket** protocol (vendored [`SignalingProtocol.proto`](proto/SignalingProtocol.proto)) and drives a `webrtc-rs` peer connection, reusing `rvoip-webrtc`'s peer/media plane. |
+| Media | [`media`](src/media.rs) + [`signaling`](src/signaling/chime.rs) | The injectable `ConnectMediaConnector` lifecycle joins Chime over protobuf WebSocket and drives an rvoip WebRTC peer. It exposes streams, terminal cause, PONG/activity health, controls, and absolute-deadline close without exposing Chime wire types to the adapter. |
 
 The control plane is abstracted behind the `ConnectContactStarter` trait, so the
 crate and its unit tests build with **zero AWS dependencies**. The real
 `aws-sdk-connect` implementation (`AwsConnectStarter`) is behind the
 `aws-control` feature — this also isolates the AWS `aws-lc-rs` crypto provider so
 it never clashes with the workspace's `ring` rustls provider unless opted in.
+The media plane is independently injectable through `ConnectMediaConnector`;
+the default `ChimeWebRtcMediaConnector` remains the production behavior, while
+tests can exercise adapter lifecycle without AWS, public ICE, or a second media
+library.
 
 ## Features
 
@@ -168,7 +172,7 @@ stable, but two pieces are reconstructed from the public JS SDK and should be
 confirmed against a real instance (run with `--features aws-live`):
 
 1. The signaling-URL query string in `signaling::chime::build_signaling_url`
-   (join token carried as `sessionToken`).
+   (join token carried in the WebSocket subprotocol header).
 2. The optional `SdkJoinFrame` fields sent in the JOIN.
 
 Both are localized to `src/signaling/chime.rs`.

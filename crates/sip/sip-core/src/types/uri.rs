@@ -316,7 +316,7 @@ impl From<Ipv6Addr> for Host {
 /// assert_eq!(uri.port, Some(5060));
 /// assert_eq!(uri.transport(), Some("tcp"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uri {
     /// URI scheme (sip, sips, tel)
     pub scheme: Scheme,
@@ -334,6 +334,36 @@ pub struct Uri {
     pub headers: HashMap<String, String>,
     /// Raw URI string for custom schemes
     pub raw_uri: Option<String>,
+}
+
+impl fmt::Debug for Uri {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let scheme = match self.scheme {
+            Scheme::Sip => "sip",
+            Scheme::Sips => "sips",
+            Scheme::Tel => "tel",
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+            Scheme::Custom(_) => "custom",
+        };
+        let host_kind = match self.host {
+            Host::Domain(_) => "domain",
+            Host::Address(_) => "address",
+        };
+
+        formatter
+            .debug_struct("Uri")
+            .field("scheme", &scheme)
+            .field("user_present", &self.user.is_some())
+            .field("user_bytes", &self.user.as_ref().map_or(0, String::len))
+            .field("password_present", &self.password.is_some())
+            .field("host_kind", &host_kind)
+            .field("port", &self.port)
+            .field("parameter_count", &self.parameters.len())
+            .field("header_count", &self.headers.len())
+            .field("raw_uri_present", &self.raw_uri.is_some())
+            .finish()
+    }
 }
 
 impl Uri {
@@ -897,4 +927,36 @@ fn escape_param(s: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+
+    #[test]
+    fn uri_debug_is_structural_and_never_exposes_secret_components() {
+        const USER: &str = "uri-user-secret-canary";
+        const PASSWORD: &str = "uri-password-secret-canary";
+        const HOST: &str = "uri-host-secret-canary.example";
+        const HEADER: &str = "uri-header-secret-canary";
+        const RAW: &str = "custom:uri-raw-secret-canary";
+
+        let uri = Uri::sip(HOST)
+            .with_user(USER)
+            .with_password(PASSWORD)
+            .with_header("subject", HEADER);
+        let custom = Uri::custom(RAW);
+        let rendered = format!("{uri:?} {custom:?}");
+
+        assert!(rendered.contains("scheme: \"sip\""));
+        assert!(rendered.contains("password_present: true"));
+        assert!(rendered.contains("header_count: 1"));
+        assert!(rendered.contains("raw_uri_present: true"));
+        for secret in [USER, PASSWORD, HOST, HEADER, RAW] {
+            assert!(
+                !rendered.contains(secret),
+                "debug leaked {secret}: {rendered}"
+            );
+        }
+    }
 }

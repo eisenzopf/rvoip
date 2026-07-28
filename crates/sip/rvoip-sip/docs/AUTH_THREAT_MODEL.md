@@ -66,7 +66,8 @@ tokens, or stale refresh tokens.
 
 Mitigations:
 
-- Digest nonce-count replay is tracked per `(username, nonce)`, not per cnonce.
+- Digest nonce-count replay is tracked per `(username, nonce, cnonce)` so
+  clients sharing a bounded server nonce keep independent monotonic sequences.
 - Stale Digest nonces are re-challenged only when the nonce was issued and
   expired; unknown nonce and wrong password are not reported as stale.
 - Cluster deployments must use a shared `DigestReplayStore` implementation.

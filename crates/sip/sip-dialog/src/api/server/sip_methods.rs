@@ -58,7 +58,7 @@ impl DialogServer {
         target_uri: String,
         refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending REFER for dialog {} to {}", dialog_id, target_uri);
+        debug!("Sending REFER for dialog {} with target present", dialog_id);
 
         // Build REFER request body with Refer-To header
         let body = if let Some(custom_body) = refer_body {
@@ -92,14 +92,21 @@ impl DialogServer {
         body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         debug!(
-            "Sending NOTIFY for dialog {} with event {}",
-            dialog_id, event
+            "Sending NOTIFY for dialog {} with event value length={}",
+            dialog_id,
+            event.len()
         );
 
-        let notify_body = body.map(|b| b.into_bytes().into());
-
         self.dialog_manager
-            .send_request(dialog_id, Method::Notify, notify_body)
+            .send_notify_request_snapshot(
+                dialog_id,
+                crate::manager::transaction_integration::NotifyRequestSnapshot::legacy(
+                    Some(event),
+                    crate::manager::transaction_integration::NotifySubscriptionState::Tracked,
+                    body.map(|value| value.into_bytes().into()),
+                    Vec::new(),
+                ),
+            )
             .await
             .map_err(ApiError::from)
     }
@@ -146,10 +153,14 @@ impl DialogServer {
     ) -> ApiResult<TransactionKey> {
         debug!("Sending INFO for dialog {}", dialog_id);
 
-        let body = Some(info_body.into_bytes().into());
-
         self.dialog_manager
-            .send_request(dialog_id, Method::Info, body)
+            .send_info_request_snapshot(
+                dialog_id,
+                crate::manager::transaction_integration::InfoRequestSnapshot::legacy(
+                    Some(info_body.into_bytes().into()),
+                    Vec::new(),
+                ),
+            )
             .await
             .map_err(ApiError::from)
     }

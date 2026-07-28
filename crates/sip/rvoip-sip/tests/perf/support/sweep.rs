@@ -685,6 +685,9 @@ pub fn parse_sweep_env(name: &str) -> Option<Vec<f64>> {
 }
 
 fn target_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("RVOIP_PERF_OUTPUT_ROOT") {
+        return PathBuf::from(path);
+    }
     let manifest_dir = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo"),
     );

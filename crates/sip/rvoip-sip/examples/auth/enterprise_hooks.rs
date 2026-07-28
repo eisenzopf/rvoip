@@ -4,7 +4,7 @@
 //! UAS authentication:
 //!
 //! - redacted audit events through `AuthAuditSink`;
-//! - rate-limit / lockout checks through `AuthRateLimiter`;
+//! - atomic rate-limit / lockout admission through `AuthRateLimiter`;
 //! - shared SIP Digest nonce and nonce-count replay state through
 //!   `DigestReplayStore`.
 //!
@@ -17,7 +17,8 @@
 //!
 //!   cargo run -p rvoip-sip --example auth_enterprise_hooks
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -25,16 +26,16 @@ use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use rvoip_sip::{
-    AuthAuditEvent, AuthAuditOutcome, AuthAuditSink, AuthRateLimitKey, AuthRateLimitVerdict,
-    AuthRateLimiter, CredentialAuthError, DigestAlgorithm, DigestAuth, DigestAuthenticator,
-    DigestNonceStatus, DigestReplayStore, DigestSecret, DigestSecretProvider, SipAuthDecision,
-    SipAuthScheme, SipAuthService, SipAuthSource,
+    AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent, AuthAuditOutcome, AuthAuditSink,
+    AuthRateLimitKey, AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError, DigestAlgorithm,
+    DigestAuth, DigestAuthenticator, DigestNonceStatus, DigestReplayStore, DigestSecret,
+    DigestSecretProvider, SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let audit = Arc::new(PrintAuditSink);
-    let rate_limiter = Arc::new(AllowingRateLimiter);
+    let rate_limiter = Arc::new(AllowingRateLimiter::default());
     let replay_store = Arc::new(MemoryDigestReplayStore::default());
 
     let mut auth = SipAuthService::new()
@@ -139,7 +140,10 @@ impl AuthAuditSink for PrintAuditSink {
     }
 }
 
-struct AllowingRateLimiter;
+#[derive(Default)]
+struct AllowingRateLimiter {
+    next_reservation: AtomicU64,
+}
 
 #[async_trait]
 impl AuthRateLimiter for AllowingRateLimiter {
@@ -160,6 +164,29 @@ impl AuthRateLimiter for AllowingRateLimiter {
         outcome: &AuthAuditOutcome,
     ) -> std::result::Result<(), CredentialAuthError> {
         println!("[rate-limit] outcome={outcome:?}");
+        Ok(())
+    }
+
+    async fn reserve_auth_attempt(
+        &self,
+        key: &AuthRateLimitKey,
+    ) -> std::result::Result<AuthAttemptAdmission, CredentialAuthError> {
+        println!(
+            "[rate-limit] reserve kind={:?} subject={:?} realm={:?}",
+            key.kind, key.subject, key.realm
+        );
+        let sequence = self.next_reservation.fetch_add(1, Ordering::Relaxed);
+        Ok(AuthAttemptAdmission::Reserved(AuthAttemptReservation::new(
+            format!("example-reservation-{sequence}"),
+        )?))
+    }
+
+    async fn complete_auth_attempt(
+        &self,
+        _reservation: &AuthAttemptReservation,
+        outcome: &AuthAuditOutcome,
+    ) -> std::result::Result<(), CredentialAuthError> {
+        println!("[rate-limit] complete outcome={outcome:?}");
         Ok(())
     }
 }
@@ -185,8 +212,12 @@ impl DigestSecretProvider for StaticDigestProvider {
 #[derive(Default)]
 struct MemoryDigestReplayStore {
     nonces: Mutex<HashMap<String, SystemTime>>,
-    nonce_counts: Mutex<HashMap<(String, String), u32>>,
+    nonce_counts: Mutex<HashMap<(String, String, String), u32>>,
 }
+
+const MAX_EXAMPLE_NONCES: usize = 4_096;
+const MAX_EXAMPLE_SEQUENCES: usize = 16_384;
+const MAX_EXAMPLE_SEQUENCES_PER_USERNAME: usize = 4_096;
 
 #[async_trait]
 impl DigestReplayStore for MemoryDigestReplayStore {
@@ -195,11 +226,14 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         nonce: &str,
         expires_at: SystemTime,
     ) -> std::result::Result<(), CredentialAuthError> {
-        self.nonces
-            .lock()
-            .unwrap()
-            .insert(nonce.to_string(), expires_at);
-        Ok(())
+        let admitted = self.admit_nonce(nonce, expires_at).await?;
+        if admitted == nonce {
+            Ok(())
+        } else {
+            Err(CredentialAuthError::PolicyRejected(
+                "legacy nonce admission reached capacity".to_string(),
+            ))
+        }
     }
 
     async fn nonce_status(
@@ -220,11 +254,87 @@ impl DigestReplayStore for MemoryDigestReplayStore {
         nonce: &str,
         nonce_count: u32,
     ) -> std::result::Result<bool, CredentialAuthError> {
-        let key = (username.to_string(), nonce.to_string());
-        let mut counts = self.nonce_counts.lock().unwrap();
-        if counts.get(&key).is_some_and(|last| nonce_count <= *last) {
-            println!("[replay] rejected nonce-count replay for {username}");
+        self.accept_client_nonce_count(
+            username,
+            nonce,
+            "legacy-client-sequence",
+            nonce_count,
+            SystemTime::now(),
+        )
+        .await
+    }
+
+    async fn admit_nonce(
+        &self,
+        proposed_nonce: &str,
+        expires_at: SystemTime,
+    ) -> std::result::Result<String, CredentialAuthError> {
+        let now = SystemTime::now();
+        let mut nonces = self.nonces.lock().unwrap();
+        let expired = nonces
+            .iter()
+            .filter(|(_, expiry)| **expiry <= now)
+            .map(|(nonce, _)| nonce.clone())
+            .collect::<HashSet<_>>();
+        nonces.retain(|nonce, _| !expired.contains(nonce));
+        let admitted = if nonces.contains_key(proposed_nonce) {
+            nonces.insert(proposed_nonce.to_string(), expires_at);
+            proposed_nonce.to_string()
+        } else if nonces.len() >= MAX_EXAMPLE_NONCES {
+            nonces
+                .iter()
+                .max_by_key(|(_, expiry)| **expiry)
+                .map(|(nonce, _)| nonce.clone())
+                .ok_or_else(|| {
+                    CredentialAuthError::PolicyRejected(
+                        "Digest nonce admission unavailable".to_string(),
+                    )
+                })?
+        } else {
+            nonces.insert(proposed_nonce.to_string(), expires_at);
+            proposed_nonce.to_string()
+        };
+        drop(nonces);
+        if !expired.is_empty() {
+            self.nonce_counts
+                .lock()
+                .unwrap()
+                .retain(|(_, nonce, _), _| !expired.contains(nonce));
+        }
+        Ok(admitted)
+    }
+
+    async fn accept_client_nonce_count(
+        &self,
+        username: &str,
+        nonce: &str,
+        cnonce: &str,
+        nonce_count: u32,
+        now: SystemTime,
+    ) -> std::result::Result<bool, CredentialAuthError> {
+        if self.nonce_status(nonce, now).await? != DigestNonceStatus::Active {
             return Ok(false);
+        }
+        let key = (username.to_string(), nonce.to_string(), cnonce.to_string());
+        let mut counts = self.nonce_counts.lock().unwrap();
+        if let Some(previous) = counts.get_mut(&key) {
+            if nonce_count <= *previous {
+                println!("[replay] rejected nonce-count replay for {username}");
+                return Ok(false);
+            }
+            *previous = nonce_count;
+            return Ok(true);
+        }
+        let username_sequences = counts
+            .keys()
+            .filter(|(recorded, _, _)| recorded == username)
+            .count();
+        if counts.len() >= MAX_EXAMPLE_SEQUENCES
+            || username_sequences >= MAX_EXAMPLE_SEQUENCES_PER_USERNAME
+        {
+            return Err(CredentialAuthError::PolicyRejected(
+                "Digest replay capacity exhausted".to_string(),
+            ));
         }
         counts.insert(key, nonce_count);
         Ok(true)

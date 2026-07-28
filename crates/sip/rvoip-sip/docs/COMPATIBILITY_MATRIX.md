@@ -1,15 +1,16 @@
 # rvoip-sip Beta Compatibility Matrix
 
-Date: 2026-05-26
+Date: 2026-07-25
 
 This matrix is the beta release contract. `Supported` and `Interop tested`
 entries have repeatable in-repo or external-peer evidence. `Partial`,
 `Experimental`, `Not supported`, and `Post-beta` entries must not be marketed
 as general beta capabilities.
 
-The latest full reference report is
-`crates/sip/rvoip-sip/beta-report/20260526T221457Z`, generated from clean git
-revision `865430d4`.
+The current full reference is the
+[Beta Release Candidate Report](BETA_RELEASE_REPORT.md), with exact executed
+coverage in the [108-gate report](BETA_GATE_REPORT.md). It describes run
+`20260724T231400Z` from clean tested commit `8d44fb35`.
 
 ## Support Levels
 
@@ -44,7 +45,7 @@ revision `865430d4`.
 | REGISTER | Supported | Supported | Supported | Interop tested | `registration_test.rs`, `register_423_retry.rs`, PBX registration rows. |
 | OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. |
 | re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
-| UPDATE | Supported | Supported | Supported | Supported | Update send tests and glare/session-timer coverage. |
+| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
 | REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |
@@ -108,6 +109,6 @@ Developer-facing auth API and crate-boundary guidance is in
 
 | Profile | Beta status | Target | Notes |
 |---------|-------------|--------|-------|
-| General full-media | Beta target | Up to 2,000 CPS | Default claim is backed by the final clean report; 24-hour soak is waived for beta and the 30-minute soak is accepted as the beta bar. |
+| General full-media | Beta target | Up to 2,000 CPS | Backed by three canonical clean passes plus the current monolithic and split one-hour soak configurations; no 24-hour claim is made. |
 | Signaling-only tuned | Experimental | Above 2,000 CPS | Requires explicit tuning docs and caveats. |
 | Tuned high-scale | Experimental | Near 10,000 CPS where proven | Not a general-user promise. |

@@ -24,7 +24,6 @@ pub struct AuthenticationService {
 }
 
 /// Result of authentication
-#[derive(Debug)]
 pub struct AuthenticationResult {
     pub user: User,
     pub access_token: String,
@@ -32,20 +31,58 @@ pub struct AuthenticationResult {
     pub expires_in: std::time::Duration,
 }
 
+impl std::fmt::Debug for AuthenticationResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticationResult")
+            .field("user", &self.user)
+            .field("access_token_present", &!self.access_token.is_empty())
+            .field("access_token_len", &self.access_token.len())
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Token pair for refresh
-#[derive(Debug)]
 pub struct TokenPair {
     pub access_token: String,
     pub refresh_token: String,
     pub expires_in: std::time::Duration,
 }
 
+impl std::fmt::Debug for TokenPair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenPair")
+            .field("access_token_present", &!self.access_token.is_empty())
+            .field("access_token_len", &self.access_token.len())
+            .field("refresh_token_present", &!self.refresh_token.is_empty())
+            .field("refresh_token_len", &self.refresh_token.len())
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Context describing why users-core issued tokens for a user.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TokenIssueContext {
     pub source: String,
     pub provider_id: Option<String>,
     pub external_subject: Option<String>,
+}
+
+impl std::fmt::Debug for TokenIssueContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokenIssueContext")
+            .field("source_present", &!self.source.is_empty())
+            .field("source_len", &self.source.len())
+            .field("provider_present", &self.provider_id.is_some())
+            .field("external_subject_present", &self.external_subject.is_some())
+            .finish()
+    }
 }
 
 impl TokenIssueContext {
@@ -71,6 +108,15 @@ impl TokenIssueContext {
 }
 
 impl AuthenticationService {
+    /// Versioned fail-closed contract for API-key token exchange.
+    ///
+    /// Direct API-key verification remains supported through
+    /// [`Self::verify_api_key_only`]. Minting JWTs is disabled until the JWT and
+    /// refresh-token formats can retain API-key permissions and key-specific
+    /// revocation lineage without widening authority.
+    pub const API_KEY_TOKEN_EXCHANGE_CONTRACT: &'static str =
+        "users-core.api-key-token-exchange.disabled.v1";
+
     pub fn new(
         user_store: Arc<dyn UserStore>,
         jwt_issuer: JwtIssuer,
@@ -131,6 +177,15 @@ impl AuthenticationService {
     /// Get the configured auth-service security store, if any.
     pub fn auth_security_store(&self) -> Option<&Arc<dyn AuthSecurityStore>> {
         self.auth_security_store.as_ref()
+    }
+
+    fn require_auth_security_store(
+        &self,
+        operation: &'static str,
+    ) -> Result<&Arc<dyn AuthSecurityStore>> {
+        self.auth_security_store
+            .as_ref()
+            .ok_or(Error::SecurityStoreUnavailable { operation })
     }
 
     /// Set enterprise identity extension storage.
@@ -227,8 +282,7 @@ impl AuthenticationService {
 
         let access_token = self.jwt_issuer.create_access_token(&user)?;
         let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
-        self.store_refresh_token_if_configured(&refresh_token)
-            .await?;
+        self.store_refresh_token_required(&refresh_token).await?;
         self.update_last_login(&user.id).await?;
 
         Ok(AuthenticationResult {
@@ -299,33 +353,23 @@ impl AuthenticationService {
         }
     }
 
-    async fn store_refresh_token_if_configured(&self, refresh_token: &str) -> Result<()> {
-        if let Some(store) = &self.auth_security_store {
-            let claims = self.jwt_issuer.validate_refresh_token(refresh_token)?;
-            let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(claims.exp as i64, 0)
-                .ok_or_else(|| {
-                    Error::Validation("refresh token exp is outside supported range".to_string())
-                })?;
-            store
-                .store_refresh_token(&claims.jti, &claims.sub, expires_at)
-                .await?;
-        }
+    async fn store_refresh_token_required(&self, refresh_token: &str) -> Result<()> {
+        let store = self.require_auth_security_store("token-issuance")?;
+        let claims = self.jwt_issuer.validate_refresh_token(refresh_token)?;
+        let expires_at = chrono::DateTime::<chrono::Utc>::from_timestamp(claims.exp as i64, 0)
+            .ok_or_else(|| {
+                Error::Validation("refresh token exp is outside supported range".to_string())
+            })?;
+        store
+            .store_refresh_token(&claims.jti, &claims.sub, expires_at)
+            .await?;
         Ok(())
     }
 
-    /// Authenticate with API key
-    pub async fn authenticate_api_key(&self, api_key: &str) -> Result<AuthenticationResult> {
-        let (user, _) = self.verify_api_key_only(api_key).await?;
-
-        // Generate tokens (API keys get shorter-lived tokens)
-        let access_token = self.jwt_issuer.create_access_token(&user)?;
-        let refresh_token = self.jwt_issuer.create_refresh_token(&user.id)?;
-
-        Ok(AuthenticationResult {
-            user,
-            access_token,
-            refresh_token,
-            expires_in: std::time::Duration::from_secs(300), // 5 minutes for API keys
+    /// Fail-closed compatibility surface for the disabled API-key JWT exchange.
+    pub async fn authenticate_api_key(&self, _api_key: &str) -> Result<AuthenticationResult> {
+        Err(Error::ApiKeyTokenExchangeDisabled {
+            contract: Self::API_KEY_TOKEN_EXCHANGE_CONTRACT,
         })
     }
 
@@ -355,10 +399,10 @@ impl AuthenticationService {
         // Validate refresh token
         let claims = self.jwt_issuer.validate_refresh_token(refresh_token)?;
 
-        // Check if revoked (if security storage is available)
-        if let Some(store) = &self.auth_security_store {
-            store.check_refresh_token_revoked(&claims.jti).await?;
-        }
+        // Unknown, revoked, or unavailable refresh-token lineage fails closed.
+        self.require_auth_security_store("token-refresh")?
+            .check_refresh_token_revoked(&claims.jti)
+            .await?;
 
         // Get user
         let user = self
@@ -384,9 +428,9 @@ impl AuthenticationService {
 
     /// Revoke tokens for a user
     pub async fn revoke_tokens(&self, user_id: &str) -> Result<()> {
-        if let Some(store) = &self.auth_security_store {
-            store.revoke_refresh_tokens_for_user(user_id).await?;
-        }
+        self.require_auth_security_store("token-revocation")?
+            .revoke_refresh_tokens_for_user(user_id)
+            .await?;
         Ok(())
     }
 
@@ -412,20 +456,17 @@ impl AuthenticationService {
         user_id: Option<&str>,
         expires_at: chrono::DateTime<chrono::Utc>,
     ) -> Result<()> {
-        if let Some(store) = &self.auth_security_store {
-            store
-                .revoke_access_token_jti(jti, user_id, expires_at)
-                .await?;
-        }
+        self.require_auth_security_store("access-token-revocation")?
+            .revoke_access_token_jti(jti, user_id, expires_at)
+            .await?;
         Ok(())
     }
 
     /// Check whether an access-token JWT ID is currently revoked.
     pub async fn is_access_token_revoked(&self, jti: &str) -> Result<bool> {
-        let Some(store) = &self.auth_security_store else {
-            return Ok(false);
-        };
-        store.is_access_token_revoked(jti).await
+        self.require_auth_security_store("access-token-validation")?
+            .is_access_token_revoked(jti)
+            .await
     }
 
     /// Change user password
@@ -436,6 +477,8 @@ impl AuthenticationService {
         new_password: &str,
     ) -> Result<()> {
         use crate::validation::PasswordValidator;
+
+        let store = self.require_auth_security_store("password-change")?;
 
         // Get user
         let user = self
@@ -467,9 +510,7 @@ impl AuthenticationService {
             .to_string();
 
         // Update password in database
-        if let Some(store) = &self.auth_security_store {
-            store.update_password_hash(user_id, &new_hash).await?;
-        }
+        store.update_password_hash(user_id, &new_hash).await?;
 
         // Revoke all existing tokens
         self.revoke_tokens(user_id).await?;
@@ -478,9 +519,9 @@ impl AuthenticationService {
     }
 
     async fn update_last_login(&self, user_id: &str) -> Result<()> {
-        if let Some(store) = &self.auth_security_store {
-            store.update_last_login(user_id).await?;
-        }
+        self.require_auth_security_store("last-login-update")?
+            .update_last_login(user_id)
+            .await?;
         Ok(())
     }
 }

@@ -109,11 +109,7 @@ pub fn create_request_from_dialog_template(
     )
     .unwrap_or_else(|e| {
         // Log the error for debugging
-        tracing::error!(
-            "Failed to create Via header with local address {}: {}",
-            local_address,
-            e
-        );
+        tracing::error!(%local_address, error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to create Via header");
 
         // Try a simpler fallback without branch parameter
         Via::new(
@@ -126,10 +122,7 @@ pub fn create_request_from_dialog_template(
         )
         .unwrap_or_else(|e2| {
             // Log the second error and panic - we should never reach this point
-            tracing::error!(
-                "Critical error: Failed to create Via header even without branch parameter: {}",
-                e2
-            );
+            tracing::error!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e2), "Failed to create Via header even without branch parameter");
             panic!(
                 "Unable to create Via header with local address {}",
                 local_address

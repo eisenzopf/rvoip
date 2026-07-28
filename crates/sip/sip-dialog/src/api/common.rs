@@ -96,10 +96,12 @@
 //! }
 //! ```
 
+use std::fmt;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use super::{ApiError, ApiResult};
+use crate::diagnostics::safe_log::method_class;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::manager::DialogManager;
 use crate::transaction::TransactionKey;
@@ -242,7 +244,11 @@ impl DialogHandle {
     /// # Returns
     /// Transaction key for tracking the request
     pub async fn send_request(&self, method: Method, body: Option<String>) -> ApiResult<String> {
-        debug!("Sending {} request in dialog {}", method, self.dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            self.dialog_id
+        );
 
         let body_bytes = body.map(|s| bytes::Bytes::from(s));
         let transaction_key = self
@@ -269,7 +275,11 @@ impl DialogHandle {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending {} request in dialog {}", method, self.dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            self.dialog_id
+        );
 
         self.dialog_manager
             .send_request(&self.dialog_id, method, body)
@@ -293,8 +303,8 @@ impl DialogHandle {
         response: Response,
     ) -> ApiResult<()> {
         debug!(
-            "Sending response for transaction {} in dialog {}",
-            transaction_id, self.dialog_id
+            "Sending response for transaction in dialog {}",
+            self.dialog_id
         );
 
         self.dialog_manager
@@ -318,8 +328,8 @@ impl DialogHandle {
         refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Sending REFER for dialog {} to {}",
-            self.dialog_id, target_uri
+            "Sending REFER for dialog {} with target present",
+            self.dialog_id
         );
 
         let body = if let Some(custom_body) = refer_body {
@@ -339,13 +349,23 @@ impl DialogHandle {
         body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Sending NOTIFY for dialog {} event {}",
-            self.dialog_id, event
+            "Sending NOTIFY for dialog {} with event value length={}",
+            self.dialog_id,
+            event.len()
         );
 
-        let notify_body = body.map(|b| bytes::Bytes::from(b));
-        self.send_request_with_key(Method::Notify, notify_body)
+        self.dialog_manager
+            .send_notify_request_snapshot(
+                &self.dialog_id,
+                crate::manager::transaction_integration::NotifyRequestSnapshot::legacy(
+                    Some(event),
+                    crate::manager::transaction_integration::NotifySubscriptionState::Tracked,
+                    body.map(bytes::Bytes::from),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// Send an UPDATE request for media modifications
@@ -360,17 +380,26 @@ impl DialogHandle {
     /// Send an INFO request for application-specific information
     pub async fn send_info(&self, info_body: String) -> ApiResult<TransactionKey> {
         info!("Sending INFO for dialog {}", self.dialog_id);
-
-        self.send_request_with_key(Method::Info, Some(bytes::Bytes::from(info_body)))
+        self.dialog_manager
+            .send_info_request_snapshot(
+                &self.dialog_id,
+                crate::manager::transaction_integration::InfoRequestSnapshot::legacy(
+                    Some(bytes::Bytes::from(info_body)),
+                    Vec::new(),
+                ),
+            )
             .await
+            .map_err(ApiError::from)
     }
 
     /// Send BYE to terminate the dialog
     pub async fn terminate(&self) -> ApiResult<()> {
         info!("Terminating dialog {}", self.dialog_id);
 
-        // Send BYE request
-        self.send_request(Method::Bye, None).await?;
+        // RFC 3261 section 15.1.1: local teardown follows successful BYE
+        // admission. Reuse the one public BYE facade so call handles cannot
+        // drift into a second request materializer.
+        self.send_bye().await?;
 
         // Terminate dialog
         self.dialog_manager
@@ -578,172 +607,16 @@ impl CallHandle {
     /// Success or error
     pub async fn answer(&self, sdp_answer: Option<String>) -> ApiResult<()> {
         info!("Answering call {}", self.call_id());
-
-        // Find the indexed server INVITE transaction associated with this dialog.
-        let transaction_id = {
-            let dialog_manager = &self.dialog_handle.dialog_manager;
-            dialog_manager
-                .server_transactions_for_dialog(self.call_id())
-                .into_iter()
-                .find(|tx_key| tx_key.method() == &rvoip_sip_core::Method::Invite)
-                .ok_or_else(|| ApiError::Internal {
-                    message: "No INVITE transaction found for this call".to_string(),
-                })?
-        };
-
-        // Get the original INVITE request to build a proper response
-        let original_request = self
-            .dialog_handle
-            .dialog_manager
-            .transaction_manager()
-            .original_request(&transaction_id)
-            .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to get original INVITE request: {}", e),
-            })?
-            .ok_or_else(|| ApiError::Internal {
-                message: "Original INVITE request not found".to_string(),
-            })?;
-
-        // Build 200 OK response with SDP and proper To tag for dialog establishment
-        let response = {
-            use crate::transaction::utils::response_builders;
-
-            // Use the dialog-aware response builder that adds To tags
-            // Get the actual local address from the dialog handle
-            let local_addr = self.dialog_handle.dialog_manager.local_address();
-            let mut response =
-                if let Some(contact_uri) = self.dialog_handle.dialog_manager.local_contact_uri() {
-                    response_builders::create_ok_response_with_contact_uri(
-                        &original_request,
-                        &contact_uri,
-                    )
-                    .map_err(|e| ApiError::Internal {
-                        message: format!(
-                            "Invalid configured local Contact URI {}: {}",
-                            contact_uri, e
-                        ),
-                    })?
-                } else {
-                    response_builders::create_ok_response_with_dialog_info(
-                        &original_request,
-                        "server",                     // contact_user
-                        &local_addr.ip().to_string(), // contact_host - use actual local IP
-                        Some(local_addr.port()),      // contact_port - use actual local port
-                    )
-                };
-
-            // Add SDP body if provided
-            if let Some(sdp) = &sdp_answer {
-                response = response.with_body(sdp.as_bytes().to_vec());
-                // Add Content-Type header for SDP
-                use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                use rvoip_sip_core::{types::content_type::ContentType, TypedHeader};
-                response
-                    .headers
-                    .push(TypedHeader::ContentType(ContentType::new(
-                        ContentTypeValue {
-                            m_type: "application".to_string(),
-                            m_subtype: "sdp".to_string(),
-                            parameters: std::collections::HashMap::new(),
-                        },
-                    )));
-            }
-
-            response
-        };
-
-        // CRITICAL FIX: Extract the tag from the response BEFORE sending it
-        let response_local_tag = response
-            .to()
-            .and_then(|to_header| to_header.tag())
-            .map(|tag| tag.to_string());
-
-        // Send the 200 OK response
         self.dialog_handle
             .dialog_manager
-            .send_response(&transaction_id, response)
-            .await
-            .map_err(|e| ApiError::Internal {
-                message: format!("Failed to send 200 OK response: {}", e),
-            })?;
-
-        // Update dialog state to Confirmed and set local tag to match the response
-        {
-            let mut dialog = self
-                .dialog_handle
-                .dialog_manager
-                .get_dialog_mut(self.call_id())
-                .map_err(|e| ApiError::Internal {
-                    message: format!("Failed to get dialog for state update: {}", e),
-                })?;
-
-            // CRITICAL FIX: Use the tag from the response we just sent to ensure consistency
-            if dialog.local_tag.is_none() {
-                if let Some(response_tag) = response_local_tag {
-                    dialog.local_tag = Some(response_tag.clone());
-                    info!(
-                        "Dialog {} local tag set to match response: {}",
-                        self.call_id(),
-                        response_tag
-                    );
-                } else {
-                    // Fallback: generate tag if response doesn't have one (shouldn't happen)
-                    let local_tag = dialog.generate_local_tag();
-                    dialog.local_tag = Some(local_tag);
-                    warn!("Dialog {} fallback tag generation used", self.call_id());
-                }
-            }
-
-            // Transition from Early to Confirmed
-            debug!(
-                "Dialog {} current state: {:?}, local_tag: {:?}, remote_tag: {:?}",
+            .send_initial_invite_final_response(
                 self.call_id(),
-                dialog.state,
-                dialog.local_tag,
-                dialog.remote_tag
-            );
-
-            if dialog.state == crate::dialog::DialogState::Early {
-                dialog.state = crate::dialog::DialogState::Confirmed;
-                info!("Dialog {} transitioned to Confirmed state", self.call_id());
-
-                // CRITICAL FIX: Update dialog lookup now that we have both tags
-                if let Some(tuple) = dialog.dialog_id_tuple() {
-                    use crate::manager::utils::DialogUtils;
-                    let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
-                    debug!("Inserting dialog lookup key: {}", key);
-                    self.dialog_handle
-                        .dialog_manager
-                        .dialog_lookup
-                        .insert(key, dialog.id.clone());
-                    info!("Updated dialog lookup for confirmed dialog {}", dialog.id);
-                } else {
-                    warn!(
-                        "Dialog {} cannot be added to lookup table - missing local or remote tag",
-                        dialog.id
-                    );
-                }
-            } else {
-                debug!(
-                    "Dialog {} not in Early state, current state: {:?}",
-                    self.call_id(),
-                    dialog.state
-                );
-            }
-        }
-
-        // Emit session coordination event
-        if let Some(sdp) = sdp_answer {
-            let event = crate::events::SessionCoordinationEvent::CallAnswered {
-                dialog_id: self.call_id().clone(),
-                session_answer: sdp,
-            };
-            self.dialog_handle
-                .dialog_manager
-                .emit_session_coordination_event(event)
-                .await;
-        }
+                StatusCode::Ok,
+                None,
+                sdp_answer.as_deref(),
+            )
+            .await
+            .map_err(ApiError::from)?;
 
         info!("Successfully answered call {}", self.call_id());
         Ok(())
@@ -763,15 +636,21 @@ impl CallHandle {
             self.call_id(),
             status_code
         );
-
-        // TODO: This should send an error response when response API is available
-        debug!(
-            "Call {} would be rejected with status {} reason: {:?}",
-            self.call_id(),
-            status_code,
-            reason
-        );
-
+        if !(300..=699).contains(&status_code.as_u16()) {
+            return Err(ApiError::protocol(
+                "call rejection requires a final 3xx-6xx SIP status",
+            ));
+        }
+        self.dialog_handle
+            .dialog_manager
+            .send_initial_invite_final_response(
+                self.call_id(),
+                status_code,
+                reason.as_deref(),
+                None,
+            )
+            .await
+            .map_err(ApiError::from)?;
         Ok(())
     }
 
@@ -825,11 +704,7 @@ impl CallHandle {
     /// # Returns
     /// Success or error
     pub async fn transfer(&self, transfer_target: String) -> ApiResult<()> {
-        info!(
-            "Transferring call {} to {}",
-            self.call_id(),
-            transfer_target
-        );
+        info!("Transferring call {} with target present", self.call_id());
 
         // Use the enhanced dialog handle method
         self.dialog_handle.send_refer(transfer_target, None).await?;
@@ -853,9 +728,8 @@ impl CallHandle {
         refer_body: String,
     ) -> ApiResult<TransactionKey> {
         info!(
-            "Transferring call {} to {} with custom body",
-            self.call_id(),
-            transfer_target
+            "Transferring call {} with target and custom body present",
+            self.call_id()
         );
 
         self.dialog_handle
@@ -875,9 +749,8 @@ impl CallHandle {
     /// Transaction key for the NOTIFY request
     pub async fn notify(&self, event: String, body: Option<String>) -> ApiResult<TransactionKey> {
         info!(
-            "Sending call notification for {} event {}",
-            self.call_id(),
-            event
+            "Sending call notification for {} with event value present",
+            self.call_id()
         );
 
         self.dialog_handle.send_notify(event, body).await
@@ -1008,7 +881,7 @@ impl CallHandle {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CallInfo {
     /// Call ID (dialog ID)
     pub call_id: DialogId,
@@ -1030,6 +903,21 @@ pub struct CallInfo {
 
     /// Remote tag
     pub remote_tag: Option<String>,
+}
+
+impl fmt::Debug for CallInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallInfo")
+            .field("call_id", &self.call_id)
+            .field("state", &self.state)
+            .field("local_uri", &"[redacted]")
+            .field("remote_uri", &"[redacted]")
+            .field("call_id_header_len", &self.call_id_header.len())
+            .field("local_tag_present", &self.local_tag.is_some())
+            .field("remote_tag_present", &self.remote_tag.is_some())
+            .finish()
+    }
 }
 
 /// Dialog events that applications can listen for
@@ -1177,7 +1065,7 @@ pub struct CallInfo {
 ///     }
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum DialogEvent {
     /// Dialog was created
     Created { dialog_id: DialogId },
@@ -1205,4 +1093,205 @@ pub enum DialogEvent {
         status_code: StatusCode,
         body: Option<String>,
     },
+}
+
+impl fmt::Debug for DialogEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Created { dialog_id } => formatter
+                .debug_struct("Created")
+                .field("dialog_id", dialog_id)
+                .finish(),
+            Self::StateChanged {
+                dialog_id,
+                old_state,
+                new_state,
+            } => formatter
+                .debug_struct("StateChanged")
+                .field("dialog_id", dialog_id)
+                .field("old_state", old_state)
+                .field("new_state", new_state)
+                .finish(),
+            Self::Terminated { dialog_id, reason } => formatter
+                .debug_struct("Terminated")
+                .field("dialog_id", dialog_id)
+                .field("reason_len", &reason.len())
+                .finish(),
+            Self::RequestReceived {
+                dialog_id,
+                method,
+                body,
+            } => formatter
+                .debug_struct("RequestReceived")
+                .field("dialog_id", dialog_id)
+                .field("method", &method_class(method))
+                .field("body_len", &body.as_ref().map(String::len))
+                .finish(),
+            Self::ResponseReceived {
+                dialog_id,
+                status_code,
+                body,
+            } => formatter
+                .debug_struct("ResponseReceived")
+                .field("dialog_id", dialog_id)
+                .field("status_code", status_code)
+                .field("body_len", &body.as_ref().map(String::len))
+                .finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod safe_debug_tests {
+    use super::*;
+
+    const SECRET: &str = "api-dialog-debug-secret-canary";
+
+    #[test]
+    fn call_info_debug_hides_sip_identity() {
+        let info = CallInfo {
+            call_id: DialogId::new(),
+            state: DialogState::Confirmed,
+            local_uri: SECRET.to_string(),
+            remote_uri: SECRET.to_string(),
+            call_id_header: SECRET.to_string(),
+            local_tag: Some(SECRET.to_string()),
+            remote_tag: Some(SECRET.to_string()),
+        };
+        let debug = format!("{info:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("local_tag_present: true"));
+    }
+
+    #[test]
+    fn api_event_debug_hides_extension_method_and_body() {
+        let event = DialogEvent::RequestReceived {
+            dialog_id: DialogId::new(),
+            method: Method::Extension(SECRET.to_string()),
+            body: Some(SECRET.to_string()),
+        };
+        let debug = format!("{event:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("method: \"extension\""));
+        assert!(debug.contains("body_len"));
+    }
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start = source.find(start).expect("source start marker");
+        let tail = &source[start..];
+        let end = tail.find(end).expect("source end marker");
+        &tail[..end]
+    }
+
+    #[test]
+    fn public_call_signaling_facades_have_one_materializer_and_no_false_success() {
+        let common = include_str!("common.rs");
+        let answer = source_between(common, "pub async fn answer(&self", "/// Reject the call");
+        let reject = source_between(common, "pub async fn reject(&self", "/// Hang up the call");
+        for facade in [answer, reject] {
+            assert!(facade.contains(".send_initial_invite_final_response("));
+            assert!(!facade.contains("SimpleResponseBuilder"));
+            assert!(!facade.contains("response_builders::"));
+            assert!(!facade.contains(".send_response("));
+            assert!(
+                facade.find(".send_initial_invite_final_response(") < facade.rfind("Ok(())"),
+                "facade must not report success before the canonical wire operation"
+            );
+            assert!(!facade.contains("emit_"));
+        }
+
+        let hangup = source_between(
+            common,
+            "pub async fn hangup(&self",
+            "/// Put the call on hold",
+        );
+        assert!(hangup.contains("self.dialog_handle.terminate().await"));
+        assert!(!hangup.contains("send_request"));
+
+        let terminate = source_between(
+            common,
+            "pub async fn terminate(&self)",
+            "/// Terminate dialog directly without sending BYE",
+        );
+        assert_eq!(terminate.matches("self.send_bye()").count(), 1);
+        assert_eq!(terminate.matches(".terminate_dialog(").count(), 1);
+        assert!(
+            terminate.find("self.send_bye()").unwrap()
+                < terminate.find(".terminate_dialog(").unwrap()
+        );
+
+        let server = include_str!("server/call_operations.rs");
+        let handle = source_between(
+            server,
+            "pub async fn handle_invite(",
+            "/// Accept an incoming call",
+        );
+        assert_eq!(handle.matches(".handle_direct_invite(").count(), 1);
+        assert!(!handle.contains(".find_dialog_for_request("));
+        assert!(!handle.contains(".create_dialog(&request)"));
+
+        let accept = source_between(
+            server,
+            "pub async fn accept_call(",
+            "/// Reject an incoming call",
+        );
+        let reject_call =
+            source_between(server, "pub async fn reject_call(", "/// Terminate a call");
+        assert!(accept.contains(".answer(sdp_answer)"));
+        assert!(reject_call.contains(".reject(status_code, reason)"));
+        for facade in [accept, reject_call] {
+            assert!(!facade.contains("would be"));
+            assert!(!facade.contains("SimpleResponseBuilder"));
+        }
+
+        let lifecycle = include_str!("../manager/response_lifecycle.rs");
+        let materializer = source_between(
+            lifecycle,
+            "pub(crate) async fn send_known_transaction_response(",
+            "async fn open_initial_invite_server_transaction(",
+        );
+        assert_eq!(
+            materializer
+                .matches("SimpleResponseBuilder::response_from_request(")
+                .count(),
+            1,
+            "initial call final responses must have one materializer"
+        );
+        assert_eq!(
+            materializer.matches("self.send_response(").count(),
+            1,
+            "the canonical operation must cross the wire boundary once"
+        );
+        assert!(
+            materializer.find("self.send_response(").unwrap()
+                < materializer
+                    .find("self.commit_sent_response_lifecycle(")
+                    .unwrap(),
+            "dialog lifecycle must commit only after the exact response send succeeds"
+        );
+        let send_to_commit = &materializer[materializer.find("self.send_response(").unwrap()
+            ..materializer
+                .find("self.commit_sent_response_lifecycle(")
+                .unwrap()];
+        assert_eq!(
+            send_to_commit.matches(".await").count(),
+            1,
+            "the wire await must be the final yield before synchronous lifecycle commit"
+        );
+        assert!(!materializer.contains(
+            "self.commit_sent_response_lifecycle(dialog_id, &response, &original_request)\n            .await"
+        ));
+        assert!(!materializer.contains("emit_"));
+
+        let unified = include_str!("unified.rs");
+        let unified_response = source_between(
+            unified,
+            "async fn send_response_for_known_transaction(",
+            "// ========================================\n    // SIP METHOD HELPERS",
+        );
+        assert!(unified_response.contains(".send_known_transaction_response("));
+        assert!(!unified_response.contains("SimpleResponseBuilder"));
+    }
 }

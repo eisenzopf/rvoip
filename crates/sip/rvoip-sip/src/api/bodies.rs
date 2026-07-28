@@ -51,7 +51,7 @@ pub fn dtmf_relay(signal: char, duration_ms: u32) -> (String, Bytes) {
 /// breaking external callers (RFC 3863 has a richer schema; this
 /// covers the open / closed basic states most applications need).
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Presence {
     /// Presentity entity URI (e.g. `sip:alice@example.com`).
     pub entity: String,
@@ -60,6 +60,18 @@ pub struct Presence {
     /// Optional human-readable note carried alongside the basic
     /// status.
     pub note: Option<String>,
+}
+
+impl std::fmt::Debug for Presence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Presence")
+            .field("entity_bytes", &self.entity.len())
+            .field("basic_bytes", &self.basic.len())
+            .field("note_present", &self.note.is_some())
+            .field("note_bytes", &self.note.as_ref().map_or(0, String::len))
+            .finish()
+    }
 }
 
 impl Presence {

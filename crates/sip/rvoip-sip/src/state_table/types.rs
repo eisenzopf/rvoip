@@ -14,8 +14,17 @@ use std::collections::{HashMap, HashSet};
 /// let id2: CallId = id.as_str().to_string().into();
 /// assert_eq!(id, id2);
 /// ```
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionId(pub String);
+
+impl std::fmt::Debug for SessionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionId")
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl SessionId {
     /// Generate a fresh, random session id.
@@ -31,6 +40,12 @@ impl SessionId {
     /// Borrow the id as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -87,6 +102,12 @@ impl DialogId {
     /// Get the inner UUID
     pub fn as_uuid(&self) -> &uuid::Uuid {
         &self.0
+    }
+}
+
+impl Default for DialogId {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -150,7 +171,7 @@ pub enum Role {
 }
 
 /// Event types that trigger transitions
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Hash, Eq, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum EventType {
     // User-initiated events
     MakeCall {
@@ -394,6 +415,13 @@ pub enum EventType {
     SendOutboundRegister,
 }
 
+impl std::fmt::Debug for EventType {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
+}
+
 impl EventType {
     /// Normalize the event for state table lookups by removing runtime-specific field values.
     /// This allows the state table to match on event type rather than exact field values.
@@ -514,7 +542,7 @@ pub struct Transition {
 }
 
 /// Guards that must be satisfied for a transition
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum Guard {
     HasLocalSDP,
     HasRemoteSDP,
@@ -535,6 +563,13 @@ pub enum Guard {
     Custom(String),
 }
 
+impl std::fmt::Debug for Guard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
+}
+
 /// Actions to execute during a transition.
 ///
 /// `strum::VariantNames` reflects the variant names so the YAML loader's
@@ -542,7 +577,7 @@ pub enum Guard {
 /// `tests::action_variants_have_parse_mapping`) can prove every variant is
 /// reachable from at least one YAML action name. This catches drift when a
 /// new variant is added without a matching `parse_action_by_name` case.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::VariantNames)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::VariantNames, strum::IntoStaticStr)]
 pub enum Action {
     // Dialog actions
     CreateDialog,
@@ -568,14 +603,15 @@ pub enum Action {
     /// 5 redirects per RFC-recommended loop breaker.
     RetryWithContact,
     /// RFC 3261 §14.1 — after receiving 491 Request Pending on a re-INVITE,
-    /// sleep a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
-    /// re-issue whatever re-INVITE kind was pending. Caps at 3 retries.
+    /// schedule a random interval (owner: 2.1-4.0 s, non-owner: 0-2.0 s) and
+    /// re-issue whatever re-INVITE kind was pending. The exact lifecycle owns
+    /// the delay outside the state-machine lane. Caps at 3 retries.
     ScheduleReinviteRetry,
     /// RFC 3261 §14.1 glare resolution: when the peer's re-INVITE arrives
     /// while our own is pending and we accept theirs, cancel our scheduled
     /// retry by clearing `pending_reinvite` + `reinvite_retry_attempts`.
-    /// Any sleeping retry noops at wake-up because `ScheduleReinviteRetry`
-    /// reads `pending_reinvite` and returns early when it's `None`.
+    /// Any scheduled retry noops at wake-up because it revalidates the exact
+    /// generation, pending kind, and attempt before dispatch.
     ClearPendingReinvite,
 
     // Call control actions
@@ -607,16 +643,17 @@ pub enum Action {
     PrepareEarlyMediaSDP,
     /// RFC 3261 §22.2 — compute an Authorization (or Proxy-Authorization)
     /// header from the cached challenge plus configured UAC auth and resend
-    /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
-    /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
+    /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Retains
+    /// independent origin/proxy credentials and rejects repeated challenges
+    /// outside the bounded protection-space and stale-refresh policy.
     SendINVITEWithAuth,
     /// SIP_API_DESIGN_2 R2 — auth-retry for non-INVITE/non-REGISTER
-    /// methods. Reads `session.pending_auth_method` to discriminate
+    /// methods and tracked re-INVITEs. Reads `session.pending_auth_method` to discriminate
     /// which `pending_<method>_options` to re-issue (falls back to
     /// inspecting which stash is set when method is missing), computes
     /// the selected auth header, and dispatches via the matching
     /// `DialogAdapter::send_<method>_with_auth` mirror. Covers BYE,
-    /// REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS, SUBSCRIBE.
+    /// REFER, NOTIFY, INFO, UPDATE, re-INVITE, MESSAGE, OPTIONS, SUBSCRIBE.
     SendRequestWithAuth,
     /// RFC 4028 §6 — resend the INVITE with a bumped `Session-Expires` /
     /// `Min-SE` header derived from `session.session_timer_min_se` after a
@@ -753,10 +790,10 @@ pub enum Action {
     //
     // `SendRefer100Trying` fires on the REFER-receiver's own dialog when
     // the REFER is accepted (alongside `SendReferAccepted`). The other
-    // three fire from the transfer-leg's UAC transitions and are no-ops
-    // when `session.transferor_session_id == None`, so appending them to
-    // shared `Dialog180Ringing` / `Dialog200OK` / `Dialog{4,5,6}xxFailure`
-    // rows is safe for non-transfer calls.
+    // three are conditional projections from shared transfer-leg/UAC rows:
+    // an ordinary call requests no transfer operation, while any session
+    // carrying a partial or stale transfer marker fails closed unless its
+    // generation-qualified transferor handle is exact.
     SendRefer100Trying,
     SendTransferNotifyRinging,
     SendTransferNotifySuccess,
@@ -764,6 +801,13 @@ pub enum Action {
 
     // Custom action for extension
     Custom(String),
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
 }
 
 /// Conditions that track readiness
@@ -810,7 +854,7 @@ impl ConditionUpdates {
 }
 
 /// Event templates for publishing
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, strum::IntoStaticStr)]
 pub enum EventTemplate {
     StateChanged,
     SessionCreated,
@@ -825,6 +869,13 @@ pub enum EventTemplate {
     MediaNegotiated,
     MediaSessionReady,
     Custom(String),
+}
+
+impl std::fmt::Debug for EventTemplate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let variant: &'static str = self.into();
+        formatter.write_str(variant)
+    }
 }
 
 /// States that must always have exit transitions if used
@@ -848,6 +899,12 @@ pub struct MasterStateTable {
 
 /// Type alias for external use
 pub type StateTable = MasterStateTable;
+
+impl Default for MasterStateTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MasterStateTable {
     pub fn new() -> Self {
@@ -956,7 +1013,7 @@ impl MasterStateTable {
         }
 
         // Collect from wildcard transitions
-        for (_, transition) in &self.wildcard_transitions {
+        for transition in self.wildcard_transitions.values() {
             if let Some(next_state) = &transition.next_state {
                 states.insert(*next_state);
             }

@@ -12,15 +12,26 @@
 
 use rvoip_sip_core::types::sdp::{ParsedAttribute, SdpSession};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 
 /// One `a=fingerprint:` line extracted from an SDP.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DtlsFingerprint {
     /// Algorithm name (e.g. `sha-256`, `sha-384`, `sha-512`).
     pub algorithm: String,
     /// Lowercase hex with `:` separators, as it appears in SDP.
     pub value: String,
+}
+
+impl fmt::Debug for DtlsFingerprint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DtlsFingerprint")
+            .field("algorithm_present", &!self.algorithm.is_empty())
+            .field("fingerprint_bytes", &self.value.len())
+            .finish()
+    }
 }
 
 impl DtlsFingerprint {

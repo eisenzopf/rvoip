@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-websocket"
-version = "0.1.3"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -24,6 +24,7 @@ rvoip-auth-core.workspace = true
 rvoip-webrtc = { workspace = true, optional = true }
 
 tokio = { workspace = true }
+tokio-util.workspace = true
 async-trait.workspace = true
 futures.workspace = true
 dashmap.workspace = true

@@ -1,6 +1,7 @@
 //! State-machine tests per `UCTP_IMPLEMENTATION_PLAN.md` §3.8.
 
 use rvoip_uctp::ids::StreamId;
+use rvoip_uctp::state::connection::AcceptedStream;
 use rvoip_uctp::state::{
     ConnectionInput, ConnectionMachine, SessionInput, SessionMachine, UctpConnectionState,
     UctpSessionState,
@@ -58,17 +59,37 @@ fn connection_negotiate_happy_path() {
 }
 
 #[test]
-fn stream_local_id_allocator_round_trip() {
+fn externally_allocated_stream_binding_round_trip() {
     let mut m = ConnectionMachine::new_negotiating();
     m.apply(ConnectionInput::AnswerReceived).unwrap();
     let s1 = StreamId::new();
     let s2 = StreamId::new();
-    let l1 = m.open_stream(s1.clone()).unwrap();
-    let l2 = m.open_stream(s2.clone()).unwrap();
-    assert_ne!(l1, l2);
-    assert_eq!(m.resolve_stream(l1), Some(&s1));
-    assert_eq!(m.resolve_stream(l2), Some(&s2));
+    m.bind_stream(41, s1.clone()).unwrap();
+    m.bind_stream(42, s2.clone()).unwrap();
+    assert_eq!(m.resolve_stream(41), Some(&s1));
+    assert_eq!(m.resolve_stream(42), Some(&s2));
     assert_eq!(m.resolve_stream(999), None);
+    assert!(m.bind_stream(0, StreamId::new()).is_err());
+    assert!(m.bind_stream(41, StreamId::new()).is_err());
+}
+
+#[test]
+fn pending_unannounced_streams_are_not_teardown_cleanup_candidates() {
+    let mut machine = ConnectionMachine::new_negotiating();
+    machine.set_pending_streams(vec![AcceptedStream {
+        strm_id: "audio/main".into(),
+        kind: "audio".into(),
+        direction: "sendrecv".into(),
+        chosen_codec: Some("opus".into()),
+        participant: "publisher".into(),
+    }]);
+    assert!(machine.stream_ids().is_empty());
+
+    let pending = machine.take_pending_streams();
+    machine
+        .bind_stream(77, StreamId::from_string(pending[0].strm_id.clone()))
+        .unwrap();
+    assert_eq!(machine.stream_ids(), vec!["audio/main".to_string()]);
 }
 
 #[test]

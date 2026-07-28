@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rvoip_auth_core::{
-    BearerAuthError, BearerValidator, JwksJwtValidator, OAuth2IntrospectionValidator,
+    AuthenticatedPrincipal, BearerAuthError, BearerValidator, JwksJwtValidator,
+    OAuth2IntrospectionValidator,
 };
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::Deserialize;
@@ -200,7 +201,7 @@ pub struct KeycloakHealth {
 
 /// Keycloak-backed Bearer validator using the realm JWKS endpoint.
 pub struct KeycloakBearerValidator {
-    inner: JwksJwtValidator,
+    inner: Arc<dyn BearerValidator>,
 }
 
 impl KeycloakBearerValidator {
@@ -213,7 +214,9 @@ impl KeycloakBearerValidator {
         if let Some(audience) = config.audience.as_ref() {
             validator = validator.with_audience([audience.as_str()]);
         }
-        Ok(Self { inner: validator })
+        Ok(Self {
+            inner: Arc::new(validator),
+        })
     }
 
     pub fn from_metadata(
@@ -228,7 +231,9 @@ impl KeycloakBearerValidator {
         if let Some(audience) = config.audience.as_ref() {
             validator = validator.with_audience([audience.as_str()]);
         }
-        Ok(Self { inner: validator })
+        Ok(Self {
+            inner: Arc::new(validator),
+        })
     }
 
     pub fn into_arc(self) -> Arc<dyn BearerValidator> {
@@ -240,6 +245,13 @@ impl KeycloakBearerValidator {
 impl BearerValidator for KeycloakBearerValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
         self.inner.validate(token).await
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        self.inner.validate_principal(token).await
     }
 }
 
@@ -337,6 +349,35 @@ async fn tokio_sleep(delay: Duration) {
 mod tests {
     use super::*;
 
+    struct RichValidator;
+
+    #[async_trait]
+    impl BearerValidator for RichValidator {
+        async fn validate(&self, _token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+            Ok(self.validate_principal("token").await?.assurance)
+        }
+
+        async fn validate_principal(
+            &self,
+            _token: &str,
+        ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+            let identity = rvoip_core_traits::ids::IdentityId::from_string("subject-a");
+            Ok(AuthenticatedPrincipal {
+                subject: "subject-a".into(),
+                tenant: Some("tenant-a".into()),
+                scopes: vec!["calls:read".into()],
+                issuer: Some("https://issuer.example".into()),
+                expires_at: None,
+                method: rvoip_auth_core::AuthenticationMethod::Oidc,
+                assurance: IdentityAssurance::UserAuthorized {
+                    identity: identity.clone(),
+                    user_id: identity,
+                    scopes: vec!["calls:read".into()],
+                },
+            })
+        }
+    }
+
     #[test]
     fn keycloak_config_builds_realm_urls() {
         let config = KeycloakConfig::new(
@@ -424,6 +465,21 @@ mod tests {
 
         assert!(
             matches!(err, KeycloakError::Config(message) if message.contains("introspection_endpoint"))
+        );
+    }
+
+    #[tokio::test]
+    async fn wrapper_preserves_rich_principal() {
+        let wrapper = KeycloakBearerValidator {
+            inner: Arc::new(RichValidator),
+        };
+        let principal = wrapper.validate_principal("token").await.unwrap();
+        assert_eq!(principal.subject, "subject-a");
+        assert_eq!(principal.tenant.as_deref(), Some("tenant-a"));
+        assert_eq!(principal.issuer.as_deref(), Some("https://issuer.example"));
+        assert_eq!(
+            principal.method,
+            rvoip_auth_core::AuthenticationMethod::Oidc
         );
     }
 }

@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use rvoip_auth_core::{
     bearer::{BearerAuthError, BearerValidator},
-    AAuthValidator, ActorClaims, ActorTokenValidator,
+    AAuthValidator, ActorClaims, ActorTokenValidator, AuthenticatedPrincipal, AuthenticationMethod,
 };
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::IdentityId;
@@ -51,6 +51,22 @@ impl BearerValidator for StaticSubject {
             scopes: self.scopes.clone(),
         })
     }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let assurance = self.validate(token).await?;
+        Ok(AuthenticatedPrincipal {
+            subject: self.user_id.to_string(),
+            tenant: Some("aauth-test-tenant".into()),
+            scopes: self.scopes.clone(),
+            issuer: Some("aauth-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance,
+        })
+    }
 }
 
 struct StaticActor {
@@ -67,6 +83,28 @@ impl ActorTokenValidator for StaticActor {
         Ok(ActorClaims {
             identity: self.identity.clone(),
             scopes: self.scopes.clone(),
+        })
+    }
+
+    async fn validate_actor_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        let claims = self.validate_actor(token).await?;
+        let mut scopes = claims.scopes.clone();
+        scopes.push("aauth:act:user:alice".into());
+        Ok(AuthenticatedPrincipal {
+            subject: claims.identity.to_string(),
+            tenant: Some("aauth-test-tenant".into()),
+            scopes: scopes.clone(),
+            issuer: Some("aauth-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::UserAuthorized {
+                identity: claims.identity.clone(),
+                user_id: claims.identity,
+                scopes,
+            },
         })
     }
 }
@@ -136,7 +174,7 @@ async fn aauth_response_yields_user_authorized_assurance() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let _coord = UctpCoordinator::start_full_with_aauth(
+    let coord = UctpCoordinator::start_full_with_aauth(
         "quic",
         in_rx,
         out_tx,
@@ -175,6 +213,17 @@ async fn aauth_response_yields_user_authorized_assurance() {
     assert_eq!(
         session_payload.assurance, "user-authorized",
         "AAuth must elevate assurance to user-authorized"
+    );
+    assert_eq!(session_payload.identity_id, "user:alice");
+    assert_eq!(session_payload.participant_id, "user:alice");
+    assert_ne!(session_payload.identity_id, "subject-token");
+    let principal = coord.authenticated_principal().expect("AAuth principal");
+    assert_eq!(principal.subject, "user:alice");
+    assert!(!format!("{principal:?}").contains("subject-token"));
+    assert!(!format!("{principal:?}").contains("actor-token"));
+    assert!(
+        principal.expires_at.is_some(),
+        "UCTP applies a finite expiry"
     );
 
     // 3. Coordinator should also have emitted the Authenticated event
@@ -241,4 +290,70 @@ async fn aauth_with_missing_actor_token_rejects_401() {
     assert_eq!(reply.msg_type, MessageType::Error);
     let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
     assert_eq!(payload.code, 401);
+}
+
+#[tokio::test]
+async fn aauth_refresh_validates_both_new_credentials_without_retaining_them() {
+    let subject = Arc::new(StaticSubject {
+        user_id: id("user:alice"),
+        scopes: vec!["calls.write".into()],
+    });
+    let actor = Arc::new(StaticActor {
+        identity: id("agent:assistant-7"),
+        scopes: vec!["calls.transfer".into()],
+    });
+    let aauth = AAuthValidator::new(subject.clone(), actor);
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, mut events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let coord = UctpCoordinator::start_full_with_aauth(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        subject as Arc<dyn BearerValidator>,
+        aauth,
+        Arc::new(default_v0_descriptor()),
+        rejecting_handler(),
+        UctpCoordinatorCaps::default(),
+    );
+
+    in_tx.send(hello()).await.unwrap();
+    let challenge = out_rx.recv().await.unwrap();
+    in_tx
+        .send(aauth_response(
+            challenge.id,
+            "initial-subject-token",
+            Some("initial-actor-token"),
+        ))
+        .await
+        .unwrap();
+    let _initial_session = out_rx.recv().await.unwrap();
+    let _initial_event = events_rx.recv().await.unwrap();
+
+    in_tx
+        .send(UctpEnvelope::new(
+            MessageType::AuthRefresh,
+            serde_json::to_value(auth::AuthRefresh {
+                method: "aauth".into(),
+                credential: "replacement-subject-token".into(),
+                actor_token: Some("replacement-actor-token".into()),
+            })
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+
+    let reply = out_rx.recv().await.expect("refreshed auth.session");
+    assert_eq!(reply.msg_type, MessageType::AuthSession);
+    let session: auth::AuthSession = reply.decode_payload().unwrap();
+    assert_eq!(session.identity_id, "user:alice");
+    let _refresh_event = events_rx.recv().await.expect("refresh auth event");
+    let principal = coord
+        .authenticated_principal()
+        .expect("refreshed principal");
+    assert_eq!(principal.subject, "user:alice");
+    let diagnostic = format!("{principal:?}");
+    assert!(!diagnostic.contains("replacement-subject-token"));
+    assert!(!diagnostic.contains("replacement-actor-token"));
 }

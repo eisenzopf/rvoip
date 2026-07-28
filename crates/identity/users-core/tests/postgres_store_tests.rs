@@ -93,6 +93,7 @@ async fn postgres_auth_security_store_backs_auth_service_when_configured() {
         access_ttl_seconds: 300,
         refresh_ttl_seconds: 3600,
         algorithm: "HS256".to_string(),
+        tenant_id: None,
         signing_key: Some("postgres-auth-security-test-secret".to_string()),
     })
     .unwrap();

@@ -2,21 +2,11 @@
 //! `Diversion`, `History-Info`, `Referred-By` accessible at the
 //! receiver side.
 //!
-//! Today this test asserts the wire-level guarantee only: the
-//! application headers Alice stamps via `with_raw_header` reach Bob's
-//! socket in the inbound INVITE bytes. The typed `SipHeaderView`
-//! consultation on `IncomingCall` depends on the inbound enrichment
-//! re-parse path in
-//! `rvoip-sip/src/adapters/session_event_handler.rs:1326-1348`, which
-//! currently fails because the upstream cross-crate publish site at
-//! `rvoip-sip-dialog/src/events/adapter.rs:282-283` reserializes the
-//! parsed `Request` via `Display::to_string()` instead of preserving
-//! the original wire bytes (the spec §7.5 commitment). Fixing the
-//! preservation path is a follow-up; until then,
-//! `IncomingCall::raw_request()` returns `None` and the `SipHeaderView`
-//! impl surfaces an empty header list. The wire-side guarantee
-//! covered here is what B2BUA-style downstream carry-through actually
-//! relies on.
+//! This test asserts that application headers Alice stamps via
+//! `with_raw_header` reach Bob byte-for-byte and remain available to
+//! `IncomingCall` header inspection. The sole event-hub ingress takes
+//! the transport-cached request bytes; it does not reserialize a parsed
+//! request or route through a compatibility adapter.
 
 use std::time::Duration;
 

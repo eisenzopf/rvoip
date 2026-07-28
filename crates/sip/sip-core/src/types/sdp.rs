@@ -33,7 +33,7 @@ pub enum RidDirection {
 }
 
 #[cfg(not(feature = "sdp"))]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RidAttribute {
     /// The RID identifier
     pub id: String,
@@ -47,6 +47,20 @@ pub struct RidAttribute {
     pub params: HashMap<String, String>,
 }
 
+#[cfg(not(feature = "sdp"))]
+impl fmt::Debug for RidAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RidAttribute")
+            .field("id_bytes", &self.id.len())
+            .field("direction", &self.direction)
+            .field("format_count", &self.formats.as_ref().map_or(0, Vec::len))
+            .field("payload_type_count", &self.pt.as_ref().map_or(0, Vec::len))
+            .field("parameter_count", &self.params.len())
+            .finish()
+    }
+}
+
 // Now all references to these types should work regardless of whether the sdp feature is enabled
 
 // --- Placeholder Attribute Structs ---
@@ -54,7 +68,7 @@ pub struct RidAttribute {
 ///
 /// Maps RTP payload types to media encoding names, clock rates, and encoding parameters.
 /// Format: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct RtpMapAttribute {
     /// RTP payload type (numeric)
     pub payload_type: u8,
@@ -66,11 +80,27 @@ pub struct RtpMapAttribute {
     pub encoding_params: Option<String>,
 }
 
+impl fmt::Debug for RtpMapAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RtpMapAttribute")
+            .field("payload_type", &self.payload_type)
+            .field("encoding_name_bytes", &self.encoding_name.len())
+            .field("clock_rate", &self.clock_rate)
+            .field("encoding_params_present", &self.encoding_params.is_some())
+            .field(
+                "encoding_params_bytes",
+                &self.encoding_params.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
 /// Represents a Format Parameters attribute (a=fmtp)
 ///
 /// Provides additional parameters for a specified format.
 /// Format: `a=fmtp:<format> <parameters>`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct FmtpAttribute {
     /// Format identifier (typically the payload type from rtpmap)
     pub format: String,
@@ -78,12 +108,22 @@ pub struct FmtpAttribute {
     pub parameters: String,
 }
 
+impl fmt::Debug for FmtpAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FmtpAttribute")
+            .field("format_bytes", &self.format.len())
+            .field("parameter_bytes", &self.parameters.len())
+            .finish()
+    }
+}
+
 /// Represents a parsed ICE Candidate attribute (RFC 5245 / 8445 / 8839).
 ///
 /// Format: `a=candidate:<foundation> <component-id> <transport> <priority>
 /// <connection-address> <port> typ <candidate-type>
 /// [raddr <related-address>] [rport <related-port>] [...]`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateAttribute {
     /// Unique identifier for this candidate
     pub foundation: String,
@@ -107,20 +147,80 @@ pub struct CandidateAttribute {
     pub extensions: Vec<(String, Option<String>)>,
 }
 
+fn ice_transport_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("udp") {
+        "udp"
+    } else if value.eq_ignore_ascii_case("tcp") {
+        "tcp"
+    } else {
+        "other"
+    }
+}
+
+fn ice_candidate_type_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("host") {
+        "host"
+    } else if value.eq_ignore_ascii_case("srflx") {
+        "server-reflexive"
+    } else if value.eq_ignore_ascii_case("prflx") {
+        "peer-reflexive"
+    } else if value.eq_ignore_ascii_case("relay") {
+        "relay"
+    } else {
+        "other"
+    }
+}
+
+impl fmt::Debug for CandidateAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CandidateAttribute")
+            .field("foundation_bytes", &self.foundation.len())
+            .field("component_id", &self.component_id)
+            .field("transport", &ice_transport_class(&self.transport))
+            .field("priority", &self.priority)
+            .field("address_bytes", &self.connection_address.len())
+            .field("port", &self.port)
+            .field(
+                "candidate_type",
+                &ice_candidate_type_class(&self.candidate_type),
+            )
+            .field("related_address_present", &self.related_address.is_some())
+            .field(
+                "related_address_bytes",
+                &self.related_address.as_ref().map_or(0, String::len),
+            )
+            .field("related_port_present", &self.related_port.is_some())
+            .field("extension_count", &self.extensions.len())
+            .finish()
+    }
+}
+
 /// ICE remote-candidates attribute (RFC 8839).
 ///
 /// Format: `a=remote-candidates:<component-id> <connection-address> <port> ...`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteCandidateAttribute {
     pub component_id: u32,
     pub connection_address: String,
     pub port: u16,
 }
 
+impl fmt::Debug for RemoteCandidateAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RemoteCandidateAttribute")
+            .field("component_id", &self.component_id)
+            .field("address_bytes", &self.connection_address.len())
+            .field("port", &self.port)
+            .finish()
+    }
+}
+
 /// Represents a parsed SSRC attribute (RFC 5576).
 ///
 /// Format: `a=ssrc:<ssrc-id> <attribute>[:<value>]`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrcAttribute {
     /// SSRC identifier
     pub ssrc_id: u32,
@@ -130,10 +230,21 @@ pub struct SsrcAttribute {
     pub value: Option<String>,
 }
 
+impl fmt::Debug for SsrcAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SsrcAttribute")
+            .field("attribute_bytes", &self.attribute.len())
+            .field("value_present", &self.value.is_some())
+            .field("value_bytes", &self.value.as_ref().map_or(0, String::len))
+            .finish()
+    }
+}
+
 /// Represents an RTCP attribute (RFC 3605 / WebRTC SDP usage).
 ///
 /// Format: `a=rtcp:<port> [<nettype> <addrtype> <connection-address>]`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RtcpAttribute {
     pub port: u16,
     pub net_type: Option<String>,
@@ -141,61 +252,161 @@ pub struct RtcpAttribute {
     pub connection_address: Option<String>,
 }
 
+impl fmt::Debug for RtcpAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RtcpAttribute")
+            .field("port", &self.port)
+            .field("network_type_present", &self.net_type.is_some())
+            .field("address_type_present", &self.addr_type.is_some())
+            .field("address_present", &self.connection_address.is_some())
+            .field(
+                "address_bytes",
+                &self.connection_address.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
 /// Represents an `a=ssrc-group:` attribute (RFC 5576).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SsrcGroupAttribute {
     pub semantics: String,
     pub ssrcs: Vec<u32>,
 }
 
+impl fmt::Debug for SsrcGroupAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SsrcGroupAttribute")
+            .field("semantics_bytes", &self.semantics.len())
+            .field("ssrc_count", &self.ssrcs.len())
+            .finish()
+    }
+}
+
 /// One RID alternative in a simulcast stream version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulcastAlternative {
     pub rid: String,
     pub paused: bool,
 }
 
+impl fmt::Debug for SimulcastAlternative {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastAlternative")
+            .field("rid_bytes", &self.rid.len())
+            .field("paused", &self.paused)
+            .finish()
+    }
+}
+
 /// One semicolon-delimited simulcast stream version.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulcastVersion {
     pub alternatives: Vec<SimulcastAlternative>,
 }
 
+impl fmt::Debug for SimulcastVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastVersion")
+            .field("alternative_count", &self.alternatives.len())
+            .finish()
+    }
+}
+
 /// Directional simulcast description preserving versions, alternatives, and paused markers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SimulcastDescription {
     pub direction: RidDirection,
     pub versions: Vec<SimulcastVersion>,
 }
 
+impl fmt::Debug for SimulcastDescription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SimulcastDescription")
+            .field("direction", &self.direction)
+            .field("version_count", &self.versions.len())
+            .finish()
+    }
+}
+
 /// RFC 8864 data channel mapping attribute.
 ///
 /// Format: `a=dcmap:<stream-id> [label="..."] [subprotocol="..."] ...`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DcMapAttribute {
     pub stream_id: u16,
     pub parameters: Vec<(String, Option<String>)>,
 }
 
+impl fmt::Debug for DcMapAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parameter_bytes = self
+            .parameters
+            .iter()
+            .map(|(name, value)| name.len() + value.as_ref().map_or(0, String::len))
+            .sum::<usize>();
+        formatter
+            .debug_struct("DcMapAttribute")
+            .field("stream_id", &self.stream_id)
+            .field("parameter_count", &self.parameters.len())
+            .field("parameter_bytes", &parameter_bytes)
+            .finish()
+    }
+}
+
 /// RFC 8864 data channel subprotocol attribute.
 ///
 /// Format: `a=dcsa:<stream-id> <attribute-line-without-a=>`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DcsaAttribute {
     pub stream_id: u16,
     pub attribute: String,
 }
 
+impl fmt::Debug for DcsaAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DcsaAttribute")
+            .field("stream_id", &self.stream_id)
+            .field("attribute_bytes", &self.attribute.len())
+            .finish()
+    }
+}
+
 /// RFC 8866 `z=` time-zone adjustment line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeZoneAdjustment {
     pub raw: String,
 }
 
+impl fmt::Debug for TimeZoneAdjustment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TimeZoneAdjustment")
+            .field("value_bytes", &self.raw.len())
+            .finish()
+    }
+}
+
 /// RFC 8866 `k=` encryption key line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EncryptionKey {
     pub raw: String,
+}
+
+impl fmt::Debug for EncryptionKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EncryptionKey")
+            .field("present", &!self.raw.is_empty())
+            .field("value_bytes", &self.raw.len())
+            .finish()
+    }
 }
 
 /// SDES crypto suites (RFC 4568 §6.2.1, RFC 6188 for AES-256 names).
@@ -277,7 +488,7 @@ impl std::str::FromStr for CryptoSuite {
 ///   leave them off.
 /// - `session_params` is a free-form list of `KEY=value` pairs (e.g.
 ///   `UNENCRYPTED_SRTCP`); rarely populated outside WebRTC.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CryptoAttribute {
     /// Crypto-suite tag (small positive integer, unique per `m=` section).
     pub tag: u32,
@@ -296,6 +507,29 @@ pub struct CryptoAttribute {
     /// Optional session-params (e.g. `UNENCRYPTED_SRTP`,
     /// `UNAUTHENTICATED_SRTP`, `UNENCRYPTED_SRTCP`, `KDR=N`).
     pub session_params: Vec<String>,
+}
+
+impl fmt::Debug for CryptoAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CryptoAttribute")
+            .field("tag", &self.tag)
+            .field("suite", &self.suite)
+            .field("key_present", &!self.key_inline.is_empty())
+            .field("key_bytes", &self.key_inline.len())
+            .field("lifetime_present", &self.key_lifetime.is_some())
+            .field(
+                "lifetime_bytes",
+                &self.key_lifetime.as_ref().map_or(0, String::len),
+            )
+            .field("mki_present", &self.key_mki.is_some())
+            .field("session_parameter_count", &self.session_params.len())
+            .field(
+                "session_parameter_bytes",
+                &self.session_params.iter().map(String::len).sum::<usize>(),
+            )
+            .finish()
+    }
 }
 
 impl CryptoAttribute {
@@ -336,7 +570,7 @@ impl std::fmt::Display for CryptoAttribute {
 }
 
 /// A parsed attribute, identified by its type
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Clone, Serialize, Deserialize)]
 pub enum ParsedAttribute {
     /// RTP format parameters, corresponds to `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
     RtpMap(RtpMapAttribute),
@@ -445,10 +679,277 @@ pub enum ParsedAttribute {
     Other(String, Option<String>),
 }
 
+fn setup_role_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("active") {
+        "active"
+    } else if value.eq_ignore_ascii_case("passive") {
+        "passive"
+    } else if value.eq_ignore_ascii_case("actpass") {
+        "actpass"
+    } else if value.eq_ignore_ascii_case("holdconn") {
+        "holdconn"
+    } else {
+        "other"
+    }
+}
+
+impl fmt::Debug for ParsedAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("ParsedAttribute");
+        match self {
+            Self::RtpMap(value) => {
+                debug.field("kind", &"rtpmap").field("value", value);
+            }
+            Self::Fmtp(value) => {
+                debug.field("kind", &"fmtp").field("value", value);
+            }
+            Self::Direction(value) => {
+                debug.field("kind", &"direction").field("direction", value);
+            }
+            Self::Ptime(value) => {
+                debug.field("kind", &"ptime").field("milliseconds", value);
+            }
+            Self::MaxPtime(value) => {
+                debug
+                    .field("kind", &"maxptime")
+                    .field("milliseconds", value);
+            }
+            Self::Candidate(value) => {
+                debug.field("kind", &"candidate").field("value", value);
+            }
+            Self::Ssrc(value) => {
+                debug.field("kind", &"ssrc").field("value", value);
+            }
+            Self::IceUfrag(value) => {
+                debug
+                    .field("kind", &"ice-ufrag")
+                    .field("value_present", &!value.is_empty())
+                    .field("value_bytes", &value.len());
+            }
+            Self::IcePwd(value) => {
+                debug
+                    .field("kind", &"ice-pwd")
+                    .field("value_present", &!value.is_empty())
+                    .field("value_bytes", &value.len());
+            }
+            Self::IceLite => {
+                debug.field("kind", &"ice-lite");
+            }
+            Self::RemoteCandidates(values) => {
+                debug
+                    .field("kind", &"remote-candidates")
+                    .field("candidate_count", &values.len());
+            }
+            Self::Fingerprint(algorithm, fingerprint) => {
+                debug
+                    .field("kind", &"fingerprint")
+                    .field("algorithm_bytes", &algorithm.len())
+                    .field("fingerprint_present", &!fingerprint.is_empty())
+                    .field("fingerprint_bytes", &fingerprint.len());
+            }
+            Self::Setup(value) => {
+                debug
+                    .field("kind", &"setup")
+                    .field("role", &setup_role_class(value));
+            }
+            Self::TlsId(value) => {
+                debug
+                    .field("kind", &"tls-id")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Crypto(value) => {
+                debug.field("kind", &"crypto").field("value", value);
+            }
+            Self::Mid(value) => {
+                debug
+                    .field("kind", &"mid")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Group(semantics, ids) => {
+                debug
+                    .field("kind", &"group")
+                    .field("semantics_bytes", &semantics.len())
+                    .field("id_count", &ids.len());
+            }
+            Self::BundleOnly => {
+                debug.field("kind", &"bundle-only");
+            }
+            Self::MsidSemantic(semantic, ids) => {
+                debug
+                    .field("kind", &"msid-semantic")
+                    .field("semantic_bytes", &semantic.len())
+                    .field("id_count", &ids.len());
+            }
+            Self::Rtcp(value) => {
+                debug.field("kind", &"rtcp").field("value", value);
+            }
+            Self::RtcpMux => {
+                debug.field("kind", &"rtcp-mux");
+            }
+            Self::RtcpRsize => {
+                debug.field("kind", &"rtcp-rsize");
+            }
+            Self::RtcpFb(payload, feedback_type, parameter) => {
+                debug
+                    .field("kind", &"rtcp-fb")
+                    .field("payload_bytes", &payload.len())
+                    .field("feedback_type_bytes", &feedback_type.len())
+                    .field("parameter_present", &parameter.is_some())
+                    .field(
+                        "parameter_bytes",
+                        &parameter.as_ref().map_or(0, String::len),
+                    );
+            }
+            Self::ExtMap(id, direction, uri, params) => {
+                debug
+                    .field("kind", &"extmap")
+                    .field("id", id)
+                    .field("direction_present", &direction.is_some())
+                    .field("uri_bytes", &uri.len())
+                    .field("parameters_present", &params.is_some())
+                    .field("parameter_bytes", &params.as_ref().map_or(0, String::len));
+            }
+            Self::ExtMapAllowMixed => {
+                debug.field("kind", &"extmap-allow-mixed");
+            }
+            Self::Msid(stream, track) => {
+                debug
+                    .field("kind", &"msid")
+                    .field("stream_id_bytes", &stream.len())
+                    .field("track_id_present", &track.is_some())
+                    .field("track_id_bytes", &track.as_ref().map_or(0, String::len));
+            }
+            Self::Bandwidth(kind, value) => {
+                debug
+                    .field("kind", &"bandwidth")
+                    .field("type_bytes", &kind.len())
+                    .field("value", value);
+            }
+            Self::Rid(value) => {
+                debug.field("kind", &"rid").field("value", value);
+            }
+            Self::Simulcast(send, receive) => {
+                debug
+                    .field("kind", &"simulcast")
+                    .field("send_count", &send.len())
+                    .field("receive_count", &receive.len());
+            }
+            Self::SimulcastStructured(values) => {
+                debug
+                    .field("kind", &"simulcast-structured")
+                    .field("description_count", &values.len());
+            }
+            Self::SsrcGroup(value) => {
+                debug.field("kind", &"ssrc-group").field("value", value);
+            }
+            Self::IceOptions(values) => {
+                debug
+                    .field("kind", &"ice-options")
+                    .field("option_count", &values.len())
+                    .field(
+                        "option_bytes",
+                        &values.iter().map(String::len).sum::<usize>(),
+                    );
+            }
+            Self::EndOfCandidates => {
+                debug.field("kind", &"end-of-candidates");
+            }
+            Self::SctpPort(value) => {
+                debug.field("kind", &"sctp-port").field("port", value);
+            }
+            Self::MaxMessageSize(value) => {
+                debug
+                    .field("kind", &"max-message-size")
+                    .field("bytes", value);
+            }
+            Self::SctpMap(port, application, streams) => {
+                debug
+                    .field("kind", &"sctpmap")
+                    .field("port", port)
+                    .field("application_bytes", &application.len())
+                    .field("stream_count", streams);
+            }
+            Self::DcMap(value) => {
+                debug.field("kind", &"dcmap").field("value", value);
+            }
+            Self::Dcsa(value) => {
+                debug.field("kind", &"dcsa").field("value", value);
+            }
+            Self::Category(value) => {
+                debug
+                    .field("kind", &"category")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Keywords(value) => {
+                debug
+                    .field("kind", &"keywords")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Tool(value) => {
+                debug
+                    .field("kind", &"tool")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Orientation(value) => {
+                debug
+                    .field("kind", &"orientation")
+                    .field("value_bytes", &value.len());
+            }
+            Self::ConferenceType(value) => {
+                debug
+                    .field("kind", &"conference-type")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Charset(value) => {
+                debug
+                    .field("kind", &"charset")
+                    .field("value_bytes", &value.len());
+            }
+            Self::SdpLanguage(value) => {
+                debug
+                    .field("kind", &"sdp-language")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Language(value) => {
+                debug
+                    .field("kind", &"language")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Framerate(value) => {
+                debug
+                    .field("kind", &"framerate")
+                    .field("value_bytes", &value.len());
+            }
+            Self::Quality(value) => {
+                debug.field("kind", &"quality").field("value", value);
+            }
+            Self::Flag(name) => {
+                debug
+                    .field("kind", &"flag")
+                    .field("name_bytes", &name.len());
+            }
+            Self::Value(name, value) => {
+                debug
+                    .field("kind", &"value")
+                    .field("name_bytes", &name.len())
+                    .field("value_bytes", &value.len());
+            }
+            Self::Other(name, value) => {
+                debug
+                    .field("kind", &"other")
+                    .field("name_bytes", &name.len())
+                    .field("value_present", &value.is_some())
+                    .field("value_bytes", &value.as_ref().map_or(0, String::len));
+            }
+        }
+        debug.finish()
+    }
+}
+
 /// Represents the Origin (o=) field in an SDP message.
 ///
 /// Format: `o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Origin {
     /// Username of the originator (often "-")
     pub username: String,
@@ -464,10 +965,42 @@ pub struct Origin {
     pub unicast_address: String,
 }
 
+fn network_type_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("in") {
+        "internet"
+    } else {
+        "other"
+    }
+}
+
+fn address_type_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("ip4") {
+        "ipv4"
+    } else if value.eq_ignore_ascii_case("ip6") {
+        "ipv6"
+    } else {
+        "other"
+    }
+}
+
+impl fmt::Debug for Origin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Origin")
+            .field("username_bytes", &self.username.len())
+            .field("session_id_bytes", &self.sess_id.len())
+            .field("session_version_bytes", &self.sess_version.len())
+            .field("network_type", &network_type_class(&self.net_type))
+            .field("address_type", &address_type_class(&self.addr_type))
+            .field("address_bytes", &self.unicast_address.len())
+            .finish()
+    }
+}
+
 /// Represents the Connection Data (c=) field in an SDP message.
 ///
 /// Format: `c=<nettype> <addrtype> <connection-address>`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectionData {
     /// Network type (typically "IN" for Internet)
     pub net_type: String,
@@ -481,10 +1014,23 @@ pub struct ConnectionData {
     pub multicast_count: Option<u32>,
 }
 
+impl fmt::Debug for ConnectionData {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionData")
+            .field("network_type", &network_type_class(&self.net_type))
+            .field("address_type", &address_type_class(&self.addr_type))
+            .field("address_bytes", &self.connection_address.len())
+            .field("ttl_present", &self.ttl.is_some())
+            .field("multicast_count_present", &self.multicast_count.is_some())
+            .finish()
+    }
+}
+
 /// Represents a Time Description (t=) field in an SDP message.
 ///
 /// Format: `t=<start-time> <stop-time>`
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeDescription {
     /// Start time (NTP timestamp, 0 means session is permanent)
     pub start_time: String,
@@ -492,6 +1038,17 @@ pub struct TimeDescription {
     pub stop_time: String,
     /// Associated repeat times (r= lines)
     pub repeat_times: Vec<RepeatTime>,
+}
+
+impl fmt::Debug for TimeDescription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TimeDescription")
+            .field("start_time_bytes", &self.start_time.len())
+            .field("stop_time_bytes", &self.stop_time.len())
+            .field("repeat_count", &self.repeat_times.len())
+            .finish()
+    }
 }
 
 /// Represents a Repeat Time (r=) field in an SDP message.
@@ -511,7 +1068,7 @@ pub struct RepeatTime {
 ///
 /// An SDP session defines a multimedia session including connection information,
 /// timing, and media descriptions for audio, video, and other streams.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SdpSession {
     /// SDP protocol version (v=)
     pub version: String,
@@ -545,6 +1102,33 @@ pub struct SdpSession {
     pub direction: Option<MediaDirection>,
     /// Session-level attributes (a=)
     pub generic_attributes: Vec<ParsedAttribute>,
+}
+
+impl fmt::Debug for SdpSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SdpSession")
+            .field("version_bytes", &self.version.len())
+            .field("origin", &self.origin)
+            .field("session_name_bytes", &self.session_name.len())
+            .field("session_info_present", &self.session_info.is_some())
+            .field(
+                "session_info_bytes",
+                &self.session_info.as_ref().map_or(0, String::len),
+            )
+            .field("uri_present", &self.uri.is_some())
+            .field("uri_bytes", &self.uri.as_ref().map_or(0, String::len))
+            .field("email_count", &self.emails.len())
+            .field("phone_count", &self.phones.len())
+            .field("connection_present", &self.connection_info.is_some())
+            .field("time_description_count", &self.time_descriptions.len())
+            .field("time_zone_count", &self.time_zones.len())
+            .field("encryption_key_present", &self.encryption_key.is_some())
+            .field("media_count", &self.media_descriptions.len())
+            .field("direction", &self.direction)
+            .field("attribute_count", &self.generic_attributes.len())
+            .finish()
+    }
 }
 
 impl SdpSession {
@@ -811,7 +1395,7 @@ impl SdpSession {
 ///
 /// A media description defines a single media stream (audio, video, etc.)
 /// with its transport information and attributes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaDescription {
     /// Media type (e.g., "audio", "video", "application")
     pub media: String,
@@ -840,6 +1424,68 @@ pub struct MediaDescription {
     // Add others like: pub rtcp_port: Option<u16>, pub mid: Option<String>, etc.
     /// Other media-level attributes
     pub generic_attributes: Vec<ParsedAttribute>,
+}
+
+fn media_type_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("audio") {
+        "audio"
+    } else if value.eq_ignore_ascii_case("video") {
+        "video"
+    } else if value.eq_ignore_ascii_case("application") {
+        "application"
+    } else if value.eq_ignore_ascii_case("message") {
+        "message"
+    } else if value.eq_ignore_ascii_case("text") {
+        "text"
+    } else {
+        "other"
+    }
+}
+
+fn media_protocol_class(value: &str) -> &'static str {
+    if value.eq_ignore_ascii_case("RTP/AVP") {
+        "rtp-avp"
+    } else if value.eq_ignore_ascii_case("RTP/AVPF") {
+        "rtp-avpf"
+    } else if value.eq_ignore_ascii_case("RTP/SAVP") {
+        "rtp-savp"
+    } else if value.eq_ignore_ascii_case("RTP/SAVPF") {
+        "rtp-savpf"
+    } else if value.eq_ignore_ascii_case("UDP/TLS/RTP/SAVP") {
+        "dtls-srtp-savp"
+    } else if value.eq_ignore_ascii_case("UDP/TLS/RTP/SAVPF") {
+        "dtls-srtp-savpf"
+    } else if value.eq_ignore_ascii_case("UDP/DTLS/SCTP") {
+        "dtls-sctp"
+    } else if value.eq_ignore_ascii_case("TCP/DTLS/SCTP") {
+        "dtls-sctp-tcp"
+    } else {
+        "other"
+    }
+}
+
+impl fmt::Debug for MediaDescription {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MediaDescription")
+            .field("media_type", &media_type_class(&self.media))
+            .field("port", &self.port)
+            .field("port_count", &self.port_count)
+            .field("protocol", &media_protocol_class(&self.protocol))
+            .field("format_count", &self.formats.len())
+            .field("connection_present", &self.connection_info.is_some())
+            .field("connection_count", &self.connection_infos.len())
+            .field("media_info_present", &self.media_info.is_some())
+            .field(
+                "media_info_bytes",
+                &self.media_info.as_ref().map_or(0, String::len),
+            )
+            .field("encryption_key_present", &self.encryption_key.is_some())
+            .field("ptime", &self.ptime)
+            .field("direction", &self.direction)
+            .field("attribute_count", &self.generic_attributes.len())
+            .finish()
+    }
 }
 
 impl MediaDescription {
@@ -1606,6 +2252,166 @@ impl std::fmt::Display for RidDirection {
         match self {
             RidDirection::Send => write!(f, "send"),
             RidDirection::Recv => write!(f, "recv"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn assert_canaries_absent(debug: &str, canaries: &[&str]) {
+        for canary in canaries {
+            assert!(
+                !debug.contains(canary),
+                "SDP Debug reflected {canary}: {debug}"
+            );
+        }
+    }
+
+    #[test]
+    fn sdp_debug_is_metadata_only_directly_and_through_session_enclosures() {
+        const USERNAME: &str = "origin-username-debug-canary";
+        const SESSION_ID: &str = "origin-session-id-debug-canary";
+        const ADDRESS: &str = "address-debug-canary.invalid";
+        const SESSION_NAME: &str = "session-name-debug-canary";
+        const CONTACT: &str = "contact-debug-canary@example.invalid";
+        const KEY: &str = "inline-srtp-key-debug-canary";
+        const ICE_UFRAG: &str = "ice-ufrag-debug-canary";
+        const ICE_PWD: &str = "ice-password-debug-canary";
+        const FINGERPRINT: &str = "fingerprint-debug-canary";
+        const MEDIA_INFO: &str = "media-info-debug-canary";
+        const GENERIC: &str = "generic-attribute-debug-canary";
+        const RID: &str = "rid-debug-canary";
+
+        let canaries = [
+            USERNAME,
+            SESSION_ID,
+            ADDRESS,
+            SESSION_NAME,
+            CONTACT,
+            KEY,
+            ICE_UFRAG,
+            ICE_PWD,
+            FINGERPRINT,
+            MEDIA_INFO,
+            GENERIC,
+            RID,
+        ];
+
+        let origin = Origin {
+            username: USERNAME.into(),
+            sess_id: SESSION_ID.into(),
+            sess_version: "1".into(),
+            net_type: "IN".into(),
+            addr_type: "IP4".into(),
+            unicast_address: ADDRESS.into(),
+        };
+        let connection = ConnectionData {
+            net_type: "IN".into(),
+            addr_type: "IP4".into(),
+            connection_address: ADDRESS.into(),
+            ttl: None,
+            multicast_count: None,
+        };
+        let encryption_key = EncryptionKey { raw: KEY.into() };
+        let crypto = CryptoAttribute::new(1, CryptoSuite::AesCm128HmacSha1_80, KEY);
+        let candidate = CandidateAttribute {
+            foundation: GENERIC.into(),
+            component_id: 1,
+            transport: "UDP".into(),
+            priority: 1,
+            connection_address: ADDRESS.into(),
+            port: 50_000,
+            candidate_type: "host".into(),
+            related_address: Some(ADDRESS.into()),
+            related_port: Some(50_001),
+            extensions: vec![(GENERIC.into(), Some(GENERIC.into()))],
+        };
+        let rid = RidAttribute {
+            id: RID.into(),
+            direction: RidDirection::Send,
+            formats: vec!["111".into()],
+            restrictions: HashMap::from([(GENERIC.into(), GENERIC.into())]),
+        };
+        let attributes = vec![
+            ParsedAttribute::IceUfrag(ICE_UFRAG.into()),
+            ParsedAttribute::IcePwd(ICE_PWD.into()),
+            ParsedAttribute::Fingerprint("sha-256".into(), FINGERPRINT.into()),
+            ParsedAttribute::Crypto(crypto.clone()),
+            ParsedAttribute::Candidate(candidate.clone()),
+            ParsedAttribute::Rid(rid.clone()),
+            ParsedAttribute::Value(GENERIC.into(), GENERIC.into()),
+        ];
+
+        let mut media = MediaDescription::new(GENERIC, 49_170, GENERIC, vec![GENERIC.into()])
+            .with_connection_data(connection.clone())
+            .with_media_info(MEDIA_INFO)
+            .with_encryption_key(encryption_key.clone());
+        for attribute in attributes.clone() {
+            media = media.with_attribute(attribute);
+        }
+
+        let mut session = SdpSession::new(origin.clone(), SESSION_NAME)
+            .with_connection_data(connection.clone())
+            .with_email(CONTACT)
+            .with_phone(CONTACT);
+        session.uri = Some(CONTACT.into());
+        session.time_zones.push(TimeZoneAdjustment {
+            raw: GENERIC.into(),
+        });
+        session.encryption_key = Some(encryption_key.clone());
+        session.media_descriptions.push(media.clone());
+        session.generic_attributes = attributes.clone();
+
+        for debug in [
+            format!("{origin:?}"),
+            format!("{connection:?}"),
+            format!("{encryption_key:?}"),
+            format!("{crypto:?}"),
+            format!("{candidate:?}"),
+            format!("{rid:?}"),
+            format!("{media:?}"),
+            format!("{session:?}"),
+        ] {
+            assert_canaries_absent(&debug, &canaries);
+        }
+        for attribute in &attributes {
+            assert_canaries_absent(&format!("{attribute:?}"), &canaries);
+        }
+
+        let wire = session.to_string();
+        for expected in [USERNAME, SESSION_ID, ADDRESS, SESSION_NAME, KEY, ICE_PWD] {
+            assert!(wire.contains(expected), "wire rendering lost {expected}");
+        }
+        assert!(serde_json::to_string(&session).unwrap().contains(ICE_UFRAG));
+        assert!(crypto.to_string().contains(KEY));
+    }
+
+    #[test]
+    fn sensitive_sdp_containers_cannot_regain_derived_debug() {
+        let source = include_str!("sdp.rs");
+        for declaration in [
+            "pub struct CandidateAttribute",
+            "pub struct RemoteCandidateAttribute",
+            "pub struct SsrcAttribute",
+            "pub struct RtcpAttribute",
+            "pub struct EncryptionKey",
+            "pub struct CryptoAttribute",
+            "pub enum ParsedAttribute",
+            "pub struct Origin",
+            "pub struct ConnectionData",
+            "pub struct SdpSession",
+            "pub struct MediaDescription",
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            let derive = &source[derive_offset..declaration_offset];
+            assert!(
+                !derive.contains("Debug"),
+                "{declaration} regained raw derived Debug: {derive}"
+            );
         }
     }
 }

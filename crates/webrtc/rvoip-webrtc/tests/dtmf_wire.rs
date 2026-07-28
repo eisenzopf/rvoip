@@ -2,20 +2,58 @@
 //! generates correct telephone-event RTP packets on the wire, end-to-end
 //! through SRTP on a real loopback.
 //!
-//! D1 attached a dedicated `TrackLocalStaticRTP` for PT 101 on its own SSRC.
-//! The offerer's SDP carries two audio m-lines (Opus stream + DTMF stream),
-//! and PT 101 packets arrive on the answerer's dedicated DTMF remote track —
-//! so the test discovers all audio remote tracks and captures from each.
+//! DTMF is a supplemental SSRC encoding on the same negotiated audio sender as
+//! Opus. The offer therefore carries one audio m-line, while primary audio and
+//! telephone-event retain independent RTP timelines. The tests discover every
+//! audio remote track so they remain insensitive to receiver-side demux shape.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_webrtc::media::dtmf::send_dtmf;
-use rvoip_webrtc::peer::connect_loopback;
+use rvoip_core::capability::CodecInfo;
+use rvoip_core::ids::StreamId;
+use rvoip_core::stream::MediaStream;
+use rvoip_webrtc::media::dtmf::{send_dtmf, OutboundDtmfNegotiation, TelephoneEventCodec};
+use rvoip_webrtc::media::from_tracks_with_dtmf_codecs;
+use rvoip_webrtc::peer::{connect_loopback, PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::WebRtcConfig;
 use webrtc::media_stream::track_remote::TrackRemoteEvent;
 
 const TELEPHONE_EVENT_PT: u8 = 101;
+
+fn retain_only_48khz_telephone_event(sdp: &str) -> String {
+    let mut output = String::with_capacity(sdp.len());
+    for line in sdp.lines() {
+        if let Some(rest) = line.strip_prefix("m=audio ") {
+            let mut fields = rest.split_whitespace().collect::<Vec<_>>();
+            if fields.len() >= 2 {
+                // `rest` starts after the media kind, so only port and proto
+                // are structural. Filter every following format, including
+                // the first payload type.
+                let mut retained = fields.drain(..2).collect::<Vec<_>>();
+                retained.extend(
+                    fields
+                        .into_iter()
+                        .filter(|payload_type| !matches!(*payload_type, "101" | "126")),
+                );
+                output.push_str("m=audio ");
+                output.push_str(&retained.join(" "));
+                output.push_str("\r\n");
+                continue;
+            }
+        }
+        if line.starts_with("a=rtpmap:101 ")
+            || line.starts_with("a=fmtp:101 ")
+            || line.starts_with("a=rtpmap:126 ")
+            || line.starts_with("a=fmtp:126 ")
+        {
+            continue;
+        }
+        output.push_str(line);
+        output.push_str("\r\n");
+    }
+    output
+}
 
 fn decode_event(payload: &[u8]) -> Option<(u8, bool, u8, u16)> {
     if payload.len() < 4 {
@@ -36,13 +74,12 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
         .await
         .expect("loopback");
 
-    // D1 — the answerer has *two* audio transceivers after negotiation
-    // (Opus stream + DTMF stream). PT 101 arrives only on the DTMF
-    // transceiver's receiver, so we spawn a watcher that drains every
-    // remote audio track from the handler's on_track channel and polls
-    // each one. New tracks may appear after we start sending PT 101
-    // (webrtc-rs fires on_track on first inbound RTP), so the watcher
-    // keeps polling until the deadline.
+    // D1 — Opus and telephone-event are codec-distinct encodings on one
+    // negotiated audio sender. Receiver implementations may expose those
+    // SSRCs through one grouped track or multiple remote-track events, so the
+    // watcher drains every audio track and polls each one. A track may appear
+    // only after the first PT 101 packet arrives, so keep polling until the
+    // deadline.
     let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u8, u16, bool)>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
     let cap_clone = Arc::clone(&captured);
@@ -80,8 +117,8 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
         }
     });
 
-    // Send DTMF "5" for 100ms — first PT 101 packet triggers on_track
-    // on the answerer's DTMF transceiver.
+    // Send DTMF "5" for 100ms. The first PT 101 packet may trigger a new
+    // remote-track event for the supplemental SSRC.
     send_dtmf(&offerer, "5", 100).await.expect("send_dtmf");
 
     // Wait long enough for end-of-event retransmissions to arrive.
@@ -124,4 +161,202 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
 
     offerer.close().await.ok();
     answerer.close().await.ok();
+}
+
+#[tokio::test]
+async fn negotiated_pt110_48khz_reaches_the_remote_peer() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = WebRtcConfig::loopback();
+    let receiver = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .expect("receiver");
+    receiver
+        .prepare_receive_only_offer()
+        .await
+        .expect("receive-only offer");
+    let original_offer = receiver.create_offer_and_gather().await.expect("offer");
+    let offer = retain_only_48khz_telephone_event(&original_offer);
+    assert!(offer.contains("a=rtpmap:110 telephone-event/48000"));
+    assert!(!offer.contains("a=rtpmap:101 telephone-event/8000"));
+    assert!(!offer.contains("a=rtpmap:126 telephone-event/8000"));
+
+    let sender = RvoipPeerConnection::new(&config, PeerRole::Answerer)
+        .await
+        .expect("sender");
+    let answer = sender
+        .accept_offer_and_gather(&offer)
+        .await
+        .expect("48 kHz answer");
+    assert!(answer.contains("a=rtpmap:110 telephone-event/48000"));
+    receiver
+        .set_remote_answer(&answer)
+        .await
+        .expect("install answer");
+    assert_eq!(
+        sender.outbound_dtmf_negotiation(),
+        OutboundDtmfNegotiation::Negotiated(TelephoneEventCodec::new(110, 48_000))
+    );
+    let expected_mid = sender
+        .negotiated_outbound_audio_mid()
+        .expect("negotiated outbound audio MID");
+    let expected_mid_id = sender
+        .negotiated_outbound_audio_mid_extension_id()
+        .expect("negotiated outbound audio MID extension ID");
+
+    let timeout = Duration::from_secs(config.connection_timeout_secs);
+    tokio::try_join!(
+        receiver.wait_connected(timeout),
+        sender.wait_connected(timeout)
+    )
+    .expect("connected peers");
+
+    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u16, bool, Option<Vec<u8>>)>>> =
+        Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_for_watcher = Arc::clone(&captured);
+    let receiver_for_watcher = Arc::clone(&receiver);
+    let watcher = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut pollers = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            if let Some(track) = receiver_for_watcher.try_recv_remote_track().await {
+                let captured = Arc::clone(&captured_for_watcher);
+                pollers.push(tokio::spawn(async move {
+                    loop {
+                        let Some(TrackRemoteEvent::OnRtpPacket(packet)) =
+                            tokio::time::timeout(Duration::from_millis(100), track.poll())
+                                .await
+                                .ok()
+                                .flatten()
+                        else {
+                            continue;
+                        };
+                        if packet.header.payload_type == 110 {
+                            if let Some((event, end, _, duration)) = decode_event(&packet.payload) {
+                                captured.lock().push((
+                                    event,
+                                    end,
+                                    duration,
+                                    packet.header.marker,
+                                    packet
+                                        .header
+                                        .get_extension(expected_mid_id)
+                                        .map(|payload| payload.to_vec()),
+                                ));
+                            }
+                        }
+                    }
+                }));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for poller in pollers {
+            poller.abort();
+        }
+    });
+
+    send_dtmf(&sender, "6", 120)
+        .await
+        .expect("negotiated PT110 DTMF");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    watcher.abort();
+
+    let events = captured.lock().clone();
+    assert!(!events.is_empty(), "expected PT110 packets on the wire");
+    assert!(events.iter().all(|(event, ..)| *event == 6));
+    assert!(events.first().is_some_and(|event| event.3));
+    assert!(events
+        .iter()
+        .any(|(_, end, duration, _, _)| { *end && *duration == 5_760 }));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.4.as_deref() == Some(expected_mid.as_bytes())),
+        "every supplemental-SSRC packet must carry the exact negotiated MID bytes"
+    );
+
+    receiver.close().await.ok();
+    sender.close().await.ok();
+}
+
+#[tokio::test]
+async fn public_media_stream_decodes_the_negotiated_dynamic_dtmf_mapping() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let config = WebRtcConfig::loopback();
+    let receiver = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .expect("receiver");
+    receiver
+        .prepare_receive_only_offer()
+        .await
+        .expect("receive-only offer");
+    let original_offer = receiver.create_offer_and_gather().await.expect("offer");
+    let offer = retain_only_48khz_telephone_event(&original_offer);
+    let dtmf_codec = TelephoneEventCodec::new(110, 48_000);
+
+    let sender = RvoipPeerConnection::new(&config, PeerRole::Answerer)
+        .await
+        .expect("sender");
+    let answer = sender
+        .accept_offer_and_gather(&offer)
+        .await
+        .expect("48 kHz answer");
+    assert_eq!(
+        sender.outbound_dtmf_negotiation(),
+        OutboundDtmfNegotiation::Negotiated(dtmf_codec)
+    );
+    receiver
+        .set_remote_answer(&answer)
+        .await
+        .expect("install answer");
+
+    let timeout = Duration::from_secs(config.connection_timeout_secs);
+    tokio::try_join!(
+        receiver.wait_connected(timeout),
+        sender.wait_connected(timeout)
+    )
+    .expect("connected peers");
+
+    // The remote track is opened by the first DTMF RTP packet. Start its
+    // waiter before sending, then give the public media constructor ownership
+    // of that one track so it can decode the queued PT 110 packets itself.
+    let receiver_for_track = Arc::clone(&receiver);
+    let remote_track = tokio::spawn(async move {
+        receiver_for_track
+            .wait_remote_track(Duration::from_secs(5))
+            .await
+    });
+    send_dtmf(&sender, "6", 120)
+        .await
+        .expect("negotiated PT110 DTMF");
+    let remote_track = remote_track
+        .await
+        .expect("remote-track waiter")
+        .expect("remote DTMF track");
+
+    let (dtmf_tx, mut dtmf_rx) = tokio::sync::mpsc::channel(4);
+    let stream = from_tracks_with_dtmf_codecs(
+        StreamId::new(),
+        CodecInfo {
+            name: "opus".into(),
+            clock_rate_hz: 48_000,
+            channels: 1,
+            fmtp: None,
+        },
+        receiver.local_audio_track().expect("receiver audio track"),
+        receiver.local_audio_ssrc().expect("receiver audio SSRC"),
+        111,
+        Some(remote_track),
+        Some(dtmf_tx),
+        [dtmf_codec],
+    );
+    let event = tokio::time::timeout(Duration::from_secs(2), dtmf_rx.recv())
+        .await
+        .expect("dynamic DTMF decode timeout")
+        .expect("DTMF receiver remains live");
+    assert_eq!(event.digit, '6');
+    assert_eq!(event.duration_ms, 120);
+
+    stream.close().await.expect("close media stream");
+    receiver.close().await.ok();
+    sender.close().await.ok();
 }

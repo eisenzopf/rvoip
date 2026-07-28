@@ -11,7 +11,7 @@ beta-tier SIP profile requires (RFC 3551).
 
 ## Status
 
-**Beta candidate** — part of the `rvoip-sip` 0.2.x beta train. The
+**Release-gated SIP dependency** — published in the unified `0.3.x` workspace release. The
 G.711 implementation is RFC-compliant and table-driven. G.729 support is
 available behind the `g729` feature as Annex A speech plus optional Annex B
 VAD/DTX/CNG; full-complexity base G.729 is not implemented.
@@ -25,7 +25,7 @@ isolation:
 
 ```toml
 [dependencies]
-rvoip-codec-core = "0.2.2"
+rvoip-codec-core = "0.3.2"
 ```
 
 ## License

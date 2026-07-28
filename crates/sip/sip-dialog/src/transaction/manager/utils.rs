@@ -191,7 +191,7 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
     // Try to get destination from Contact header first
     if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
         if let Some(contact_addr) = contact.addresses().next() {
-            debug!("Found Contact URI in response: {}", contact_addr.uri);
+            debug!(contact_uri_present = true, "Found Contact URI in response");
 
             // Try to parse the URI as a socket address
             if let Some(addr) = socket_addr_from_uri(&contact_addr.uri) {

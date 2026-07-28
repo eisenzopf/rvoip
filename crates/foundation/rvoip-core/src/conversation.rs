@@ -3,6 +3,7 @@ use crate::participant::Participant;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ConversationState {
@@ -24,7 +25,7 @@ impl Default for ConversationPolicy {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Conversation {
     pub id: ConversationId,
     pub tenant_id: TenantId,
@@ -41,4 +42,21 @@ pub struct Conversation {
     /// so call sites don't churn when the driver is wired up.
     pub last_activity_at: DateTime<Utc>,
     pub metadata: HashMap<String, String>,
+}
+
+impl fmt::Debug for Conversation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Conversation")
+            .field("state", &self.state)
+            .field("policy", &self.policy)
+            .field("participant_count", &self.participants.len())
+            .field("session_count", &self.sessions.len())
+            .field("message_count", &self.messages.len())
+            .field("opened_at", &self.opened_at)
+            .field("closed_at", &self.closed_at)
+            .field("last_activity_at", &self.last_activity_at)
+            .field("metadata_count", &self.metadata.len())
+            .finish()
+    }
 }

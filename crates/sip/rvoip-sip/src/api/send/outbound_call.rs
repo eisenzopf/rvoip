@@ -1,6 +1,6 @@
 //! `OutboundCallBuilder` — SIP_API_DESIGN_2 §3.3 INVITE builder.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use rvoip_sip_core::types::Method;
 
@@ -12,8 +12,10 @@ use crate::errors::Result;
 use crate::types::Credentials;
 
 /// Per-request override for the `P-Asserted-Identity` (RFC 3325).
+///
+/// `Debug` reports the selected variant without formatting the URI override.
 #[non_exhaustive]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub enum PaiOverride {
     /// Inherit `Config.pai_uri`.
     #[default]
@@ -24,9 +26,21 @@ pub enum PaiOverride {
     Use(String),
 }
 
+impl fmt::Debug for PaiOverride {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "Default",
+            Self::Suppress => "Suppress",
+            Self::Use(_) => "Use",
+        })
+    }
+}
+
 /// Per-request override for the outbound proxy `Route:` header.
+///
+/// `Debug` reports the selected variant without formatting the URI override.
 #[non_exhaustive]
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub enum ProxyOverride {
     /// Inherit `Config.outbound_proxy_uri`.
     #[default]
@@ -37,6 +51,16 @@ pub enum ProxyOverride {
     Use(String),
 }
 
+impl fmt::Debug for ProxyOverride {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "Default",
+            Self::Suppress => "Suppress",
+            Self::Use(_) => "Use",
+        })
+    }
+}
+
 /// SIP_API_DESIGN_2 §7.1 — frozen snapshot of an `OutboundCallBuilder`
 /// staged on `SessionState.pending_invite_options` and consumed by the
 /// `Action::SendINVITEWithOptions` handler.
@@ -44,10 +68,12 @@ pub enum ProxyOverride {
 /// `OutboundCallOptions` is an rvoip-sip-side struct (not in
 /// rvoip-sip-dialog) because INVITE carries rvoip-sip concerns rvoip-sip-dialog
 /// doesn't need: PAI mode, credentials, transfer-leg tracking,
-/// `supported_100rel`. The state machine unpacks it at the
-/// DialogAdapter boundary and calls rvoip-sip-dialog's existing
-/// `make_call_with_extra_headers_for_session`.
-#[derive(Default, Debug, Clone)]
+/// `supported_100rel`. The state machine unpacks it at the DialogAdapter
+/// boundary into rvoip-sip-dialog's structural `InviteRequestOptions`.
+///
+/// `Debug` intentionally exposes only operational flags and counts; retained
+/// URIs, SDP, credentials, authorization, and application headers are redacted.
+#[derive(Default, Clone)]
 pub struct OutboundCallOptionsSnapshot {
     /// `From:` URI; falls back to `Config.local_uri` when `None`.
     pub from: Option<String>,
@@ -94,6 +120,41 @@ pub struct OutboundCallOptionsSnapshot {
     pub tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
 }
 
+impl fmt::Debug for OutboundCallOptionsSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pai_override = match &self.pai_override {
+            PaiOverride::Default => "default",
+            PaiOverride::Suppress => "suppress",
+            PaiOverride::Use(_) => "override",
+        };
+        let outbound_proxy_override = match &self.outbound_proxy_override {
+            ProxyOverride::Default => "default",
+            ProxyOverride::Suppress => "suppress",
+            ProxyOverride::Use(_) => "override",
+        };
+
+        formatter
+            .debug_struct("OutboundCallOptionsSnapshot")
+            .field("from_present", &self.from.is_some())
+            .field("target_present", &!self.to.is_empty())
+            .field("sdp_present", &self.sdp.is_some())
+            .field("credentials_present", &self.credentials.is_some())
+            .field("auth_present", &self.auth.is_some())
+            .field("pai_override", &pai_override)
+            .field("contact_uri_present", &self.contact_uri.is_some())
+            .field("outbound_proxy_override", &outbound_proxy_override)
+            .field("subject_present", &self.subject.is_some())
+            .field("from_display_present", &self.from_display.is_some())
+            .field("precomputed_auth_present", &self.precomputed_auth.is_some())
+            .field("transfer_leg_present", &self.transfer_leg.is_some())
+            .field("supported_100rel", &self.supported_100rel)
+            .field("extra_header_count", &self.extra_headers.len())
+            .field("topology_hiding", &self.topology_hiding)
+            .field("tls_override_present", &self.tls_override.is_some())
+            .finish()
+    }
+}
+
 /// Outbound INVITE builder.
 pub struct OutboundCallBuilder {
     coord: Arc<UnifiedCoordinator>,
@@ -113,6 +174,7 @@ pub struct OutboundCallBuilder {
     state: BuilderHeaderState,
     topology_hiding: bool,
     tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
+    session_id: Option<CallId>,
 }
 
 impl OutboundCallBuilder {
@@ -139,6 +201,7 @@ impl OutboundCallBuilder {
             state: BuilderHeaderState::default(),
             topology_hiding: false,
             tls_override: None,
+            session_id: None,
         }
     }
 
@@ -281,6 +344,17 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Use a caller-reserved Session identity for this INVITE.
+    ///
+    /// This crate-private seam lets the core adapter install its Connection ID
+    /// and dormant event stage before the state machine can emit a fast answer
+    /// or terminal event. Ordinary API callers continue to receive a generated
+    /// Session ID from [`Self::send`].
+    pub(crate) fn with_reserved_session_id(mut self, session_id: CallId) -> Self {
+        self.session_id = Some(session_id);
+        self
+    }
+
     /// Send the INVITE.
     ///
     /// Routes through the unified state-machine path: creates the
@@ -343,13 +417,29 @@ impl OutboundCallBuilder {
             tls_override: self.tls_override,
         });
 
-        // Create the session up front — Idle UAC. Then mirror
-        // `make_call_inner`'s pre-event field plumbing so a fast
-        // loopback 180 Ringing can't beat our state update: credentials,
-        // PAI, transfer leg, extra headers land on SessionState before
-        // the event enters the machine. The state-table `CreateDialog`
-        // action picks them up.
-        let session_id = crate::state_table::SessionId::new();
+        // Validate the complete wire-facing option set before allocating a
+        // SessionState or media resources. This catches semantic stack-owned
+        // headers (including `TypedHeader::Other` aliases), malformed Contact,
+        // auth, proxy and singleton collisions without mutating any runtime
+        // state or performing DNS.
+        let (preflight_opts, _) = crate::state_machine::actions::materialize_invite_options(
+            &snapshot,
+            pai_uri.as_deref(),
+            snapshot.sdp.clone(),
+        )
+        .map_err(|error| crate::errors::SessionError::InvalidInput(error.to_string()))?;
+        rvoip_sip_dialog::api::unified::validate_initial_invite_options(&preflight_opts).map_err(
+            |_| {
+                crate::errors::SessionError::InvalidInput(
+                    "initial INVITE options failed preflight validation".to_string(),
+                )
+            },
+        )?;
+
+        // Create the session up front — Idle UAC. Builder metadata and the
+        // immutable request snapshot enter together through the exact-session
+        // lane below, before the state-table `CreateDialog` action reads them.
+        let session_id = self.session_id.unwrap_or_default();
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let create_session_started = std::time::Instant::now();
         self.coord
@@ -368,73 +458,25 @@ impl OutboundCallBuilder {
             create_session_started.elapsed(),
         );
 
-        if snapshot.credentials.is_some()
-            || snapshot.auth.is_some()
-            || pai_uri.is_some()
-            || snapshot.transfer_leg.is_some()
-            || !snapshot.extra_headers.is_empty()
-        {
+        let setup_result: Result<()> = async {
             #[cfg(feature = "perf-call-setup-diagnostics")]
-            let pre_event_state_update_started = std::time::Instant::now();
-            let mut session = self.coord.session_state(&session_id).await?;
-            if let Some(c) = snapshot.credentials.clone() {
-                session.credentials = Some(c);
-            }
-            if let Some(auth) = snapshot.auth.clone() {
-                session.auth = Some(auth);
-            }
-            if let Some(pai) = pai_uri {
-                session.pai_uri = Some(pai);
-            }
-            if let Some(transferor) = snapshot.transfer_leg.clone() {
-                session.transferor_session_id = Some(transferor);
-                session.is_transfer_call = true;
-            }
-            if !snapshot.extra_headers.is_empty() {
-                session.extra_headers = snapshot.extra_headers.clone();
-            }
+            let stage_and_dispatch_started = std::time::Instant::now();
             self.coord
-                .helpers
-                .state_machine
-                .store
-                .update_session(session)
+                .dispatch_outbound_invite_with_options(&session_id, Arc::clone(&snapshot), pai_uri)
                 .await?;
             #[cfg(feature = "perf-call-setup-diagnostics")]
             crate::call_setup_diag::record_stage(
                 &session_id,
-                "outbound_send.pre_event_state_update",
-                pre_event_state_update_started.elapsed(),
+                "outbound_send.stage_and_dispatch",
+                stage_and_dispatch_started.elapsed(),
             );
+            Ok(())
         }
-
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        let stage_options_started = std::time::Instant::now();
-        self.coord
-            .stage_outbound_options(
-                &session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Invite(snapshot),
-            )
-            .await?;
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        crate::call_setup_diag::record_stage(
-            &session_id,
-            "outbound_send.stage_options",
-            stage_options_started.elapsed(),
-        );
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        let dispatch_started = std::time::Instant::now();
-        self.coord
-            .dispatch_outbound(
-                &session_id,
-                crate::state_table::EventType::SendOutboundInvite,
-            )
-            .await?;
-        #[cfg(feature = "perf-call-setup-diagnostics")]
-        crate::call_setup_diag::record_stage(
-            &session_id,
-            "outbound_send.dispatch_outbound",
-            dispatch_started.elapsed(),
-        );
+        .await;
+        if let Err(error) = setup_result {
+            self.coord.rollback_outbound_setup(&session_id).await;
+            return Err(error);
+        }
         #[cfg(feature = "perf-call-setup-diagnostics")]
         let schedule_timeout_started = std::time::Instant::now();
         self.coord
@@ -466,5 +508,63 @@ impl SipRequestOptions for OutboundCallBuilder {
     }
     fn header_state(&self) -> &BuilderHeaderState {
         &self.state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
+
+    #[test]
+    fn outbound_call_snapshot_debug_redacts_every_retained_value() {
+        const SECRET: &str = "outbound-snapshot-secret-canary";
+        let snapshot = OutboundCallOptionsSnapshot {
+            from: Some(format!("sip:{SECRET}@from.invalid")),
+            to: format!("sip:{SECRET}@target.invalid"),
+            sdp: Some(format!("v=0\r\na={SECRET}")),
+            credentials: Some(Credentials::new(SECRET, SECRET)),
+            auth: Some(SipClientAuth::bearer_token(SECRET)),
+            pai_override: PaiOverride::Use(format!("sip:{SECRET}@pai.invalid")),
+            contact_uri: Some(format!("sip:{SECRET}@contact.invalid")),
+            outbound_proxy_override: ProxyOverride::Use(format!("sip:{SECRET}@proxy.invalid")),
+            subject: Some(SECRET.into()),
+            from_display: Some(SECRET.into()),
+            precomputed_auth: Some(format!("Bearer {SECRET}")),
+            transfer_leg: Some(SECRET.into()),
+            supported_100rel: true,
+            extra_headers: vec![TypedHeader::Other(
+                HeaderName::Other("X-Secret-Canary".into()),
+                HeaderValue::Raw(SECRET.as_bytes().to_vec()),
+            )],
+            topology_hiding: true,
+            tls_override: Some(rvoip_sip_transport::OutboundTlsConfig {
+                client: rvoip_sip_transport::TlsClientConfig {
+                    extra_ca_path: None,
+                    insecure_skip_verify: false,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                server_name: Some(SECRET.into()),
+            }),
+        };
+
+        let debug = format!("{snapshot:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(!debug.contains("X-Secret-Canary"));
+        assert!(debug.contains("credentials_present: true"));
+        assert!(debug.contains("auth_present: true"));
+        assert!(debug.contains("pai_override: \"override\""));
+        assert!(debug.contains("outbound_proxy_override: \"override\""));
+        assert!(debug.contains("extra_header_count: 1"));
+        assert!(debug.contains("supported_100rel: true"));
+        assert!(debug.contains("tls_override_present: true"));
+
+        let pai_debug = format!("{:?}", PaiOverride::Use(SECRET.into()));
+        let proxy_debug = format!("{:?}", ProxyOverride::Use(SECRET.into()));
+        assert_eq!(pai_debug, "Use");
+        assert_eq!(proxy_debug, "Use");
+        assert!(!pai_debug.contains(SECRET));
+        assert!(!proxy_debug.contains(SECRET));
     }
 }

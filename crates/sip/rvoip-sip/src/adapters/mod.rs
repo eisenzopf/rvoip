@@ -4,6 +4,7 @@ pub mod dtls_negotiator;
 #[cfg(feature = "ice")]
 pub mod ice_negotiator;
 pub mod media_adapter;
+pub(crate) mod outbound_request_tracker;
 pub mod registration_adapter;
 pub mod session_api_event;
 pub mod session_event_handler;
@@ -13,6 +14,8 @@ pub mod srtp_negotiator;
 pub use dialog_adapter::{strip_record_route_below_self, strip_via_below_top, DialogAdapter};
 pub use media_adapter::{MediaAdapter, NegotiatedConfig};
 pub use registration_adapter::RegistrationAdapter;
+pub(crate) use session_api_event::{sanitize_session_api_observation, SessionControlEvent};
 pub use session_api_event::{SessionApiCrossCrateEvent, SESSION_TO_APP_CHANNEL};
+pub(crate) use session_event_handler::CausalDialogToSessionIngress;
 pub use session_event_handler::SessionCrossCrateEventHandler;
 pub use srtp_negotiator::{SrtpNegotiator, SrtpPair};

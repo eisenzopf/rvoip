@@ -15,8 +15,9 @@ use chrono::Utc;
 use dashmap::DashMap;
 use rvoip_auth_core::BearerValidator;
 use rvoip_core::adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    RejectReason, SignatureHeaders, TransferTarget,
+    legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
+    AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
+    OrchestratorAdapterEvent, OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -25,11 +26,14 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::ConnectionId;
 use rvoip_core::message::Message;
 use rvoip_core::stream::MediaStream;
+use rvoip_core::{DataMessage, DataReliability};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads;
 use rvoip_uctp::types::MessageType;
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use url::Url;
 
@@ -56,11 +60,16 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 /// interception).
 #[derive(Clone)]
 pub(crate) struct Route {
+    /// Exact peer-selected Conversation ID from the authenticated invite.
+    pub cid: Option<String>,
     pub sid: String,
+    pub binding: rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     /// Gap plan §4.2 v1 punch list — see rvoip-quic Route doc.
     pub pending: Arc<rvoip_uctp::substrate::Pending>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
+    pub coordinator: Arc<rvoip_uctp::state::UctpCoordinator>,
+    pub route_cancel: CancellationToken,
     #[cfg(feature = "media-webrtc")]
     pub bridge: Arc<parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>>,
     #[cfg(feature = "media-webrtc")]
@@ -147,8 +156,10 @@ pub struct UctpWsAdapter {
     #[allow(dead_code)]
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
+    lifecycle_sink: AdapterLifecycleSinkSlot,
+    events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
     _server: Arc<UctpWsServer>,
-    events_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    events_rx: StdMutex<Option<mpsc::Receiver<OrchestratorAdapterEvent>>>,
     local_addr: SocketAddr,
     client_url: Option<Url>,
 }
@@ -161,11 +172,13 @@ impl UctpWsAdapter {
         let by_connection: Arc<DashMap<ConnectionId, String>> = Arc::new(DashMap::new());
         let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
         let routes: Arc<DashMap<ConnectionId, Route>> = Arc::new(DashMap::new());
+        let lifecycle_sink = AdapterLifecycleSinkSlot::default();
 
         let server = UctpWsServer::start(
             config.listener,
             config.bearer_validator,
-            events_tx,
+            events_tx.clone(),
+            lifecycle_sink.clone(),
             Arc::clone(&by_connection),
             Arc::clone(&by_uctp_sid),
             Arc::clone(&routes),
@@ -180,6 +193,8 @@ impl UctpWsAdapter {
             by_connection,
             by_uctp_sid,
             routes,
+            lifecycle_sink,
+            events_tx,
             _server: server,
             events_rx: StdMutex::new(Some(events_rx)),
             local_addr,
@@ -193,6 +208,71 @@ impl UctpWsAdapter {
 
     fn route(&self, conn: &ConnectionId) -> Option<Route> {
         self.routes.get(conn).map(|r| r.clone())
+    }
+
+    fn take_terminal_route(&self, conn: &ConnectionId) -> Option<Route> {
+        let (_, route) = self.routes.remove(conn)?;
+        self.by_connection.remove(conn);
+        if self
+            .by_uctp_sid
+            .get(&route.sid)
+            .is_some_and(|mapped| mapped.value() == conn)
+        {
+            self.by_uctp_sid.remove(&route.sid);
+        }
+        Some(route)
+    }
+
+    async fn close_terminal_media(route: &Route) {
+        let streams = route
+            .streams
+            .iter()
+            .map(|entry| Arc::clone(entry.value()))
+            .collect::<Vec<_>>();
+        route.streams.clear();
+        for stream in streams {
+            let _ = stream.close().await;
+        }
+        #[cfg(feature = "media-webrtc")]
+        {
+            route.pending_offer.lock().take();
+            let bridge = route.bridge.lock().take();
+            if let Some(bridge) = bridge {
+                let _ = bridge.close().await;
+            }
+        }
+    }
+
+    async fn terminate_route(
+        &self,
+        conn: &ConnectionId,
+        envelope: impl FnOnce(&Route) -> UctpEnvelope,
+        terminal_event: AdapterEvent,
+    ) {
+        let Some(route) = self.take_terminal_route(conn) else {
+            return;
+        };
+        let terminal_envelope = envelope(&route);
+        if route.out_tx.try_send(terminal_envelope).is_err() {
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP WebSocket terminal notification was not queued");
+        }
+        route.route_cancel.cancel();
+        route
+            .coordinator
+            .retire_local_session(&rvoip_core::ids::SessionId::from_string(route.sid.clone()));
+        let _ = self
+            .lifecycle_sink
+            .queue_or_deliver_orchestrator_terminal(&self.events_tx, terminal_event)
+            .await;
+        if tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            Self::close_terminal_media(&route),
+        )
+        .await
+        .is_err()
+        {
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(conn.as_str()), "UCTP WebSocket terminal media cleanup timed out");
+        }
     }
 
     /// Public accessor for the per-Connection `WebRtcMediaBridge` (answerer
@@ -246,6 +326,25 @@ impl ConnectionAdapter for UctpWsAdapter {
         AdapterKind::Substrate
     }
 
+    fn lifecycle_capabilities(&self) -> AdapterLifecycleCapabilities {
+        AdapterLifecycleCapabilities {
+            authoritative_liveness: true,
+            atomic_inbound_handoff: true,
+            terminal_fallback: true,
+            staged_outbound_activation: false,
+        }
+    }
+
+    fn install_lifecycle_sink(&self, sink: Arc<dyn AdapterLifecycleSink>) -> RvoipResult<()> {
+        self.lifecycle_sink.install(sink).map_err(|_| {
+            RvoipError::InvalidState("UCTP WebSocket lifecycle sink already installed")
+        })
+    }
+
+    fn is_connection_live(&self, conn: &ConnectionId) -> bool {
+        self.routes.contains_key(conn)
+    }
+
     async fn originate(&self, request: OriginateRequest) -> RvoipResult<ConnectionHandle> {
         let url = match &self.client_url {
             Some(u) => u.clone(),
@@ -279,7 +378,7 @@ impl ConnectionAdapter for UctpWsAdapter {
             closed_at: None,
         };
 
-        Ok(ConnectionHandle { connection })
+        Ok(ConnectionHandle::new(connection))
     }
 
     async fn accept(&self, conn: ConnectionId) -> RvoipResult<()> {
@@ -303,47 +402,54 @@ impl ConnectionAdapter for UctpWsAdapter {
     }
 
     async fn reject(&self, conn: ConnectionId, reason: RejectReason) -> RvoipResult<()> {
-        let route = self
-            .route(&conn)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let (code, reason_str) = reject_codes(&reason);
-        let payload = payloads::session::SessionReject {
-            by: "part_local".into(),
-            reason_code: code,
-            reason: reason_str.into(),
-        };
-        let env = UctpEnvelope::new(
-            MessageType::SessionReject,
-            serde_json::to_value(payload).unwrap(),
+        self.terminate_route(
+            &conn,
+            |route| {
+                let payload = payloads::session::SessionReject {
+                    by: "part_local".into(),
+                    reason_code: code,
+                    reason: reason_str.into(),
+                };
+                UctpEnvelope::new(
+                    MessageType::SessionReject,
+                    serde_json::to_value(payload).expect("SessionReject is serializable"),
+                )
+                .with_sid(route.sid.clone())
+            },
+            AdapterEvent::Failed {
+                connection_id: conn.clone(),
+                detail: "session rejected locally".into(),
+            },
         )
-        .with_sid(route.sid);
-        route
-            .out_tx
-            .send(env)
-            .await
-            .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+        .await;
+        Ok(())
     }
 
     async fn end(&self, conn: ConnectionId, reason: EndReason) -> RvoipResult<()> {
-        let route = self
-            .route(&conn)
-            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let (code, reason_str) = end_codes(&reason);
-        let payload = payloads::session::SessionEnd {
-            by: "part_local".into(),
-            reason_code: code,
-            reason: reason_str.into(),
-        };
-        let env = UctpEnvelope::new(
-            MessageType::SessionEnd,
-            serde_json::to_value(payload).unwrap(),
+        let terminal_reason = reason.clone();
+        self.terminate_route(
+            &conn,
+            |route| {
+                let payload = payloads::session::SessionEnd {
+                    by: "part_local".into(),
+                    reason_code: code,
+                    reason: reason_str.into(),
+                };
+                UctpEnvelope::new(
+                    MessageType::SessionEnd,
+                    serde_json::to_value(payload).expect("SessionEnd is serializable"),
+                )
+                .with_sid(route.sid.clone())
+            },
+            AdapterEvent::Ended {
+                connection_id: conn.clone(),
+                reason: terminal_reason,
+            },
         )
-        .with_sid(route.sid);
-        route
-            .out_tx
-            .send(env)
-            .await
-            .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+        .await;
+        Ok(())
     }
 
     async fn hold(&self, _conn: ConnectionId) -> RvoipResult<()> {
@@ -393,26 +499,53 @@ impl ConnectionAdapter for UctpWsAdapter {
             .route(&conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
         let content_type_str = content_type_to_wire(&message.content_type);
-        let payload = payloads::message::MessageSend {
-            msg_id: message.id.to_string(),
-            from: message.from_participant.to_string(),
-            to: serde_json::json!(["all"]),
+        let data = DataMessage {
+            label: "rvoip-messages".into(),
             content_type: content_type_str.into(),
-            body: String::from_utf8_lossy(&message.body).to_string(),
-            attachments: Vec::new(),
-            in_reply_to_msg: message.in_reply_to.map(|m| m.to_string()),
+            bytes: message.body.clone(),
+            reliability: DataReliability::ReliableOrdered,
+            message_id: message.id.clone(),
         };
+        let mut payload = payloads::message::MessageSend::from_data_message(
+            &data,
+            message.from_participant.to_string(),
+            serde_json::json!(["all"]),
+        )
+        .map_err(|error| RvoipError::Adapter(format!("invalid message: {error}")))?;
+        payload.in_reply_to_msg = message.in_reply_to.map(|m| m.to_string());
         let env = UctpEnvelope::new(
             MessageType::MessageSend,
             serde_json::to_value(payload).unwrap(),
         )
         .with_cid(message.conversation_id.to_string())
-        .with_sid(route.sid);
+        .with_sid(route.sid.clone())
+        .with_connid(
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        );
         route
             .out_tx
             .send(env)
             .await
             .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
+    }
+
+    async fn send_data_message(&self, conn: ConnectionId, message: DataMessage) -> RvoipResult<()> {
+        let route = self
+            .route(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let wire_connection_id =
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
+        let wire_conversation_id = route.cid.as_deref().ok_or_else(|| {
+            RvoipError::Adapter("UCTP data route has no conversation binding".into())
+        })?;
+        rvoip_uctp::adapter_helpers::send_data_message_via_envelope(
+            &route.out_tx,
+            wire_conversation_id,
+            &route.sid,
+            &wire_connection_id,
+            &message,
+        )
+        .await
     }
 
     async fn send_dtmf(
@@ -439,7 +572,9 @@ impl ConnectionAdapter for UctpWsAdapter {
             serde_json::to_value(payload).unwrap(),
         )
         .with_sid(route.sid.clone())
-        .with_connid(conn.to_string());
+        .with_connid(
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?.to_string(),
+        );
         route
             .out_tx
             .send(env)
@@ -463,11 +598,13 @@ impl ConnectionAdapter for UctpWsAdapter {
             .get(&conn)
             .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?
             .clone();
+        let wire_connection_id =
+            rvoip_uctp::adapter_helpers::require_bound_wire_connection(&route.binding)?;
         rvoip_uctp::adapter_helpers::renegotiate_via_envelope(
             &route.out_tx,
             &route.pending,
             &route.sid,
-            &conn,
+            &wire_connection_id,
             &capabilities,
             rvoip_uctp::adapter_helpers::DEFAULT_RENEGOTIATE_TIMEOUT,
         )
@@ -476,10 +613,22 @@ impl ConnectionAdapter for UctpWsAdapter {
 
     fn subscribe_events(&self) -> mpsc::Receiver<AdapterEvent> {
         let mut guard = self.events_rx.lock().expect("poisoned");
-        guard.take().unwrap_or_else(|| {
-            warn!(
+        guard
+            .take()
+            .map(|events| legacy_normalized_event_receiver(events, ADAPTER_EVENT_CAP * 2))
+            .unwrap_or_else(|| {
+                warn!(
                 "UctpWsAdapter::subscribe_events called more than once; returning closed channel"
             );
+                let (_tx, rx) = mpsc::channel(1);
+                rx
+            })
+    }
+
+    fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
+        let mut guard = self.events_rx.lock().expect("poisoned");
+        guard.take().unwrap_or_else(|| {
+            warn!("UctpWsAdapter atomic event stream already consumed");
             let (_tx, rx) = mpsc::channel(1);
             rx
         })

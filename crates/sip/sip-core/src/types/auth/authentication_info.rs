@@ -16,8 +16,92 @@ use std::str::FromStr;
 /// authentication. It provides additional authentication information to the client, such
 /// as a new nonce for subsequent requests or a server authentication response for mutual
 /// authentication.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct AuthenticationInfo(pub Vec<AuthenticationInfoParam>); // Holds a list of params
+
+impl fmt::Debug for AuthenticationInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut qop_counts = [0usize; 3];
+        for qop in self.0.iter().filter_map(|param| match param {
+            AuthenticationInfoParam::Qop(qop) => Some(qop),
+            _ => None,
+        }) {
+            qop_counts[match qop {
+                Qop::Auth => 0,
+                Qop::AuthInt => 1,
+                Qop::Other(_) => 2,
+            }] += 1;
+        }
+        formatter
+            .debug_struct("AuthenticationInfo")
+            .field("param_count", &self.0.len())
+            .field(
+                "next_nonce_present",
+                &self
+                    .0
+                    .iter()
+                    .any(|param| matches!(param, AuthenticationInfoParam::NextNonce(_))),
+            )
+            .field(
+                "next_nonce_bytes",
+                &self
+                    .0
+                    .iter()
+                    .find_map(|param| match param {
+                        AuthenticationInfoParam::NextNonce(value) => Some(value.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+            )
+            .field(
+                "response_auth_present",
+                &self
+                    .0
+                    .iter()
+                    .any(|param| matches!(param, AuthenticationInfoParam::ResponseAuth(_))),
+            )
+            .field(
+                "response_auth_bytes",
+                &self
+                    .0
+                    .iter()
+                    .find_map(|param| match param {
+                        AuthenticationInfoParam::ResponseAuth(value) => Some(value.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+            )
+            .field(
+                "client_nonce_present",
+                &self
+                    .0
+                    .iter()
+                    .any(|param| matches!(param, AuthenticationInfoParam::Cnonce(_))),
+            )
+            .field(
+                "client_nonce_bytes",
+                &self
+                    .0
+                    .iter()
+                    .find_map(|param| match param {
+                        AuthenticationInfoParam::Cnonce(value) => Some(value.len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+            )
+            .field(
+                "nonce_count_present",
+                &self
+                    .0
+                    .iter()
+                    .any(|param| matches!(param, AuthenticationInfoParam::NonceCount(_))),
+            )
+            .field("qop_auth_count", &qop_counts[0])
+            .field("qop_auth_int_count", &qop_counts[1])
+            .field("qop_other_count", &qop_counts[2])
+            .finish()
+    }
+}
 
 impl fmt::Display for AuthenticationInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

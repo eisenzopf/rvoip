@@ -11,6 +11,10 @@
 - [ ] Access-token revocation, OAuth2 introspection, or short TTLs satisfy the
   revocation requirement.
 - [ ] Clustered SIP UAS deployments use shared `DigestReplayStore`.
+- [ ] Every enabled `SipListenerAuthPolicy` has a validated explicit tenant;
+  Bearer and trusted-CIDR/mTLS principals match it exactly.
+- [ ] SIP mTLS fingerprint mappings are paired with an Optional or Required
+  TLS client-certificate policy and an explicit client CA bundle.
 - [ ] Rate limiter is configured for REGISTER, Basic/password, Digest, Bearer,
   API-key, and token issuance paths.
 - [ ] Audit sink is configured and redaction has been verified.

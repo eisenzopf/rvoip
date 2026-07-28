@@ -19,22 +19,14 @@
 //! - **Event Emission**: Send session coordination events to session-core
 //! - **Event Translation**: Convert dialog events to session events
 //! - **Layer Boundary**: Maintain clean separation between protocol and session logic
-//! - **Backward Compatibility**: Support legacy session coordination patterns
 //! - **Event Filtering**: Send only relevant events to avoid session-core overload
 
 use super::core::DialogManager;
-use crate::errors::DialogResult;
+use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
-use tokio::sync::mpsc;
 
 /// Trait for session coordination operations
 pub trait SessionCoordinator {
-    /// Set up session coordination channel
-    fn configure_session_coordination(
-        &self,
-        sender: mpsc::Sender<SessionCoordinationEvent>,
-    ) -> impl std::future::Future<Output = ()> + Send;
-
     /// Send event to session-core
     fn notify_session_layer(
         &self,
@@ -42,36 +34,38 @@ pub trait SessionCoordinator {
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
 }
 
-/// Trait for event sending operations
-pub trait EventSender {
-    /// Send session coordination event
-    fn send_coordination_event(
-        &self,
-        event: SessionCoordinationEvent,
-    ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-}
-
 // Implementation using GlobalEventCoordinator
 impl SessionCoordinator for DialogManager {
-    async fn configure_session_coordination(
-        &self,
-        _sender: mpsc::Sender<SessionCoordinationEvent>,
-    ) {
-        // REMOVED: Channel-based coordination - events now flow through GlobalEventCoordinator
-        tracing::warn!(
-            "configure_session_coordination() called but channel-based coordination is removed"
-        );
-    }
-
     async fn notify_session_layer(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
-        // Use the emit_session_coordination_event method which properly uses GlobalEventCoordinator
-        self.emit_session_coordination_event(event).await;
-        Ok(())
-    }
-}
+        if let Some(hub) = self.event_hub.read().await.clone() {
+            let acknowledged = hub
+                .publish_session_coordination_authoritative(event)
+                .await
+                .map_err(|_| {
+                    DialogError::routing_error(
+                        "authoritative session dispatch was rejected by session-core",
+                    )
+                })?;
+            return acknowledged.then_some(()).ok_or_else(|| {
+                DialogError::routing_error(
+                    "authoritative session dispatch had no session-core handler",
+                )
+            });
+        }
 
-impl EventSender for DialogManager {
-    async fn send_coordination_event(&self, event: SessionCoordinationEvent) -> DialogResult<()> {
-        self.notify_session_layer(event).await
+        // Focused manager tests inject transaction events directly without
+        // constructing the cross-crate event hub. Keep their private channel
+        // as a test-only causal sink; production never regains a legacy
+        // fallback when the authoritative route is absent or rejects delivery.
+        #[cfg(test)]
+        if let Some(sender) = self.session_coordinator.read().await.clone() {
+            return sender.send(event).await.map_err(|_| {
+                DialogError::routing_error("test session coordination route was closed")
+            });
+        }
+
+        Err(DialogError::routing_error(
+            "authoritative session dispatch requires an event hub",
+        ))
     }
 }

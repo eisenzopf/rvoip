@@ -17,13 +17,31 @@ use super::{LatencyHistogram, ResourceSample, ResourceSummary};
 
 pub const DEFAULT_PERF_APP_EVENT_CHANNEL_CAPACITY: usize =
     Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY;
-pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
+// Keep this synchronized with sip-dialog's INVITE failover-plan retention and
+// sip-transaction's retired-client-transaction retention. The margin ensures
+// the post-load sample runs after their 90-second expiry boundary.
+pub const RETAINED_INVITE_STATE_TTL_SECS: usize = 90;
+pub const RETENTION_DRAIN_MARGIN_SECS: usize = 5;
+pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
+    RETAINED_INVITE_STATE_TTL_SECS + RETENTION_DRAIN_MARGIN_SECS;
+pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
+pub const BURST_RSS_DIAGNOSTIC_SETTLE_SECS: usize = 5;
+pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
+pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
+    MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
+/// Full endpoint-retention snapshots walk and serialize every owned runtime
+/// index. Keep that diagnostic off the 5-second RSS sampling hot path so the
+/// leak gate does not measure allocator page growth caused by its own report.
+/// The sampler still records an exact final `after_drain` snapshot on stop.
+pub const RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 pub const BOB_PORT_ENV: &str = "RVOIP_PERF_SOAK_BOB_PORT";
 pub const ALICE_PORT_ENV: &str = "RVOIP_PERF_SOAK_ALICE_PORT";
 pub const READY_FILE_ENV: &str = "RVOIP_PERF_SOAK_READY_FILE";
 pub const STOP_FILE_ENV: &str = "RVOIP_PERF_SOAK_STOP_FILE";
 pub const RUN_DIR_ENV: &str = "RVOIP_PERF_SOAK_RUN_DIR";
 pub const ACTIVE_PHASES_ENV: &str = "RVOIP_PERF_SOAK_ACTIVE_CALL_PHASES";
+pub const MEDIA_PORT_START_ENV: &str = "RVOIP_PERF_MEDIA_PORT_START";
+pub const MEDIA_PORT_END_ENV: &str = "RVOIP_PERF_MEDIA_PORT_END";
 pub const DISABLE_IN_PROCESS_RESOURCE_SAMPLER_ENV: &str =
     "RVOIP_PERF_DISABLE_IN_PROCESS_RESOURCE_SAMPLER";
 pub const EXTERNAL_RESOURCE_DIAGNOSTICS_DIR_ENV: &str = "RVOIP_PERF_PROFILE_EXTERNAL_RESOURCE_DIR";
@@ -593,7 +611,7 @@ fn sip_udp_call_trace_json(
     snapshot: &rvoip_sip_transport::diagnostics::CallTraceSnapshot,
 ) -> Value {
     json!({
-        "call_id": &snapshot.call_id,
+        "call_correlation": &snapshot.call_correlation,
         "inbound_invite": snapshot.inbound_invite,
         "inbound_ack": snapshot.inbound_ack,
         "inbound_bye": snapshot.inbound_bye,
@@ -656,7 +674,7 @@ fn dialog_call_timing_traces_json(
         .iter()
         .map(|snapshot| {
             json!({
-                "call_id": &snapshot.call_id,
+                "call_correlation": &snapshot.call_correlation,
                 "first_uac_invite_2xx_response_epoch_us": snapshot.first_uac_invite_2xx_response_epoch_us,
                 "last_uac_invite_2xx_response_epoch_us": snapshot.last_uac_invite_2xx_response_epoch_us,
                 "first_uac_ack_attempt_epoch_us": snapshot.first_uac_ack_attempt_epoch_us,
@@ -1061,16 +1079,41 @@ pub fn perf_config(name: &str, port: u16) -> Config {
     if let Some(seconds) = read_nonnegative_u64_env("RVOIP_PERF_SETUP_TEARDOWN_TIMEOUT_SECS") {
         config = config.with_setup_teardown_timeout_secs(seconds);
     }
+    match (
+        read_optional_u16_env(MEDIA_PORT_START_ENV),
+        read_optional_u16_env(MEDIA_PORT_END_ENV),
+    ) {
+        (Some(start), Some(end)) => config = config.with_media_ports(start, end),
+        (None, None) => {}
+        _ => panic!("{MEDIA_PORT_START_ENV} and {MEDIA_PORT_END_ENV} must be set together"),
+    }
     config
 }
 
 pub fn retention_drain_wait() -> Duration {
-    Duration::from_secs(
-        read_positive_usize_env("RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS")
-            .unwrap_or(DEFAULT_RETENTION_DRAIN_WAIT_SECS)
-            .try_into()
-            .unwrap_or(u64::MAX),
-    )
+    retention_drain_wait_for_configured(read_positive_usize_env(
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS",
+    ))
+}
+
+pub fn burst_retention_drain_wait() -> Duration {
+    burst_retention_drain_wait_for_configured(read_positive_usize_env(
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS",
+    ))
+}
+
+pub fn retention_drain_wait_for_configured(configured_secs: Option<usize>) -> Duration {
+    let seconds = configured_secs
+        .unwrap_or(DEFAULT_RETENTION_DRAIN_WAIT_SECS)
+        .max(MIN_RETENTION_DRAIN_WAIT_SECS);
+    Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
+}
+
+pub fn burst_retention_drain_wait_for_configured(configured_secs: Option<usize>) -> Duration {
+    let seconds = configured_secs
+        .unwrap_or(MIN_BURST_RETENTION_DRAIN_WAIT_SECS)
+        .max(MIN_BURST_RETENTION_DRAIN_WAIT_SECS);
+    Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
 }
 
 pub async fn run_caller_load(
@@ -1808,10 +1851,19 @@ fn endpoint_retention_sample_summary(
 
 pub fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
     json!({
+        "retention_totals": {
+            "live_ownership": endpoint_live_ownership_total(snapshot),
+            "bounded_tombstones": endpoint_bounded_tombstone_total(snapshot),
+            "retained": endpoint_retained_total(snapshot),
+        },
         "session_store": snapshot["session_store"].clone(),
         "session_registry": snapshot["session_registry"].clone(),
         "lifecycle": snapshot["lifecycle"].clone(),
+        "app_event_publisher": snapshot["app_event_publisher"].clone(),
+        "global_event_bus": snapshot["global_event_bus"].clone(),
         "state_machine_helpers": snapshot["state_machine_helpers"].clone(),
+        "exact_response_supervisor": snapshot["exact_response_supervisor"].clone(),
+        "retained_tasks": snapshot["retained_tasks"].clone(),
         "transaction_manager": snapshot["transaction_manager"].clone(),
         "dialog_manager": snapshot["dialog_manager"].clone(),
         "dialog_adapter": snapshot["dialog_adapter"].clone(),
@@ -1822,35 +1874,61 @@ pub fn endpoint_summary(snapshot: &serde_json::Value) -> serde_json::Value {
 }
 
 pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
+    endpoint_live_ownership_total(snapshot)
+        .saturating_add(endpoint_bounded_tombstone_total(snapshot))
+}
+
+pub fn endpoint_live_ownership_total(snapshot: &serde_json::Value) -> u64 {
     const POINTERS: &[&str] = &[
         "/session_store/total",
         "/session_registry/sessions",
+        "/session_registry/dialog_mappings",
+        "/session_registry/media_mappings",
+        "/session_store/lifecycle/live_indexes/dialog",
+        "/session_store/lifecycle/live_indexes/call_id",
+        "/session_store/lifecycle/live_indexes/media",
         "/state_machine_helpers/active_sessions",
         "/state_machine_helpers/subscriber_sessions",
-        "/dialog_adapter/session_to_dialog",
-        "/dialog_adapter/dialog_to_session",
-        "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
+        "/dialog_adapter/outgoing_bye_tx",
+        "/dialog_adapter/outgoing_bye_generation_watch",
+        "/dialog_adapter/outgoing_bye_wait_intents",
+        "/dialog_adapter/outbound_initial_invites",
+        "/dialog_adapter/outbound_request_tracker/live_requests",
+        "/dialog_adapter/outbound_request_tracker/deferred_events",
         "/dialog_adapter/registration_refresh_tasks",
-        "/lifecycle/expired_terminal_entries",
+        "/dialog_adapter/registration_refresh_retained_tasks",
+        "/exact_response_supervisor/pending_obligations",
+        "/exact_response_supervisor/retry_attempts",
+        "/exact_response_supervisor/pending_deadlines",
+        "/exact_response_supervisor/fire_in_flight",
+        "/cleanup/setup_teardown_watchdog/pending_deadlines",
+        "/cleanup/setup_teardown_watchdog/fire_in_flight",
+        "/app_event_publisher/dispatcher/queued_current",
+        "/app_event_publisher/dispatcher/in_flight_current",
+        "/global_event_bus/broadcast_retained_total",
+        "/global_event_bus/subscriber_queued_total",
+        "/global_event_bus/observational_handlers/queued_current",
+        "/global_event_bus/observational_handlers/in_flight_current",
+        "/lifecycle/waiters",
         "/transaction_manager/total",
-        "/transaction_manager/terminated_transactions",
         "/transaction_manager/server_invite_dialog_index",
         "/transaction_manager/server_invite_dialog_keys_by_tx",
-        "/transaction_manager/invite_2xx_response_cache",
-        "/transaction_manager/invite_2xx_response_due_queue",
         "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
+        "/transaction_manager/event_subscribers",
         "/transaction_manager/pending_inbound_bytes",
         "/transaction_manager/pending_inbound_timing",
         "/dialog_manager/dialogs",
         "/dialog_manager/dialog_lookup",
         "/dialog_manager/early_dialog_lookup",
-        "/dialog_manager/terminated_bye_lookup",
         "/dialog_manager/transaction_to_dialog",
         "/dialog_manager/transaction_dialog_route_hash",
         "/dialog_manager/dialog_invite_transactions",
+        "/dialog_manager/active_invite_failover_by_dialog",
+        "/dialog_manager/invite_failover_plan_reservations",
+        "/dialog_manager/invite_failover_attempt_reservations",
         "/dialog_manager/dialog_server_transactions",
         "/dialog_manager/pending_response_transaction_by_dialog",
         "/dialog_manager/session_to_dialog",
@@ -1861,7 +1939,9 @@ pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/dialog_manager/outbound_flow_tasks",
         "/dialog_manager/flow_by_destination",
         "/dialog_manager/flow_by_aor",
-        "/media_adapter/session_to_dialog",
+        "/media_adapter/media_resources",
+        "/media_adapter/media_create_reservations",
+        "/media_adapter/registry_media_bindings",
         "/media_adapter/dialog_to_session",
         "/media_adapter/media_sessions",
         "/media_adapter/audio_receivers",
@@ -1881,10 +1961,28 @@ pub fn endpoint_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/cleanup/active_total",
     ];
 
-    POINTERS
-        .iter()
-        .map(|pointer| endpoint_metric(snapshot, pointer))
-        .sum()
+    endpoint_metrics_total(snapshot, POINTERS)
+}
+
+pub fn endpoint_bounded_tombstone_total(snapshot: &serde_json::Value) -> u64 {
+    const POINTERS: &[&str] = &[
+        "/lifecycle/entries",
+        "/lifecycle/storage/terminal_deadline_records",
+        "/app_event_publisher/exact_terminal_claims/slots",
+        "/app_event_publisher/exact_terminal_claims/deadlines",
+        "/transaction_manager/terminated_transactions",
+        "/transaction_manager/invite_2xx_response_cache",
+        "/transaction_manager/invite_2xx_response_due_queue",
+        "/transaction_manager/retired_client_transactions",
+        "/dialog_manager/terminated_bye_lookup",
+        "/dialog_manager/terminated_bye_deadlines",
+        "/dialog_manager/invite_failover_plans",
+        "/dialog_manager/invite_failover_plans_by_dialog",
+        "/dialog_manager/invite_failover_attempts",
+        "/dialog_manager/invite_failover_attempts_by_dialog",
+    ];
+
+    endpoint_metrics_total(snapshot, POINTERS)
 }
 
 pub fn endpoint_global_retained_total(snapshot: &serde_json::Value) -> u64 {
@@ -1893,10 +1991,13 @@ pub fn endpoint_global_retained_total(snapshot: &serde_json::Value) -> u64 {
         "/sip_dialog_diagnostics/transaction_cleanup/in_flight",
     ];
 
-    POINTERS
-        .iter()
-        .map(|pointer| endpoint_metric(snapshot, pointer))
-        .sum()
+    endpoint_metrics_total(snapshot, POINTERS)
+}
+
+fn endpoint_metrics_total(snapshot: &serde_json::Value, pointers: &[&str]) -> u64 {
+    pointers.iter().fold(0, |total, pointer| {
+        total.saturating_add(endpoint_metric(snapshot, pointer))
+    })
 }
 
 pub fn endpoint_metric(snapshot: &serde_json::Value, pointer: &str) -> u64 {
@@ -1958,6 +2059,15 @@ impl RssGrowthGate {
 pub struct RssResultMetrics {
     pub full_growth_mb_per_hr: f64,
     pub sustained_growth_mb_per_hr: f64,
+    pub active_tail_growth_mb_per_hr: f64,
+    pub active_tail_sample_count: usize,
+    pub active_tail_window_secs: f64,
+    pub active_tail_window_complete: bool,
+    pub active_tail_estimator: &'static str,
+    pub active_tail_endpoint_band_secs: f64,
+    pub active_tail_endpoint_separation_secs: f64,
+    pub active_tail_start_sample_count: usize,
+    pub active_tail_end_sample_count: usize,
     pub post_drain_growth_mb_per_hr: f64,
     pub post_drain_sample_count: usize,
     pub post_drain_window_secs: f64,
@@ -1966,17 +2076,59 @@ pub struct RssResultMetrics {
     pub windows: Vec<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RssGatePolicy {
+    /// Long-soak authority: qualify the final ten minutes under load and fail
+    /// separately if that complete window was not captured.
+    ActiveTail600,
+    /// Short/burst authority: require the full scenario-specific post-drain
+    /// coverage, then qualify its settled final 60 seconds. The full-window
+    /// slope remains diagnostic so bounded cleanup settling stays visible.
+    PostDrainOrTail,
+}
+
 pub fn rss_result_metrics(
     resources: &ResourceSummary,
-    active_secs: f64,
+    active_load_end_secs: f64,
+    post_drain_start_secs: f64,
     drain_secs: f64,
+    gate_policy: RssGatePolicy,
 ) -> RssResultMetrics {
+    const LONG_SOAK_ACTIVE_WINDOW_SECS: f64 = 600.0;
+    const LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS: f64 = 590.0;
+    const LONG_SOAK_MIN_ACTIVE_SAMPLES: usize = 110;
+
     let full_growth_mb_per_hr = resources.rss_growth_mb_per_min * 60.0;
     let sustained_growth_mb_per_hr = resources.rss_tail_growth_mb_per_min * 60.0;
+    let active_tail_start_secs = (active_load_end_secs - LONG_SOAK_ACTIVE_WINDOW_SECS).max(0.0);
+    let active_tail_samples: Vec<ResourceSample> = resources
+        .samples
+        .iter()
+        .filter(|sample| {
+            sample.t_secs >= active_tail_start_secs && sample.t_secs <= active_load_end_secs
+        })
+        .cloned()
+        .collect();
+    let active_tail_endpoint = rss_endpoint_median_growth_mb_per_hr(&active_tail_samples);
+    let active_tail_growth_mb_per_hr = active_tail_endpoint.as_ref().map_or_else(
+        || rss_growth_mb_per_min(&active_tail_samples) * 60.0,
+        |estimate| estimate.growth_mb_per_hr,
+    );
+    let active_tail_window_secs = match (active_tail_samples.first(), active_tail_samples.last()) {
+        (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
+        _ => 0.0,
+    };
+    let active_tail_window_complete = active_load_end_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS
+        && active_tail_window_secs >= LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS
+        && active_tail_samples.len() >= LONG_SOAK_MIN_ACTIVE_SAMPLES
+        && active_tail_endpoint.is_some();
     let post_drain_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
-        .filter(|sample| sample.t_secs >= active_secs)
+        .filter(|sample| {
+            sample.t_secs >= post_drain_start_secs
+                && sample.t_secs <= post_drain_start_secs + drain_secs
+        })
         .cloned()
         .collect();
     let post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&post_drain_samples) * 60.0;
@@ -1984,22 +2136,124 @@ pub fn rss_result_metrics(
         (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
         _ => 0.0,
     };
-    let (gate_growth_mb_per_hr, gate_window) = if post_drain_samples.len() >= 2 {
-        (post_drain_growth_mb_per_hr, "post_drain")
-    } else {
-        (sustained_growth_mb_per_hr, "tail")
+    // A long soak must be qualified by sustained behavior under active load.
+    // A short scenario retains its complete post-drain evidence window, but
+    // its authoritative slope comes from the final 60 seconds after bounded
+    // cleanup settling. Because the sampler is stopped at the drain boundary,
+    // report allocations cannot contaminate this settled-runtime estimate.
+    let (gate_growth_mb_per_hr, gate_window) = match gate_policy {
+        RssGatePolicy::ActiveTail600 => (
+            active_tail_growth_mb_per_hr,
+            if active_tail_window_complete {
+                "active_tail_600s"
+            } else {
+                "active_tail_600s_incomplete"
+            },
+        ),
+        RssGatePolicy::PostDrainOrTail if post_drain_samples.len() >= 2 => {
+            (sustained_growth_mb_per_hr, "post_drain_tail_60s")
+        }
+        RssGatePolicy::PostDrainOrTail => (sustained_growth_mb_per_hr, "tail"),
     };
-    let windows = rss_window_summaries(&resources.samples, active_secs, drain_secs);
+    let windows = rss_window_summaries(
+        &resources.samples,
+        active_load_end_secs,
+        post_drain_start_secs,
+        drain_secs,
+    );
 
     RssResultMetrics {
         full_growth_mb_per_hr,
         sustained_growth_mb_per_hr,
+        active_tail_growth_mb_per_hr,
+        active_tail_sample_count: active_tail_samples.len(),
+        active_tail_window_secs,
+        active_tail_window_complete,
+        active_tail_estimator: if active_tail_endpoint.is_some() {
+            "median_first_last_sixth_capped_60s"
+        } else {
+            "unavailable_ols_diagnostic_only"
+        },
+        active_tail_endpoint_band_secs: active_tail_endpoint
+            .as_ref()
+            .map_or(0.0, |estimate| estimate.band_secs),
+        active_tail_endpoint_separation_secs: active_tail_endpoint
+            .as_ref()
+            .map_or(0.0, |estimate| estimate.separation_secs),
+        active_tail_start_sample_count: active_tail_endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.start_sample_count),
+        active_tail_end_sample_count: active_tail_endpoint
+            .as_ref()
+            .map_or(0, |estimate| estimate.end_sample_count),
         post_drain_growth_mb_per_hr,
         post_drain_sample_count: post_drain_samples.len(),
         post_drain_window_secs,
         gate_growth_mb_per_hr,
         gate_window,
         windows,
+    }
+}
+
+/// Robust retained-RSS rate across the first and last minute of a selected
+/// window. Medians prevent a single late sampler/allocator spike from turning
+/// into a false long-soak failure while sustained growth remains visible.
+pub struct RssEndpointMedianEstimate {
+    pub growth_mb_per_hr: f64,
+    pub band_secs: f64,
+    pub separation_secs: f64,
+    pub start_sample_count: usize,
+    pub end_sample_count: usize,
+}
+
+pub fn rss_endpoint_median_growth_mb_per_hr(
+    samples: &[ResourceSample],
+) -> Option<RssEndpointMedianEstimate> {
+    const MIN_ENDPOINT_SAMPLES: usize = 3;
+    const MAX_ENDPOINT_BAND_SECS: f64 = 60.0;
+
+    if samples.len() < MIN_ENDPOINT_SAMPLES * 2 {
+        return None;
+    }
+    let first_t = samples.first()?.t_secs;
+    let last_t = samples.last()?.t_secs;
+    let coverage_secs = (last_t - first_t).max(0.0);
+    if coverage_secs <= 0.0 {
+        return None;
+    }
+    let band_secs = (coverage_secs / 6.0).min(MAX_ENDPOINT_BAND_SECS);
+    let start = samples
+        .iter()
+        .take_while(|sample| sample.t_secs <= first_t + band_secs)
+        .collect::<Vec<_>>();
+    let end = samples
+        .iter()
+        .skip_while(|sample| sample.t_secs < last_t - band_secs)
+        .collect::<Vec<_>>();
+    if start.len() < MIN_ENDPOINT_SAMPLES || end.len() < MIN_ENDPOINT_SAMPLES {
+        return None;
+    }
+    let start_rss = median_f64(start.iter().map(|sample| sample.rss_mb).collect());
+    let end_rss = median_f64(end.iter().map(|sample| sample.rss_mb).collect());
+    let start_t = median_f64(start.iter().map(|sample| sample.t_secs).collect());
+    let end_t = median_f64(end.iter().map(|sample| sample.t_secs).collect());
+    let separation_secs = end_t - start_t;
+    (separation_secs > 0.0).then(|| RssEndpointMedianEstimate {
+        growth_mb_per_hr: (end_rss - start_rss) * 3600.0 / separation_secs,
+        band_secs,
+        separation_secs,
+        start_sample_count: start.len(),
+        end_sample_count: end.len(),
+    })
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    values.sort_by(f64::total_cmp);
+    let midpoint = values.len() / 2;
+    if values.len() % 2 == 0 {
+        (values[midpoint - 1] + values[midpoint]) / 2.0
+    } else {
+        values[midpoint]
     }
 }
 
@@ -2029,10 +2283,11 @@ pub fn rss_growth_mb_per_min(samples: &[ResourceSample]) -> f64 {
 
 pub fn rss_window_summaries(
     samples: &[ResourceSample],
-    active_secs: f64,
+    active_load_end_secs: f64,
+    post_drain_start_secs: f64,
     drain_secs: f64,
 ) -> Vec<serde_json::Value> {
-    let total_secs = active_secs + drain_secs;
+    let total_secs = post_drain_start_secs + drain_secs;
     let mut windows = Vec::new();
     let mut start = 0.0;
 
@@ -2045,7 +2300,13 @@ pub fn rss_window_summaries(
             .collect();
         if let (Some(first), Some(last)) = (window_samples.first(), window_samples.last()) {
             windows.push(json!({
-                "label": if start >= active_secs { "drain" } else { "active" },
+                "label": if start >= post_drain_start_secs {
+                    "post_drain"
+                } else if start >= active_load_end_secs {
+                    "interprocess_drain"
+                } else {
+                    "active"
+                },
                 "start_secs": round2(start),
                 "end_secs": round2(end),
                 "sample_count": window_samples.len(),
@@ -2060,14 +2321,14 @@ pub fn rss_window_summaries(
 
     let drain_samples: Vec<ResourceSample> = samples
         .iter()
-        .filter(|sample| sample.t_secs >= active_secs)
+        .filter(|sample| sample.t_secs >= post_drain_start_secs && sample.t_secs <= total_secs)
         .cloned()
         .collect();
     if let (Some(first), Some(last)) = (drain_samples.first(), drain_samples.last()) {
         windows.push(json!({
             "label": "post_drain",
-            "start_secs": round2(active_secs),
-            "end_secs": round2(active_secs + drain_secs),
+            "start_secs": round2(post_drain_start_secs),
+            "end_secs": round2(total_secs),
             "sample_count": drain_samples.len(),
             "first_rss_mb": round2(first.rss_mb),
             "last_rss_mb": round2(last.rss_mb),
@@ -2201,6 +2462,18 @@ pub fn read_required_u16_env(name: &str) -> u16 {
     let raw = std::env::var(name).unwrap_or_else(|err| panic!("{name} must be set: {err}"));
     raw.parse()
         .unwrap_or_else(|_| panic!("{name} must be a valid u16 port, got {raw:?}"))
+}
+
+fn read_optional_u16_env(name: &str) -> Option<u16> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(err) => panic!("{name} could not be read: {err}"),
+    };
+    Some(
+        raw.parse()
+            .unwrap_or_else(|_| panic!("{name} must be a valid u16 port, got {raw:?}")),
+    )
 }
 
 fn read_bool_env(name: &str) -> bool {

@@ -3,15 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use webrtc::data_channel::DataChannel;
-use webrtc::media_stream::track_local::TrackLocal;
-
 use crate::client::{SessionHandle, SessionMedium};
 use crate::errors::{Result, WebRtcError};
 use crate::media::dtmf;
 use crate::media::fixtures::send_fixture_media_burst;
 use crate::peer::RvoipPeerConnection;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+use webrtc::data_channel::DataChannel;
 
 const DC_LABEL: &str = "rvoip-comprehensive";
 const CHAT_PREFIX: &str = "chat:";

@@ -1,0 +1,7 @@
+{
+  "environment": {"git_rev": "a3c84d8f"},
+  "load": {"target_cps": 30.0},
+  "resources": {"rss_sample_count": 71},
+  "results": {"calls_offered": 975, "calls_succeeded": 975},
+  "scenario": "perf_call_setup_cps_pbx-media-server"
+}

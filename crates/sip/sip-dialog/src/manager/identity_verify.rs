@@ -25,7 +25,7 @@
 //! UAS inbound:
 //!   socket → parse → TransactionManager.pending_inbound_bytes[tx_key]
 //!         → dispatch to dialog handlers
-//!         → events/adapter.rs.convert_coordination_to_cross_crate_event:
+//!         → events/event_hub.rs.convert_coordination_to_cross_crate:
 //!               raw = take_inbound_bytes(tx_id)
 //!               identity = IdentityHeader from request (if present)
 //!               outcome = verifier.verify(&raw, &identity, &request).await

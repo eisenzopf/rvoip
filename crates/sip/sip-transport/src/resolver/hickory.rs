@@ -54,7 +54,7 @@ impl HickoryResolver {
     /// this and falls back to IP-literal-only resolution.
     pub fn new_system() -> Result<Self, ResolverError> {
         let (config, mut opts) = hickory_resolver::system_conf::read_system_conf()
-            .map_err(|e| ResolverError::Dns(format!("system DNS config: {}", e)))?;
+            .map_err(|_| ResolverError::Dns("system DNS configuration unavailable".into()))?;
         opts.edns0 = true;
         let inner = build_tokio_resolver(config, opts)?;
         Ok(Self {
@@ -75,12 +75,18 @@ impl HickoryResolver {
         let read = tokio::task::spawn_blocking(hickory_resolver::system_conf::read_system_conf);
         let (config, mut opts) = match tokio::time::timeout(timeout, read).await {
             Ok(Ok(Ok((config, opts)))) => (config, opts),
-            Ok(Ok(Err(e))) => {
-                warn!("system DNS config read failed ({e}); using default resolver config");
+            Ok(Ok(Err(_))) => {
+                warn!(
+                    error_class = "configuration-read",
+                    "system DNS config unavailable; using default resolver config"
+                );
                 (ResolverConfig::default(), ResolverOpts::default())
             }
-            Ok(Err(join_err)) => {
-                warn!("system DNS config read task failed ({join_err}); using default resolver config");
+            Ok(Err(_)) => {
+                warn!(
+                    error_class = "task-join",
+                    "system DNS config unavailable; using default resolver config"
+                );
                 (ResolverConfig::default(), ResolverOpts::default())
             }
             Err(_) => {
@@ -89,8 +95,11 @@ impl HickoryResolver {
             }
         };
         opts.edns0 = true;
-        let inner = build_tokio_resolver(config, opts).unwrap_or_else(|e| {
-            warn!("resolver build failed ({e}); rebuilding from default config");
+        let inner = build_tokio_resolver(config, opts).unwrap_or_else(|_| {
+            warn!(
+                error_class = "configuration-build",
+                "resolver build failed; rebuilding from default config"
+            );
             let mut default_opts = ResolverOpts::default();
             default_opts.edns0 = true;
             build_tokio_resolver(ResolverConfig::default(), default_opts)
@@ -218,6 +227,7 @@ impl HickoryResolver {
                 .map(|(ip, expires)| ResolvedTarget {
                     addr: SocketAddr::new(ip, port),
                     transport,
+                    authority: None,
                     expires,
                 })
                 .collect());
@@ -277,8 +287,8 @@ impl HickoryResolver {
                 return Ok(out);
             }
             debug!(
-                "RFC 3263: NAPTR for {} returned records but no usable SRV; falling through",
-                host
+                host_len = host.len(),
+                "RFC 3263 NAPTR returned records but no usable SRV; falling through"
             );
         }
 
@@ -317,6 +327,7 @@ impl HickoryResolver {
             .map(|(ip, expires)| ResolvedTarget {
                 addr: SocketAddr::new(ip, port),
                 transport,
+                authority: None,
                 expires,
             })
             .collect())
@@ -332,13 +343,17 @@ impl HickoryResolver {
         for (_prio, _weight, port, target) in ordered {
             let ips = self.lookup_ip(&target).await?;
             if ips.is_empty() {
-                trace!("RFC 3263: SRV target {} produced no A/AAAA records", target);
+                trace!(
+                    srv_target_len = target.len(),
+                    "RFC 3263 SRV target produced no A/AAAA records"
+                );
                 continue;
             }
             for (ip, expires) in ips {
                 out.push(ResolvedTarget {
                     addr: SocketAddr::new(ip, port),
                     transport,
+                    authority: None,
                     expires,
                 });
             }
@@ -350,6 +365,15 @@ impl HickoryResolver {
 #[async_trait]
 impl Resolver for HickoryResolver {
     async fn resolve(&self, uri: &Uri) -> Result<Vec<ResolvedTarget>, ResolverError> {
+        if matches!(uri.scheme(), Scheme::Sips)
+            && uri.transport().is_some_and(|transport| {
+                matches!(transport.to_ascii_lowercase().as_str(), "udp" | "ws")
+            })
+        {
+            return Err(ResolverError::Forbidden(
+                "sips: scheme cannot use an insecure transport",
+            ));
+        }
         // (1) IP literal short-circuit — no DNS.
         let transport = select_transport_for_uri(uri);
         let default_port = default_port_for_scheme(uri.scheme());
@@ -382,12 +406,18 @@ impl Resolver for HickoryResolver {
                     ));
                 }
                 if domain.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(ResolverError::InvalidHost(format!(
-                        "request URI host `{domain}` is not routable; address it \
-                         to the registrar, e.g. `sip:{domain}@your-pbx`"
-                    )));
+                    return Err(ResolverError::InvalidHost(
+                        "request URI host is an unroutable numeric label; address the extension to a registrar"
+                            .to_string(),
+                    ));
                 }
-                self.resolve_domain(domain, uri).await
+                let authority = crate::transport::TransportAuthority::dns(domain.clone())
+                    .map_err(|_| ResolverError::NoCandidates)?;
+                let mut targets = self.resolve_domain(domain, uri).await?;
+                for target in &mut targets {
+                    target.authority = Some(authority.clone());
+                }
+                Ok(targets)
             }
         }
     }
@@ -424,12 +454,28 @@ fn build_tokio_resolver(
     *builder.options_mut() = opts;
     builder
         .build()
-        .map_err(|e| ResolverError::Dns(format!("hickory resolver config: {}", e)))
+        .map_err(|_| ResolverError::Dns("resolver configuration rejected".into()))
 }
 
 fn map_resolve_err(e: NetError) -> ResolverError {
-    warn!("hickory resolve error: {}", e);
-    ResolverError::Dns(format!("{}", e))
+    let error_class = net_error_class(&e);
+    warn!(error_class, "hickory resolve failed");
+    ResolverError::Dns(error_class.to_string())
+}
+
+fn net_error_class(error: &NetError) -> &'static str {
+    match error {
+        NetError::Busy => "busy",
+        NetError::Timeout => "timeout",
+        NetError::NoConnections => "no-connections",
+        NetError::Dns(DnsError::ResponseCode(_)) => "dns-response",
+        NetError::Dns(DnsError::NoRecordsFound(_)) => "no-records",
+        NetError::Dns(_) => "dns",
+        NetError::Io(_) => "io",
+        NetError::Proto(_) => "protocol",
+        NetError::ParseInt(_) => "invalid-number",
+        _ => "resolver",
+    }
 }
 
 fn is_no_records_error(e: &NetError) -> bool {
@@ -446,6 +492,7 @@ mod tests {
 
     use super::*;
     use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+    use hickory_resolver::net::NetError;
     use std::str::FromStr;
 
     fn empty_resolver() -> HickoryResolver {
@@ -456,6 +503,30 @@ mod tests {
         let ns = vec![NameServerConfig::udp("127.0.0.1".parse().unwrap())];
         let config = ResolverConfig::from_parts(None, vec![], ns);
         HickoryResolver::with_resolver(config, ResolverOpts::default())
+    }
+
+    #[test]
+    fn resolver_errors_and_source_do_not_reflect_queries_or_targets() {
+        const SECRET_QUERY: &str = "_sip._udp.secret-query.example";
+        let error = map_resolve_err(NetError::Msg(SECRET_QUERY.to_string()));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(SECRET_QUERY));
+        assert!(rendered.contains("resolver"));
+
+        let source = include_str!("hickory.rs");
+        for fragments in [
+            ["NAPTR for ", "{}"],
+            ["SRV target ", "{}"],
+            ["hickory resolve error", ": {}"],
+            ["`{domain}", "`"],
+            ["sip:{domain}", "@"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !source.contains(&forbidden),
+                "forbidden resolver diagnostic: {forbidden}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -498,9 +569,9 @@ mod tests {
     #[tokio::test]
     async fn sips_with_transport_udp_is_forbidden_for_ip_literal() {
         let resolver = empty_resolver();
-        // `sips:` pinned to UDP. Even though `select_transport_for_uri`
-        // returns TLS for `sips:` by default, an explicit `transport=udp`
-        // overrides it and the resolver must reject.
+        // The syntax classifier remains fail-secure and returns TLS, while
+        // the resolver rejects the explicitly insecure hint rather than
+        // silently rewriting caller intent.
         let uri = Uri::from_str("sips:1.2.3.4;transport=udp").unwrap();
         let err = resolver.resolve(&uri).await.unwrap_err();
         assert!(matches!(err, ResolverError::Forbidden(_)));

@@ -1,14 +1,23 @@
-//! PUBLISH method implementation for presence (RFC 3903)
+//! Reserved PUBLISH API surface for presence (RFC 3903)
 //!
-//! Provides support for publishing presence information to a presence server.
+//! A transaction-backed PUBLISH implementation is not currently part of the
+//! supported dialog feature set. The public builder and publisher types remain
+//! available for API compatibility, but every operation fails closed instead of
+//! fabricating a SIP response or entity tag.
 
 use crate::{DialogError, DialogResult};
-use bytes::Bytes;
-use rvoip_sip_core::{
-    types::pidf::PidfDocument, HeaderName, HeaderValue, Method, Request, TypedHeader, Uri,
-};
+use rvoip_sip_core::{types::pidf::PidfDocument, Uri};
 use std::time::Duration;
 use tracing::{debug, info};
+
+const PUBLISH_UNSUPPORTED_MESSAGE: &str =
+    "SIP PUBLISH is unsupported because no transaction-backed implementation is installed";
+
+fn publish_unsupported_error() -> DialogError {
+    DialogError::ProtocolError {
+        message: PUBLISH_UNSUPPORTED_MESSAGE.to_string(),
+    }
+}
 
 /// PUBLISH request builder for presence updates
 pub struct PublishBuilder {
@@ -30,8 +39,8 @@ pub struct PublishBuilder {
     /// Presence document to publish
     body: Option<PidfDocument>,
 
-    /// Placeholder for future transaction management
-    _placeholder: std::marker::PhantomData<()>,
+    /// Marker retaining the public builder shape while support is disabled.
+    _unsupported_marker: std::marker::PhantomData<()>,
 }
 
 impl PublishBuilder {
@@ -44,7 +53,7 @@ impl PublishBuilder {
             sip_if_match: None,
             expires: 3600, // Default 1 hour
             body: None,
-            _placeholder: std::marker::PhantomData,
+            _unsupported_marker: std::marker::PhantomData,
         }
     }
 
@@ -72,74 +81,29 @@ impl PublishBuilder {
         self
     }
 
-    /// Build and send the PUBLISH request
+    /// Attempt to send the configured PUBLISH request.
+    ///
+    /// PUBLISH is not currently backed by the transaction layer, so this
+    /// method fails closed. It never writes to the wire and never fabricates a
+    /// successful response or entity tag.
     pub async fn send(self) -> DialogResult<PublishResponse> {
-        // Create PUBLISH request
-        let mut request = Request::new(Method::Publish, self.target.clone());
-
-        // Add required headers using Other variant for simplicity
-        request.headers.push(TypedHeader::Other(
-            HeaderName::From,
-            HeaderValue::Raw(self.from.to_string().into_bytes()),
-        ));
-        request.headers.push(TypedHeader::Other(
-            HeaderName::To,
-            HeaderValue::Raw(self.target.to_string().into_bytes()),
-        ));
-        request.headers.push(TypedHeader::Other(
-            HeaderName::Event,
-            HeaderValue::Raw(self.event.clone().into_bytes()),
-        ));
-        request.headers.push(TypedHeader::Other(
-            HeaderName::Expires,
-            HeaderValue::Raw(self.expires.to_string().into_bytes()),
-        ));
-
-        // Add conditional header if present
-        if let Some(ref etag) = self.sip_if_match {
-            request.headers.push(TypedHeader::Other(
-                HeaderName::SipIfMatch,
-                HeaderValue::Raw(etag.clone().into_bytes()),
-            ));
-        }
-
-        // Add body if present
-        if let Some(pidf) = self.body {
-            let xml = pidf.to_xml();
-            let xml_len = xml.len();
-            request.body = Bytes::from(xml.into_bytes());
-            request.headers.push(TypedHeader::Other(
-                HeaderName::ContentType,
-                HeaderValue::Raw("application/pidf+xml".to_string().into_bytes()),
-            ));
-            request.headers.push(TypedHeader::Other(
-                HeaderName::ContentLength,
-                HeaderValue::Raw(xml_len.to_string().into_bytes()),
-            ));
-        } else if self.sip_if_match.is_none() {
-            // Initial PUBLISH must have a body
-            return Err(DialogError::InvalidState {
-                expected: "PUBLISH with body".to_string(),
-                actual: "PUBLISH without body".to_string(),
-            });
-        }
-
-        // TODO: Send via transaction manager when integrated
-        // For now, return a placeholder response
-
-        // This would normally send the request and parse the response
-        // let response = self.transaction_manager.send_request(request).await?;
-
-        Ok(PublishResponse {
-            status_code: 200,
-            entity_tag: Some("placeholder-etag".to_string()),
-            expires: self.expires,
-        })
+        // Consume the retained builder configuration without materializing a
+        // request. These fields remain solely to preserve the public builder
+        // contract until a canonical transaction-owned implementation exists.
+        let _configured_request = (
+            self.target,
+            self.from,
+            self.event,
+            self.sip_if_match,
+            self.expires,
+            self.body,
+        );
+        Err(publish_unsupported_error())
     }
 }
 
 /// Response from a PUBLISH request
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PublishResponse {
     /// SIP status code
     pub status_code: u16,
@@ -149,6 +113,18 @@ pub struct PublishResponse {
 
     /// Granted expiration time
     pub expires: u32,
+}
+
+impl std::fmt::Debug for PublishResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublishResponse")
+            .field("status_code", &self.status_code)
+            .field("entity_tag_present", &self.entity_tag.is_some())
+            .field("entity_tag_len", &self.entity_tag.as_ref().map(String::len))
+            .field("expires", &self.expires)
+            .finish()
+    }
 }
 
 impl PublishResponse {
@@ -204,7 +180,10 @@ impl PresencePublisher {
         // Update entity-tag for next update
         if let Some(etag) = response.entity_tag {
             self.entity_tag = Some(etag);
-            info!("Presence published, entity-tag: {:?}", self.entity_tag);
+            info!(
+                "Presence published, entity_tag_present={}",
+                self.entity_tag.is_some()
+            );
         }
 
         Ok(())
@@ -212,17 +191,11 @@ impl PresencePublisher {
 
     /// Refresh the publication (keep-alive)
     pub async fn refresh(&mut self) -> DialogResult<()> {
-        if self.entity_tag.is_none() {
-            return Err(DialogError::InvalidState {
-                expected: "entity-tag from initial PUBLISH".to_string(),
-                actual: "no entity-tag".to_string(),
-            });
+        let mut builder = PublishBuilder::new(self.target.clone(), self.presentity.clone());
+        if let Some(etag) = &self.entity_tag {
+            builder = builder.if_match(etag);
         }
-
-        let response = PublishBuilder::new(self.target.clone(), self.presentity.clone())
-            .if_match(self.entity_tag.as_ref().unwrap())
-            .send()
-            .await?;
+        let response = builder.send().await?;
 
         if !response.is_success() {
             // Lost our publication, need to re-publish
@@ -238,19 +211,19 @@ impl PresencePublisher {
 
     /// Remove the publication
     pub async fn remove(&mut self) -> DialogResult<()> {
+        let mut builder = PublishBuilder::new(self.target.clone(), self.presentity.clone());
         if let Some(etag) = &self.entity_tag {
-            let response = PublishBuilder::new(self.target.clone(), self.presentity.clone())
-                .if_match(etag)
-                .expires(0) // Remove by setting expires to 0
-                .send()
-                .await?;
-
-            if response.is_success() {
-                self.entity_tag = None;
-                info!("Presence publication removed");
-            }
+            builder = builder.if_match(etag);
         }
+        let response = builder.expires(0).send().await?;
 
+        if !response.is_success() {
+            return Err(DialogError::ProtocolError {
+                message: format!("Remove failed with status {}", response.status_code),
+            });
+        }
+        self.entity_tag = None;
+        info!("Presence publication removed");
         Ok(())
     }
 
@@ -267,9 +240,86 @@ impl PresencePublisher {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn assert_publish_is_unsupported<T>(result: DialogResult<T>) {
+        match result {
+            Err(DialogError::ProtocolError { message }) => {
+                assert_eq!(message, PUBLISH_UNSUPPORTED_MESSAGE);
+            }
+            Err(error) => panic!(
+                "expected explicit unsupported PUBLISH error, got class={}",
+                error.diagnostic_class()
+            ),
+            Ok(_) => panic!("unsupported PUBLISH operation reported success"),
+        }
+    }
+
+    fn publisher() -> PresencePublisher {
+        PresencePublisher::new(
+            "sip:presence.example.invalid".parse().unwrap(),
+            "sip:alice@example.invalid".parse().unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn publish_builder_fails_closed_without_fabricated_response() {
+        let result = PublishBuilder::new(
+            "sip:presence.example.invalid".parse().unwrap(),
+            "sip:alice@example.invalid".parse().unwrap(),
+        )
+        .event("presence")
+        .expires(300)
+        .body(PidfDocument::available("pres:alice@example.invalid"))
+        .send()
+        .await;
+
+        assert_publish_is_unsupported(result);
+    }
+
+    #[tokio::test]
+    async fn unsupported_publisher_operations_preserve_entity_tag_state() {
+        let mut publisher = publisher();
+
+        let result = publisher
+            .publish(PidfDocument::available("pres:alice@example.invalid"))
+            .await;
+        assert_publish_is_unsupported(result);
+        assert_eq!(publisher.entity_tag(), None);
+
+        assert_publish_is_unsupported(publisher.refresh().await);
+        assert_eq!(publisher.entity_tag(), None);
+
+        assert_publish_is_unsupported(publisher.remove().await);
+        assert_eq!(publisher.entity_tag(), None);
+
+        const EXISTING_TAG: &str = "existing-publish-etag";
+        publisher.entity_tag = Some(EXISTING_TAG.to_string());
+
+        let result = publisher
+            .publish(PidfDocument::unavailable("pres:alice@example.invalid"))
+            .await;
+        assert_publish_is_unsupported(result);
+        assert_eq!(publisher.entity_tag(), Some(EXISTING_TAG));
+
+        assert_publish_is_unsupported(publisher.refresh().await);
+        assert_eq!(publisher.entity_tag(), Some(EXISTING_TAG));
+
+        assert_publish_is_unsupported(publisher.remove().await);
+        assert_eq!(publisher.entity_tag(), Some(EXISTING_TAG));
+    }
+
     #[test]
-    fn test_publish_builder() {
-        // This would need mock transaction manager to test properly
-        // For now, just test the builder pattern
+    fn publish_response_debug_hides_entity_tag() {
+        const SECRET: &str = "publish-tag-secret-canary";
+        let response = PublishResponse {
+            status_code: 200,
+            entity_tag: Some(SECRET.to_string()),
+            expires: 300,
+        };
+        let debug = format!("{response:?}");
+
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("entity_tag_present: true"));
     }
 }

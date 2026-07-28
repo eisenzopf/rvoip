@@ -4,7 +4,7 @@
 //! implementing RFC 3261 compliant dialog management with proper state transitions.
 
 use dashmap::mapref::one::RefMut;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use super::core::DialogManager;
@@ -12,7 +12,7 @@ use super::utils::DialogUtils;
 use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::SessionCoordinationEvent;
+use rvoip_sip_core::types::uri::Scheme;
 use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::HeaderName;
 use rvoip_sip_core::{Request, Uri};
@@ -138,8 +138,13 @@ impl DialogStore for DialogManager {
             remote_tag, // remote_tag (from their From header)
             false,      // is_initiator = false (incoming request, we are UAS)
         );
+        dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
         if let Some(remote_target) = remote_target_from_request(request) {
-            dialog.remote_target = remote_target;
+            if !dialog.update_remote_target(remote_target) {
+                return Err(DialogError::protocol_error(
+                    "Secure dialog-forming request contains a non-SIPS Contact",
+                ));
+            }
         }
 
         let dialog_id = dialog.id.clone();
@@ -194,9 +199,8 @@ impl DialogStore for DialogManager {
         {
             if !service_route.is_empty() {
                 debug!(
-                    "RFC 3608 preload: prepending {} Service-Route hop(s) to outbound dialog route_set for AoR {}",
-                    service_route.len(),
-                    aor_key
+                    "RFC 3608 preload: prepending {} Service-Route hop(s) to outbound dialog route_set",
+                    service_route.len()
                 );
                 dialog.route_set = service_route;
             }
@@ -205,24 +209,10 @@ impl DialogStore for DialogManager {
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
 
-        // Publish DialogCreated event for session-core to track
-        if let Some(hub) = self.event_hub.read().await.as_ref() {
-            let event =
-                rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::DialogToSession(
-                    rvoip_infra_common::events::cross_crate::DialogToSessionEvent::DialogCreated {
-                        dialog_id: dialog_id.to_string(),
-                        call_id: call_id.clone(),
-                    },
-                );
-            if let Err(e) = hub.publish_cross_crate_event(event).await {
-                warn!("Failed to publish DialogCreated event: {}", e);
-            } else {
-                info!(
-                    "Published DialogCreated event for dialog {} with call-id {}",
-                    dialog_id, call_id
-                );
-            }
-        }
+        // The creator already owns the returned exact DialogId and commits its
+        // session mapping directly. The retired creation bus projection
+        // was a no-op in session-core and put observer availability on dialog
+        // creation's hot path.
 
         debug!("Created UAC dialog {} for outgoing request", dialog_id);
         Ok(dialog_id)
@@ -278,15 +268,19 @@ impl DialogStore for DialogManager {
 
         // Cancel any RFC 4028 refresh task + RFC 3262 retransmit tasks
         // associated with this dialog before we unwind state.
-        crate::manager::session_timer::cancel_refresh_task(self, dialog_id);
-        self.reliable_provisional_tasks.retain(|(d, _), abort| {
-            if d == dialog_id {
-                abort.abort();
-                false
-            } else {
-                true
-            }
-        });
+        crate::manager::session_timer::cancel_refresh_task(self, dialog_id)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "Session refresh task did not drain".to_string(),
+                context: None,
+            })?;
+        self.reliable_provisional_tasks
+            .close_dialog(dialog_id)
+            .await
+            .map_err(|_error| DialogError::InternalError {
+                message: "Reliable provisional tasks did not drain".to_string(),
+                context: None,
+            })?;
 
         // Get the dialog and terminate it
         if let Some(mut dialog_entry) = self.dialogs.get_mut(dialog_id) {
@@ -300,19 +294,6 @@ impl DialogStore for DialogManager {
             if dialog.state != DialogState::Terminated {
                 let previous_state = dialog.state.clone();
                 dialog.terminate();
-
-                // Send session coordination event for dialog state change
-                if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-                    let event = SessionCoordinationEvent::DialogStateChanged {
-                        dialog_id: dialog_id.clone(),
-                        new_state: "Terminated".to_string(),
-                        previous_state: format!("{:?}", previous_state),
-                    };
-
-                    if let Err(e) = coordinator.send(event).await {
-                        warn!("Failed to send dialog termination event: {}", e);
-                    }
-                }
 
                 debug!(
                     "Dialog {} terminated (was: {:?})",
@@ -436,19 +417,6 @@ impl DialogStore for DialogManager {
             prev
         };
 
-        // Send session coordination event for state change
-        if let Some(ref coordinator) = self.session_coordinator.read().await.as_ref() {
-            let event = SessionCoordinationEvent::DialogStateChanged {
-                dialog_id: dialog_id.clone(),
-                new_state: format!("{:?}", new_state),
-                previous_state: format!("{:?}", previous_state),
-            };
-
-            if let Err(e) = coordinator.send(event).await {
-                warn!("Failed to send dialog state change event: {}", e);
-            }
-        }
-
         debug!(
             "Updated dialog {} state from {:?} to {:?}",
             dialog_id, previous_state, new_state
@@ -472,15 +440,12 @@ impl DialogLookup for DialogManager {
 
         // First try: Standard lookup with both tags (for confirmed dialogs)
         if let Some(to_tag) = &to_tag {
-            debug!(
-                "Looking for confirmed dialog: Call-ID={}, From-tag={}, To-tag={}",
-                call_id, from_tag, to_tag
-            );
+            debug!("Looking for confirmed dialog with Call-ID and both tags present");
 
             // Try both scenarios: UAC and UAS perspective
             let (key1, key2) = DialogUtils::create_bidirectional_keys(&call_id, &from_tag, &to_tag);
-            debug!("Trying lookup key1 (UAC perspective): {}", key1);
-            debug!("Trying lookup key2 (UAS perspective): {}", key2);
+            debug!("Trying lookup key1 (UAC perspective)");
+            debug!("Trying lookup key2 (UAS perspective)");
 
             if tracing::enabled!(tracing::Level::DEBUG) {
                 debug!(
@@ -488,7 +453,7 @@ impl DialogLookup for DialogManager {
                     self.dialog_lookup.len()
                 );
                 for entry in self.dialog_lookup.iter().take(10) {
-                    debug!("  Lookup key: {} -> dialog: {}", entry.key(), entry.value());
+                    debug!("  Lookup entry -> dialog: {}", entry.value());
                 }
             }
 
@@ -515,10 +480,7 @@ impl DialogLookup for DialogManager {
 
         // Second try: Fallback lookup for early dialogs (only have call-id and from-tag)
         // This is needed for initial INVITEs where we created an early dialog but don't have to-tag yet
-        debug!(
-            "Searching for early dialog: Call-ID={}, From-tag={}, To-tag=None",
-            call_id, from_tag
-        );
+        debug!("Searching for early dialog with Call-ID and From-tag present");
 
         let early_key = DialogUtils::create_early_lookup_key(&call_id, &from_tag);
         if let Some(dialog_id) = self
@@ -587,8 +549,13 @@ impl DialogLookup for DialogManager {
             remote_tag, // remote_tag (from the From header)
             false,      // is_initiator = false (we're UAS)
         );
+        dialog.secure_transport_required |= matches!(request.uri().scheme(), Scheme::Sips);
         if let Some(remote_target) = remote_target_from_request(request) {
-            dialog.remote_target = remote_target;
+            if !dialog.update_remote_target(remote_target) {
+                return Err(DialogError::protocol_error(
+                    "Secure INVITE contains a non-SIPS Contact",
+                ));
+            }
         }
 
         let dialog_id = dialog.id.clone();
@@ -621,6 +588,19 @@ mod tests {
     fn test_dialog_lookup_key_creation() {
         let key = DialogUtils::create_lookup_key("call-123", "tag-local", "tag-remote");
         assert_eq!(key, "call-123:tag-local:tag-remote");
+    }
+
+    #[test]
+    fn outgoing_dialog_creation_has_no_event_bus_dependency() {
+        let source = include_str!("dialog_operations.rs");
+        let body = source
+            .split("async fn create_outgoing_dialog(")
+            .nth(1)
+            .and_then(|tail| tail.split("async fn store_dialog(").next())
+            .expect("outgoing dialog implementation");
+        assert!(!body.contains("event_hub"));
+        assert!(!body.contains("publish_cross_crate_event"));
+        assert!(!body.contains("DialogCreated"));
     }
 
     #[test]

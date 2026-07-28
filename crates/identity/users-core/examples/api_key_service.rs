@@ -137,15 +137,14 @@ async fn main() -> Result<()> {
     // Demonstrate API key authentication
     println!("\n🚀 Using API keys for authentication...");
 
-    // PBX Service authenticates
-    let pbx_auth = auth_service.authenticate_api_key(&pbx_raw).await?;
+    // PBX Service verifies the key directly. API-key-to-JWT exchange is
+    // deliberately disabled until a versioned contract preserves scopes and
+    // key-specific revocation lineage.
+    let (pbx_user, pbx_verified_key) = auth_service.verify_api_key_only(&pbx_raw).await?;
     println!("\n✅ PBX authenticated with API key");
-    println!("   Service account: {}", pbx_auth.user.username);
-    println!("   Roles: {:?}", pbx_auth.user.roles);
-    println!(
-        "   Token expires in: {} seconds",
-        pbx_auth.expires_in.as_secs()
-    );
+    println!("   Service account: {}", pbx_user.username);
+    println!("   Roles: {:?}", pbx_user.roles);
+    println!("   Permissions: {:?}", pbx_verified_key.permissions);
 
     // Use the PBX service
     let pbx_service = PbxService {

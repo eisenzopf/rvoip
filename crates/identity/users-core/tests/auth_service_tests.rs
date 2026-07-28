@@ -16,6 +16,7 @@ fn create_test_config(db_url: String) -> UsersConfig {
             access_ttl_seconds: 300,   // 5 minutes for tests
             refresh_ttl_seconds: 3600, // 1 hour for tests
             algorithm: "HS256".to_string(),
+            tenant_id: None,
             signing_key: None, // Will be auto-generated
         },
         password: PasswordConfig {
@@ -89,6 +90,16 @@ async fn test_complete_authentication_flow() {
     assert!(!token_pair.access_token.is_empty());
     assert_eq!(token_pair.refresh_token, auth_result.refresh_token); // Same refresh token
     assert!(token_pair.access_token != auth_result.access_token); // New access token
+
+    // A correctly signed token without durable issuance lineage is not active.
+    let untracked_refresh = auth_service
+        .jwt_issuer()
+        .create_refresh_token(&user.id)
+        .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&untracked_refresh).await,
+        Err(users_core::Error::InvalidCredentials)
+    ));
 
     // 6. Test token revocation
     auth_service.revoke_tokens(&user.id).await.unwrap();
@@ -178,18 +189,19 @@ async fn test_api_key_authentication() {
         .await
         .unwrap();
 
-    // Authenticate with API key
-    let auth_result = auth_service.authenticate_api_key(&raw_key).await.unwrap();
+    // Direct verification retains the key's exact permission boundary.
+    let (verified_user, verified_key) = auth_service.verify_api_key_only(&raw_key).await.unwrap();
+    assert_eq!(verified_user.id, user.id);
+    assert_eq!(verified_key.permissions, vec!["read", "write"]);
 
-    assert_eq!(auth_result.user.id, user.id);
-    assert!(!auth_result.access_token.is_empty());
-    assert_eq!(auth_result.expires_in.as_secs(), 300); // API keys get shorter tokens
-
-    // Invalid API key should fail
-    let fail_result = auth_service
-        .authenticate_api_key("rvoip_ak_live_invalid")
-        .await;
-    assert!(fail_result.is_err());
+    // JWT exchange fails closed until its versioned contract can preserve
+    // permissions and durable key-specific revocation lineage.
+    let exchange = auth_service.authenticate_api_key(&raw_key).await;
+    assert!(matches!(
+        exchange,
+        Err(users_core::Error::ApiKeyTokenExchangeDisabled { contract })
+            if contract == users_core::AuthenticationService::API_KEY_TOKEN_EXCHANGE_CONTRACT
+    ));
 }
 
 #[tokio::test]
@@ -342,4 +354,81 @@ async fn test_jwt_claims_content() {
     assert!(claims.scope.contains("email"));
     assert!(claims.scope.contains("sip.register"));
     assert!(claims.scope.contains("admin")); // Because user has admin role
+}
+
+#[tokio::test]
+async fn tenant_bound_refresh_exchange_rejects_legacy_and_cross_tenant_tokens() {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_url = format!(
+        "sqlite://{}?mode=rwc",
+        temp_dir.path().join("tenant-refresh.db").display()
+    );
+    let mut config = create_test_config(db_url);
+    config.jwt.tenant_id = Some("tenant-a".into());
+    config.jwt.signing_key = Some("tenant-refresh-test-key".into());
+    let auth_service = init(config).await.unwrap();
+    let user = auth_service
+        .create_user(CreateUserRequest {
+            username: "tenantuser".into(),
+            password: "SecurePass2026".into(),
+            email: None,
+            display_name: None,
+            roles: vec!["user".into()],
+        })
+        .await
+        .unwrap();
+    let authentication = auth_service
+        .authenticate_password("tenantuser", "SecurePass2026")
+        .await
+        .unwrap();
+
+    let refreshed = auth_service
+        .refresh_token(&authentication.refresh_token)
+        .await
+        .unwrap();
+    let refreshed_claims = auth_service
+        .jwt_issuer()
+        .validate_access_token(&refreshed.access_token)
+        .unwrap();
+    assert_eq!(refreshed_claims.tenant_id.as_deref(), Some("tenant-a"));
+
+    let now = chrono::Utc::now().timestamp() as u64;
+    let legacy = users_core::jwt::RefreshTokenClaims {
+        iss: "https://test.rvoip.local".into(),
+        sub: user.id.clone(),
+        jti: "legacy-refresh".into(),
+        exp: now + 3600,
+        iat: now,
+    };
+    let legacy = encode(
+        &Header::default(),
+        &legacy,
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
+    )
+    .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&legacy).await,
+        Err(users_core::Error::Validation(_))
+    ));
+
+    let cross_tenant = serde_json::json!({
+        "iss": "https://test.rvoip.local",
+        "sub": user.id,
+        "jti": "cross-tenant-refresh",
+        "exp": now + 3600,
+        "iat": now,
+        "tenant_id": "tenant-b"
+    });
+    let cross_tenant = encode(
+        &Header::default(),
+        &cross_tenant,
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
+    )
+    .unwrap();
+    assert!(matches!(
+        auth_service.refresh_token(&cross_tenant).await,
+        Err(users_core::Error::Validation(_))
+    ));
 }

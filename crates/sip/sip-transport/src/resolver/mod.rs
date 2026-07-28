@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use rvoip_sip_core::Uri;
 use thiserror::Error;
 
-use crate::transport::TransportType;
+use crate::transport::{TransportAuthority, TransportType};
 
 pub mod srv;
 
@@ -45,6 +45,10 @@ pub use hickory::HickoryResolver;
 pub struct ResolvedTarget {
     pub addr: SocketAddr,
     pub transport: TransportType,
+    /// Authority authenticated for this candidate. DNS expansion preserves
+    /// the input SIP authority instead of reconstructing it from the IP/SRV
+    /// result.
+    pub authority: Option<TransportAuthority>,
     pub expires: Option<Instant>,
 }
 
@@ -55,8 +59,18 @@ impl ResolvedTarget {
         Self {
             addr,
             transport,
+            // A resolved socket does not by itself identify the logical DNS
+            // authority that TLS/WSS must authenticate. Callers that know the
+            // authority attach it explicitly with `with_authority`; otherwise
+            // the request's top Route/Request-URI authority is retained.
+            authority: None,
             expires: None,
         }
+    }
+
+    pub fn with_authority(mut self, authority: TransportAuthority) -> Self {
+        self.authority = Some(authority);
+        self
     }
 }
 
@@ -113,16 +127,28 @@ pub trait Resolver: Send + Sync {
 /// (`;transport=` URI parameter, RFC 3261 §19.1.5) and §26.2 (`sips:`
 /// requires TLS-capable transport).
 ///
-/// Precedence (highest first):
-/// 1. URI `;transport=` parameter (`udp` / `tcp` / `tls` / `ws` / `wss`).
-/// 2. Scheme: `sips:` → TLS.
-/// 3. Default: UDP.
+/// The `sips:` security requirement always dominates transport hints:
+/// `tcp` means TLS-over-TCP, `tls` remains TLS, and `wss` remains WSS.
+/// Insecure `udp`/`ws` hints are classified to TLS here so syntax-only
+/// callers never downgrade; resolvers and send paths reject those invalid
+/// combinations explicitly.
 ///
 /// This is a pure-syntax classifier — no DNS lookups, no I/O. Lives in
 /// this crate so resolvers and the dialog-layer multiplexer can share a
 /// single source of truth.
 pub fn select_transport_for_uri(uri: &Uri) -> TransportType {
     use rvoip_sip_core::types::uri::Scheme;
+
+    if matches!(uri.scheme(), Scheme::Sips) {
+        return match uri
+            .transport()
+            .map(|transport| transport.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("wss") => TransportType::Wss,
+            _ => TransportType::Tls,
+        };
+    }
 
     if let Some(transport_param) = uri.transport() {
         match transport_param.to_ascii_lowercase().as_str() {

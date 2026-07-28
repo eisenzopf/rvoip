@@ -125,8 +125,10 @@ impl Harness {
             source,
             destination: self.transport.local_addr,
             transport_type: TransportType::Udp,
+            flow_id: None,
             raw_bytes: None,
             timing: None,
+            connection_metadata: None,
         };
         self.tx.send(event).await.expect("inject transport event");
     }
@@ -365,8 +367,10 @@ async fn route_fn_none_returns_404_upstream() {
         source: UAC_ADDR.parse().unwrap(),
         destination: proxy_addr,
         transport_type: TransportType::Udp,
+        flow_id: None,
         raw_bytes: None,
         timing: None,
+        connection_metadata: None,
     };
     tx.send(event).await.unwrap();
 

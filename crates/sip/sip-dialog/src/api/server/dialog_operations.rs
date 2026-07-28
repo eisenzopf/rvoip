@@ -3,6 +3,7 @@
 //! This module provides dialog-level operations for session coordination including
 //! creating dialogs, querying dialog state, and managing dialog lifecycle.
 
+use crate::diagnostics::safe_log::method_class;
 use tracing::debug;
 
 use super::super::common::DialogHandle;
@@ -32,7 +33,11 @@ impl DialogServer {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending {} request in dialog {}", method, dialog_id);
+        debug!(
+            "Sending {} request in dialog {}",
+            method_class(&method),
+            dialog_id
+        );
 
         self.dialog_manager
             .send_request(dialog_id, method, body)
@@ -58,10 +63,7 @@ impl DialogServer {
         remote_uri: Uri,
         call_id: Option<String>,
     ) -> ApiResult<DialogId> {
-        debug!(
-            "Creating outgoing dialog from {} to {}",
-            local_uri, remote_uri
-        );
+        debug!("Creating outgoing dialog with local and remote URIs present");
 
         self.dialog_manager
             .create_outgoing_dialog(local_uri, remote_uri, call_id)
@@ -174,7 +176,7 @@ impl DialogServer {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> ApiResult<()> {
-        debug!("Sending response for transaction {}", transaction_id);
+        debug!("Sending response for transaction");
 
         self.dialog_manager
             .send_response(transaction_id, response)

@@ -91,7 +91,7 @@ use crate::types::CSeq;
 ///     .with_header(TypedHeader::From(From::new(Address::new_with_display_name("Alice", "sip:alice@example.com".parse().unwrap()))))
 ///     .with_header(TypedHeader::To(To::new(Address::new_with_display_name("Bob", "sip:bob@example.com".parse().unwrap()))));
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
     /// The method of the request
     pub method: Method,
@@ -103,6 +103,54 @@ pub struct Request {
     pub headers: Vec<TypedHeader>,
     /// The body of the request
     pub body: Bytes,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let method = match self.method {
+            Method::Invite => "INVITE",
+            Method::Ack => "ACK",
+            Method::Bye => "BYE",
+            Method::Cancel => "CANCEL",
+            Method::Register => "REGISTER",
+            Method::Options => "OPTIONS",
+            Method::Subscribe => "SUBSCRIBE",
+            Method::Notify => "NOTIFY",
+            Method::Update => "UPDATE",
+            Method::Refer => "REFER",
+            Method::Info => "INFO",
+            Method::Message => "MESSAGE",
+            Method::Prack => "PRACK",
+            Method::Publish => "PUBLISH",
+            Method::Extension(_) => "extension",
+        };
+        let authorization_present = self
+            .headers
+            .iter()
+            .any(|header| header.name().is_authorization_credentials());
+        let header_diagnostic = if self
+            .headers
+            .iter()
+            .any(|header| !header.name().is_valid_wire_name())
+        {
+            "[invalid header name] [redacted]"
+        } else if authorization_present {
+            "[redacted]"
+        } else {
+            "[omitted]"
+        };
+
+        formatter
+            .debug_struct("Request")
+            .field("method", &method)
+            .field("uri", &self.uri)
+            .field("version", &self.version)
+            .field("header_count", &self.headers.len())
+            .field("headers", &header_diagnostic)
+            .field("authorization_present", &authorization_present)
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 impl Request {
@@ -529,6 +577,30 @@ impl Request {
         buffer.extend_from_slice(b"\r\n");
 
         buffer
+    }
+
+    /// Serialize the complete request to its SIP wire representation.
+    ///
+    /// Unlike [`fmt::Display`], this method preserves arbitrary binary body
+    /// bytes. It also serializes directly from the borrowed request so callers
+    /// do not need to clone the parsed header tree merely to construct a
+    /// temporary [`Message`](crate::Message).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let estimated = 64 + self.headers.len() * 64 + self.body.len();
+        let mut bytes = Vec::with_capacity(estimated);
+        let _ = write!(
+            &mut bytes,
+            "{} {} {}\r\n",
+            self.method, self.uri, self.version
+        );
+        for header in &self.headers {
+            let _ = write!(&mut bytes, "{}\r\n", header);
+        }
+        bytes.extend_from_slice(b"\r\n");
+        bytes.extend_from_slice(&self.body);
+        bytes
     }
 
     // Note: The parse method is intentionally omitted here.
@@ -1110,6 +1182,22 @@ mod tests {
     }
 
     #[test]
+    fn test_to_bytes_preserves_binary_body_and_matches_message_serializer() {
+        let body = Bytes::from_static(&[0x00, 0x80, 0xff, b'\r', b'\n']);
+        let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
+            .with_header(TypedHeader::CallId(types::CallId::new("binary-wire")))
+            .with_body(body.clone());
+
+        let wire = request.to_bytes();
+        assert_eq!(wire, crate::Message::Request(request.clone()).to_bytes());
+        let crate::Message::Request(parsed) = crate::parse_message(&wire).expect("parse wire")
+        else {
+            panic!("request wire parsed as a response");
+        };
+        assert_eq!(parsed.body(), body.as_ref());
+    }
+
+    #[test]
     fn test_display() {
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
@@ -1167,5 +1255,35 @@ mod tests {
         let call_id = request.call_id();
         assert!(call_id.is_some());
         assert_eq!(call_id.unwrap().value(), "abc123@example.com");
+    }
+
+    #[test]
+    fn request_debug_reports_structure_without_uri_headers_body_or_auth() {
+        const METHOD: &str = "X-REQUEST-METHOD-SECRET-CANARY";
+        const HOST: &str = "request-host-secret-canary.example";
+        const PASSWORD: &str = "request-password-secret-canary";
+        const AUTH: &str = "Digest response=request-auth-secret-canary";
+        const BODY: &str = "request-body-secret-canary";
+
+        let request = Request::new(
+            Method::Extension(METHOD.into()),
+            Uri::sip(HOST).with_user("alice").with_password(PASSWORD),
+        )
+        .with_header(TypedHeader::Other(
+            HeaderName::Authorization,
+            crate::types::headers::HeaderValue::Raw(AUTH.as_bytes().to_vec()),
+        ))
+        .with_body(BODY);
+
+        let rendered = format!("{request:?}");
+        assert!(rendered.contains("method: \"extension\""));
+        assert!(rendered.contains("authorization_present: true"));
+        assert!(rendered.contains(&format!("body_bytes: {}", BODY.len())));
+        for secret in [METHOD, HOST, PASSWORD, AUTH, BODY] {
+            assert!(
+                !rendered.contains(secret),
+                "debug leaked {secret}: {rendered}"
+            );
+        }
     }
 }

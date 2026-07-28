@@ -44,6 +44,7 @@ async fn whip_inbound_flows_through_orchestrator() {
             direction: Direction::Outbound,
             capabilities: publisher.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

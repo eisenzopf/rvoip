@@ -438,11 +438,10 @@ fn handle_detail_key(key: KeyEvent, detail: DetailView, app: &mut TuiApp) {
 fn handle_trace_key(key: KeyEvent, app: &mut TuiApp) {
     match key.code {
         KeyCode::Esc => return_to_menu(app),
-        KeyCode::Enter => {
-            if !visible_trace_indices(app).is_empty() {
-                app.trace_show_raw = !app.trace_show_raw;
-            }
+        KeyCode::Enter if !visible_trace_indices(app).is_empty() => {
+            app.trace_show_raw = !app.trace_show_raw;
         }
+        KeyCode::Enter => {}
         KeyCode::Up => move_trace_selection(app, -1),
         KeyCode::Down => move_trace_selection(app, 1),
         _ => {}

@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::factory::{TransportFactory, TransportFactoryConfig, TransportType};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{validate_typed_outbound_message, Transport, TransportEvent};
 use rvoip_sip_core::Message;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -177,6 +177,7 @@ impl TransportManager {
 
     /// Sends a SIP message to the specified destination
     pub async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        validate_typed_outbound_message(&message)?;
         // Get a transport for this destination
         let transport = self.get_transport_for_addr(&destination).await?;
 
@@ -203,7 +204,17 @@ mod tests {
     use super::*;
     use crate::bind_udp;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::types::call_info::CallInfoValue;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::types::param::Param;
+    use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
+
+    fn malicious_authorization_header(name: HeaderName) -> TypedHeader {
+        TypedHeader::Other(
+            name,
+            HeaderValue::Raw(b"Bearer safe\r\nX-Injected: manager".to_vec()),
+        )
+    }
 
     #[tokio::test]
     async fn test_transport_manager_create() {
@@ -306,5 +317,85 @@ mod tests {
 
         // Clean up
         manager.close_all().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_manager_rejects_unsafe_fields_before_route_lookup() {
+        let (manager, _rx) = TransportManager::with_defaults().await.unwrap();
+        let destination: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request
+            .headers
+            .push(malicious_authorization_header(HeaderName::Authorization));
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(malicious_authorization_header(HeaderName::Other(
+                "PROXY-authorization".into(),
+            )));
+
+        let mut malformed_name = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        malformed_name.headers.push(TypedHeader::Other(
+            HeaderName::Other("Authorization ".into()),
+            HeaderValue::Raw(b"Bearer manager-name-secret".to_vec()),
+        ));
+        let mut unsafe_raw = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        unsafe_raw.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Context".into()),
+            HeaderValue::Raw(b"safe\r\nX-Injected: manager-raw-secret".to_vec()),
+        ));
+        let unsafe_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: manager-reason-secret");
+        let mut unsafe_structured = Request::new(Method::Options, Uri::sip("example.test"));
+        unsafe_structured.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Structured".into()),
+            HeaderValue::CallInfo(vec![CallInfoValue::new(Uri::sip("example.test"))
+                .with_param(Param::Other(
+                    "purpose\r\nX-Injected: manager-structured-secret".into(),
+                    None,
+                ))]),
+        ));
+        let unsafe_method = Request::new(
+            Method::Extension("SAFE\r\nX-Injected: manager-method-secret".into()),
+            Uri::sip("example.test"),
+        );
+        let unsafe_uri = Request::new(
+            Method::Options,
+            Uri::custom("sip:bob@example.test\r\nX-Injected: manager-uri-secret"),
+        );
+
+        for message in [
+            Message::Request(request),
+            Message::Response(response),
+            Message::Request(malformed_name),
+            Message::Request(unsafe_raw),
+            Message::Response(unsafe_reason),
+            Message::Request(unsafe_structured),
+            Message::Request(unsafe_method),
+            Message::Request(unsafe_uri),
+        ] {
+            let error = manager
+                .send_message(message, destination)
+                .await
+                .expect_err("unsafe typed field must fail before transport lookup");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            for secret in [
+                "X-Injected",
+                "manager-name-secret",
+                "manager-raw-secret",
+                "manager-reason-secret",
+                "manager-structured-secret",
+                "manager-method-secret",
+                "manager-uri-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
     }
 }

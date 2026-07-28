@@ -17,15 +17,122 @@ use rvoip_core::subscriptions::{PublisherEntry, PublisherRegistry};
 use rvoip_core::Orchestrator;
 use rvoip_uctp::{
     envelope::UctpEnvelope,
-    payloads::stream::{StreamSubscribe, StreamSubscription, StreamUnsubscribe},
+    payloads::{
+        connection::{ConnectionOffer, StreamOffer},
+        stream::{StreamSubscribe, StreamSubscription, StreamUnsubscribe},
+    },
     state::{OrchestratorSubscriptionHandler, UctpCoordinator, ENVELOPE_CHANNEL_CAP},
     types::MessageType,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 mod common;
 use common::drive_auth_handshake;
+
+fn descriptor_with_opus() -> Arc<CapabilityDescriptor> {
+    Arc::new(CapabilityDescriptor {
+        audio_codecs: vec![rvoip_core::capability::CodecInfo {
+            name: "opus".into(),
+            clock_rate_hz: 48_000,
+            channels: 1,
+            fmtp: None,
+        }],
+        ..Default::default()
+    })
+}
+
+fn invite_env(sid: &str) -> UctpEnvelope {
+    UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::SessionInvite,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: Some(format!("conv_{sid}")),
+        sid: Some(sid.into()),
+        connid: None,
+        in_reply_to: None,
+        payload: serde_json::json!({
+            "from": "part_subscriber",
+            "to": ["part_remote"],
+            "medium": "voice",
+            "intent": "synchronous-engagement",
+            "capabilities_offer": {}
+        }),
+        signature: None,
+    }
+}
+
+fn subscriber_offer_env(sid: &str, connid: &str) -> UctpEnvelope {
+    UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::ConnectionOffer,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: None,
+        sid: Some(sid.into()),
+        connid: Some(connid.into()),
+        in_reply_to: None,
+        payload: serde_json::to_value(ConnectionOffer {
+            by_participant: "part_subscriber".into(),
+            substrate: "quic".into(),
+            capabilities: serde_json::Value::Object(Default::default()),
+            streams_offered: vec![StreamOffer {
+                id: format!("strm_fixture_{connid}"),
+                kind: "audio".into(),
+                direction: "recvonly".into(),
+                codec_preferences: vec!["opus".into()],
+            }],
+            substrate_setup: serde_json::Value::Null,
+        })
+        .unwrap(),
+        signature: None,
+    }
+}
+
+fn ready_env(sid: &str, connid: &str) -> UctpEnvelope {
+    UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::ConnectionReady,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: None,
+        sid: Some(sid.into()),
+        connid: Some(connid.into()),
+        in_reply_to: None,
+        payload: serde_json::Value::Object(Default::default()),
+        signature: None,
+    }
+}
+
+async fn establish_subscriber_connection(
+    in_tx: &mpsc::Sender<UctpEnvelope>,
+    out_rx: &mut mpsc::Receiver<UctpEnvelope>,
+    sid: &str,
+    connid: &str,
+) {
+    in_tx
+        .send(invite_env(sid))
+        .await
+        .expect("send session invite");
+    in_tx
+        .send(subscriber_offer_env(sid, connid))
+        .await
+        .expect("send subscriber connection offer");
+    in_tx
+        .send(ready_env(sid, connid))
+        .await
+        .expect("send subscriber connection ready");
+
+    let opened = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+        .await
+        .expect("subscriber stream.opened timeout")
+        .expect("coordinator output closed");
+    assert_eq!(opened.msg_type, MessageType::StreamOpened);
+    assert_eq!(opened.sid.as_deref(), Some(sid));
+    assert_eq!(opened.connid.as_deref(), Some(connid));
+}
 
 fn subscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
     let payload = StreamSubscribe {
@@ -102,11 +209,12 @@ async fn subscribe_with_registered_publisher_emits_ack_and_records_row() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_a", "conn_subscriber").await;
 
     in_tx
         .send(subscribe_env("sess_a", "conn_subscriber", &["strm_x"]))
@@ -138,11 +246,12 @@ async fn subscribe_with_unknown_strm_id_emits_404() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_a", "conn_subscriber").await;
 
     in_tx
         .send(subscribe_env(
@@ -190,11 +299,12 @@ async fn unsubscribe_is_idempotent_and_removes_row() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_a", "conn_subscriber").await;
 
     // Subscribe first.
     in_tx
@@ -272,12 +382,13 @@ async fn setup_with_alice_streams() -> (
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
     std::mem::forget(_coord); // keep driver task alive for the test duration
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_x", "conn_bob").await;
 
     (orch, publishers, in_tx, out_rx)
 }
@@ -447,10 +558,11 @@ async fn subscribe_refuses_unsupported_codec_with_488() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_b2", "conn_subscriber").await;
 
     in_tx
         .send(subscribe_env(
@@ -518,10 +630,11 @@ async fn subscribe_accepts_when_codec_in_default_set() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_b2_ok", "conn_sub").await;
 
     in_tx
         .send(subscribe_env("sess_b2_ok", "conn_sub", &["strm_opus"]))
@@ -589,10 +702,11 @@ async fn from_participant_skips_unsupported_codec_streams() {
         out_tx,
         events_tx,
         bearer_stub(),
-        Arc::new(CapabilityDescriptor::default()),
+        descriptor_with_opus(),
         handler,
     );
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_b2_mix", "conn_bob").await;
 
     let env = UctpEnvelope {
         v: 1,

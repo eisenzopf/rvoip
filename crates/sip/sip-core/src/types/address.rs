@@ -80,7 +80,7 @@ use std::str::FromStr;
 /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
 /// let addr = Address::new(uri.clone());
 /// ```
-#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
+#[derive(Clone, Eq, Serialize, Deserialize)]
 pub struct Address {
     /// Optional display name component
     pub display_name: Option<String>,
@@ -88,6 +88,31 @@ pub struct Address {
     pub uri: Uri,
     /// Optional parameters (including tag, expires, q-value, etc.)
     pub params: Vec<Param>,
+}
+
+impl fmt::Debug for Address {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let uri_scheme = match self.uri.scheme() {
+            crate::types::uri::Scheme::Sip => "sip",
+            crate::types::uri::Scheme::Sips => "sips",
+            crate::types::uri::Scheme::Tel => "tel",
+            crate::types::uri::Scheme::Http => "http",
+            crate::types::uri::Scheme::Https => "https",
+            crate::types::uri::Scheme::Custom(_) => "custom",
+        };
+        formatter
+            .debug_struct("Address")
+            .field("display_name_present", &self.display_name.is_some())
+            .field(
+                "display_name_bytes",
+                &self.display_name.as_ref().map_or(0, String::len),
+            )
+            .field("uri_scheme", &uri_scheme)
+            .field("uri_user_present", &self.uri.user.is_some())
+            .field("uri_parameter_count", &self.uri.parameters.len())
+            .field("parameter_count", &self.params.len())
+            .finish()
+    }
 }
 
 // Manual PartialEq implementation to treat None and Some("") display_name as equal
@@ -843,3 +868,22 @@ impl FromStr for Address {
 }
 
 // TODO: Implement helper methods (e.g., new, tag(), set_tag(), etc.)
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn debug_redacts_display_name_uri_and_parameters_without_changing_wire() {
+        const CANARY: &str = "address-direct-diagnostic-secret-canary";
+        let uri = Uri::from_str(&format!("sip:{CANARY}@example.test")).unwrap();
+        let mut address = Address::new_with_display_name(CANARY, uri);
+        address.set_tag(CANARY);
+        let wire = address.to_string();
+        let debug = format!("{address:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains("uri_scheme: \"sip\""));
+        assert_eq!(address.to_string(), wire);
+        assert!(serde_json::to_string(&address).unwrap().contains(CANARY));
+    }
+}

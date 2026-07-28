@@ -1,297 +1,363 @@
-//! RFC 4028 session-timer refresh scheduling.
+//! Retired dialog-owned RFC 4028 scheduler compatibility surface.
 //!
-//! When a session timer is negotiated on a dialog, the refresher MUST
-//! re-send an UPDATE (or re-INVITE, §9) at `interval / 2` to keep the
-//! session from being torn down. We **subscribe to the refresh
-//! transaction's outcome** (success, failure, timeout, transport error) and
-//! only fire `SessionRefreshed` on a 2xx. If the refresh fails (4xx/5xx/6xx
-//! response, timeout, or UPDATE returning 501), we fall back to a re-INVITE
-//! per §9; if that also fails, the dialog is terminated with
-//! `BYE + Reason: SIP ;cause=408;text="Session expired"` per §10 and
-//! `SessionRefreshFailed` is notified up to the session layer.
-//!
-//! This module owns the per-dialog refresh task. Cancellation is via the
-//! `AbortHandle` stored on `DialogManager::session_refresh_tasks`; both
-//! `rx.recv()` and `tokio::time::timeout` are cancel-safe, so abort is
-//! clean wherever the task happens to be awaiting.
+//! Dialog-core remains responsible for parsing and negotiating session-timer
+//! headers. Scheduling, fallback decisions and lifecycle termination are owned
+//! by rvoip-sip's generation-qualified session lane. The old public spawn
+//! facade therefore fails closed and this registry remains empty in production;
+//! its cancellation shape is retained so existing manager teardown signatures
+//! do not change.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::fmt;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
-
-use rvoip_sip_core::types::reason::Reason;
-use rvoip_sip_core::Method;
+use dashmap::DashMap;
+use tokio::sync::{watch, Mutex};
+use tokio::task::AbortHandle;
+use tracing::debug;
 
 use crate::dialog::DialogId;
-use crate::events::SessionCoordinationEvent;
-use crate::manager::{core::DialogManager, SessionCoordinator};
-use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
+use crate::manager::core::DialogManager;
 
-/// Outcome of awaiting a session-timer refresh transaction. Anything other
-/// than `Success` is treated as a refresh failure per RFC 4028 §10.
+const REFRESH_TASK_COMPLETION_TIMEOUT: Duration = Duration::from_secs(1);
+
 #[derive(Debug)]
-enum RefreshOutcome {
-    Success,
-    FailureStatus(u16),
-    Timeout,
-    Transport,
-    Terminated,
+struct SessionRefreshTask {
+    token: u64,
+    abort: AbortHandle,
+    completion: watch::Receiver<bool>,
 }
 
-impl RefreshOutcome {
-    fn describe(&self, method: Method) -> String {
+#[derive(Debug)]
+struct SessionRefreshAdmission {
+    accepting: bool,
+    closed_dialogs: HashSet<DialogId>,
+}
+
+#[derive(Debug)]
+pub(crate) struct SessionRefreshTaskRegistry {
+    tasks: DashMap<DialogId, Arc<SessionRefreshTask>>,
+    operation_gate: Mutex<()>,
+    admission: StdMutex<SessionRefreshAdmission>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SessionRefreshTaskError {
+    RegistryClosed,
+    CompletionTimeout,
+}
+
+impl fmt::Display for SessionRefreshTaskError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RefreshOutcome::Success => format!("{} 2xx", method),
-            RefreshOutcome::FailureStatus(code) => format!("{} returned {}", method, code),
-            RefreshOutcome::Timeout => format!("{} timed out", method),
-            RefreshOutcome::Transport => format!("{} transport error", method),
-            RefreshOutcome::Terminated => format!("{} terminated without final response", method),
+            Self::RegistryClosed => formatter.write_str("session refresh registry is closed"),
+            Self::CompletionTimeout => {
+                formatter.write_str("session refresh task did not complete after cancellation")
+            }
         }
     }
 }
 
-/// Subscribe to the given client transaction and wait up to `deadline` for
-/// its final outcome. Handles the race where the transaction completes
-/// between `send_request` returning and the subscription being created —
-/// falls back to the transaction's cached last response in that case.
-async fn await_tx_outcome(
-    tx_mgr: &Arc<TransactionManager>,
-    key: &TransactionKey,
-    deadline: Duration,
-) -> RefreshOutcome {
-    // Subscribe FIRST so events fired between the `last_response` check and
-    // the `recv` loop below aren't lost. Then peek at the cached last
-    // response: for the common case where the peer answered between
-    // `send_request` returning and us getting here, the 2xx is already
-    // sitting in the transaction's state and the subscription would never
-    // see a fresh `SuccessResponse` event because it was broadcast before
-    // we existed. Without this peek the task would sit until the 34 s
-    // deadline expires and then fall through to a re-INVITE retry.
-    let mut rx = match tx_mgr.subscribe_to_transaction(key).await {
-        Ok(rx) => rx,
-        Err(_) => {
-            return match tx_mgr.last_response(key).await {
-                Ok(Some(resp)) if (resp.status().as_u16() / 100) == 2 => RefreshOutcome::Success,
-                Ok(Some(resp)) => RefreshOutcome::FailureStatus(resp.status().as_u16()),
-                _ => RefreshOutcome::Terminated,
-            };
-        }
-    };
-
-    if let Ok(Some(resp)) = tx_mgr.last_response(key).await {
-        let code = resp.status().as_u16();
-        if (200..300).contains(&code) {
-            return RefreshOutcome::Success;
-        }
-        if code >= 300 {
-            return RefreshOutcome::FailureStatus(code);
-        }
-        // 1xx provisional — keep waiting for a final response.
+impl SessionRefreshTaskRegistry {
+    pub(crate) fn with_capacity(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            tasks: DashMap::with_capacity(capacity),
+            operation_gate: Mutex::new(()),
+            admission: StdMutex::new(SessionRefreshAdmission {
+                accepting: true,
+                closed_dialogs: HashSet::new(),
+            }),
+        })
     }
 
-    let waited = tokio::time::timeout(deadline, async {
+    pub(crate) fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    pub(crate) fn has_task(&self, dialog_id: &DialogId) -> bool {
+        self.tasks.contains_key(dialog_id)
+    }
+
+    pub(crate) fn fence_dialog(&self, dialog_id: &DialogId) {
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed_dialogs
+            .insert(dialog_id.clone());
+    }
+
+    pub(crate) fn begin_close_dialog(&self, dialog_id: &DialogId) {
+        self.fence_dialog(dialog_id);
+        if let Some(task) = self.tasks.get(dialog_id) {
+            task.abort.abort();
+        }
+    }
+
+    fn remove_exact(&self, dialog_id: &DialogId, token: u64) {
+        self.tasks
+            .remove_if(dialog_id, |_, current| current.token == token);
+    }
+
+    async fn cancel_record(
+        &self,
+        dialog_id: &DialogId,
+        task: &Arc<SessionRefreshTask>,
+    ) -> Result<(), SessionRefreshTaskError> {
+        task.abort.abort();
+        if wait_for_refresh_task_completion(task).await {
+            self.remove_exact(dialog_id, task.token);
+            Ok(())
+        } else {
+            Err(SessionRefreshTaskError::CompletionTimeout)
+        }
+    }
+
+    pub(crate) async fn cancel_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Result<(), SessionRefreshTaskError> {
+        let _operation = self.operation_gate.lock().await;
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed_dialogs
+            .insert(dialog_id.clone());
+        if let Some(task) = self
+            .tasks
+            .get(dialog_id)
+            .map(|entry| Arc::clone(entry.value()))
+        {
+            self.cancel_record(dialog_id, &task).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release_dialog(&self, dialog_id: &DialogId) {
+        let mut admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.tasks.contains_key(dialog_id) {
+            admission.closed_dialogs.remove(dialog_id);
+        }
+    }
+
+    pub(crate) async fn close_all(&self) -> Result<(), SessionRefreshTaskError> {
+        let _operation = self.operation_gate.lock().await;
+        self.admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accepting = false;
+        let records = self
+            .tasks
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect::<Vec<_>>();
+        for (_, task) in &records {
+            task.abort.abort();
+        }
+        let deadline = tokio::time::Instant::now() + REFRESH_TASK_COMPLETION_TIMEOUT;
+        let mut incomplete = false;
+        for (dialog_id, task) in records {
+            if wait_for_refresh_task_completion_until(&task, deadline).await {
+                self.remove_exact(&dialog_id, task.token);
+            } else {
+                incomplete = true;
+            }
+        }
+        if incomplete {
+            Err(SessionRefreshTaskError::CompletionTimeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+struct SessionRefreshTaskCompletion {
+    registry: Arc<SessionRefreshTaskRegistry>,
+    dialog_id: DialogId,
+    token: u64,
+    completion: Option<watch::Sender<bool>>,
+}
+
+#[cfg(test)]
+impl Drop for SessionRefreshTaskCompletion {
+    fn drop(&mut self) {
+        if let Some(completion) = self.completion.take() {
+            let _ = completion.send(true);
+        }
+        self.registry.remove_exact(&self.dialog_id, self.token);
+    }
+}
+
+async fn wait_for_refresh_task_completion_until(
+    task: &SessionRefreshTask,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let mut completion = task.completion.clone();
+    if *completion.borrow() {
+        return true;
+    }
+    match tokio::time::timeout_at(deadline, async {
         loop {
-            match rx.recv().await {
-                Some(TransactionEvent::SuccessResponse { .. }) => {
-                    return RefreshOutcome::Success;
-                }
-                Some(TransactionEvent::FailureResponse { response, .. }) => {
-                    return RefreshOutcome::FailureStatus(response.status().as_u16());
-                }
-                Some(TransactionEvent::TransactionTimeout { .. }) => {
-                    return RefreshOutcome::Timeout;
-                }
-                Some(TransactionEvent::TransportError { .. }) => {
-                    return RefreshOutcome::Transport;
-                }
-                Some(TransactionEvent::TransactionTerminated { .. }) => {
-                    return RefreshOutcome::Terminated;
-                }
-                None => return RefreshOutcome::Terminated,
-                _ => continue,
+            if *completion.borrow() {
+                return true;
+            }
+            if completion.changed().await.is_err() {
+                return *completion.borrow();
             }
         }
     })
-    .await;
-
-    waited.unwrap_or(RefreshOutcome::Timeout)
+    .await
+    {
+        Ok(completed) => completed,
+        Err(_) => false,
+    }
 }
 
-/// Spawn a session-timer refresh task for the dialog. Replaces any
-/// previously-spawned task for the same dialog (aborting it first).
+async fn wait_for_refresh_task_completion(task: &SessionRefreshTask) -> bool {
+    wait_for_refresh_task_completion_until(
+        task,
+        tokio::time::Instant::now() + REFRESH_TASK_COMPLETION_TIMEOUT,
+    )
+    .await
+}
+
+/// Retired compatibility facade.
 ///
-/// `interval_secs` is the negotiated `Session-Expires` value; the refresh
-/// fires at half that. `is_refresher` indicates whether *this* side is
-/// responsible for sending the refresh — if `false`, no task is spawned
-/// (the peer refreshes for us, and mid-dialog re-INVITE/UPDATE reception
-/// already updates the dialog's liveness timer via the normal handlers).
-pub fn spawn_refresh_task(
-    manager: DialogManager,
-    dialog_id: DialogId,
-    interval_secs: u32,
-    is_refresher: bool,
-) {
-    if !is_refresher {
-        debug!(
-            "Session timer active on dialog {} but peer is the refresher — no task needed",
-            dialog_id
-        );
-        return;
-    }
-    if interval_secs == 0 {
-        return;
-    }
-
-    // Abort any prior task for the same dialog (e.g. on re-INVITE
-    // renegotiation with a different interval).
-    if let Some((_, prior)) = manager.session_refresh_tasks.remove(&dialog_id) {
-        prior.abort();
-    }
-
-    let half = Duration::from_secs(interval_secs as u64 / 2);
-    let dialog_for_task = dialog_id.clone();
-    let tracker = manager.session_refresh_tasks.clone();
-    let task_tracker = tracker.clone();
-    let manager_for_insert = manager.clone();
-
-    // Budget for awaiting the refresh transaction's final outcome. Timer F
-    // drives the transaction timeout; add a small slack so the subscription
-    // path definitely sees the TransactionTimeout event before we bail.
-    let tx_deadline = manager
-        .transaction_manager
-        .timer_settings()
-        .transaction_timeout
-        + Duration::from_secs(2);
-
-    let handle = tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(half).await;
-
-            // Attempt 1: UPDATE (RFC 4028 §9 preferred for refresh).
-            let update_outcome = match manager
-                .send_request(&dialog_for_task, Method::Update, None)
-                .await
-            {
-                Ok(key) => {
-                    info!(
-                        "Session refresh UPDATE sent for dialog {} (tx={}); awaiting response",
-                        dialog_for_task, key
-                    );
-                    await_tx_outcome(&manager.transaction_manager, &key, tx_deadline).await
-                }
-                Err(e) => {
-                    warn!(
-                        "Session refresh UPDATE send failed for dialog {}: {}",
-                        dialog_for_task, e
-                    );
-                    RefreshOutcome::Transport
-                }
-            };
-
-            if matches!(update_outcome, RefreshOutcome::Success) {
-                let _ = manager
-                    .notify_session_layer(SessionCoordinationEvent::SessionRefreshed {
-                        dialog_id: dialog_for_task.clone(),
-                        expires_secs: interval_secs,
-                    })
-                    .await;
-                continue;
-            }
-
-            warn!(
-                "Session refresh UPDATE outcome for dialog {}: {} — falling back to re-INVITE",
-                dialog_for_task,
-                update_outcome.describe(Method::Update)
-            );
-
-            // Attempt 2: re-INVITE fallback.
-            let invite_outcome = match manager
-                .send_request(&dialog_for_task, Method::Invite, None)
-                .await
-            {
-                Ok(key) => {
-                    info!(
-                        "Session refresh re-INVITE sent for dialog {} (tx={}); awaiting response",
-                        dialog_for_task, key
-                    );
-                    await_tx_outcome(&manager.transaction_manager, &key, tx_deadline).await
-                }
-                Err(e) => {
-                    warn!(
-                        "Session refresh re-INVITE send failed for dialog {}: {}",
-                        dialog_for_task, e
-                    );
-                    RefreshOutcome::Transport
-                }
-            };
-
-            if matches!(invite_outcome, RefreshOutcome::Success) {
-                let _ = manager
-                    .notify_session_layer(SessionCoordinationEvent::SessionRefreshed {
-                        dialog_id: dialog_for_task.clone(),
-                        expires_secs: interval_secs,
-                    })
-                    .await;
-                continue;
-            }
-
-            // Both paths failed — tear the dialog down per RFC 4028 §10.
-            let failure_reason = format!(
-                "{}; {}",
-                update_outcome.describe(Method::Update),
-                invite_outcome.describe(Method::Invite)
-            );
-            warn!(
-                "Session refresh failed for dialog {}: {} — sending BYE with Reason",
-                dialog_for_task, failure_reason
-            );
-
-            let reason = Reason::new("SIP", 408, Some("Session expired"));
-            if let Err(e) = manager.send_bye_with_reason(&dialog_for_task, reason).await {
-                warn!(
-                    "Failed to send BYE-with-Reason for dialog {}: {}",
-                    dialog_for_task, e
-                );
-            }
-
-            let _ = manager
-                .notify_session_layer(SessionCoordinationEvent::SessionRefreshFailed {
-                    dialog_id: dialog_for_task.clone(),
-                    reason: format!(
-                        "Session expired (RFC 4028 §10 — cause=408): {}",
-                        failure_reason
-                    ),
-                })
-                .await;
-            break;
-        }
-
-        task_tracker.remove(&dialog_for_task);
-    });
-
-    manager_for_insert
-        .session_refresh_tasks
-        .insert(dialog_id, handle.abort_handle());
-    let _ = tracker; // silence unused binding
+/// RFC 4028 lifecycle work must be admitted by rvoip-sip's exact session
+/// authority. Calling this lower-layer facade can provide neither that exact
+/// lifetime nor the YAML transition capability, so it always fails closed.
+pub async fn spawn_refresh_task(
+    _manager: DialogManager,
+    _dialog_id: DialogId,
+    _interval_secs: u32,
+    _is_refresher: bool,
+) -> Result<(), SessionRefreshTaskError> {
+    Err(SessionRefreshTaskError::RegistryClosed)
 }
 
 /// Abort the refresh task (if any) for a dialog — called from the dialog
 /// cleanup path when the dialog terminates via BYE or any other reason.
-pub fn cancel_refresh_task(manager: &DialogManager, dialog_id: &DialogId) {
-    if let Some((_, abort)) = manager.session_refresh_tasks.remove(dialog_id) {
-        abort.abort();
-        debug!("Cancelled session refresh task for dialog {}", dialog_id);
-    }
+pub async fn cancel_refresh_task(
+    manager: &DialogManager,
+    dialog_id: &DialogId,
+) -> Result<(), SessionRefreshTaskError> {
+    manager
+        .session_refresh_tasks
+        .cancel_dialog(dialog_id)
+        .await?;
+    debug!("Cancelled session refresh task for dialog {}", dialog_id);
+    Ok(())
 }
 
 /// Wrapper taking an `Arc<DialogManager>` for call sites that only have a
 /// shared reference.
-pub fn spawn_refresh_task_for(
+pub async fn spawn_refresh_task_for(
     manager: Arc<DialogManager>,
     dialog_id: DialogId,
     interval_secs: u32,
     is_refresher: bool,
-) {
-    spawn_refresh_task((*manager).clone(), dialog_id, interval_secs, is_refresher);
+) -> Result<(), SessionRefreshTaskError> {
+    spawn_refresh_task((*manager).clone(), dialog_id, interval_secs, is_refresher).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install_pending_refresh(
+        registry: Arc<SessionRefreshTaskRegistry>,
+        dialog_id: DialogId,
+        token: u64,
+    ) -> Arc<SessionRefreshTask> {
+        let (completion_tx, completion_rx) = watch::channel(false);
+        let completion_guard = SessionRefreshTaskCompletion {
+            registry: Arc::clone(&registry),
+            dialog_id: dialog_id.clone(),
+            token,
+            completion: Some(completion_tx),
+        };
+        let handle = tokio::spawn(async move {
+            let _completion = completion_guard;
+            std::future::pending::<()>().await;
+        });
+        let task = Arc::new(SessionRefreshTask {
+            token,
+            abort: handle.abort_handle(),
+            completion: completion_rx,
+        });
+        drop(handle);
+        registry.tasks.insert(dialog_id, Arc::clone(&task));
+        task
+    }
+
+    #[tokio::test]
+    async fn terminal_cancel_fences_and_joins_never_polled_refresh() {
+        let registry = SessionRefreshTaskRegistry::with_capacity(2);
+        let dialog_id = DialogId::new();
+        install_pending_refresh(Arc::clone(&registry), dialog_id.clone(), 1);
+
+        registry
+            .cancel_dialog(&dialog_id)
+            .await
+            .expect("terminal cancellation must observe completion");
+        assert_eq!(registry.len(), 0);
+        assert!(registry
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed_dialogs
+            .contains(&dialog_id));
+        registry.release_dialog(&dialog_id);
+        assert!(!registry
+            .admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .closed_dialogs
+            .contains(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_completion_cannot_remove_replacement_and_stop_closes_admission() {
+        let registry = SessionRefreshTaskRegistry::with_capacity(2);
+        let dialog_id = DialogId::new();
+        install_pending_refresh(Arc::clone(&registry), dialog_id.clone(), 2);
+        let (completion_tx, _completion_rx) = watch::channel(false);
+        drop(SessionRefreshTaskCompletion {
+            registry: Arc::clone(&registry),
+            dialog_id: dialog_id.clone(),
+            token: 1,
+            completion: Some(completion_tx),
+        });
+        assert!(registry.has_task(&dialog_id));
+
+        registry.close_all().await.expect("stop drain");
+        assert_eq!(registry.len(), 0);
+        assert!(
+            !registry
+                .admission
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .accepting
+        );
+    }
+
+    #[test]
+    fn retired_module_has_no_refresh_wire_driver() {
+        let source = include_str!("session_timer.rs");
+        for forbidden in [
+            concat!(".send_", "request("),
+            concat!("send_bye_", "with_reason("),
+            concat!("tokio::time::", "sleep("),
+            concat!("SessionCoordinationEvent::", "SessionRefreshed"),
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "retired dialog timer regained a signaling hot path: {forbidden}"
+            );
+        }
+    }
 }

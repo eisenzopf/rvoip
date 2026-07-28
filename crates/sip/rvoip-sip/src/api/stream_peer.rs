@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::adapters::SessionApiCrossCrateEvent;
+use crate::adapters::{SessionApiCrossCrateEvent, SessionControlEvent};
 use crate::api::endpoint::SipAccount;
 use crate::api::events::{Event, MediaSecurityState, SipTrace};
 use crate::api::handle::{CallId, SessionHandle};
@@ -41,6 +41,7 @@ use crate::api::unified::{
 };
 use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 
 // Re-export Config so callers can import it from this module
 pub use crate::api::unified::Config as PeerConfig;
@@ -76,7 +77,26 @@ pub use crate::api::unified::Config as PeerConfig;
 /// [`GlobalEventCoordinator`]: rvoip_infra_common::events::coordinator::GlobalEventCoordinator
 pub struct EventReceiver {
     rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+    control_rx: Option<mpsc::UnboundedReceiver<SessionControlEvent>>,
+    control_coordinator: Option<Arc<UnifiedCoordinator>>,
+    owns_control: bool,
+    observations_open: bool,
     filter: Option<CallId>,
+    /// When present, this receiver is a capability-scoped internal view. It
+    /// accepts only projections carrying this exact generation and rejects
+    /// public Call-ID-only copies, which could otherwise be confused with a
+    /// later lifetime that reused the same identifier.
+    exact_filter: Option<SessionRegistryHandle>,
+    /// The exact authority is already held by `SessionHandle`; this store is
+    /// used only to prove that authority is still current before accepting a
+    /// Call-ID-only public observation.
+    exact_store: Option<Arc<crate::session_store::SessionStore>>,
+    /// Exact lifecycle notification is the lossless terminal boundary for a
+    /// handle-scoped receiver. It is independent of public bus delivery and
+    /// remains generation-qualified after the store slot is released.
+    exact_lifecycle: Option<crate::api::lifecycle::LifecycleIndex>,
+    exact_watcher: Option<tokio::sync::watch::Receiver<u64>>,
+    exact_terminal_delivered: bool,
     /// Events synthesized at receiver-construction time to compensate for the
     /// subscribe-after-event race: the session-to-app channel is broadcast,
     /// so a subscriber added by `events_for_session` after the relevant
@@ -86,13 +106,70 @@ pub struct EventReceiver {
     primed: std::collections::VecDeque<Event>,
 }
 
+fn attach_incoming_request_authority(
+    event: &mut Event,
+    coordinator: &Arc<UnifiedCoordinator>,
+    lifecycle_handle: Option<&SessionRegistryHandle>,
+) {
+    let captured = lifecycle_handle.cloned();
+    match event {
+        Event::ReferReceived {
+            request: Some(request),
+            ..
+        }
+        | Event::NotifyReceived {
+            request: Some(request),
+            ..
+        } => {
+            request.set_coordinator_captured(Arc::clone(coordinator), captured);
+        }
+        Event::InfoReceived { request, .. }
+        | Event::MessageReceived { request, .. }
+        | Event::OptionsReceived { request, .. }
+        | Event::UpdateReceived { request, .. } => {
+            request.set_coordinator_captured(Arc::clone(coordinator), captured);
+        }
+        Event::IncomingRegister { register } => {
+            register.set_coordinator(Arc::clone(coordinator));
+        }
+        _ => {}
+    }
+}
+
+async fn receive_optional_control(
+    receiver: &mut Option<mpsc::UnboundedReceiver<SessionControlEvent>>,
+) -> Option<SessionControlEvent> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+async fn wait_optional_exact_lifecycle(
+    watcher: &mut Option<tokio::sync::watch::Receiver<u64>>,
+) -> bool {
+    match watcher {
+        Some(watcher) => watcher.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
 impl EventReceiver {
     pub(crate) fn new(
         rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
     ) -> Self {
         Self {
             rx,
+            control_rx: None,
+            control_coordinator: None,
+            owns_control: false,
+            observations_open: true,
             filter: None,
+            exact_filter: None,
+            exact_store: None,
+            exact_lifecycle: None,
+            exact_watcher: None,
+            exact_terminal_delivered: false,
             primed: std::collections::VecDeque::new(),
         }
     }
@@ -104,9 +181,77 @@ impl EventReceiver {
     ) -> Self {
         Self {
             rx,
+            control_rx: None,
+            control_coordinator: None,
+            owns_control: false,
+            observations_open: true,
             filter: Some(call_id),
+            exact_filter: None,
+            exact_store: None,
+            exact_lifecycle: None,
+            exact_watcher: None,
+            exact_terminal_delivered: false,
             primed: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Create a generation-qualified receiver for a retained session
+    /// capability. Public observational copies deliberately fail closed.
+    pub(crate) fn filtered_exact(
+        rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+        lifecycle_handle: SessionRegistryHandle,
+        store: Arc<crate::session_store::SessionStore>,
+        lifecycle: crate::api::lifecycle::LifecycleIndex,
+    ) -> Self {
+        let exact_watcher = lifecycle.watcher_exact(&lifecycle_handle);
+        Self {
+            rx,
+            control_rx: None,
+            control_coordinator: None,
+            owns_control: false,
+            observations_open: true,
+            filter: Some(lifecycle_handle.session_id().clone()),
+            exact_filter: Some(lifecycle_handle),
+            exact_store: Some(store),
+            exact_lifecycle: Some(lifecycle),
+            exact_watcher: Some(exact_watcher),
+            exact_terminal_delivered: false,
+            primed: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn with_control(
+        rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+        control_rx: mpsc::UnboundedReceiver<SessionControlEvent>,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) -> Self {
+        Self {
+            rx,
+            control_rx: Some(control_rx),
+            control_coordinator: Some(coordinator),
+            owns_control: true,
+            observations_open: true,
+            filter: None,
+            exact_filter: None,
+            exact_store: None,
+            exact_lifecycle: None,
+            exact_watcher: None,
+            exact_terminal_delivered: false,
+            primed: std::collections::VecDeque::new(),
+        }
+    }
+
+    pub(crate) async fn ensure_control(
+        &mut self,
+        coordinator: &Arc<UnifiedCoordinator>,
+    ) -> Result<()> {
+        if self.control_rx.is_none() {
+            let control = coordinator.claim_session_control_events().await?;
+            self.control_rx = Some(control);
+            self.control_coordinator = Some(Arc::clone(coordinator));
+            self.owns_control = true;
+        }
+        Ok(())
     }
 
     /// Push a synthesized event to the front of this receiver's queue.
@@ -115,6 +260,33 @@ impl EventReceiver {
     /// state transition had already fired.
     pub(crate) fn prime(&mut self, event: Event) {
         self.primed.push_back(event);
+    }
+
+    /// Revalidate authority already held by an exact `SessionHandle` before
+    /// accepting a Call-ID-only observation. No capability is derived from
+    /// the observation itself.
+    fn exact_observation_handle(&self) -> std::result::Result<Option<SessionRegistryHandle>, ()> {
+        let Some(handle) = self.exact_filter.as_ref() else {
+            return Ok(None);
+        };
+        let Some(store) = self.exact_store.as_ref() else {
+            return Err(());
+        };
+        store.get_session_snapshot_exact(handle).map_err(|_| ())?;
+        Ok(Some(handle.clone()))
+    }
+
+    fn take_exact_terminal(&mut self) -> Option<(Event, Option<SessionRegistryHandle>)> {
+        if self.exact_terminal_delivered {
+            return None;
+        }
+        let handle = self.exact_filter.as_ref()?;
+        let lifecycle = self.exact_lifecycle.as_ref()?;
+        let terminal = lifecycle.snapshot_exact(handle, None).terminal?;
+        let event = terminal.to_event(handle.session_id().clone());
+        let handle = handle.clone();
+        self.exact_terminal_delivered = true;
+        Some((event, Some(handle)))
     }
 
     /// Wait for the next event (optionally filtered to one session).
@@ -131,24 +303,97 @@ impl EventReceiver {
     /// # }
     /// ```
     pub async fn next(&mut self) -> Option<Event> {
+        self.next_with_lifecycle().await.map(|(event, _)| event)
+    }
+
+    /// Receive an event together with the causal exact session authority, when
+    /// the event grants an internal owner permission to mutate signaling.
+    pub(crate) async fn next_with_lifecycle(
+        &mut self,
+    ) -> Option<(Event, Option<SessionRegistryHandle>)> {
+        if let Some(terminal) = self.take_exact_terminal() {
+            return Some(terminal);
+        }
         // Drain primed events first — these were synthesized by
         // `events_for_session` so the caller observes a state transition
         // that fired before this receiver was subscribed.
-        if let Some(event) = self.primed.pop_front() {
-            return Some(event);
+        if self.exact_filter.is_none() {
+            if let Some(event) = self.primed.pop_front() {
+                return Some((event, None));
+            }
         }
         loop {
-            let raw = self.rx.recv().await?;
-            // Downcast from Arc<dyn CrossCrateEvent> to our concrete wrapper
-            let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
-            let event = session_event.event.clone();
+            if let Some(terminal) = self.take_exact_terminal() {
+                return Some(terminal);
+            }
+            if self.control_rx.is_none() && !self.observations_open && self.exact_watcher.is_none()
+            {
+                return None;
+            }
+            enum Input {
+                Control(Option<SessionControlEvent>),
+                Observation(
+                    Option<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
+                ),
+                ExactLifecycle(bool),
+            }
+            let input = tokio::select! {
+                event = receive_optional_control(&mut self.control_rx) => Input::Control(event),
+                raw = self.rx.recv(), if self.observations_open => Input::Observation(raw),
+                changed = wait_optional_exact_lifecycle(&mut self.exact_watcher) => {
+                    Input::ExactLifecycle(changed)
+                }
+            };
+            let (mut event, lifecycle_handle) = match input {
+                Input::Control(Some(control)) => (control.event, control.lifecycle_handle),
+                Input::Control(None) => {
+                    self.control_rx = None;
+                    continue;
+                }
+                Input::Observation(Some(raw)) => {
+                    let Some(session_event) =
+                        raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()
+                    else {
+                        continue;
+                    };
+                    // The single owner receives every application event on
+                    // its private channel. Public copies are observations for
+                    // non-owning subscribers and must never become a fallback
+                    // authority path if the private channel closes.
+                    if self.owns_control {
+                        continue;
+                    }
+                    let lifecycle_handle = match self.exact_observation_handle() {
+                        Ok(handle) => handle,
+                        Err(()) => continue,
+                    };
+                    (session_event.event.clone(), lifecycle_handle)
+                }
+                Input::Observation(None) => {
+                    self.observations_open = false;
+                    continue;
+                }
+                Input::ExactLifecycle(changed) => {
+                    if !changed {
+                        self.exact_watcher = None;
+                    }
+                    continue;
+                }
+            };
+            if let Some(coordinator) = &self.control_coordinator {
+                attach_incoming_request_authority(
+                    &mut event,
+                    coordinator,
+                    lifecycle_handle.as_ref(),
+                );
+            }
             // Apply per-session filter if set
             if let Some(ref filter) = self.filter {
                 if event.call_id() != Some(filter) {
                     continue;
                 }
             }
-            return Some(event);
+            return Some((event, lifecycle_handle));
         }
     }
 
@@ -164,19 +409,84 @@ impl EventReceiver {
     /// # }
     /// ```
     pub fn try_next(&mut self) -> Option<Event> {
-        if let Some(event) = self.primed.pop_front() {
-            return Some(event);
+        self.try_next_with_lifecycle().map(|(event, _)| event)
+    }
+
+    pub(crate) fn try_next_with_lifecycle(
+        &mut self,
+    ) -> Option<(Event, Option<SessionRegistryHandle>)> {
+        if let Some(terminal) = self.take_exact_terminal() {
+            return Some(terminal);
+        }
+        if self.exact_filter.is_none() {
+            if let Some(event) = self.primed.pop_front() {
+                return Some((event, None));
+            }
         }
         loop {
-            let raw = self.rx.try_recv().ok()?;
-            let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
-            let event = session_event.event.clone();
+            if let Some(control_rx) = self.control_rx.as_mut() {
+                match control_rx.try_recv() {
+                    Ok(control) => {
+                        let mut event = control.event;
+                        let lifecycle_handle = control.lifecycle_handle;
+                        if let Some(coordinator) = &self.control_coordinator {
+                            attach_incoming_request_authority(
+                                &mut event,
+                                coordinator,
+                                lifecycle_handle.as_ref(),
+                            );
+                        }
+                        if self
+                            .filter
+                            .as_ref()
+                            .is_none_or(|filter| event.call_id() == Some(filter))
+                        {
+                            return Some((event, lifecycle_handle));
+                        }
+                        continue;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.control_rx = None;
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                }
+            }
+            if !self.observations_open {
+                return None;
+            }
+            let raw = match self.rx.try_recv() {
+                Ok(raw) => raw,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    self.observations_open = false;
+                    return None;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return None,
+            };
+            let Some(session_event) = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()
+            else {
+                continue;
+            };
+            if self.owns_control {
+                continue;
+            }
+            let lifecycle_handle = match self.exact_observation_handle() {
+                Ok(handle) => handle,
+                Err(()) => continue,
+            };
+            let mut event = session_event.event.clone();
+            if let Some(coordinator) = &self.control_coordinator {
+                attach_incoming_request_authority(
+                    &mut event,
+                    coordinator,
+                    lifecycle_handle.as_ref(),
+                );
+            }
             if let Some(ref filter) = self.filter {
                 if event.call_id() != Some(filter) {
                     continue;
                 }
             }
-            return Some(event);
+            return Some((event, lifecycle_handle));
         }
     }
 
@@ -210,6 +520,29 @@ impl EventReceiver {
                 } => {
                     return Some((call_id, from, to, sdp));
                 }
+                _ => continue,
+            }
+        }
+    }
+
+    pub(crate) async fn next_incoming_exact(
+        &mut self,
+    ) -> Option<(
+        CallId,
+        String,
+        String,
+        Option<String>,
+        Option<SessionRegistryHandle>,
+    )> {
+        loop {
+            let (event, lifecycle_handle) = self.next_with_lifecycle().await?;
+            match event {
+                Event::IncomingCall {
+                    call_id,
+                    from,
+                    to,
+                    sdp,
+                } => return Some((call_id, from, to, sdp, lifecycle_handle)),
                 _ => continue,
             }
         }
@@ -715,12 +1048,13 @@ impl StreamPeer {
         let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
         let event_rx = coordinator.subscribe_events().await?;
+        let control_rx = coordinator.claim_session_control_events().await?;
         Ok(Self {
             control: PeerControl {
-                coordinator,
+                coordinator: Arc::clone(&coordinator),
                 local_uri,
             },
-            events: EventReceiver::new(event_rx),
+            events: EventReceiver::with_control(event_rx, control_rx, coordinator),
         })
     }
 
@@ -823,39 +1157,41 @@ impl StreamPeer {
     /// # }
     /// ```
     pub async fn wait_for_incoming(&mut self) -> Result<IncomingCall> {
-        loop {
-            match self.events.next().await {
-                Some(Event::IncomingCall {
-                    call_id,
-                    from,
-                    to,
-                    sdp,
-                }) => {
-                    // SIP_API_DESIGN_2 Phase A: prefer the typed
-                    // `Arc<Request>` view when the bus enriched the
-                    // inbound INVITE; falls back to the legacy empty
-                    // headers shape when synthesized in tests.
-                    let coord = self.control.coordinator.clone();
-                    let parsed = coord.session_registry.peek_pending_incoming_request().await;
-                    let transport = coord
-                        .session_registry
-                        .peek_pending_incoming_transport()
-                        .await;
-                    let incoming = match parsed {
-                        Some(req) => IncomingCall::with_request(call_id, from, to, sdp, coord, req),
-                        None => IncomingCall::new(call_id, from, to, sdp, coord),
+        match self.events.next_incoming_exact().await {
+            Some((call_id, from, to, sdp, lifecycle_handle)) => {
+                // SIP_API_DESIGN_2 Phase A: prefer the typed
+                // `Arc<Request>` view when the bus enriched the
+                // inbound INVITE; falls back to the legacy empty
+                // headers shape when synthesized in tests.
+                let coord = self.control.coordinator.clone();
+                let pending = lifecycle_handle
+                    .as_ref()
+                    .and_then(|handle| coord.pending_incoming_bundle_for_handle_exact(handle));
+                let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+                let transport = pending.and_then(|bundle| bundle.transport);
+                let incoming = match parsed {
+                    Some(req) => IncomingCall::with_request_captured(
+                        call_id,
+                        from,
+                        to,
+                        sdp,
+                        coord,
+                        req,
+                        lifecycle_handle,
+                    ),
+                    None => {
+                        IncomingCall::new_captured(call_id, from, to, sdp, coord, lifecycle_handle)
                     }
-                    .with_transport_context(
-                        transport
-                            .as_deref()
-                            .cloned()
-                            .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
-                    );
-                    return Ok(incoming);
                 }
-                None => return Err(SessionError::Other("Event channel closed".to_string())),
-                _ => {}
+                .with_transport_context(
+                    transport
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+                );
+                return Ok(incoming);
             }
+            None => return Err(SessionError::Other("Event channel closed".to_string())),
         }
     }
 
@@ -874,27 +1210,30 @@ impl StreamPeer {
     /// ```
     pub async fn wait_for_answered(&mut self, call_id: &CallId) -> Result<SessionHandle> {
         loop {
-            match self.events.next().await {
-                Some(Event::CallAnswered {
+            let Some((event, lifecycle_handle)) = self.events.next_with_lifecycle().await else {
+                return Err(SessionError::Other("Event channel closed".to_string()));
+            };
+            match event {
+                Event::CallAnswered {
                     call_id: answered_id,
                     ..
-                }) if &answered_id == call_id => {
-                    return Ok(SessionHandle::new(
+                } if &answered_id == call_id => {
+                    return Ok(SessionHandle::new_captured(
                         answered_id,
                         self.control.coordinator.clone(),
+                        lifecycle_handle,
                     ));
                 }
-                Some(Event::CallFailed {
+                Event::CallFailed {
                     call_id: failed_id,
                     reason,
                     status_code,
-                }) if &failed_id == call_id => {
+                } if &failed_id == call_id => {
                     return Err(SessionError::Other(format!(
                         "Call failed with {}: {}",
                         status_code, reason
                     )));
                 }
-                None => return Err(SessionError::Other("Event channel closed".to_string())),
                 _ => {}
             }
         }
@@ -915,10 +1254,10 @@ impl StreamPeer {
     {
         loop {
             match self.events.next().await {
-                Some(event @ Event::CallProgress { .. }) => {
-                    if event.call_id() == Some(call_id) && predicate(&event) {
-                        return Ok(event);
-                    }
+                Some(event @ Event::CallProgress { .. })
+                    if event.call_id() == Some(call_id) && predicate(&event) =>
+                {
+                    return Ok(event);
                 }
                 Some(Event::CallAnswered {
                     call_id: answered_id,
@@ -1589,10 +1928,12 @@ mod tests {
             recv_buffer_size: 2048,
             rtcp_recv_buffer_size: 1024,
         };
-        let mut media_config = MediaSessionControllerConfig::default();
-        media_config.rtp_buffer_size = 960;
-        media_config.rtp_buffer_initial_count = 3;
-        media_config.rtp_buffer_max_count = 9;
+        let media_config = MediaSessionControllerConfig {
+            rtp_buffer_size: 960,
+            rtp_buffer_initial_count: 3,
+            rtp_buffer_max_count: 9,
+            ..Default::default()
+        };
 
         let builder = StreamPeerBuilder::new()
             .media_session_controller_config(media_config)
@@ -1648,6 +1989,73 @@ mod tests {
 
         assert_eq!(trace.sip_call_id.as_deref(), Some("wire-call"));
         assert_eq!(trace.session_id, Some(SessionId("session-1".into())));
+    }
+
+    #[tokio::test]
+    async fn event_receiver_reuses_held_authority_for_public_observations() {
+        let store = Arc::new(crate::session_store::SessionStore::new());
+        let call_id = SessionId("exact-incoming-envelope".into());
+        store
+            .create_session(call_id.clone(), crate::state_table::types::Role::UAS, false)
+            .await
+            .expect("create exact incoming lifetime");
+        let lifecycle_handle = store
+            .lifecycle_handle(&call_id)
+            .expect("capture exact incoming lifetime");
+        let event = Event::IncomingCall {
+            call_id: call_id.clone(),
+            from: "sip:caller@example.test".into(),
+            to: "sip:callee@example.test".into(),
+            sdp: None,
+        };
+        let (tx, rx) = mpsc::channel::<Arc<dyn CrossCrateEvent>>(4);
+        tx.send(SessionApiCrossCrateEvent::new(event))
+            .await
+            .expect("send public observation");
+
+        let mut receiver = EventReceiver::filtered_exact(
+            rx,
+            lifecycle_handle.clone(),
+            Arc::clone(&store),
+            crate::api::lifecycle::LifecycleIndex::new(),
+        );
+        let (observed, observed_handle) = receiver
+            .next_with_lifecycle()
+            .await
+            .expect("receive incoming observation");
+        assert!(matches!(observed, Event::IncomingCall { .. }));
+        assert_eq!(observed_handle, Some(lifecycle_handle.clone()));
+    }
+
+    #[tokio::test]
+    async fn exact_filtered_receiver_requires_current_generation() {
+        let store = Arc::new(crate::session_store::SessionStore::new());
+        let call_id = SessionId("exact-filtered-reuse".into());
+        store
+            .create_session(call_id.clone(), crate::state_table::types::Role::UAS, false)
+            .await
+            .expect("create exact receiver lifetime");
+        let generation_a = store
+            .lifecycle_handle(&call_id)
+            .expect("capture generation A");
+        let event = Event::CallAnswered { call_id, sdp: None };
+        let (tx, rx) = mpsc::channel::<Arc<dyn CrossCrateEvent>>(8);
+        tx.send(SessionApiCrossCrateEvent::new(event))
+            .await
+            .expect("send current generation observation");
+
+        let mut receiver = EventReceiver::filtered_exact(
+            rx,
+            generation_a.clone(),
+            Arc::clone(&store),
+            crate::api::lifecycle::LifecycleIndex::new(),
+        );
+        let (_, observed_handle) = receiver
+            .next_with_lifecycle()
+            .await
+            .expect("receive only generation A");
+        assert_eq!(observed_handle, Some(generation_a));
+        assert!(receiver.try_next_with_lifecycle().is_none());
     }
 
     fn trace_event() -> SipTrace {

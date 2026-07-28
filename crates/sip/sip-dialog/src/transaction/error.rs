@@ -6,7 +6,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur in SIP transaction handling
-#[derive(Error, Debug)]
+#[derive(Error)]
 pub enum Error {
     /// Error originating from the sip-core crate (parsing, building messages, etc.)
     #[error("SIP core error: {0}")]
@@ -63,6 +63,14 @@ pub enum Error {
     #[error("Failed to create transaction: {message}")]
     TransactionCreationError { message: String },
 
+    /// Bounded protocol-retention admission was exhausted before any request
+    /// or response was accepted on the wire.
+    #[error("Transaction capacity exhausted for {resource} (limit: {limit})")]
+    TransactionCapacityExhausted {
+        resource: &'static str,
+        limit: usize,
+    },
+
     /// Transaction message processing error
     #[error("Failed to process message: {message} for transaction {transaction_id:?}")]
     MessageProcessingError {
@@ -77,6 +85,12 @@ pub enum Error {
     /// Other miscellaneous errors.
     #[error("Other error: {0}")]
     Other(String),
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::transaction::safe_diagnostics::SafeTransactionError::new(self).fmt(f)
+    }
 }
 
 /// Wrapper for transport errors to provide consistent Debug/Display

@@ -102,6 +102,7 @@ mod tests {
     /// event stream so tests can assert on the wire bytes.
     async fn pair() -> (
         Arc<Mutex<RtpSession>>,
+        UdpRtpTransport,
         tokio::sync::broadcast::Receiver<RtpEvent>,
     ) {
         let receiver_cfg = RtpTransportConfig {
@@ -130,12 +131,16 @@ mod tests {
             transport_buffer_config: Default::default(),
         };
         let sender = RtpSession::new(sender_cfg).await.unwrap();
-        (Arc::new(Mutex::new(sender)), receiver_events)
+        (
+            Arc::new(Mutex::new(sender)),
+            receiver_transport,
+            receiver_events,
+        )
     }
 
     #[tokio::test]
     async fn send_emits_pt13_with_level_byte() {
-        let (sender, mut events) = pair().await;
+        let (sender, _receiver_transport, mut events) = pair().await;
         let cn = CnTransmitter::new(sender);
         cn.send(40).await.expect("CN send");
 
@@ -167,7 +172,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_clamps_high_bit_per_rfc_3389_3_1() {
-        let (sender, mut events) = pair().await;
+        let (sender, _receiver_transport, mut events) = pair().await;
         let cn = CnTransmitter::new(sender);
         // 0xFF — high bit set; RFC 3389 §3.1 reserves it.
         cn.send(0xFF).await.expect("CN send");

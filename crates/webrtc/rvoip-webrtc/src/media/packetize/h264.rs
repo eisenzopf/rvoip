@@ -18,15 +18,26 @@
 //! start codes and strips them before encapsulation.
 
 use bytes::Bytes;
+use std::fmt;
 
 /// One packetized H.264 RTP payload — codec payload only (no RTP header).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct H264Packet {
     pub payload: Bytes,
     /// `true` on the *last* packet of the access unit so the outbound RTP
     /// pump stamps the marker bit (RFC 6184 §5.3: M=1 on the last RTP
     /// packet of an access unit, signalling end-of-frame to the decoder).
     pub marker: bool,
+}
+
+impl fmt::Debug for H264Packet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("H264Packet")
+            .field("payload_bytes", &self.payload.len())
+            .field("marker", &self.marker)
+            .finish()
+    }
 }
 
 /// Packetize one H.264 access unit (Annex-B byte stream).

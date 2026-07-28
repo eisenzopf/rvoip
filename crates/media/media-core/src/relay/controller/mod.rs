@@ -47,13 +47,45 @@ use crate::types::{AudioFrame, DialogId, MediaDirection, MediaSessionId};
 use rvoip_nat_core as nat_core;
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::transport::{
-    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
+    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig, SymmetricRtpPolicy,
 };
 use rvoip_rtp_core::{
     RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
 };
 
-const RTP_SESSION_BIND_RETRIES: usize = 8;
+/// Releases a media-controller port reservation if `start_media` is cancelled
+/// before ownership is committed to the controller maps.
+struct MediaPortReservationGuard {
+    allocator: Arc<PortAllocator>,
+    session_id: Option<String>,
+}
+
+impl MediaPortReservationGuard {
+    fn new(allocator: Arc<PortAllocator>, session_id: String) -> Self {
+        Self {
+            allocator,
+            session_id: Some(session_id),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session_id = None;
+    }
+}
+
+impl Drop for MediaPortReservationGuard {
+    fn drop(&mut self) {
+        let Some(session_id) = self.session_id.take() else {
+            return;
+        };
+        let allocator = self.allocator.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = allocator.release_session(&session_id).await;
+            });
+        }
+    }
+}
 
 /// Which side of the DTLS handshake a dialog plays, per RFC 4145/5763's
 /// `a=setup` active/passive mapping (the caller resolves the SDP
@@ -195,7 +227,11 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    rvoip_infra_common::memory_diagnostics::spawn_tracked(kind, future)
+    let guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(kind, 0);
+    rvoip_rtp_core::task_runtime::spawn_media_task(async move {
+        let _guard = guard;
+        future.await
+    })
 }
 
 #[cfg(not(feature = "memory-diagnostics"))]
@@ -204,7 +240,7 @@ where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    tokio::spawn(future)
+    rvoip_rtp_core::task_runtime::spawn_media_task(future)
 }
 
 #[cfg(feature = "memory-diagnostics")]
@@ -363,6 +399,11 @@ pub struct MediaSessionController {
 
     /// RTP transport event and receive buffer sizing for new sessions.
     rtp_transport_buffer_config: RtpTransportBufferConfig,
+
+    /// Source-compatible policy sidecar for symmetric-RTP learning. This is
+    /// configured through a controller builder instead of adding a field to
+    /// the public `MediaSessionControllerConfig` struct.
+    symmetric_rtp_policy: SymmetricRtpPolicy,
 }
 
 impl MediaSessionController {
@@ -471,7 +512,15 @@ impl MediaSessionController {
             g729_tx_codecs: Arc::new(DashMap::with_capacity(capacity_hint)),
             rtp_session_buffer_config,
             rtp_transport_buffer_config,
+            symmetric_rtp_policy: SymmetricRtpPolicy::default(),
         }
+    }
+
+    /// Configure bounded symmetric-RTP learning for sessions created by this
+    /// controller.
+    pub fn with_symmetric_rtp_policy(mut self, policy: SymmetricRtpPolicy) -> Self {
+        self.symmetric_rtp_policy = policy;
+        self
     }
 
     /// Toggle RFC 3389 Comfort Noise gating on the audio TX path.
@@ -575,7 +624,8 @@ impl MediaSessionController {
             .map(|entry| entry.value().max_capacity())
             .sum();
 
-        let value = serde_json::json!({
+        #[cfg_attr(not(feature = "memory-diagnostics"), allow(unused_mut))]
+        let mut value = serde_json::json!({
             "sessions": self.sessions.len(),
             "rtp_sessions": self.rtp_sessions.len(),
             "rtp_sender_queue_packets": rtp_sender_queue_packets,
@@ -660,11 +710,12 @@ impl MediaSessionController {
         config.port_range_end = max_port;
         config.validate_ports = false;
         config.capacity_hint = capacity_hint;
-        if capacity_hint > 0 {
-            config.allocation_strategy = AllocationStrategy::Incremental;
-            config.prefer_port_reuse = false;
-            config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
-        }
+        // Media controllers perform the authoritative bind in RtpSession. Use
+        // the indexed unvalidated pool for every custom range so controllers
+        // with the same bind domain share reservations before that bind.
+        config.allocation_strategy = AllocationStrategy::Incremental;
+        config.prefer_port_reuse = false;
+        config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
 
         controller.port_allocator = Some(Arc::new(PortAllocator::with_config(config)));
         info!(
@@ -788,6 +839,7 @@ impl MediaSessionController {
             g729_tx_codecs: Arc::new(DashMap::new()),
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
+            symmetric_rtp_policy: SymmetricRtpPolicy::default(),
         })
     }
 
@@ -830,13 +882,33 @@ impl MediaSessionController {
         let dialog_session_id = format!("dialog_{}", dialog_id);
         let mut last_bind_error: Option<rtp_core::Error> = None;
         let mut created_session = None;
-        for attempt in 1..=RTP_SESSION_BIND_RETRIES {
+        // The real RTP socket bind is authoritative. Scan at most one complete
+        // configured range so occupied candidates are quarantined and skipped
+        // without either failing after an arbitrary eight ports or looping
+        // forever when the host has no usable port left.
+        let bind_attempt_limit = allocator.configured_port_capacity().max(1);
+        for attempt in 1..=bind_attempt_limit {
             let allocate_started = Instant::now();
-            let (local_rtp_addr, _) = allocator
+            let allocation = allocator
                 .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
-                .await
-                .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
+                .await;
             diagnostics::record_rtp_port_allocate(allocate_started.elapsed());
+            let (local_rtp_addr, _) = match allocation {
+                Ok(allocation) => allocation,
+                Err(e) => {
+                    let failure_kind = if last_bind_error.is_some() {
+                        "rtp_bind_collision"
+                    } else {
+                        "port_pool_exhausted"
+                    };
+                    return Err(Error::config(format!(
+                        "Media allocation failed [kind={}]: {}",
+                        failure_kind, e
+                    )));
+                }
+            };
+            let mut reservation_guard =
+                MediaPortReservationGuard::new(allocator.clone(), dialog_session_id.clone());
 
             // Create RTP session configuration
             let rtp_config = RtpSessionConfig {
@@ -853,46 +925,64 @@ impl MediaSessionController {
             };
 
             let session_started = Instant::now();
-            match RtpSession::new_event_driven(rtp_config).await {
+            match RtpSession::new_event_driven_with_symmetric_rtp_policy(
+                rtp_config,
+                self.symmetric_rtp_policy,
+            )
+            .await
+            {
                 Ok(rtp_session) => {
                     diagnostics::record_rtp_session_new(session_started.elapsed());
-                    created_session = Some((local_rtp_addr, rtp_session));
+                    created_session = Some((local_rtp_addr, rtp_session, reservation_guard));
                     break;
                 }
                 Err(e) => {
                     diagnostics::record_rtp_session_new(session_started.elapsed());
-                    let _ = allocator.release_session(&dialog_session_id).await;
-                    let should_retry =
-                        is_retryable_rtp_bind_error(&e) && attempt < RTP_SESSION_BIND_RETRIES;
-                    if should_retry {
+                    reservation_guard.disarm();
+                    if is_retryable_rtp_bind_error(&e) {
+                        if let Err(quarantine_error) =
+                            allocator.quarantine_session(&dialog_session_id).await
+                        {
+                            warn!(
+                                "Failed to quarantine RTP bind candidate for {}: {}",
+                                dialog_id, quarantine_error
+                            );
+                            let _ = allocator.release_session(&dialog_session_id).await;
+                        }
+
                         // Try the next reserved port. The allocator no longer probe-binds
                         // for media-controller sessions; the real RTP socket bind is the
                         // authoritative availability check.
                         debug!(
                             "RTP bind failed for {} on {} (attempt {}/{}); retrying with another port: {}",
-                            dialog_id, local_rtp_addr, attempt, RTP_SESSION_BIND_RETRIES, e
+                            dialog_id, local_rtp_addr, attempt, bind_attempt_limit, e
                         );
                         last_bind_error = Some(e);
-                        continue;
+                        if attempt < bind_attempt_limit {
+                            continue;
+                        }
+                        break;
                     }
 
+                    let _ = allocator.release_session(&dialog_session_id).await;
                     return Err(Error::config(format!(
-                        "Failed to create RTP session on {}: {}",
+                        "Media allocation failed [kind=rtp_session_creation] on {}: {}",
                         local_rtp_addr, e
                     )));
                 }
             }
         }
 
-        let (local_rtp_addr, rtp_session) = created_session.ok_or_else(|| {
-            Error::config(format!(
-                "Failed to create RTP session after {} bind attempts: {}",
-                RTP_SESSION_BIND_RETRIES,
-                last_bind_error
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "no bind attempt completed".to_string())
-            ))
-        })?;
+        let (local_rtp_addr, rtp_session, mut reservation_guard) =
+            created_session.ok_or_else(|| {
+                Error::config(format!(
+                    "Media allocation failed [kind=rtp_bind_collision] after {} bind attempts: {}",
+                    bind_attempt_limit,
+                    last_bind_error
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| "no bind attempt completed".to_string())
+                ))
+            })?;
 
         let rtp_port = local_rtp_addr.port();
 
@@ -939,6 +1029,9 @@ impl MediaSessionController {
         );
         self.sessions.insert(dialog_id.clone(), session_info);
         self.rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
+        // The controller maps now own the RTP session and stop_media owns the
+        // matching allocator release.
+        reservation_guard.disarm();
 
         // Send event
         let _ = self.event_tx.send(MediaSessionEvent::SessionCreated {
@@ -1220,7 +1313,12 @@ impl MediaSessionController {
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
         if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
-            self.session_to_media.remove(&session_id);
+            // A raw session identifier can be rebound to a newer media
+            // generation before delayed cleanup of the old reverse entry is
+            // observed. Remove the forward entry only when it still points at
+            // the exact media id being stopped.
+            self.session_to_media
+                .remove_if(&session_id, |_, mapped| mapped == &media_id);
         }
 
         let stale_session_ids: Vec<String> = self
@@ -1235,7 +1333,8 @@ impl MediaSessionController {
             })
             .collect();
         for session_id in stale_session_ids {
-            self.session_to_media.remove(&session_id);
+            self.session_to_media
+                .remove_if(&session_id, |_, mapped| mapped == &media_id);
         }
     }
 
@@ -1791,10 +1890,8 @@ impl MediaSessionController {
                                         "media_core.audio.rx.audio_frame.samples_vec",
                                         samples.capacity() * std::mem::size_of::<i16>(),
                                     );
-                                    let audio_frame = AudioFrame::new(
-                                        samples, 8000, 1,
-                                        0, // timestamp behaviour preserved from codec decode path
-                                    );
+                                    let audio_frame =
+                                        AudioFrame::new(samples, 8000, 1, packet.header.timestamp);
 
                                     // Use try_send to avoid blocking the RTP event handler
                                     match sender.try_send(audio_frame) {

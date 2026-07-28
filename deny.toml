@@ -113,9 +113,15 @@ wrappers = [
 ]
 reason = "Adapter crates should consume type/trait surface from `rvoip-core-traits`; the implementation crate `rvoip-core` is reserved for the facade. See GAP_PLAN.md V2.A.10."
 
-# Source registry policy — workspace + crates.io only.
+# Source registry policy — workspace, crates.io, and reviewed project-owned
+# forks only. Cargo.toml must still use an exact 40-character `rev`; this URL
+# allow-list never authorizes a floating branch. Fork changes remain private
+# until project-owner review and do not imply permission to contact upstream.
 [sources]
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = []
+allow-git        = [
+    "https://github.com/eisenzopf/rtc",
+    "https://github.com/eisenzopf/moq-rs",
+]

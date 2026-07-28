@@ -75,6 +75,27 @@ fn offer_env(sid: &str, connid: &str, strm_id: &str) -> UctpEnvelope {
     }
 }
 
+fn invite_env(sid: &str) -> UctpEnvelope {
+    UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::SessionInvite,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: Some(format!("conv_{sid}")),
+        sid: Some(sid.into()),
+        connid: None,
+        in_reply_to: None,
+        payload: serde_json::json!({
+            "from": "part_publisher",
+            "to": ["part_remote"],
+            "medium": "voice",
+            "intent": "synchronous-engagement",
+            "capabilities_offer": {}
+        }),
+        signature: None,
+    }
+}
+
 fn ready_env(sid: &str, connid: &str) -> UctpEnvelope {
     UctpEnvelope {
         v: 1,
@@ -132,6 +153,28 @@ async fn next_envelope_of(
     None
 }
 
+async fn establish_subscriber_connection(
+    in_tx: &mpsc::Sender<UctpEnvelope>,
+    out_rx: &mut mpsc::Receiver<UctpEnvelope>,
+    sid: &str,
+    connid: &str,
+) {
+    in_tx
+        .send(offer_env(sid, connid, &format!("strm_fixture_{connid}")))
+        .await
+        .expect("send subscriber connection offer");
+    in_tx
+        .send(ready_env(sid, connid))
+        .await
+        .expect("send subscriber connection ready");
+
+    let opened = next_envelope_of(out_rx, MessageType::StreamOpened)
+        .await
+        .expect("expected subscriber stream.opened envelope");
+    assert_eq!(opened.sid.as_deref(), Some(sid));
+    assert_eq!(opened.connid.as_deref(), Some(connid));
+}
+
 #[tokio::test]
 async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     let orch = Orchestrator::new(Config::default());
@@ -153,6 +196,8 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    in_tx.send(invite_env("sess_a")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     // 1. Send connection.offer — coordinator runs negotiation (passes;
     //    descriptor has opus, offer has opus) and stores accepted streams.
@@ -197,6 +242,7 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
 
     // 4. A subscriber sending stream.subscribe by strm_id should now
     //    succeed without any test pre-population.
+    establish_subscriber_connection(&in_tx, &mut out_rx, "sess_a", "conn_subscriber").await;
     in_tx
         .send(subscribe_env("sess_a", "conn_subscriber", "strm_audio_1"))
         .await
@@ -237,6 +283,8 @@ async fn duplicate_connection_ready_does_not_re_emit_stream_opened() {
     );
 
     drive_auth_handshake(&in_tx, &mut out_rx).await;
+    in_tx.send(invite_env("sess_b")).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
 
     in_tx
         .send(offer_env("sess_b", "conn_b", "strm_x"))

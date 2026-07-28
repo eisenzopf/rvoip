@@ -31,7 +31,7 @@ use std::str::FromStr;
 /// let custom = HeaderName::from_str("X-Custom-Header").unwrap();
 /// assert_eq!(custom, HeaderName::Other("X-Custom-Header".to_string()));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HeaderName {
     /// Call-ID: Unique identifier for this call
     CallId,
@@ -159,7 +159,51 @@ pub enum HeaderName {
     Identity,
 }
 
+impl fmt::Debug for HeaderName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Other(value) => formatter
+                .debug_struct("HeaderName::Other")
+                .field("name_bytes", &value.len())
+                .finish(),
+            standard => formatter
+                .debug_tuple("HeaderName")
+                .field(&standard.as_str())
+                .finish(),
+        }
+    }
+}
+
 impl HeaderName {
+    /// Whether this header name is safe to serialize as an RFC 3261 token.
+    ///
+    /// Known typed names are always canonical tokens. Extension names remain
+    /// caller supplied, so typed transport boundaries must reject whitespace,
+    /// colons, line breaks, and non-ASCII aliases before serialization.
+    pub fn is_valid_wire_name(&self) -> bool {
+        match self {
+            HeaderName::Other(name) => {
+                !name.is_empty()
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric()
+                            || matches!(
+                                byte,
+                                b'-' | b'.'
+                                    | b'!'
+                                    | b'%'
+                                    | b'*'
+                                    | b'_'
+                                    | b'+'
+                                    | b'`'
+                                    | b'\''
+                                    | b'~'
+                            )
+                    })
+            }
+            _ => true,
+        }
+    }
+
     /// Returns the canonical name of the header
     pub fn as_str(&self) -> &str {
         match self {
@@ -225,6 +269,42 @@ impl HeaderName {
             HeaderName::PAssertedIdentity => "P-Asserted-Identity",
             HeaderName::PPreferredIdentity => "P-Preferred-Identity",
             HeaderName::Identity => "Identity",
+        }
+    }
+
+    /// Whether this name carries origin-server or proxy credentials.
+    ///
+    /// `HeaderName::Other` remains public for parser and extension-header
+    /// compatibility, so security-sensitive callers must compare its wire
+    /// spelling case-insensitively as well as matching the typed variants.
+    pub fn is_authorization_credentials(&self) -> bool {
+        matches!(
+            self.canonical_wire_name(),
+            HeaderName::Authorization | HeaderName::ProxyAuthorization
+        )
+    }
+
+    /// Return the typed identity for a recognized standard or compact header spelling.
+    ///
+    /// Public constructors can still produce `Other("call-id")`. Security and framing
+    /// boundaries must not let that spelling evade the policy attached to `CallId`, so this
+    /// helper applies the same case-insensitive and compact-name table as [`FromStr`]. Unknown
+    /// extension names remain unchanged.
+    pub fn canonical_wire_name(&self) -> HeaderName {
+        match self {
+            HeaderName::Other(name) => HeaderName::from_str(name).unwrap_or_else(|_| self.clone()),
+            _ => self.clone(),
+        }
+    }
+
+    /// Compare SIP header identities case-insensitively, including standard names smuggled
+    /// through [`HeaderName::Other`] and RFC compact spellings.
+    pub fn wire_eq(&self, other: &HeaderName) -> bool {
+        match (self.canonical_wire_name(), other.canonical_wire_name()) {
+            (HeaderName::Other(left), HeaderName::Other(right)) => {
+                left.eq_ignore_ascii_case(&right)
+            }
+            (left, right) => left == right,
         }
     }
 }
@@ -390,5 +470,46 @@ mod tests {
 
         // Unsupported has no compact form — bare "u" must not land there.
         assert_ne!(HeaderName::from_str("u").unwrap(), HeaderName::Unsupported);
+    }
+
+    #[test]
+    fn canonical_wire_identity_covers_other_case_and_compact_aliases() {
+        for (alias, expected) in [
+            ("CALL-id", HeaderName::CallId),
+            ("I", HeaderName::CallId),
+            ("cSeQ", HeaderName::CSeq),
+            ("V", HeaderName::Via),
+            ("MAX-forwards", HeaderName::MaxForwards),
+            ("L", HeaderName::ContentLength),
+            ("F", HeaderName::From),
+            ("T", HeaderName::To),
+            ("M", HeaderName::Contact),
+            ("C", HeaderName::ContentType),
+            ("ROUTE", HeaderName::Route),
+            ("record-ROUTE", HeaderName::RecordRoute),
+            ("AUTHORIZATION", HeaderName::Authorization),
+            ("proxy-AUTHORIZATION", HeaderName::ProxyAuthorization),
+        ] {
+            let other = HeaderName::Other(alias.to_string());
+            assert_eq!(other.canonical_wire_name(), expected);
+            assert!(other.wire_eq(&expected));
+            assert!(expected.wire_eq(&other));
+        }
+
+        assert!(HeaderName::Other("x-trace".into()).wire_eq(&HeaderName::Other("X-Trace".into())));
+        assert!(!HeaderName::Other("x-trace".into()).wire_eq(&HeaderName::Route));
+    }
+
+    #[test]
+    fn authorization_credentials_recognize_typed_and_other_case_aliases() {
+        for name in [
+            HeaderName::Authorization,
+            HeaderName::ProxyAuthorization,
+            HeaderName::Other("AUTHORIZATION".into()),
+            HeaderName::Other("proxy-Authorization".into()),
+        ] {
+            assert!(name.is_authorization_credentials());
+        }
+        assert!(!HeaderName::Other("X-Authorization-Context".into()).is_authorization_credentials());
     }
 }

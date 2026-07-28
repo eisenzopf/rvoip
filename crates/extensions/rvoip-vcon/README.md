@@ -1,6 +1,6 @@
 # rvoip-vcon
 
-> ⚠️ **Alpha** (`0.1.x`) — early and API-unstable; expect breaking changes before `1.0`.
+> ⚠️ **Experimental surface** (unified `0.3.x` release) — API-unstable; expect breaking changes before `1.0`.
 
 vCon (Virtualized Conversation) document builder + store per the IETF vCon WG draft. Builds + signs the recording artifacts UCTP / SIP / WebRTC adapters reference via Event::RecordingComplete.vcon_ref.
 

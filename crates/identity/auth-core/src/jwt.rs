@@ -13,8 +13,9 @@
 //! primitives are provided as separate validators/building blocks.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
@@ -22,7 +23,10 @@ use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    unix_time_from_seconds, validate_optional_token_id, AuthenticatedPrincipal,
+    AuthenticationMethod, BearerAuthError, BearerValidator, ValidatedBearer,
+};
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
@@ -35,7 +39,7 @@ use crate::providers::{
 /// Both `scope` (space-separated string) and `scopes` (array form) are
 /// accepted to match the variety of issuer conventions in the wild.
 /// Tokens with neither map to an empty scopes Vec.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Claims {
     sub: String,
     #[serde(default)]
@@ -56,12 +60,49 @@ struct Claims {
     realm_access: Option<RoleAccess>,
     #[serde(default)]
     resource_access: Option<HashMap<String, RoleAccess>>,
+    #[serde(default, alias = "tenant", alias = "tid")]
+    tenant_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for Claims {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Claims")
+            .field("subject_present", &!self.sub.is_empty())
+            .field("issuer_present", &self.iss.is_some())
+            .field("issued_at_present", &self.iat.is_some())
+            .field("expires_at_present", &self.exp.is_some())
+            .field("token_id_present", &self.jti.is_some())
+            .field("scope_present", &self.scope.is_some())
+            .field("scope_bytes", &self.scope.as_ref().map_or(0, String::len))
+            .field(
+                "scope_list_count",
+                &self.scopes.as_ref().map_or(0, Vec::len),
+            )
+            .field("role_count", &self.roles.as_ref().map_or(0, Vec::len))
+            .field("realm_access_present", &self.realm_access.is_some())
+            .field(
+                "resource_access_count",
+                &self.resource_access.as_ref().map_or(0, HashMap::len),
+            )
+            .field("tenant_present", &self.tenant_id.is_some())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct RoleAccess {
     #[serde(default)]
     roles: Vec<String>,
+}
+
+impl fmt::Debug for RoleAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleAccess")
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
 }
 
 /// Validate JWTs against a single signing key. Constructed from either
@@ -76,6 +117,7 @@ pub struct JwtValidator {
     decoding_key: DecodingKey,
     validation: Validation,
     revocation_checker: Option<Arc<dyn TokenRevocationChecker>>,
+    require_jti: bool,
 }
 
 impl JwtValidator {
@@ -90,6 +132,7 @@ impl JwtValidator {
             decoding_key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         }
     }
 
@@ -106,6 +149,7 @@ impl JwtValidator {
             decoding_key: DecodingKey::from_secret(secret),
             validation,
             revocation_checker: None,
+            require_jti: false,
         }
     }
 
@@ -120,6 +164,7 @@ impl JwtValidator {
             decoding_key: key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         })
     }
 
@@ -133,6 +178,7 @@ impl JwtValidator {
             decoding_key: key,
             validation,
             revocation_checker: None,
+            require_jti: false,
         })
     }
 
@@ -151,6 +197,16 @@ impl JwtValidator {
     /// cannot participate in revocation checks.
     pub fn with_revocation_checker(mut self, checker: Arc<dyn TokenRevocationChecker>) -> Self {
         self.revocation_checker = Some(checker);
+        self
+    }
+
+    /// Require a non-empty, bounded JWT `jti` even without a revocation store.
+    ///
+    /// Production deployments that use token IDs for replay, lease, or audit
+    /// correlation should enable this policy. Configuring a revocation checker
+    /// already requires `jti` regardless of this setting.
+    pub fn with_required_jti(mut self) -> Self {
+        self.require_jti = true;
         self
     }
 
@@ -198,19 +254,51 @@ impl JwtValidator {
 #[async_trait]
 impl BearerValidator for JwtValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal)
+    }
+
+    async fn validate_credential(&self, token: &str) -> Result<ValidatedBearer, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
         let data = decode::<Claims>(token, &self.decoding_key, &self.validation)
             .map_err(|e| BearerAuthError::Invalid(e.to_string()))?;
         let claims = data.claims;
-        let revocation_context = revocation_context_from_claims(&claims);
+        let token_id = validate_optional_token_id(claims.jti.clone())?;
+        if self.require_jti && token_id.is_none() {
+            return Err(BearerAuthError::Invalid(
+                "token missing required jti".into(),
+            ));
+        }
+        let issued_at = claims
+            .iat
+            .map(|iat| unix_time_from_seconds(iat, "iat"))
+            .transpose()?;
+        let expires_at_system = claims
+            .exp
+            .map(|exp| unix_time_from_seconds(exp, "exp"))
+            .transpose()?;
+        let revocation_context = revocation_context_from_claims(
+            &claims,
+            token_id.as_deref(),
+            issued_at,
+            expires_at_system,
+        );
         check_revocation(
             self.revocation_checker.as_ref(),
             revocation_context.as_ref(),
         )
         .await?;
-        let identity = IdentityId::from_string(claims.sub);
+        let subject = claims.sub.clone();
+        let expires_at = claims.exp.map(expiration_from_unix).transpose()?;
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_claims(
             claims.scope,
             claims.scopes,
@@ -218,12 +306,32 @@ impl BearerValidator for JwtValidator {
             claims.realm_access,
             claims.resource_access,
         );
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
-            scopes,
-        })
+            scopes: scopes.clone(),
+        };
+        ValidatedBearer::new(
+            AuthenticatedPrincipal {
+                subject,
+                tenant: claims.tenant_id,
+                scopes,
+                issuer: claims.iss,
+                expires_at,
+                method: AuthenticationMethod::Jwt,
+                assurance,
+            },
+            token_id,
+            issued_at,
+        )
     }
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<chrono::Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| BearerAuthError::Invalid("token exp is outside the supported range".into()))
 }
 
 async fn check_revocation(
@@ -248,21 +356,18 @@ async fn check_revocation(
     }
 }
 
-fn revocation_context_from_claims(claims: &Claims) -> Option<TokenRevocationContext> {
-    let token_id = claims.jti.clone()?;
-    let mut context = TokenRevocationContext::new(token_id).with_subject(claims.sub.clone());
+fn revocation_context_from_claims(
+    claims: &Claims,
+    token_id: Option<&str>,
+    issued_at: Option<SystemTime>,
+    expires_at: Option<SystemTime>,
+) -> Option<TokenRevocationContext> {
+    let mut context = TokenRevocationContext::new(token_id?).with_subject(claims.sub.clone());
     if let Some(issuer) = claims.iss.clone() {
         context = context.with_issuer(issuer);
     }
-    context = context.with_times(
-        claims.iat.and_then(unix_seconds_to_system_time),
-        claims.exp.and_then(unix_seconds_to_system_time),
-    );
+    context = context.with_times(issued_at, expires_at);
     Some(context)
-}
-
-fn unix_seconds_to_system_time(seconds: u64) -> Option<SystemTime> {
-    UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
 fn scopes_from_claims(
@@ -304,5 +409,62 @@ fn scopes_from_claims(
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "jwt-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_claims_keep_values_out_of_debug() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": CANARY,
+            "iss": CANARY,
+            "iat": 1,
+            "exp": 2,
+            "jti": CANARY,
+            "scope": CANARY,
+            "scopes": [CANARY],
+            "roles": [CANARY],
+            "realm_access": { "roles": [CANARY] },
+            "resource_access": { (CANARY): { "roles": [CANARY] } },
+            "tenant_id": CANARY,
+        }))
+        .unwrap();
+
+        for rendered in [
+            format!("{claims:?}"),
+            format!("{:?}", claims.realm_access.as_ref().unwrap()),
+            format!(
+                "{:?}",
+                claims
+                    .resource_access
+                    .as_ref()
+                    .unwrap()
+                    .get(CANARY)
+                    .unwrap()
+            ),
+        ] {
+            assert!(!rendered.contains(CANARY), "claim leaked: {rendered}");
+        }
+
+        assert_eq!(claims.sub, CANARY);
+        assert_eq!(claims.iss.as_deref(), Some(CANARY));
+        assert_eq!(claims.jti.as_deref(), Some(CANARY));
+        assert_eq!(claims.scope.as_deref(), Some(CANARY));
+        assert_eq!(claims.scopes.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.roles.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.tenant_id.as_deref(), Some(CANARY));
+        assert_eq!(
+            claims.realm_access.as_ref().unwrap().roles,
+            [CANARY.to_string()]
+        );
+        assert_eq!(
+            claims.resource_access.as_ref().unwrap()[CANARY].roles,
+            [CANARY.to_string()]
+        );
     }
 }

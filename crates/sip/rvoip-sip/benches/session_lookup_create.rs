@@ -29,8 +29,9 @@
 use arc_swap::ArcSwapOption;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;
-use rvoip_sip::session_store::SessionStore;
+use rvoip_sip::session_store::{SessionState, SessionStore};
 use rvoip_sip::state_table::{DialogId, Role, SessionId};
+use rvoip_sip::types::CallState;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};
@@ -250,6 +251,32 @@ fn bench_create(c: &mut Criterion) {
             },
         );
     }
+    group.finish();
+}
+
+/// Track the allocation boundary introduced by the COW cold-state split.
+/// The normal call path changes hot signaling/media fields and should retain
+/// the cold block; authentication/registration mutations deliberately pay one
+/// copy so previously published revisions remain immutable.
+fn bench_session_state_clone(c: &mut Criterion) {
+    let mut base = SessionState::new(session_key(0), Role::UAC);
+    base.registration_contact = Some("sip:bench@example.test".into());
+
+    let mut group = c.benchmark_group("session_state_clone");
+    group.bench_function("hot_revision", |b| {
+        b.iter(|| {
+            let mut revision = black_box(&base).clone();
+            revision.call_state = CallState::Active;
+            black_box(revision)
+        });
+    });
+    group.bench_function("cold_revision", |b| {
+        b.iter(|| {
+            let mut revision = black_box(&base).clone();
+            revision.registration_contact = Some("sip:changed@example.test".into());
+            black_box(revision)
+        });
+    });
     group.finish();
 }
 
@@ -477,6 +504,7 @@ criterion_group!(
     bench_uncontended,
     bench_contended_lookup,
     bench_create,
+    bench_session_state_clone,
     bench_session_registry_lookup,
     bench_dialog_callid_key_type,
 );

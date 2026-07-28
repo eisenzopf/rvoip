@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason};
 use rvoip_core::connection::Transport;
+use rvoip_core::error::RvoipError;
 use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
@@ -76,6 +77,11 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
     // transport() + kind() are real per design doc §4.4.
     assert_eq!(adapter.transport(), Transport::Quic);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
+    let lifecycle = adapter.lifecycle_capabilities();
+    assert!(lifecycle.authoritative_liveness);
+    assert!(lifecycle.atomic_inbound_handoff);
+    assert!(lifecycle.terminal_fallback);
+    assert!(!lifecycle.staged_outbound_activation);
 
     let mut events = adapter.subscribe_events();
 
@@ -144,6 +150,10 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
         .expect("timeout waiting for auth.session")
         .expect("inbound closed");
     assert_eq!(session_reply.msg_type, MessageType::AuthSession);
+    let authenticated_participant = session_reply
+        .decode_payload::<auth::AuthSession>()
+        .expect("decode auth.session")
+        .participant_id;
 
     let payload = SessionInvite {
         from: "part_alice".into(),
@@ -180,39 +190,266 @@ async fn adapter_emits_inbound_connection_on_session_invite() {
         break ev;
     };
 
-    match event {
+    let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::Quic);
-            assert_eq!(connection.session_id.as_str(), "sess_adapter_test");
-            assert_eq!(connection.participant_id.as_str(), "part_alice");
-
-            // SP-D: default audio stream is now populated at InboundInvite
-            // time so `Orchestrator::bridge_connections` has something to
-            // bridge.
-            assert_eq!(
-                connection.streams.len(),
-                1,
-                "expected one default audio stream populated at InboundInvite"
+            assert!(
+                connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_adapter_test"),
+                "the safe default must retain the wire ID inside a peer-scoped namespace"
             );
+            assert_ne!(connection.session_id.as_str(), "sess_adapter_test");
             assert_eq!(
-                rvoip_core::stream::MediaStream::kind(connection.streams[0].stream().as_ref()),
-                rvoip_core::stream::StreamKind::Audio
+                connection.participant_id.as_str(),
+                authenticated_participant.as_str()
             );
-            let codec =
-                rvoip_core::stream::MediaStream::codec(connection.streams[0].stream().as_ref());
-            assert_eq!(codec.name, "opus");
 
-            // The adapter's `streams(id)` returns the same stream by id.
+            // Streams are created from negotiated `connection.offer` data,
+            // never synthetically at invite time.
+            assert!(connection.streams.is_empty());
             let via_adapter = adapter
                 .streams(connection.id.clone())
                 .await
                 .expect("streams ok");
-            assert_eq!(via_adapter.len(), 1);
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(via_adapter[0].as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
+            assert!(via_adapter.is_empty());
+            connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),
+    };
+
+    let error = adapter
+        .send_data_message(
+            core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable(
+                "bridgefu.context.v1",
+                "text/plain",
+                "must not leak a core connection ID",
+            ),
+        )
+        .await
+        .expect_err("outbound data before connection.offer must fail");
+    let RvoipError::Adapter(detail) = &error else {
+        panic!("expected typed adapter error, got {error:?}");
+    };
+    assert!(detail.contains("not ready"));
+    assert!(!error.to_string().contains(detail));
+
+    let wire_connection_id = "conn_quic_wire_a";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "quic".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_quic_data_a".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_adapter_test")
+            .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("bind first wire connection");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("event channel closed"),
+                AdapterEvent::Native { kind: "uctp.connection_bound", detail }
+                    if detail == wire_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("first connection binding timeout");
+
+    client
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::SessionInvite,
+            id: "env_inv_other".into(),
+            ts: Utc::now(),
+            cid: Some("conv_y".into()),
+            sid: Some("sess_adapter_other".into()),
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::to_value(SessionInvite {
+                from: "part_alice".into(),
+                to: vec!["part_bob".into()],
+                medium: "voice".into(),
+                intent: "synchronous-engagement".into(),
+                capabilities_offer: serde_json::Value::Object(Default::default()),
+            })
+            .unwrap(),
+            signature: None,
+        })
+        .await
+        .expect("send second invite");
+    let second_core_connection_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AdapterEvent::InboundConnection { connection } =
+                events.recv().await.expect("event channel closed")
+            {
+                if connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_adapter_other")
+                {
+                    break connection.id;
+                }
+            }
+        }
+    })
+    .await
+    .expect("second inbound connection timeout");
+    assert_ne!(second_core_connection_id, core_connection_id);
+
+    let second_wire_connection_id = "conn_quic_wire_b";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "quic".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_quic_data_b".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_adapter_other")
+            .with_connid(second_wire_connection_id),
+        )
+        .await
+        .expect("bind second wire connection");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("event channel closed"),
+                AdapterEvent::Native { kind: "uctp.connection_bound", detail }
+                    if detail == second_wire_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("second connection binding timeout");
+
+    adapter
+        .send_data_message(
+            core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "first route payload"),
+        )
+        .await
+        .expect("send first route data");
+    adapter
+        .send_data_message(
+            second_core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "second route payload"),
+        )
+        .await
+        .expect("send second route data");
+
+    for (cid, sid, connid, body) in [
+        (
+            "conv_x",
+            "sess_adapter_test",
+            wire_connection_id,
+            "first route payload",
+        ),
+        (
+            "conv_y",
+            "sess_adapter_other",
+            second_wire_connection_id,
+            "second route payload",
+        ),
+    ] {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let envelope = inbound.recv().await.expect("client inbound closed");
+                if envelope.msg_type == MessageType::MessageSend {
+                    break envelope;
+                }
+            }
+        })
+        .await
+        .expect("outbound data timeout");
+        let payload = envelope
+            .decode_payload::<rvoip_uctp::payloads::message::MessageSend>()
+            .expect("decode outbound message");
+        assert_eq!(envelope.cid.as_deref(), Some(cid));
+        assert_eq!(envelope.sid.as_deref(), Some(sid));
+        assert_eq!(envelope.connid.as_deref(), Some(connid));
+        assert_eq!(payload.body, body);
     }
+
+    let peer_terminal = UctpEnvelope::new(
+        MessageType::SessionEnd,
+        serde_json::to_value(rvoip_uctp::payloads::session::SessionEnd {
+            by: "part_alice".into(),
+            reason_code: 0,
+            reason: "racing peer terminal".into(),
+        })
+        .expect("terminal payload"),
+    )
+    .with_sid("sess_adapter_test");
+    let (local_end, peer_end) = tokio::join!(
+        adapter.end(core_connection_id.clone(), EndReason::Normal),
+        client.send(peer_terminal),
+    );
+    local_end.expect("local end");
+    peer_end.expect("peer terminal send");
+    assert!(!adapter.is_connection_live(&core_connection_id));
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(AdapterEvent::Ended { connection_id, .. }) = events.recv().await {
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(terminal, core_connection_id);
+    adapter
+        .end(core_connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("repeated end is idempotent");
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Some(AdapterEvent::Ended { connection_id, .. }) if connection_id == core_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "racing terminal must be emitted exactly once"
+    );
+    adapter
+        .end(second_core_connection_id, EndReason::Normal)
+        .await
+        .expect("end second route");
 }

@@ -15,6 +15,8 @@ use rvoip_infra_common::planes::PlaneType;
 use std::any::Any;
 use std::sync::Arc;
 
+use crate::session_registry::SessionRegistryHandle;
+
 /// Event type identifier for session API events on the global coordinator.
 ///
 /// Subscribe with:
@@ -59,4 +61,59 @@ impl CrossCrateEvent for SessionApiCrossCrateEvent {
     fn as_any(&self) -> &dyn Any {
         self
     }
+}
+
+/// Private, single-owner delivery for application events.
+///
+/// This value is sent only through the coordinator-owned bounded control
+/// channel. It deliberately does not implement [`CrossCrateEvent`], so exact
+/// registry authority cannot be published on the observational event bus.
+#[derive(Debug)]
+pub(crate) struct SessionControlEvent {
+    pub(crate) event: crate::api::events::Event,
+    pub(crate) lifecycle_handle: Option<SessionRegistryHandle>,
+}
+
+impl SessionControlEvent {
+    pub(crate) fn new(
+        event: crate::api::events::Event,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        Self {
+            event,
+            lifecycle_handle,
+        }
+    }
+}
+
+/// Return the public, observation-only copy of an application event.
+///
+/// Response transactions, exact obligations, coordinator references, and
+/// lifecycle authority stay exclusively on [`SessionControlEvent`]. Public
+/// event variants and fields remain unchanged for API compatibility.
+pub(crate) fn sanitize_session_api_observation(
+    event: &crate::api::events::Event,
+) -> crate::api::events::Event {
+    let mut observation = event.clone();
+    match &mut observation {
+        crate::api::events::Event::ReferReceived {
+            request: Some(request),
+            ..
+        }
+        | crate::api::events::Event::NotifyReceived {
+            request: Some(request),
+            ..
+        } => request.clear_response_capability(),
+        crate::api::events::Event::InfoReceived { request, .. }
+        | crate::api::events::Event::MessageReceived { request, .. }
+        | crate::api::events::Event::OptionsReceived { request, .. }
+        | crate::api::events::Event::UpdateReceived { request, .. } => {
+            request.clear_response_capability()
+        }
+        crate::api::events::Event::IncomingRegister { register } => {
+            register.mark_control_observation()
+        }
+        _ => {}
+    }
+    observation
 }

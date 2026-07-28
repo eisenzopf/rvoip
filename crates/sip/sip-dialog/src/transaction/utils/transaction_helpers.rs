@@ -52,8 +52,9 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
                         let method = request.method();
                         let key = TransactionKey::new(branch.to_string(), method.clone(), true);
                         debug!(
-                            "🔍 TX_KEY: Generated server key from request {}: {}",
-                            method, key
+                            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method),
+                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
+                            "Generated server transaction key from request"
                         );
                         return Some(key);
                     }
@@ -72,16 +73,16 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
                             let key =
                                 TransactionKey::new(branch.to_string(), cseq.method.clone(), false);
                             info!(
-                                "🔍 TX_KEY: Generated client key from response {} {}: {}",
-                                response.status(),
-                                cseq.method,
-                                key
+                                status=%response.status(),
+                                method=%crate::transaction::safe_diagnostics::SafeMethod::new(&cseq.method),
+                                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
+                                "Generated client transaction key from response"
                             );
                             debug!(
-                                "🔍 TX_KEY: Generated client key from response {} {}: {}",
-                                response.status(),
-                                cseq.method,
-                                key
+                                status=%response.status(),
+                                method=%crate::transaction::safe_diagnostics::SafeMethod::new(&cseq.method),
+                                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
+                                "Generated client transaction key from response"
                             );
                             return Some(key);
                         } else {

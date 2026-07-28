@@ -10,8 +10,8 @@
 .DS_Store
 desktop.ini
 Cargo.lock
+!/Cargo.lock
 publish_order.sh
-bump_version.sh
 # crates.io release tooling — run locally, never tracked in the repo.
 scripts/check-publish-readiness.sh
 scripts/publish-beta.sh
@@ -39,7 +39,6 @@ Session.vim
 .settings/
 .vs/
 .dir-locals.el
-Cargo.lock
 Cargo.backup
 # Editor / sed backups. `.rs-e` is what macOS `sed -i '' ...` produces
 # when you forget `-i .bak` — these crept into the tree historically.
@@ -162,4 +161,3 @@ dhat-heap-*.json
 ## Local release helpers
 /scripts/sync_beta_train_versions.sh
 /scripts/publish_beta_train_0.2.2.sh
-/scripts/publish_train.sh

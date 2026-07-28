@@ -19,8 +19,9 @@ use std::time::Duration;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::Method;
 use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
-use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::{HandshakeAdmissionConfig, Transport, TransportEvent};
 use tempfile::tempdir;
+use tokio::io::AsyncReadExt;
 
 /// Generate a self-signed cert for `localhost` and write it + the key
 /// out as PEM files in a temp dir; return the dir handle (so tempfiles
@@ -257,4 +258,147 @@ async fn tls_server_only_refuses_new_outbound_connections() {
         result.is_err(),
         "server-only TLS transport unexpectedly opened an outbound connection"
     );
+}
+
+fn trusted_client_config(cert_path: &std::path::Path) -> TlsClientConfig {
+    TlsClientConfig {
+        extra_ca_path: Some(cert_path.to_path_buf()),
+        insecure_skip_verify: false,
+        ..Default::default()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_tls_client_hello_does_not_block_another_handshake() {
+    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+    let (server, _events) = TlsTransport::bind_with_handshake_config(
+        loopback_addr(0),
+        &cert_path,
+        &key_path,
+        None,
+        HandshakeAdmissionConfig::new(Duration::from_secs(2), 2),
+    )
+    .await
+    .expect("TLS bind");
+    let address = server.local_addr().unwrap();
+
+    let _slow_peer = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("slow TCP peer");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (client, _client_events) =
+        TlsTransport::client_only(loopback_addr(0), None, trusted_client_config(&cert_path))
+            .await
+            .expect("TLS client");
+    tokio::time::timeout(Duration::from_millis(750), client.connect(address))
+        .await
+        .expect("valid TLS handshake was serialized behind slow peer")
+        .expect("valid TLS handshake");
+
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_handshake_deadline_releases_saturated_admission() {
+    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+    let (server, _events) = TlsTransport::bind_with_handshake_config(
+        loopback_addr(0),
+        &cert_path,
+        &key_path,
+        None,
+        HandshakeAdmissionConfig::new(Duration::from_millis(150), 1),
+    )
+    .await
+    .expect("TLS bind");
+    let address = server.local_addr().unwrap();
+
+    let _slow_peer = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("slow TCP peer");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let (client, _client_events) =
+        TlsTransport::client_only(loopback_addr(0), None, trusted_client_config(&cert_path))
+            .await
+            .expect("TLS client");
+    let connect = tokio::spawn({
+        let client = client;
+        async move {
+            client.connect(address).await?;
+            Ok::<_, rvoip_sip_transport::Error>(client)
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !connect.is_finished(),
+        "second TLS handshake bypassed the configured admission limit"
+    );
+    let client = tokio::time::timeout(Duration::from_secs(1), connect)
+        .await
+        .expect("TLS slot was not released after deadline")
+        .expect("connect task")
+        .expect("valid TLS handshake after timeout");
+
+    client.close().await.unwrap();
+    server.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tls_close_cancels_pending_and_live_peers_then_releases_listener() {
+    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+    let config = HandshakeAdmissionConfig::new(Duration::from_secs(30), 2);
+    let (server_tx, mut server_events) = tokio::sync::mpsc::channel(16);
+    let (server, _unused_events) = TlsTransport::bind_with_handshake_config(
+        loopback_addr(0),
+        &cert_path,
+        &key_path,
+        Some(server_tx),
+        config,
+    )
+    .await
+    .expect("TLS bind");
+    let address = server.local_addr().unwrap();
+
+    let mut slow_peer = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("slow TCP peer");
+    let (client, mut client_events) =
+        TlsTransport::client_only(loopback_addr(0), None, trusted_client_config(&cert_path))
+            .await
+            .expect("TLS client");
+    client.connect(address).await.expect("live TLS peer");
+
+    tokio::time::timeout(Duration::from_millis(500), server.close())
+        .await
+        .expect("TLS close waited for peer or handshake timeout")
+        .expect("TLS close");
+    server.close().await.expect("idempotent TLS close");
+
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_millis(500), slow_peer.read(&mut byte))
+        .await
+        .expect("slow TLS socket remained open");
+    assert!(matches!(read, Ok(0) | Err(_)));
+
+    let closed = tokio::time::timeout(Duration::from_secs(1), client_events.recv())
+        .await
+        .expect("live TLS peer was not closed")
+        .expect("client event channel closed");
+    assert!(matches!(closed, TransportEvent::ConnectionClosed { .. }));
+
+    let (replacement, _replacement_events) =
+        TlsTransport::bind_with_handshake_config(address, &cert_path, &key_path, None, config)
+            .await
+            .expect("rebind released TLS address");
+    replacement.close().await.unwrap();
+
+    // A cancelled live reader or handshake must not emit after close returns.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), server_events.recv())
+            .await
+            .is_err()
+    );
+    client.close().await.unwrap();
 }

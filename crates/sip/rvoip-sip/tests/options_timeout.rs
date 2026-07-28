@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+use rvoip_sip::SessionError;
 
 const TEST_PORT: u16 = 17090;
 // A port nothing is listening on. Loopback IP keeps DNS resolution
@@ -32,15 +33,23 @@ async fn options_with_timeout_returns_within_configured_duration() {
         .await;
     let elapsed = started.elapsed();
 
-    // The send must fail with a timeout-flavored error. We don't pin a
-    // specific variant — dialog-core wraps the timer in a network /
-    // dialog error — but the message must mention "timed out".
+    // Dialog-core currently crosses the adapter boundary as a typed
+    // DialogError with a bounded network-class diagnostic. Inspect the
+    // retained typed field rather than requiring the public Display
+    // representation to expose lower-layer diagnostics. The elapsed-time
+    // bounds below distinguish this configured timeout from other network
+    // failures.
     let err = result.expect_err("OPTIONS to a black-hole address must not return Ok");
-    let msg = err.to_string().to_lowercase();
-    assert!(
-        msg.contains("timed out") || msg.contains("timeout"),
-        "expected timeout in error message; got: {err}"
-    );
+    let detail = match &err {
+        SessionError::DialogError(detail) => detail,
+        other => panic!("expected typed dialog timeout, got {other:?}"),
+    };
+    assert!(detail.contains("class=network"));
+
+    let display = err.to_string();
+    assert!(display.contains("redacted(bytes="));
+    assert!(!display.contains(detail));
+    assert!(!display.contains("class=network"));
 
     // The whole call must complete within ~timeout + small slack
     // budget. Without the per-request timeout, dialog-core defaults

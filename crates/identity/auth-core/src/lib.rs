@@ -21,6 +21,9 @@
 //! ## Bearer and Token Validators
 //!
 //! [`BearerValidator`] is the common async validation trait for Bearer tokens.
+//! Its source-compatible [`BearerValidator::validate_credential`] method
+//! returns [`ValidatedBearer`] when adapters also need a bounded token ID and
+//! issue time for revocation, replay, or lease enforcement.
 //! [`JwtValidator`], [`JwksJwtValidator`], [`OAuth2IntrospectionValidator`],
 //! and [`AAuthValidator`] are concrete validator families that can be plugged
 //! into `rvoip-sip`'s `SipAuthService` for UAS-side SIP Bearer validation.
@@ -56,7 +59,12 @@ pub mod sip_digest;
 pub mod types;
 
 pub use aauth::{AAuthValidator, ActorClaims, ActorTokenValidator};
-pub use bearer::{bearer_stub, BearerAuthError, BearerValidator};
+pub use bearer::{
+    bearer_stub, ensure_principal_active, AuthenticatedPrincipal, AuthenticationMethod,
+    BearerAuthError, BearerValidator, PrincipalOwnershipKey, ValidatedBearer,
+    MAX_BEARER_ISSUER_BYTES, MAX_BEARER_SUBJECT_BYTES, MAX_BEARER_TENANT_BYTES,
+    MAX_BEARER_TOKEN_ID_BYTES,
+};
 pub use dpop::{
     jwk_thumbprint, DpopError, DpopProof, DpopValidator, ValidatedDpop, DEFAULT_IAT_LEEWAY,
     DEFAULT_JTI_CACHE_CAPACITY,
@@ -66,10 +74,11 @@ pub use introspection::OAuth2IntrospectionValidator;
 pub use jwks::{JwksJwtValidator, DEFAULT_JWKS_CACHE_TTL};
 pub use jwt::JwtValidator;
 pub use providers::{
-    ApiKeyVerifier, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,
-    AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter,
-    CredentialAuthError, DigestNonceStatus, DigestReplayStore, DigestSecret, DigestSecretProvider,
-    PasswordVerifier, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
+    ApiKeyVerifier, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent, AuthAuditOutcome,
+    AuthAuditScheme, AuthAuditSink, AuthFailureReason, AuthRateLimitKey, AuthRateLimitKind,
+    AuthRateLimitVerdict, AuthRateLimiter, CredentialAuthError, DigestNonceStatus,
+    DigestReplayStore, DigestSecret, DigestSecretProvider, PasswordVerifier,
+    TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use sig9421::{
     EnvelopeSignature, KeyResolver, Sig9421Error, Sig9421Verifier, StaticKeyResolver,

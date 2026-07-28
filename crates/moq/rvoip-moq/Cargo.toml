@@ -1,0 +1,59 @@
+[package]
+name = "rvoip-moq"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "MOQT/MSF/LOC broadcast adapter for the rvoip media graph"
+
+[features]
+default = []
+# Never enable in production artifacts. This exposes server-auth-only and
+# certificate-verification-disabled relay client construction for local tests.
+insecure-development = []
+relay-admission = ["dep:moq-relay-ietf"]
+relay-runtime = ["relay-admission", "moq-relay-ietf/relay-runtime"]
+
+[dependencies]
+rvoip-core-traits.workspace = true
+rvoip-auth-core.workspace = true
+moq-transport.workspace = true
+moq-native-ietf.workspace = true
+moq-relay-ietf = { workspace = true, optional = true, default-features = false }
+web-transport.workspace = true
+url.workspace = true
+
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+metrics.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+jsonwebtoken = "9.3"
+rand.workspace = true
+rcgen.workspace = true
+tempfile = "3.14"
+time = { version = "0.3.47", features = ["std"] }
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "moq_browser_e2e_server"
+required-features = ["relay-runtime"]
+
+[lints]
+workspace = true

@@ -19,7 +19,11 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::diagnostics;
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportReceiveTiming, TransportType};
+use crate::transport::{
+    safe_method_label, validate_typed_outbound_message, Transport, TransportEvent,
+    TransportReceiveTiming, TransportType,
+};
+use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
@@ -348,7 +352,7 @@ impl UdpTransport {
 
             let events_tx = self.inner.events_tx.clone();
             let shutdown_rx = self.inner.shutdown_rx.clone();
-            worker_handles.push(tokio::spawn(async move {
+            worker_handles.push(crate::transport::runtime::spawn_sip_udp_io(async move {
                 udp_parse_worker(worker_id, rx, events_tx, shutdown_rx).await;
             }));
         }
@@ -363,7 +367,7 @@ impl UdpTransport {
         let events_tx = self.inner.events_tx.clone();
         let round_robin_worker = Arc::clone(&round_robin_worker);
 
-        let handle = tokio::spawn(async move {
+        let handle = crate::transport::runtime::spawn_sip_udp_io(async move {
             let mut last_receive_completed_at: Option<Instant> = None;
             loop {
                 let receive_poll_started = diagnostics::enabled().then(Instant::now);
@@ -545,7 +549,23 @@ async fn process_udp_datagram(
     }
 
     let parse_started = datagram.timing.as_ref().map(|_| Instant::now());
-    let parsed = rvoip_sip_core::parse_message(&datagram.packet);
+    // RFC 3261 section 18.3 requires bytes beyond an explicit Content-Length
+    // to be discarded for message-oriented transports. Snapshot and publish
+    // only the authoritative frame so raw SBC forwarding cannot turn ignored
+    // UDP suffix bytes into a second request on a stream transport.
+    let parsed =
+        match inspect_sip_frame_with_policy(&datagram.packet, SipFramingPolicy::CompleteMessage) {
+            Ok(SipFrameStatus::Complete(frame)) => {
+                let raw_bytes = datagram.packet.slice(..frame.total_bytes);
+                rvoip_sip_core::parse_message(&raw_bytes)
+                    .map(|message| (message, raw_bytes))
+                    .map_err(|error| Error::ParseError(error.to_string()))
+            }
+            Ok(SipFrameStatus::Incomplete { .. }) => {
+                Err(Error::ParseError("incomplete SIP UDP datagram".to_string()))
+            }
+            Err(error) => Err(Error::ParseError(error.to_string())),
+        };
     if let (Some(started), Some(timing)) = (parse_started, datagram.timing.as_mut()) {
         let now = Instant::now();
         diagnostics::record_udp_parse(now.duration_since(started));
@@ -553,7 +573,7 @@ async fn process_udp_datagram(
     }
 
     let event = match parsed {
-        Ok(message) => {
+        Ok((message, raw_bytes)) => {
             diagnostics::record_udp_parse_ok();
             diagnostics::record_inbound_message(&message, datagram.source, datagram.local_addr);
             TransportEvent::MessageReceived {
@@ -561,13 +581,19 @@ async fn process_udp_datagram(
                 source: datagram.source,
                 destination: datagram.local_addr,
                 transport_type: TransportType::Udp,
-                raw_bytes: Some(datagram.packet),
+                flow_id: None,
+                raw_bytes: Some(raw_bytes),
                 timing: datagram.timing,
+                connection_metadata: None,
             }
         }
         Err(e) => {
             diagnostics::record_udp_parse_failed();
-            warn!("Error parsing SIP message: {}", e);
+            debug!(
+                error_class = "malformed-sip-datagram",
+                error_bytes = e.to_string().len(),
+                "Discarding malformed SIP UDP datagram"
+            );
             TransportEvent::Error {
                 error: format!("Error parsing SIP message: {}", e),
             }
@@ -576,6 +602,12 @@ async fn process_udp_datagram(
 
     match events_tx.try_send(event) {
         Ok(()) => {}
+        Err(TrySendError::Full(TransportEvent::Error { .. })) => {
+            // Parse diagnostics are lossy by design. They must never occupy
+            // the reserved lifecycle lane or backpressure UDP parsing so a
+            // malformed-datagram flood cannot suppress later valid SIP.
+            trace!("Dropping UDP parse diagnostic under event backpressure");
+        }
         Err(TrySendError::Full(event)) => {
             let started = Instant::now();
             if let Err(e) = events_tx.send(event).await {
@@ -624,6 +656,7 @@ impl Transport for UdpTransport {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(&message)?;
 
         // Convert message to bytes
         let bytes = message.to_bytes();
@@ -632,7 +665,7 @@ impl Transport for UdpTransport {
         info!(
             "Sending {} message to {}",
             if let Message::Request(ref req) = message {
-                format!("{}", req.method)
+                safe_method_label(&req.method).to_string()
             } else {
                 "response".to_string()
             },
@@ -749,6 +782,9 @@ impl fmt::Debug for UdpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::{Method, Response, StatusCode};
 
     #[tokio::test]
     async fn bind_uses_default_mtu_threshold() {
@@ -820,5 +856,152 @@ mod tests {
                 first
             );
         }
+    }
+
+    #[tokio::test]
+    async fn udp_complete_datagram_uses_missing_content_length_boundary_as_body() {
+        let packet = Bytes::from_static(
+            b"MESSAGE sip:service.example SIP/2.0\r\nVia : SIP/2.0/UDP edge.example\r\n\r\nbody",
+        );
+        let source = "127.0.0.1:5060".parse().unwrap();
+        let local_addr = "127.0.0.1:5061".parse().unwrap();
+        let datagram = UdpDatagram {
+            packet: packet.clone(),
+            source,
+            local_addr,
+            timing: None,
+        };
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+
+        process_udp_datagram(0, datagram, &events_tx).await;
+
+        let event = events_rx.recv().await.expect("UDP parse event");
+        let TransportEvent::MessageReceived {
+            message, raw_bytes, ..
+        } = event
+        else {
+            panic!("message event expected");
+        };
+        let Message::Request(request) = message else {
+            panic!("request expected");
+        };
+        assert_eq!(request.body(), b"body");
+        assert_eq!(raw_bytes.as_deref(), Some(packet.as_ref()));
+    }
+
+    #[tokio::test]
+    async fn udp_discards_bytes_beyond_content_length_from_raw_snapshot() {
+        let first = Bytes::from_static(
+            b"OPTIONS sip:service.example SIP/2.0\r\nVia: SIP/2.0/UDP edge.example\r\nContent-Length: 0\r\n\r\n",
+        );
+        let suffix = b"BYE sip:service.example SIP/2.0\r\nContent-Length: 0\r\n\r\n";
+        let mut packet = first.to_vec();
+        packet.extend_from_slice(suffix);
+        let datagram = UdpDatagram {
+            packet: Bytes::from(packet),
+            source: "127.0.0.1:5060".parse().unwrap(),
+            local_addr: "127.0.0.1:5061".parse().unwrap(),
+            timing: None,
+        };
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+
+        process_udp_datagram(0, datagram, &events_tx).await;
+
+        let TransportEvent::MessageReceived { raw_bytes, .. } =
+            events_rx.recv().await.expect("UDP parse event")
+        else {
+            panic!("message event expected");
+        };
+        assert_eq!(raw_bytes.as_deref(), Some(first.as_ref()));
+        assert!(!raw_bytes.unwrap().windows(3).any(|window| window == b"BYE"));
+    }
+
+    #[tokio::test]
+    async fn typed_send_rejects_unsafe_fields_but_raw_send_remains_verbatim() {
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture bind");
+        let destination = capture.local_addr().expect("capture address");
+        let (transport, _events) = UdpTransport::bind("127.0.0.1:0".parse().unwrap(), None)
+            .await
+            .expect("transport bind");
+        let malicious = |name| {
+            TypedHeader::Other(
+                name,
+                HeaderValue::Raw(b"Bearer safe\r\nX-Injected: udp".to_vec()),
+            )
+        };
+
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(malicious(HeaderName::Authorization));
+        let mut response = Response::new(StatusCode::Ok);
+        response
+            .headers
+            .push(malicious(HeaderName::Other("PROXY-authorization".into())));
+        let mut malformed_name = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        malformed_name.headers.push(TypedHeader::Other(
+            HeaderName::Other("X-Context: injected".into()),
+            HeaderValue::Raw(b"udp-name-secret".to_vec()),
+        ));
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: udp-reason-secret");
+        let mut duplicate_structural =
+            SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+                .unwrap()
+                .build();
+        duplicate_structural.headers.extend([
+            TypedHeader::Other(
+                HeaderName::CallId,
+                HeaderValue::Raw(b"first-call-id".to_vec()),
+            ),
+            TypedHeader::Other(
+                HeaderName::Other("I".into()),
+                HeaderValue::Raw(b"second-call-id".to_vec()),
+            ),
+        ]);
+
+        for message in [
+            Message::Request(request),
+            Message::Response(response),
+            Message::Request(malformed_name),
+            Message::Response(invalid_reason),
+            Message::Request(duplicate_structural),
+        ] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed UDP send must reject unsafe fields");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
+        let mut buffer = [0u8; 256];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                capture.recv_from(&mut buffer),
+            )
+            .await
+            .is_err(),
+            "rejected typed messages must emit no datagram",
+        );
+
+        let raw = Bytes::from_static(b"Authorization: raw\r\nX-Verbatim: retained\r\n");
+        transport
+            .send_message_raw(raw.clone(), destination)
+            .await
+            .expect("explicit raw send remains available");
+        let (received, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            capture.recv_from(&mut buffer),
+        )
+        .await
+        .expect("raw datagram timeout")
+        .expect("raw datagram receive");
+        assert_eq!(&buffer[..received], raw.as_ref());
+        transport.close().await.ok();
     }
 }

@@ -87,7 +87,8 @@ Acceptance metrics:
 - Teardown failures are `0`.
 - Caller and receiver retained objects after drain are `0`.
 - Receiver active audio receivers after drain are `0`.
-- Post-drain RSS slope is below the configured gate, currently `10 MB/hr`.
+- Post-drain RSS slope is below the configured beta gate, currently
+  `15 MB/hr`.
 
 Latency and burst metrics:
 

@@ -98,6 +98,14 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the bound for active and retained SIP lifecycle records.
+    pub fn with_server_retained_lifecycle_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_server_retained_lifecycle_capacity(capacity);
+        self
+    }
+
     /// Set the server-side inbound call admission limit.
     pub fn with_server_call_admission_limit(mut self, limit: usize) -> Self {
         self.config = self.config.with_server_call_admission_limit(limit);
@@ -431,6 +439,7 @@ mod tests {
         let builder = SessionBuilder::new()
             .with_channel_capacity(256)
             .with_server_capacity(128)
+            .with_server_retained_lifecycle_capacity(1024)
             .with_server_call_admission_limit(512)
             .with_server_call_admission_soft_limit(480)
             .with_server_call_admission_pacing_delay_ms(2)
@@ -459,6 +468,10 @@ mod tests {
             Some(4096)
         );
         assert_eq!(builder.config.server_call_capacity, Some(128));
+        assert_eq!(
+            builder.config.server_retained_lifecycle_capacity,
+            Some(1024)
+        );
         assert_eq!(builder.config.server_call_admission_limit, Some(512));
         assert_eq!(builder.config.server_call_admission_soft_limit, Some(480));
         assert_eq!(
@@ -513,10 +526,12 @@ mod tests {
             recv_buffer_size: 2048,
             rtcp_recv_buffer_size: 1024,
         };
-        let mut media_config = MediaSessionControllerConfig::default();
-        media_config.rtp_buffer_size = 960;
-        media_config.rtp_buffer_initial_count = 4;
-        media_config.rtp_buffer_max_count = 16;
+        let media_config = MediaSessionControllerConfig {
+            rtp_buffer_size: 960,
+            rtp_buffer_initial_count: 4,
+            rtp_buffer_max_count: 16,
+            ..Default::default()
+        };
 
         let builder = SessionBuilder::new()
             .with_media_session_controller_config(media_config)

@@ -4,7 +4,8 @@
 
 use rvoip_sip::{
     Config, MediaMode, MediaSessionControllerConfig, PerformanceConfig, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, SipContactMode, SipTlsMode,
+    RtpTransportBufferConfig, SessionError, SipContactMode, SipNatConfig, SipTlsMode,
+    SymmetricRtpPolicy,
 };
 use rvoip_sip_transport::UdpParseDispatch;
 use std::net::{IpAddr, SocketAddr};
@@ -129,10 +130,12 @@ fn test_config_graduated_perf_knobs_are_configurable() {
         recv_buffer_size: 2048,
         rtcp_recv_buffer_size: 1024,
     };
-    let mut media_controller_config = MediaSessionControllerConfig::default();
-    media_controller_config.rtp_buffer_size = 960;
-    media_controller_config.rtp_buffer_initial_count = 8;
-    media_controller_config.rtp_buffer_max_count = 32;
+    let media_controller_config = MediaSessionControllerConfig {
+        rtp_buffer_size: 960,
+        rtp_buffer_initial_count: 8,
+        rtp_buffer_max_count: 32,
+        ..Default::default()
+    };
 
     let c = Config::local("alice", 5060)
         .with_auto_180_ringing(false)
@@ -230,6 +233,49 @@ fn test_config_signaling_only_server_high_performance_recipe() {
 }
 
 #[test]
+fn test_carrier_burst_recipes_provision_dialog_causal_lanes() {
+    let balanced = Config::local("bob", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-balanced").with_capacity(8_500),
+        )
+        .unwrap();
+    let high_density = Config::local("bob", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-high-density").with_capacity(12_500),
+        )
+        .unwrap();
+
+    assert_eq!(balanced.sip_dialog_dispatch_workers, Some(16));
+    assert_eq!(high_density.sip_dialog_dispatch_workers, Some(32));
+}
+
+#[test]
+fn test_carrier_burst_uac_high_density_provisions_existing_delivery_lanes_only() {
+    let c = Config::local("alice", 5060)
+        .try_with_performance_config(
+            PerformanceConfig::profile("carrier-burst-uac-high-density").with_capacity(782),
+        )
+        .unwrap();
+
+    assert_eq!(c.sip_udp_parse_workers, Some(4));
+    assert_eq!(c.sip_udp_parse_queue_capacity, Some(782));
+    assert_eq!(c.sip_udp_parse_dispatch, Some(UdpParseDispatch::RoundRobin));
+    assert_eq!(c.sip_transaction_dispatch_workers, Some(4));
+    assert_eq!(c.sip_transaction_dispatch_queue_capacity, Some(782));
+    assert_eq!(c.sip_dialog_dispatch_workers, Some(8));
+    assert_eq!(c.sip_dialog_dispatch_queue_capacity, Some(782));
+    assert_eq!(c.session_event_dispatcher_workers, 16);
+    assert_eq!(c.session_event_dispatcher_channel_capacity, 782);
+    assert_eq!(c.sip_transaction_command_channel_capacity, Some(512));
+    assert!(!c.fast_auto_accept_incoming_calls);
+    assert_eq!(c.server_call_capacity, None);
+    assert_eq!(c.server_call_admission_limit, None);
+    assert_eq!(c.server_call_admission_soft_limit, None);
+    assert_eq!(c.active_call_no_media_timeout_secs, 0);
+    assert_eq!(c.active_call_media_idle_timeout_secs, 0);
+}
+
+#[test]
 fn test_config_profile_defaults_can_be_overridden_after_profile() {
     let c = Config::local("alice", 5060)
         .with_pbx_media_server_performance(2_000)
@@ -247,7 +293,11 @@ fn test_config_profile_rejects_invalid_capacity() {
     let err = Config::local("alice", 5060)
         .try_with_performance_config(PerformanceConfig::pbx_media_server(0))
         .unwrap_err();
-    assert!(err.to_string().contains("capacity"));
+    let SessionError::ConfigError(detail) = &err else {
+        panic!("expected typed ConfigError, got {err:?}");
+    };
+    assert!(detail.contains("capacity"));
+    assert!(!err.to_string().contains(detail));
 }
 
 #[test]
@@ -368,6 +418,48 @@ fn test_config_lan_pbx_profile_sets_advertised_addresses() {
         0,
         "LAN PBX media public address must not reuse the SIP port; SDP should advertise the allocated RTP port"
     );
+}
+
+#[test]
+fn advertised_address_builders_separate_private_bind_and_public_wire_addresses() {
+    let signaling: SocketAddr = "203.0.113.10:5060".parse().unwrap();
+    let media: SocketAddr = "203.0.113.10:0".parse().unwrap();
+    let c = Config::on("bridge", "10.0.0.10".parse().unwrap(), 5060)
+        .with_sip_advertised_addr(signaling)
+        .with_media_public_addr(media);
+
+    assert_eq!(c.bind_addr, "10.0.0.10:5060".parse().unwrap());
+    assert_eq!(c.sip_advertised_addr, Some(signaling));
+    assert_eq!(c.media_public_addr, Some(media));
+    c.validate().expect("valid split bind/advertise config");
+
+    // Config diagnostics expose only presence, never routable addresses.
+    let rendered = format!("{c:?}");
+    assert!(rendered.contains("media_public_address_configured: true"));
+    assert!(!rendered.contains("203.0.113.10"));
+    assert!(!rendered.contains("10.0.0.10"));
+}
+
+#[test]
+fn unspecified_advertised_addresses_fail_startup_validation() {
+    let signaling =
+        Config::local("bridge", 5060).with_sip_advertised_addr("0.0.0.0:5060".parse().unwrap());
+    assert!(signaling.validate().is_err());
+
+    let media = Config::local("bridge", 5060).with_media_public_addr("0.0.0.0:0".parse().unwrap());
+    assert!(media.validate().is_err());
+}
+
+#[test]
+fn nat_policy_is_a_source_compatible_sidecar() {
+    let policy = SymmetricRtpPolicy {
+        probation_packets: 5,
+        max_rebindings: 1,
+        ..SymmetricRtpPolicy::default()
+    };
+    let nat = SipNatConfig::default().with_symmetric_rtp_policy(policy);
+    assert_eq!(nat.symmetric_rtp, policy);
+    assert_eq!(Config::local("bridge", 5060).sip_port, 5060);
 }
 
 #[test]

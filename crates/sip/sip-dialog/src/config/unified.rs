@@ -311,7 +311,8 @@ impl DialogManagerConfig {
         self.dialog_config().use_100rel
     }
 
-    /// Check if automatic REGISTER response is enabled
+    /// Check whether the legacy auto-REGISTER compatibility flag is set.
+    /// Dialog-core rejects this mode with 501 because it has no binding store.
     pub fn auto_register_enabled(&self) -> bool {
         match self {
             DialogManagerConfig::Client(_) => false,
@@ -385,7 +386,8 @@ pub struct ServerBehavior {
     /// Enable automatic OPTIONS response
     pub auto_options_response: bool,
 
-    /// Enable automatic REGISTER response
+    /// Legacy auto-REGISTER flag. It produces an honest 501 response; install
+    /// an authoritative registrar handler to accept registrations.
     pub auto_register_response: bool,
 }
 
@@ -422,7 +424,8 @@ pub struct HybridBehavior {
     /// Enable automatic OPTIONS response
     pub auto_options_response: bool,
 
-    /// Enable automatic REGISTER response
+    /// Legacy auto-REGISTER flag. It produces an honest 501 response; install
+    /// an authoritative registrar handler to accept registrations.
     pub auto_register_response: bool,
 }
 
@@ -519,7 +522,7 @@ impl ServerConfigBuilder {
         self
     }
 
-    /// Enable automatic REGISTER responses
+    /// Set the legacy auto-REGISTER flag (REGISTER is rejected with 501).
     pub fn with_auto_register(mut self) -> Self {
         self.behavior.auto_register_response = true;
         self
@@ -595,7 +598,7 @@ impl HybridConfigBuilder {
         self
     }
 
-    /// Enable automatic REGISTER responses
+    /// Set the legacy auto-REGISTER flag (REGISTER is rejected with 501).
     pub fn with_auto_register(mut self) -> Self {
         self.behavior.auto_register_response = true;
         self

@@ -31,7 +31,7 @@ use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use moka::future::Cache;
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
+use std::fmt;
 
 /// Default `iat` window: a proof JWT issued more than this far in the
 /// past (or future) is rejected. RFC 9449 recommends "small" (single-
@@ -45,36 +45,57 @@ pub const DEFAULT_IAT_LEEWAY: Duration = Duration::from_secs(60);
 /// LRU eviction.
 pub const DEFAULT_JTI_CACHE_CAPACITY: u64 = 100_000;
 
-#[derive(Debug, Error)]
 pub enum DpopError {
-    #[error("dpop proof header invalid: {0}")]
     Header(String),
-
-    #[error("dpop proof signature failed: {0}")]
     Signature(String),
-
-    #[error("dpop proof claims invalid: {0}")]
     Claims(String),
-
-    #[error("dpop proof iat outside leeway window")]
     IatOutOfWindow,
-
-    #[error("dpop proof jti replayed")]
     Replayed,
-
-    #[error("unsupported jwk kty: {0}")]
     UnsupportedKty(String),
-
-    #[error("jwk missing required field: {0}")]
     MissingJwkField(&'static str),
 }
+
+impl DpopError {
+    fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::Header(_) => "header",
+            Self::Signature(_) => "signature",
+            Self::Claims(_) => "claims",
+            Self::IatOutOfWindow => "iat-window",
+            Self::Replayed => "replay",
+            Self::UnsupportedKty(_) => "unsupported-key-type",
+            Self::MissingJwkField(_) => "missing-key-field",
+        }
+    }
+}
+
+impl fmt::Display for DpopError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "DPoP validation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for DpopError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DpopError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for DpopError {}
 
 /// Standard DPoP-Proof JWT claims (RFC 9449 §4.2).
 ///
 /// `htm` / `htu` are echoed back so callers can apply method-binding
 /// at their layer (this crate doesn't enforce them itself because
 /// UCTP doesn't have an HTTP method/URI by default — see module docs).
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct DpopProof {
     /// Replay-protection nonce. Required.
     pub jti: String,
@@ -93,14 +114,37 @@ pub struct DpopProof {
     pub ath: Option<String>,
 }
 
+impl fmt::Debug for DpopProof {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DpopProof")
+            .field("jti_present", &!self.jti.is_empty())
+            .field("method_present", &!self.htm.is_empty())
+            .field("uri_present", &!self.htu.is_empty())
+            .field("issued_at_present", &true)
+            .field("access_token_hash_present", &self.ath.is_some())
+            .finish()
+    }
+}
+
 /// One-shot validation result. Carries the RFC 7638 SHA-256
 /// thumbprint of the public key the client used to sign the proof —
 /// the caller compares this against the access token's `cnf.jkt`
 /// claim to complete the DPoP binding.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ValidatedDpop {
     pub jkt: String,
     pub proof: DpopProof,
+}
+
+impl fmt::Debug for ValidatedDpop {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ValidatedDpop")
+            .field("thumbprint_present", &!self.jkt.is_empty())
+            .field("proof", &self.proof)
+            .finish()
+    }
 }
 
 /// Validate DPoP-Proof JWTs against the embedded `jwk` header. The

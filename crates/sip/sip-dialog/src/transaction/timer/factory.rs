@@ -132,9 +132,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_a(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::A, self.settings.t1)
+            .start_timer_detached(transaction_id, TimerType::A, self.settings.t1)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer B for an INVITE client transaction (transaction timeout).
@@ -150,13 +149,12 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_b(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(
+            .start_timer_detached(
                 transaction_id,
                 TimerType::B,
                 self.settings.transaction_timeout,
             )
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer D for an INVITE client transaction (wait for response retransmissions).
@@ -172,9 +170,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_d(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::D, self.settings.wait_time_d)
+            .start_timer_detached(transaction_id, TimerType::D, self.settings.wait_time_d)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer E for a non-INVITE client transaction (initial retransmission timer).
@@ -190,9 +187,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_e(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::E, self.settings.t1)
+            .start_timer_detached(transaction_id, TimerType::E, self.settings.t1)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer F for a non-INVITE client transaction (transaction timeout).
@@ -208,13 +204,12 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_f(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(
+            .start_timer_detached(
                 transaction_id,
                 TimerType::F,
                 self.settings.transaction_timeout,
             )
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer G for an INVITE server transaction (2xx response retransmission).
@@ -230,9 +225,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_g(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::G, self.settings.t1)
+            .start_timer_detached(transaction_id, TimerType::G, self.settings.t1)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer H for an INVITE server transaction (wait for ACK after 2xx).
@@ -249,9 +243,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_h(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::H, self.settings.wait_time_h)
+            .start_timer_detached(transaction_id, TimerType::H, self.settings.wait_time_h)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer I for an INVITE server transaction (wait in Confirmed state after ACK).
@@ -268,9 +261,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_i(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::I, self.settings.wait_time_i)
+            .start_timer_detached(transaction_id, TimerType::I, self.settings.wait_time_i)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer J for a non-INVITE server transaction (wait for request retransmissions).
@@ -287,9 +279,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the non-INVITE server transaction
     pub async fn schedule_timer_j(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::J, self.settings.wait_time_j)
+            .start_timer_detached(transaction_id, TimerType::J, self.settings.wait_time_j)
             .await
-            .map(|_| ())
     }
 
     /// Schedules Timer K for a non-INVITE client transaction (wait for response retransmissions).
@@ -306,9 +297,8 @@ impl TimerFactory {
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_k(&self, transaction_id: TransactionKey) -> Result<()> {
         self.timer_manager
-            .start_timer(transaction_id, TimerType::K, self.settings.wait_time_k)
+            .start_timer_detached(transaction_id, TimerType::K, self.settings.wait_time_k)
             .await
-            .map(|_| ())
     }
 
     // --- Transaction State Timer Combinations ---
@@ -524,41 +514,33 @@ mod tests {
     // and assume TimerManager calls are correct if parameters to factory methods are correct.
     // For more rigorous tests of interaction, TimerManager would need a trait.
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_schedule_timer_a() {
         let settings = TimerSettings {
             t1: Duration::from_millis(100),
             ..Default::default()
         };
-        // For this test, we need to see what TimerFactory *would* call on TimerManager.
-        // We'll use a real TimerManager but won't check its internal state, only that factory uses correct values.
-        let tm = Arc::new(TimerManager::new(None)); // Corrected: TimerManager::new takes Option<TimerSettings>
+        let tm = Arc::new(TimerManager::new(None));
         let factory = TimerFactory::new(Some(settings), tm.clone());
         let tx_key = dummy_tx_key("timer_a");
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(1);
+        tm.register_transaction(tx_key.clone(), command_tx).await;
 
-        // We can't easily inspect what start_timer was called with on the real TimerManager.
-        // The test should be structured to use the MockTimerManager defined above.
-        // For this, TimerFactory should take an Arc that *could be* Arc<MockTimerManager>
-        // if MockTimerManager implemented the necessary trait or was the same type.
-        // Let's refine the mock strategy.
+        factory
+            .schedule_timer_a(tx_key)
+            .await
+            .expect("registered Timer A schedule");
+        tokio::time::advance(Duration::from_millis(99)).await;
+        assert!(matches!(
+            command_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
 
-        // Refined Mock Strategy: Create a MockTimerManager that can be wrapped in Arc for factory
-        // and whose methods can be called.
-        let mock_tm = Arc::new(MockTimerManager::new());
-        // We need to cast Arc<MockTimerManager> to Arc<TimerManager> or make TimerFactory generic.
-        // Let's assume TimerFactory could be generic for its TimerManager for robust testing:
-        // pub struct TimerFactory<TM: TimerManagerLike> { timer_manager: Arc<TM> }
-        // Or, if TimerManager is simple enough, mock its fields directly.
-
-        // Given the current concrete TimerManager, we test by side effects if possible,
-        // or trust the parameters passed. Let's proceed by creating a full TimerFactory
-        // and testing its methods. We won't be able to assert calls on the *real* TimerManager easily.
-        // So, the tests below will verify the *logic* within TimerFactory methods assuming TimerManager works.
-
-        let factory_for_a = TimerFactory::new(Some(settings), Arc::new(TimerManager::new(None))); // Use real TM for now
-        let res_a = factory_for_a.schedule_timer_a(tx_key.clone()).await;
-        assert!(res_a.is_ok()); // Asserts that start_timer itself didn't fail for some reason.
-                                // Does not verify parameters easily.
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "A"
+        ));
     }
 
     // To properly test interactions, TimerManager needs to be mockable.
@@ -626,43 +608,64 @@ mod tests {
     // The best we can do without changing TimerFactory structure is to check that the results are Ok,
     // implying the call to TimerManager didn't immediately fail.
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn test_schedule_timers_with_mock_manager_if_possible() {
-        // This test demonstrates how it *would* work if TimerFactory took Arc<dyn TimerManagerActions>
-        // or was generic. Since it takes Arc<TimerManager>, we can't directly inject MockTimerManager
-        // without changing TimerFactory or TimerManager structure (e.g. TimerManager implementing a trait).
-
-        // For the current structure, we'll test that the factory *attempts* to schedule with correct values
-        // by checking the TimerSettings it uses. The interaction with TimerManager is harder to verify.
-
         let settings = TimerSettings::default();
-        let mock_tm = Arc::new(MockTimerManager::new());
-
-        // To use this mock_tm, TimerFactory::new would need to accept Arc<MockTimerManager>
-        // or Arc<dyn TimerManagerActions>.
-        // Let's proceed assuming we are checking the factory's internal logic of choosing durations.
-
-        let factory = TimerFactory::new(Some(settings.clone()), Arc::new(TimerManager::new(None))); // Using real TM
+        let timer_manager = Arc::new(TimerManager::new(None));
+        let factory = TimerFactory::new(Some(settings.clone()), timer_manager.clone());
         let tx_key_a = dummy_tx_key("timer_a_logic");
         let tx_key_b = dummy_tx_key("timer_b_logic");
-
-        // This test would be more meaningful if we could assert calls on a mock.
-        // Example: test that schedule_timer_a uses settings.t1
-        // We can't directly verify the duration passed to tm.start_timer without a mock.
-        // The current test will just ensure it runs without panic.
-        assert!(factory.schedule_timer_a(tx_key_a.clone()).await.is_ok());
-        assert!(factory.schedule_timer_b(tx_key_b.clone()).await.is_ok());
-
-        // Test a combination method
         let tx_key_combo = dummy_tx_key("combo_logic");
-        let res_combo = factory
-            .schedule_invite_client_initial_timers(tx_key_combo.clone())
+        let (timer_a_tx, mut timer_a_rx) = tokio::sync::mpsc::channel(1);
+        let (timer_b_tx, mut timer_b_rx) = tokio::sync::mpsc::channel(1);
+        let (combo_tx, mut combo_rx) = tokio::sync::mpsc::channel(2);
+        timer_manager
+            .register_transaction(tx_key_a.clone(), timer_a_tx)
             .await;
-        assert!(res_combo.is_ok());
+        timer_manager
+            .register_transaction(tx_key_b.clone(), timer_b_tx)
+            .await;
+        timer_manager
+            .register_transaction(tx_key_combo.clone(), combo_tx)
+            .await;
 
-        // Test cancel
-        let res_cancel = factory.cancel_all_timers(&tx_key_combo).await;
-        assert!(res_cancel.is_ok());
+        factory
+            .schedule_timer_a(tx_key_a)
+            .await
+            .expect("registered Timer A schedule");
+        factory
+            .schedule_timer_b(tx_key_b)
+            .await
+            .expect("registered Timer B schedule");
+        factory
+            .schedule_invite_client_initial_timers(tx_key_combo.clone())
+            .await
+            .expect("registered combined Timer A/B schedule");
+        factory
+            .cancel_all_timers(&tx_key_combo)
+            .await
+            .expect("cancel combined timers");
+
+        tokio::time::advance(settings.t1).await;
+        assert!(matches!(
+            timer_a_rx.recv().await,
+            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "A"
+        ));
+        assert!(matches!(
+            timer_b_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        tokio::time::advance(settings.transaction_timeout - settings.t1).await;
+        assert!(matches!(
+            timer_b_rx.recv().await,
+            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "B"
+        ));
+        assert!(matches!(
+            combo_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                | Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     // More focused tests using a mock manager if TimerFactory were adapted:

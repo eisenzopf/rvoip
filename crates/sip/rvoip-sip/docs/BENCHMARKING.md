@@ -32,6 +32,29 @@ cargo test -p rvoip-sip --features perf-tests --release \
     --test perf_call_setup_cps -- --nocapture
 ```
 
+For the fixed in-process 2,000-CPS beta control and its matching CPU, timing,
+and memory captures, use
+`scripts/perf_call_setup_2k_profile.sh <clean|cpu|timing|memory>`. The script
+resolves the exact executable from Cargo JSON, fixes the canonical runtime
+profile, isolates each run's report, and writes a provenance manifest. `clean`
+first conditions the same booted peers at `30,100,300,1000` CPS, then measures
+the 2,000-CPS point. This reproduces the reviewed beta sweep's allocator and
+retention state instead of comparing a cold process with a warmed fifth point.
+After the measured calls drain, it allows 95 seconds for the structural
+anti-reuse fence and allocator settling, then measures a separate 600-second
+RSS gate window. The clean artifact embeds the raw resource samples needed to
+audit that window, without endpoint diagnostic scans in the active or RSS gate
+windows. `clean` also verifies the exact workload/configuration, runs
+`scripts/perf_2k_acceptance.py` against the absolute beta limits, and gates
+`perf_audit.py --fail-on-regression` against the reviewed `20260706T181609Z`
+baseline tracked under `perf-baselines/`. The runner snapshots that input into
+each run and records its relative path and SHA-256. An explicit
+`RVOIP_PERF_REVIEWED_BASELINE` may only relocate the byte-identical reviewed
+input and requires the matching `RVOIP_PERF_REVIEWED_BASELINE_SHA256`; it
+cannot select different comparison data for release evidence. Only a `PASS`
+clean manifest is acceptance evidence; see
+[`PROFILING.md`](PROFILING.md#canonical-2000-cps-reproduction).
+
 Enable diagnostic features only for targeted investigation runs:
 
 | Feature | Adds |
@@ -56,40 +79,23 @@ across commits to track regressions.
 All generated benchmark artifacts live under the workspace root
 `target/perf-results/`. `crates/target/` is not a valid output location.
 
-## Clean Beta Comparison: 2026-06-15
+## Current beta candidate evidence
 
-The 2026-06-15 clean beta run is packaged at
-`beta-report/20260615T105337Z`. It used the clean `perf-tests` feature set,
-`BETA_SIPP_DIAGNOSTICS=0`, `RVOIP_PERF_MEMORY_DIAGNOSTICS=0`, and
-`RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0`. No media/RTP/infra diagnostic features,
-RTP/audio pacing default, or shared RTP TX scheduler default were enabled.
+The canonical current values are generated from clean full run
+`20260724T231400Z` and published in the
+[Beta Performance Report](BETA_PERFORMANCE_REPORT.md). That report contains:
 
-Use `20260612T211608Z` as the comparison baseline for this RCA, not the
-diagnostic-contaminated `20260615T030513Z` run.
+- all three canonical 2,000-CPS runs;
+- every endpoint, PBX-media-server, and signaling-only profile-matrix point;
+- the 160-CPS high-density full-delivery burst and every tracked threshold;
+- monolithic and split one-hour soak results;
+- regression status and all 59 packaged performance JSON artifacts.
 
-| Standard beta gate | 20260612 baseline | 20260615 clean fix run | Read |
-| --- | --- | --- | --- |
-| Full beta result | `0` failures, `0` skips | `0` failures, `0` skips | Pass |
-| `pbx-media-server` @ 1000 CPS | p99 `12.4 ms`, ASR `1.0000`, no knee | p99 `13.0 ms`, ASR `1.0000`, no knee | Recovered |
-| `pbx-media-server` headline | `1857.1` achieved CPS @ target `2000`, p99 `12.7 ms` | `1857.1` achieved CPS @ target `2000`, p99 `12.8 ms` | Equivalent |
-| `signaling-only-server-high-performance` headline | `1857.1` achieved CPS, p99 `12.6 ms` | `1857.1` achieved CPS, p99 `12.9 ms` | Equivalent |
-| `perf_backpressure_step` | max setup `113.6 ms`; p99 phases `13.2/12.7/13.5 ms` | max setup `23.8 ms`; p99 phases `14.1/12.9/14.1 ms` | 100 ms tail removed |
-| `perf_soak_candidate` caller | p99 `49.9 ms`, max `114.9 ms`, CPU `60.5%` | p99 `44.1 ms`, max `95.1 ms`, CPU `57.2%` | Improved |
-| `perf_soak_candidate` receiver | CPU `41.4%`, post-drain RSS gate `1.00 MB/hr` | CPU `38.8%`, post-drain RSS gate `0.10 MB/hr` | Improved |
-| Artifact root | older logs referenced `crates/target/perf-results` | report packaged from `target/perf-results`; `crates/target/` absent | Fixed |
-
-The root cause for the 100 ms setup tail was a fixed post-initiation wait in
-`TransactionManager::send_request` for successful INVITE client sends. The
-fix removes that wait for `InviteClient` transactions and keeps the old
-non-INVITE safety window until the pending-options/auth-retry lifecycle is
-cleaned up.
-
-The standard beta run had two single-run p99 values higher than the baseline:
-`perf_rtp_steady_state` (`28.7 ms` vs `17.5 ms`) and
-`perf_concurrent_active_calls` (`55.1 ms` vs `51.6 ms`). Follow-up repeat checks
-did not reproduce those as persistent regressions. RTP steady-state repeated at
-`16.4`, `23.2`, `19.8`, `20.4`, and `16.8 ms`; sequential concurrent-call
-repeats passed at `45.7`, `47.6`, and `47.8 ms`.
+The candidate used the clean `perf-tests` feature set with diagnostic hot-path
+instrumentation disabled, full application `AudioFrame` delivery enabled, and
+the reviewed `20260706T181609Z` regression baseline. The complete release
+result is in [BETA_RELEASE_REPORT.md](BETA_RELEASE_REPORT.md); do not use
+ignored, untracked run directories as documentation references.
 
 > **`--release` is mandatory.** Every scenario asserts
 > `!cfg!(debug_assertions)` at startup. Debug-build numbers are not
@@ -276,6 +282,9 @@ blocks before attributing answer timeouts to Rust queue sizing.
 | `RVOIP_PERF_RAMP_SECS` | 1, 3 | 5 | Ramp from 0 → target CPS — applies to every sweep point too. |
 | `RVOIP_PERF_STEADY_SECS` | 1, 3 | 30 | Steady-state window. Publish only over a representative window — 5 s runs are dominated by ramp / cooldown noise. |
 | `RVOIP_PERF_COOLDOWN_SECS` | 1, 3 | 5 | Drain window before snapshotting. |
+| `RVOIP_PERF_POST_DRAIN_SETTLE_SECS` | 1 | 0 | Wait after the final sweep point drains before opening the RSS gate window. The canonical clean control fixes this at 95 seconds to cover its structural anti-reuse fence and allocator settling; diagnostic modes leave it off. |
+| `RVOIP_PERF_POST_DRAIN_SAMPLE_SECS` | 1 | 0 | Measure RSS after the post-drain settle. The canonical clean control fixes this at 600 seconds; ordinary sweeps and diagnostic modes leave it off. |
+| `RVOIP_PERF_EMBED_RESOURCE_SAMPLES` | 1 | 0 | Embed the raw resource time series in the report. Canonical clean evidence fixes this to `1`; diagnostic profile modes leave it off. |
 | `RVOIP_PERF_CALL_TIMEOUT_SECS` | 1, 2 | 15 / 30 | Per-call deadline. Distinguishes "slow" from "stuck". |
 | `RVOIP_PERF_CONCURRENT_TARGET` | 2 | 500 | Single-point default for concurrent-call ceiling. |
 | `RVOIP_PERF_HOLD_SECS` | 2 | 10 | Steady-state hold before teardown. |
@@ -355,6 +364,71 @@ production-shaped deployment. Treat it as an upper bound: a real
 deployment running rvoip-sip alongside other workloads will share
 allocator overhead, OS page caches, and dynamic libs.
 
+Resource reports distinguish the configured request from what was actually
+observed. `rss_tail_window_requested_secs` is the requested tail length;
+`rss_tail_window_secs`, `rss_tail_sample_count`, and
+`rss_tail_window_complete` describe actual coverage. A 35-second run therefore
+cannot silently label its all-run slope as a 60-second tail. Named windows make
+the same distinction: `requested_coverage_secs` comes from configuration, while
+`actual_coverage_secs` comes only from the first and last observed samples.
+Scheduler overshoot at sampler shutdown never changes the configured request.
+
+The fixed beta threshold of `2378.44 MB/min` applies to
+`rss_active_growth_mb_per_min`, selected from `point_start` through
+`calls_drained`. That is the window represented by the reviewed historical
+sweep. It is not an idle leak threshold. After call drain, the canonical
+control first spends 95 seconds outside the RSS gate window so the 64-second
+anti-reuse horizon and allocator settling cannot be projected as a sustained
+leak. The subsequent 600-second window reports
+`rss_cleanup_growth_mb_per_hour`, but that least-squares slope remains
+diagnostic.
+
+The post-settle cleanup gate instead uses
+`rss_cleanup_endpoint_growth_mb_per_hour`. It first calculates
+`rss_cleanup_retained_growth_mb`, the signed difference between median RSS in
+the first and last sixth of the observed window (each endpoint band is capped
+at 60 seconds), then divides that delta by the actual separation between the
+two bands' median sample timestamps. Acceptance also requires at least 360
+seconds between those representative timestamps, making the 10 MB/hour limit
+represent at least 1 MB of observed movement. This preserves that limit
+without treating the unobserved outer edges of the 600-second window as growth
+time and without an additive allowance. Canonical clean reports embed the raw
+samples so reviewers can inspect the settle-to-gate boundary and recompute the
+endpoint estimate. Acceptance independently recomputes the active, tail, and
+cleanup summaries from that series and rejects any mismatch; the cleanup
+window must provide at least 599 seconds and 1,180 samples, with at least 110
+samples in each endpoint band.
+
+Compact structural snapshots are taken at the end of the 95-second settle and
+again after resource sampling stops; both must independently report zero
+retained call structures. The settle snapshot remains allocated for the whole
+RSS window so its own memory is present in both endpoint bands rather than
+appearing as mid-window growth. The one-hour monolithic and one-hour split
+soaks use the reviewed 15 MB/hour beta limit as of 2026-07-24 and remain
+authoritative for sustained-growth claims.
+
+For monolithic and split soaks with a complete active phase of at least 600
+seconds, `results.rss_gate_window` must be `active_tail_600s` and
+`results.rss_gate_growth_mb_per_hr` comes from the final 600 seconds while calls
+are still cycling, using first/last-minute endpoint medians. The report also
+emits `rss_active_tail_growth_mb_per_hr`,
+`rss_active_tail_sample_count`, `rss_active_tail_window_secs`, and
+`rss_active_tail_window_complete`. The post-drain slope remains diagnostic;
+zero `retained_objects_after_drain` and the other final structural-retention
+checks remain separate hard requirements. The beta monolithic and split-soak
+limit is 15 MB/hour as of 2026-07-24; the canonical 2K cleanup control above
+retains its independent 10 MB/hour acceptance. Short diagnostic runs may fall
+back to `post_drain` or `tail`, but that fallback is not long-soak
+qualification.
+
+`diagnostics.measurement_identity` records the ordered conditioning points,
+their offered/succeeded calls, shared-peer lifetime, resource phase names, and
+sampling cadence. `perf_audit.py` refuses the scalar comparison as
+`NON_COMPARABLE` when either conditioning or window identity differs. For the
+reviewed pre-schema baseline only, the auditor reconstructs this identity from
+its complete `_sweep.json` and per-point reports; it reports that inference and
+the available sample-count evidence explicitly.
+
 ### 3.4 What the numbers don't tell you
 
 - **Loopback excludes the NIC, the driver, and the kernel UDP queue.**
@@ -417,7 +491,7 @@ load.
 
 **Citing a result** — pick the highest sweep point where ASR ≥ 0.99
 and setup-p99 stays inside your SLA budget, and report that as the
-sustained capacity. Example: "rvoip-sip 0.2.2 sustains 500 CPS at
+sustained capacity. Example: "rvoip-sip 0.3.2 sustains 500 CPS at
 98.7% ASR with setup p99 < 90 ms on Apple M3 Max." Always include the
 hardware spec block from §6.
 
@@ -444,8 +518,13 @@ extra keys is fine, removing a canonical one is a breaking change.
     "total_ram_gb": 64.0,
     "build_profile": "release",
     "global_allocator": "mimalloc",
-    "rvoip_sip_version": "0.2.2",
-    "git_rev": "a9a3383c"
+    "rvoip_sip_version": "0.3.2",
+    "git_rev": "a9a3383c",
+    "git_commit": "a9a3383c...",
+    "git_dirty": false,
+    "source_fingerprint_sha256": "...",
+    "cargo_features": ["perf-tests"],
+    "requested_cargo_features": "perf-tests"
   },
   "load": {
     "target_cps": 200.0,
@@ -490,6 +569,11 @@ Latency values are in **nanoseconds**. Consumers should convert as
 needed for display. Resource fields are `null` when the scenario
 doesn't populate them.
 
+Call-setup reports additionally place the performance-recipe SHA-256, an
+allowlisted runtime-switch snapshot, complete effective endpoint configuration,
+and workload phase markers under `diagnostics`. These fields make a dirty-tree
+profile reproducible without adding provenance to headline result keys.
+
 ### 4.1 New result keys (Phase 1.5)
 
 Every scenario emits these on top of the headline number:
@@ -503,10 +587,27 @@ Every scenario emits these on top of the headline number:
 - `resources.rss_growth_mb_per_min` — least-squares slope of RSS over
   time. Near zero on a healthy run; positive growth is the leak
   indicator that backs the "no leaks" Rust pitch.
+- `resources.rss_tail_window_requested_secs` and
+  `resources.rss_tail_window_secs` — configured versus actually observed tail
+  coverage; completeness and sample count are reported alongside them.
+- `resources.rss_windows.<name>` — phase names, requested/actual boundaries,
+  sample count, completeness, slope, and robust endpoint medians for explicit
+  windows. The canonical names are `active_load` and `post_drain_cleanup`.
+- `resources.rss_active_growth_mb_per_min` and
+  `resources.rss_cleanup_growth_mb_per_hour` — convenient scalar slope
+  projections of those two named windows. The cleanup slope is diagnostic for
+  the 600-second post-settle control.
+- `resources.rss_cleanup_retained_growth_mb` — robust absolute cleanup delta;
+  the nested window also records endpoint medians, representative timestamps,
+  their separation, band duration, and sample counts.
+- `resources.rss_cleanup_endpoint_growth_mb_per_hour` — the robust delta
+  normalized by the representative timestamp separation and used by the
+  unchanged 10 MB/hour post-settle gate.
 - `resources.avg_cpu_pct` — process-level CPU% averaged across the
   steady window (excludes the first sysinfo sample, which is always 0).
 - `resources.rss_samples_mb` — the raw `(t_secs, rss_mb, cpu_pct)`
-  time series, suitable for plotting "RSS vs time".
+  time series, suitable for plotting "RSS vs time". Canonical clean controls
+  require this series to be embedded; diagnostic profile modes do not.
 
 The aggregated `_sweep.json` also gains a top-level `headline` block
 (see §3.5):

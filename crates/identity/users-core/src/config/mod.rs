@@ -4,7 +4,7 @@ use crate::jwt::JwtConfig;
 use serde::Deserialize;
 
 /// Main configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UsersConfig {
     pub database_url: String,
     pub jwt: JwtConfig,
@@ -12,6 +12,22 @@ pub struct UsersConfig {
     pub api_bind_address: String,
     #[serde(default)]
     pub tls: TlsSettings,
+}
+
+impl std::fmt::Debug for UsersConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("UsersConfig")
+            .field("database_url_present", &!self.database_url.is_empty())
+            .field("jwt", &self.jwt)
+            .field("password", &self.password)
+            .field(
+                "api_bind_address_present",
+                &!self.api_bind_address.is_empty(),
+            )
+            .field("tls", &self.tls)
+            .finish()
+    }
 }
 
 /// Password configuration
@@ -28,12 +44,26 @@ pub struct PasswordConfig {
 }
 
 /// TLS/HTTPS configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct TlsSettings {
     pub enabled: bool,
     pub cert_path: String,
     pub key_path: String,
     pub require_tls: bool, // If true, refuse to start without TLS
+}
+
+impl std::fmt::Debug for TlsSettings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TlsSettings")
+            .field("enabled", &self.enabled)
+            .field("cert_path_present", &!self.cert_path.is_empty())
+            .field("cert_path_bytes", &self.cert_path.len())
+            .field("key_path_present", &!self.key_path.is_empty())
+            .field("key_path_bytes", &self.key_path.len())
+            .field("require_tls", &self.require_tls)
+            .finish()
+    }
 }
 
 impl Default for TlsSettings {
@@ -79,6 +109,9 @@ impl UsersConfig {
         }
         if let Ok(value) = std::env::var("RVOIP_USERS_JWT_ALGORITHM") {
             config.jwt.algorithm = value;
+        }
+        if let Ok(value) = std::env::var("RVOIP_USERS_JWT_TENANT_ID") {
+            config.jwt.tenant_id = Some(value);
         }
         if let Ok(value) = std::env::var("RVOIP_USERS_JWT_SIGNING_KEY") {
             config.jwt.signing_key = Some(value);

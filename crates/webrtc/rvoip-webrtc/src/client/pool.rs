@@ -1,22 +1,22 @@
-//! G3 — Signaling-connection pool keyed by base URL.
+//! Legacy signaler-object cache keyed by base URL.
 //!
 //! The default [`WebRtcClient::call`](crate::client::WebRtcClient::call)
-//! flow opens a fresh signaler per call. For applications that place many
-//! concurrent calls to the same backend, opening one WebSocket per call is
-//! wasteful. The pool returns a shared [`Signaler`](crate::client::Signaler)
-//! per `ws_url`; entries idle for `idle_ttl` are evicted on the next
-//! `get` request.
+//! flow opens a fresh signaling exchange per operation. This type caches the
+//! lightweight [`WsSignaler`](crate::client::WsSignaler) configuration object;
+//! it does **not** pool or multiplex a live WebSocket. Target-contacting
+//! adapter originations instead retain one private persistent socket for the
+//! complete route lifecycle.
 //!
 //! Caller still owns the [`Signaler`] handle the pool returns — multiple
 //! callers can hold the same `Arc<dyn Signaler>` concurrently (the
-//! underlying [`WsSignaler`](crate::client::WsSignaler) muxes by
-//! `connection_id`).
+//! underlying compatibility signaler opens a socket for each operation).
 //!
 //! ```ignore
 //! let pool = SignalingPool::new(Duration::from_secs(60));
 //! let sig_a = pool.get_ws("ws://server/signal").await?;
 //! let sig_b = pool.get_ws("ws://server/signal").await?;
-//! // sig_a and sig_b are the same Arc — one WebSocket, two callers.
+//! // sig_a and sig_b are the same Arc configuration object. No socket has
+//! // been opened yet.
 //! ```
 
 use std::sync::Arc;
@@ -27,7 +27,7 @@ use parking_lot::Mutex;
 
 use crate::errors::Result;
 
-/// Lightweight signaling-connection pool. Cheap to clone (single Arc).
+/// Lightweight legacy signaler-object cache. Cheap to clone (single Arc).
 #[derive(Clone)]
 pub struct SignalingPool {
     inner: Arc<Inner>,

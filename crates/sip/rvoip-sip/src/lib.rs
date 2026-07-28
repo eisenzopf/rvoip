@@ -471,6 +471,9 @@ pub mod errors;
 /// D4 — `MediaStream` wrapper that bridges a SIP audio session into
 /// `rvoip_core::ConnectionAdapter::streams`. See module docs.
 pub mod media_stream;
+/// Typed, redacted SIP options for transport-neutral outbound origination.
+pub mod originate;
+pub mod profiled_adapter;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but
@@ -488,10 +491,14 @@ pub mod auth;
 pub mod call_setup_diag;
 #[doc(hidden)]
 pub mod cleanup_diag;
+mod retained_tasks;
+#[doc(hidden)]
+pub mod session_lifecycle;
 #[doc(hidden)]
 pub mod session_registry;
 #[doc(hidden)]
 pub mod session_store;
+mod sip_data_message;
 #[doc(hidden)]
 pub mod state_machine;
 #[doc(hidden)]
@@ -502,7 +509,21 @@ pub mod types;
 // ── Primary public API ──────────────────────────────────────────────────────
 
 // Peer types
-pub use adapter::SipAdapter;
+pub use adapter::{SipAdapter, SipInboundContextPolicy, SipInboundContextPolicyError};
+pub use originate::{
+    SipInitialHeaders, SipInitialHeadersError, SipOriginateContext, SipOriginateContextError,
+    SipProfileRevision, SipProfileRevisionError, MAX_SIP_INITIAL_HEADERS,
+    MAX_SIP_INITIAL_HEADER_BYTES, MAX_SIP_INITIAL_HEADER_NAME_BYTES,
+    MAX_SIP_INITIAL_HEADER_VALUE_BYTES, MAX_SIP_ORIGINATE_AUTH_BYTES,
+    MAX_SIP_ORIGINATE_AUTH_OPTIONS, MAX_SIP_ORIGINATE_AUTH_PASSWORD_BYTES,
+    MAX_SIP_ORIGINATE_AUTH_REALM_BYTES, MAX_SIP_ORIGINATE_AUTH_USERNAME_BYTES,
+    MAX_SIP_ORIGINATE_BEARER_TOKEN_BYTES, MAX_SIP_ORIGINATE_FROM_URI_BYTES,
+    MAX_SIP_PROFILE_REVISION_BYTES,
+};
+pub use profiled_adapter::{
+    ProfiledSipAdapter, SipEgressProfilePolicy, SipEgressProfileRegistration, SipProfileSrtpPolicy,
+    SipProfiledAdapterError, MAX_INSTALLED_SIP_EGRESS_PROFILES,
+};
 
 pub use api::callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
@@ -541,18 +562,22 @@ pub use api::headers::view::SipHeaderView;
 pub use api::incoming::{
     IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
-pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedactor};
+pub use api::trace_redactor::{
+    BodyRedactionDecision, DefaultTraceRedactor, PassthroughRedactor, RedactionDecision,
+    TraceRedactor, REDACTED_BODY_MARKER,
+};
 pub use auth::{
     AAuthValidator, AkaClientConfig, AkaClientProvider, AkaVectorProvider, ApiKeyVerifier,
-    AuditFailurePolicy, AuthAuditEvent, AuthAuditOutcome, AuthAuditScheme, AuthAuditSink,
-    AuthDecision, AuthFailureReason, AuthIdentity, AuthRateLimitKey, AuthRateLimitKind,
-    AuthRateLimitVerdict, AuthRateLimiter, BearerAuthError, BearerValidator, ClientAuthHeader,
-    CredentialAuthError, DigestAlgorithm, DigestAuth, DigestAuthenticator, DigestChallenge,
-    DigestChallengeDetails, DigestComputed, DigestNonceStatus, DigestReplayStore, DigestResponse,
-    DigestSecret, DigestSecretProvider, JwksJwtValidator, JwtValidator,
-    OAuth2IntrospectionValidator, PasswordVerifier, SipAuthChallenge, SipAuthContext,
-    SipAuthDecision, SipAuthPolicy, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-    SipDigestAuthService, SipIncomingAuthenticator, SipTransportSecurityContext,
+    AuditFailurePolicy, AuthAttemptAdmission, AuthAttemptReservation, AuthAuditEvent,
+    AuthAuditOutcome, AuthAuditScheme, AuthAuditSink, AuthDecision, AuthFailureReason,
+    AuthIdentity, AuthRateLimitKey, AuthRateLimitKind, AuthRateLimitVerdict, AuthRateLimiter,
+    BearerAuthError, BearerValidator, ClientAuthHeader, CredentialAuthError, DigestAlgorithm,
+    DigestAuth, DigestAuthenticator, DigestChallenge, DigestChallengeDetails, DigestComputed,
+    DigestNonceStatus, DigestReplayStore, DigestResponse, DigestSecret, DigestSecretProvider,
+    JwksJwtValidator, JwtValidator, OAuth2IntrospectionValidator, PasswordVerifier,
+    SipAuthChallenge, SipAuthContext, SipAuthDecision, SipAuthPolicy, SipAuthScheme,
+    SipAuthService, SipAuthSource, SipClientAuth, SipDigestAuthService, SipIncomingAuthenticator,
+    SipListenerAuthPolicy, SipPrincipalAuthDecision, SipTransportSecurityContext,
     TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
 pub use rvoip_media_core::performance::pool::PoolConfig as MediaPoolConfig;
@@ -577,7 +602,7 @@ pub use api::lifecycle::{
 // Configuration & registration
 pub use api::unified::{
     AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, Registration, RelUsage,
-    RtpSessionBufferConfig, RtpTransportBufferConfig,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SymmetricRtpPolicy,
 };
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode,
@@ -634,13 +659,15 @@ pub mod prelude {
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,
         MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
         MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
-        Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, Result,
-        RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SessionHandle, SipAccount,
-        SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-        SipContactMode, SipDigestAuthService, SipReason, SipTlsMode, SipTrace, SipTraceConfig,
-        SipTraceDirection, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
-        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
-        TransferTargetEvidence, TransferWaitMode, TypedHeader,
+        ProfiledSipAdapter, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+        Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SessionHandle,
+        SipAccount, SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
+        SipContactMode, SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
+        SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
+        SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
+        StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
+        TypedHeader,
     };
 }
 

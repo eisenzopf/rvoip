@@ -8,6 +8,9 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use crate::session_registry::SessionRegistryHandle;
+
+use super::InDialogRequestAuthority;
 
 /// Outbound CANCEL builder (RFC 3261 §9, abort a pending INVITE).
 /// Reachable via
@@ -17,6 +20,7 @@ pub struct CancelBuilder {
     session_id: CallId,
     reason: Option<String>,
     state: BuilderHeaderState,
+    authority: InDialogRequestAuthority,
 }
 
 impl CancelBuilder {
@@ -26,7 +30,18 @@ impl CancelBuilder {
             session_id,
             reason: None,
             state: BuilderHeaderState::default(),
+            authority: InDialogRequestAuthority::CaptureCurrent,
         }
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        session_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        let mut builder = Self::new(coord, session_id);
+        builder.authority = InDialogRequestAuthority::captured(lifecycle_handle);
+        builder
     }
 
     /// RFC 3326 `Reason:` header attached to the CANCEL. Stamped on
@@ -46,18 +61,20 @@ impl CancelBuilder {
             reason: self.reason,
             extra_headers,
         });
-        self.coord
-            .stage_outbound_options(
-                &self.session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Cancel(opts),
-            )
-            .await?;
-        self.coord
-            .dispatch_outbound(
-                &self.session_id,
-                crate::state_table::EventType::SendOutboundCancel,
-            )
-            .await?;
+        let event = crate::state_table::EventType::SendOutboundCancel;
+        let slot = crate::state_machine::executor::PendingOptionsSlot::Cancel(opts);
+        match self.authority.exact_handle(&self.session_id)? {
+            Some(handle) => {
+                self.coord
+                    .dispatch_outbound_with_options_exact(&handle, event, slot)
+                    .await?
+            }
+            None => {
+                self.coord
+                    .dispatch_outbound_with_options(&self.session_id, event, slot)
+                    .await?
+            }
+        };
         Ok(())
     }
 }

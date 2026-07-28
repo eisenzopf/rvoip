@@ -13,9 +13,12 @@
 //! Each peer exits 0 on success. The test succeeds if Alice exits cleanly
 //! within the deadline; Bob and Charlie are then cleaned up.
 
-use std::env;
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 /// Port set chosen to avoid collisions with the shell-script example
 /// (which uses 5060-5062).
@@ -33,14 +36,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    // Honour CARGO if cargo set it (it does when running tests via cargo test).
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // The examples are built before launch. Executing them directly avoids
+    // serializing the long-lived Bob/Charlie peers behind Cargo's artifact
+    // lock, which would prevent Alice from starting until they exit.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -54,23 +54,11 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
 
 #[test]
 fn blind_transfer_end_to_end() {
-    // Build all three examples first so cargo-run invocations below are cheap.
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "stream_peer_blind_transfer_alice",
-            "--example",
-            "stream_peer_blind_transfer_bob",
-            "--example",
-            "stream_peer_blind_transfer_charlie",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "stream_peer_blind_transfer_alice",
+        "stream_peer_blind_transfer_bob",
+        "stream_peer_blind_transfer_charlie",
+    ]);
 
     let env_vars: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

@@ -19,10 +19,13 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::{error::Error, fmt};
 
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::error::{Result as CoreResult, RvoipError};
+use rvoip_core::identity::{AuthenticatedPrincipal, PrincipalOwnershipKey};
 use rvoip_core::ids::ConnectionId;
+use rvoip_core::DataMessage;
 use tokio::sync::mpsc;
 
 use crate::envelope::UctpEnvelope;
@@ -32,6 +35,167 @@ use crate::types::MessageType;
 
 /// Default time the adapter waits for the peer's reply.
 pub const DEFAULT_RENEGOTIATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Principal-owned association between an adapter's core Connection ID and
+/// the peer-selected UCTP wire `connid`.
+///
+/// A route is created from an authenticated `session.invite`, then bound once
+/// when that same peer emits `connection.offer`. Binding compares issuer,
+/// tenant, and subject and refuses both ownership switches and wire-ID
+/// rebinding. All UCTP substrates use this type so their authorization and
+/// outbound-ID behavior cannot drift.
+#[derive(Clone)]
+pub struct AuthenticatedConnectionBinding {
+    owner: PrincipalOwnershipKey,
+    wire_connection_id: Arc<parking_lot::RwLock<Option<ConnectionId>>>,
+}
+
+impl fmt::Debug for AuthenticatedConnectionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedConnectionBinding")
+            .field(
+                "wire_connection_bound",
+                &self.wire_connection_id.read().is_some(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub enum ConnectionBindingError {
+    NotBound,
+    PrincipalExpired,
+    OwnerMismatch,
+    AlreadyBound {
+        existing: ConnectionId,
+        attempted: ConnectionId,
+    },
+}
+
+impl fmt::Debug for ConnectionBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotBound => "ConnectionBindingError::NotBound",
+            Self::PrincipalExpired => "ConnectionBindingError::PrincipalExpired",
+            Self::OwnerMismatch => "ConnectionBindingError::OwnerMismatch",
+            Self::AlreadyBound { .. } => "ConnectionBindingError::AlreadyBound",
+        })
+    }
+}
+
+impl fmt::Display for ConnectionBindingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::NotBound => "authenticated wire connection is not bound",
+            Self::PrincipalExpired => "authenticated principal is expired",
+            Self::OwnerMismatch => "wire connection owner mismatch",
+            Self::AlreadyBound { .. } => "wire connection is already bound",
+        })
+    }
+}
+
+impl Error for ConnectionBindingError {}
+
+impl AuthenticatedConnectionBinding {
+    pub fn new(principal: &AuthenticatedPrincipal) -> Self {
+        Self {
+            owner: principal.ownership_key(),
+            wire_connection_id: Arc::new(parking_lot::RwLock::new(None)),
+        }
+    }
+
+    pub fn owner(&self) -> &PrincipalOwnershipKey {
+        &self.owner
+    }
+
+    pub fn is_owned_by(&self, principal: &AuthenticatedPrincipal) -> bool {
+        self.owner == principal.ownership_key()
+    }
+
+    pub fn bind_wire_connection(
+        &self,
+        principal: &AuthenticatedPrincipal,
+        wire_connection_id: ConnectionId,
+    ) -> Result<(), ConnectionBindingError> {
+        if principal.is_expired() {
+            return Err(ConnectionBindingError::PrincipalExpired);
+        }
+        if !self.is_owned_by(principal) {
+            return Err(ConnectionBindingError::OwnerMismatch);
+        }
+        let mut bound = self.wire_connection_id.write();
+        match bound.as_ref() {
+            None => {
+                *bound = Some(wire_connection_id);
+                Ok(())
+            }
+            Some(existing) if existing == &wire_connection_id => Ok(()),
+            Some(existing) => Err(ConnectionBindingError::AlreadyBound {
+                existing: existing.clone(),
+                attempted: wire_connection_id,
+            }),
+        }
+    }
+
+    pub fn wire_connection_id(&self) -> Option<ConnectionId> {
+        self.wire_connection_id.read().clone()
+    }
+
+    pub fn outbound_connection_id(&self) -> Result<ConnectionId, ConnectionBindingError> {
+        self.wire_connection_id()
+            .ok_or(ConnectionBindingError::NotBound)
+    }
+}
+
+pub fn require_bound_wire_connection(
+    binding: &AuthenticatedConnectionBinding,
+) -> CoreResult<ConnectionId> {
+    binding.outbound_connection_id().map_err(|error| {
+        RvoipError::Adapter(format!("UCTP connection route is not ready: {error}"))
+    })
+}
+
+pub async fn send_data_message_via_envelope(
+    out_tx: &mpsc::Sender<UctpEnvelope>,
+    cid: &str,
+    sid: &str,
+    conn: &ConnectionId,
+    message: &DataMessage,
+) -> CoreResult<()> {
+    // `DataMessage` deliberately has no sender field. The peer must derive
+    // sender/ownership from the authenticated Connection route and ignore the
+    // legacy UCTP payload's non-authoritative `from` string.
+    const ROUTE_DERIVED_SENDER: &str = "system:rvoip";
+    let payload = crate::payloads::message::MessageSend::from_data_message(
+        message,
+        ROUTE_DERIVED_SENDER,
+        serde_json::json!("all"),
+    )
+    .map_err(|error| match error {
+        crate::payloads::message::MessagePayloadError::UnsupportedReliability => {
+            RvoipError::NotImplemented("UCTP message.send supports reliable ordered delivery only")
+        }
+        other => RvoipError::Adapter(format!("invalid data message: {other}")),
+    })?;
+    if cid.is_empty() {
+        return Err(RvoipError::Adapter(
+            "UCTP data route has no authenticated conversation binding".into(),
+        ));
+    }
+    let env = UctpEnvelope::new(
+        MessageType::MessageSend,
+        serde_json::to_value(payload)
+            .map_err(|error| RvoipError::Adapter(format!("encode message.send: {error}")))?,
+    )
+    .with_cid(cid.to_string())
+    .with_sid(sid.to_string())
+    .with_connid(conn.to_string());
+    out_tx
+        .send(env)
+        .await
+        .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))
+}
 
 /// Send a `connection.update` envelope with the new capabilities and
 /// await the peer's reply. See module docs for the parse rules.
@@ -133,4 +297,91 @@ fn parse_update_reply(
         audio: Some(chosen),
         video: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rvoip_core::identity::{AuthenticationMethod, IdentityAssurance};
+
+    fn principal(issuer: &str, tenant: &str, subject: &str) -> AuthenticatedPrincipal {
+        AuthenticatedPrincipal {
+            subject: subject.into(),
+            tenant: Some(tenant.into()),
+            scopes: vec!["calls:read".into()],
+            issuer: Some(issuer.into()),
+            expires_at: None,
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::Anonymous,
+        }
+    }
+
+    #[test]
+    fn connection_binding_is_idempotent_but_owner_and_wire_id_are_immutable() {
+        let owner = principal("issuer-a", "tenant-a", "alice");
+        let binding = AuthenticatedConnectionBinding::new(&owner);
+        let wire = ConnectionId::from_string("conn_wire_a");
+
+        assert_eq!(
+            binding.outbound_connection_id(),
+            Err(ConnectionBindingError::NotBound)
+        );
+        assert_eq!(binding.bind_wire_connection(&owner, wire.clone()), Ok(()));
+        assert_eq!(binding.bind_wire_connection(&owner, wire.clone()), Ok(()));
+        assert_eq!(binding.outbound_connection_id(), Ok(wire));
+
+        let other_owner = principal("issuer-a", "tenant-b", "alice");
+        assert_eq!(
+            binding.bind_wire_connection(&other_owner, ConnectionId::from_string("conn_wire_b")),
+            Err(ConnectionBindingError::OwnerMismatch)
+        );
+        assert!(matches!(
+            binding.bind_wire_connection(&owner, ConnectionId::from_string("conn_wire_b")),
+            Err(ConnectionBindingError::AlreadyBound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn data_messages_retain_the_exact_conversation_for_each_session() {
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let routes = [
+            ("conv-a", "session-a", "connection-a"),
+            ("conv-b", "session-b", "connection-b"),
+        ];
+        for (cid, sid, connid) in routes {
+            send_data_message_via_envelope(
+                &out_tx,
+                cid,
+                sid,
+                &ConnectionId::from_string(connid),
+                &DataMessage::reliable("route.test", "text/plain", cid),
+            )
+            .await
+            .expect("send exact route message");
+        }
+
+        for (cid, sid, connid) in routes {
+            let envelope = out_rx.recv().await.expect("data envelope");
+            assert_eq!(envelope.msg_type, MessageType::MessageSend);
+            assert_eq!(envelope.cid.as_deref(), Some(cid));
+            assert_eq!(envelope.sid.as_deref(), Some(sid));
+            assert_eq!(envelope.connid.as_deref(), Some(connid));
+        }
+    }
+
+    #[tokio::test]
+    async fn data_message_without_conversation_binding_is_rejected() {
+        let (out_tx, mut out_rx) = mpsc::channel(1);
+        let error = send_data_message_via_envelope(
+            &out_tx,
+            "",
+            "session-a",
+            &ConnectionId::from_string("connection-a"),
+            &DataMessage::reliable("route.test", "text/plain", "payload"),
+        )
+        .await
+        .expect_err("missing cid must fail closed");
+        assert!(matches!(error, RvoipError::Adapter(_)));
+        assert!(out_rx.try_recv().is_err());
+    }
 }

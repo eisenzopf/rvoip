@@ -79,6 +79,9 @@ All transport implementations share a common `Transport` trait:
 pub trait Transport: Send + Sync + fmt::Debug {
     fn local_addr(&self) -> Result<SocketAddr>;
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()>;
+    async fn prepare_message_route(&self, message: &Message, route: TransportRoute) -> Result<TransportRoute>;
+    async fn send_message_on_route(&self, message: Message, route: TransportRoute) -> Result<TransportRoute>;
+    async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()>;
     async fn close(&self) -> Result<()>;
     fn is_closed(&self) -> bool;
     // ... additional methods for transport capabilities
@@ -92,19 +95,85 @@ pub trait Transport: Send + Sync + fmt::Debug {
 - **TLS** (`TlsTransport`): Secure TCP with encryption and certificate validation
 - **WebSocket** (`WebSocketTransport`): Full-duplex communication over HTTP
 
+### Inbound TLS client authentication
+
+SIP TLS and WSS listeners use a server-side client-authentication policy that
+is independent from outbound `TlsClientConfig`:
+
+```rust,no_run
+use rvoip_sip_transport::transport::tls::{
+    TlsServerClientAuthConfig, TlsTransport,
+};
+
+let client_auth = TlsServerClientAuthConfig::required("client-ca.pem");
+let (transport, events) = TlsTransport::bind_server_only_with_client_auth(
+    "0.0.0.0:5061".parse()?,
+    "server-cert.pem".as_ref(),
+    "server-key.pem".as_ref(),
+    None,
+    client_auth,
+).await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+`Disabled` is the default and preserves server-only TLS compatibility.
+`Optional` verifies a certificate when supplied but permits anonymous clients;
+`Required` rejects clients that do not present a trusted certificate. Accepted
+client certificates are exposed as a verified SHA-256 leaf fingerprint in
+`TransportEvent::MessageReceived::connection_metadata`. WSS exposes the same
+policy through `WebSocketTransport::bind_with_tls_configs`.
+
 ### Event System
 
 The transport layer emits events through the `TransportEvent` enum:
 
 ```rust
 pub enum TransportEvent {
-    MessageReceived { message: Message, source: SocketAddr, destination: SocketAddr },
+    MessageReceived {
+        message: Message,
+        source: SocketAddr,
+        destination: SocketAddr,
+        transport_type: TransportType,
+        flow_id: Option<TransportFlowId>,
+        raw_bytes: Option<Bytes>,
+        timing: Option<TransportReceiveTiming>,
+        connection_metadata: Option<TransportConnectionMetadata>,
+    },
+    KeepAlivePongReceived {
+        source: SocketAddr,
+        destination: SocketAddr,
+        flow_id: Option<TransportFlowId>,
+    },
+    ConnectionClosed {
+        remote_addr: SocketAddr,
+        transport_type: TransportType,
+        flow_id: Option<TransportFlowId>,
+    },
     Error { error: String },
     Closed,
+    // ... graceful-shutdown events
 }
 ```
 
+For stream transports, retain the receive event's `transport_type` and opaque
+`flow_id` in a `TransportRoute` when sending responses, cached bytes,
+keepalives, CANCEL, or teardown traffic. See
+[MIGRATING-0.3.md](./MIGRATING-0.3.md) for the complete event-shape and
+route-aware API migration.
+
 ## Usage
+
+### WebSocket listener API in 0.3
+
+The 0.3 API removes the unsafe `WebSocketListener::accept` escape hatch in
+favor of `Arc<WebSocketListener>::serve_concurrent`, which retains ownership of
+handshake/session admission and shutdown. See the complete before/after example
+and release guidance in [MIGRATING-0.3.md](./MIGRATING-0.3.md). The transport
+crate now carries the required 0.3.2 package version.
+
+SIPS never falls back to a plaintext transport: `sips:...;transport=tcp` means
+TLS-over-TCP, `transport=wss` means secure WebSocket, and explicit `udp` or
+plain `ws` hints are rejected.
 
 ### Basic Example
 
@@ -234,7 +303,7 @@ Disable default features and enable only what you need:
 
 ```toml
 [dependencies]
-rvoip-sip-transport = { version = "0.1", default-features = false, features = ["udp", "tcp"] }
+rvoip-sip-transport = { version = "0.3", default-features = false, features = ["udp", "tcp"] }
 ```
 
 ## Performance Characteristics

@@ -149,7 +149,11 @@ fn endpoint_summary(snapshot: &Value) -> Value {
         "session_store": snapshot["session_store"].clone(),
         "session_registry": snapshot["session_registry"].clone(),
         "lifecycle": snapshot["lifecycle"].clone(),
+        "app_event_publisher": snapshot["app_event_publisher"].clone(),
+        "global_event_bus": snapshot["global_event_bus"].clone(),
         "state_machine_helpers": snapshot["state_machine_helpers"].clone(),
+        "exact_response_supervisor": snapshot["exact_response_supervisor"].clone(),
+        "retained_tasks": snapshot["retained_tasks"].clone(),
         "transaction_manager": snapshot["transaction_manager"].clone(),
         "dialog_manager": snapshot["dialog_manager"].clone(),
         "dialog_adapter": snapshot["dialog_adapter"].clone(),
@@ -163,14 +167,33 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
     const POINTERS: &[&str] = &[
         "/session_store/total",
         "/session_registry/sessions",
+        "/session_registry/dialog_mappings",
+        "/session_registry/media_mappings",
+        "/session_store/lifecycle/live_indexes/dialog",
+        "/session_store/lifecycle/live_indexes/call_id",
+        "/session_store/lifecycle/live_indexes/media",
         "/state_machine_helpers/active_sessions",
         "/state_machine_helpers/subscriber_sessions",
-        "/dialog_adapter/session_to_dialog",
-        "/dialog_adapter/dialog_to_session",
-        "/dialog_adapter/callid_to_session",
         "/dialog_adapter/outgoing_invite_tx",
+        "/dialog_adapter/outbound_initial_invites",
+        "/dialog_adapter/outbound_request_tracker/live_requests",
+        "/dialog_adapter/outbound_request_tracker/deferred_events",
         "/dialog_adapter/registration_refresh_tasks",
-        "/lifecycle/expired_terminal_entries",
+        "/dialog_adapter/registration_refresh_retained_tasks",
+        "/exact_response_supervisor/pending_obligations",
+        "/exact_response_supervisor/retry_attempts",
+        "/exact_response_supervisor/pending_deadlines",
+        "/exact_response_supervisor/fire_in_flight",
+        "/cleanup/setup_teardown_watchdog/pending_deadlines",
+        "/cleanup/setup_teardown_watchdog/fire_in_flight",
+        "/app_event_publisher/dispatcher/queued_current",
+        "/app_event_publisher/dispatcher/in_flight_current",
+        "/app_event_publisher/exact_terminal_claims/pending",
+        "/global_event_bus/broadcast_retained_total",
+        "/global_event_bus/subscriber_queued_total",
+        "/global_event_bus/observational_handlers/queued_current",
+        "/global_event_bus/observational_handlers/in_flight_current",
+        "/lifecycle/waiters",
         "/transaction_manager/total",
         "/transaction_manager/terminated_transactions",
         "/transaction_manager/server_invite_dialog_index",
@@ -180,12 +203,14 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
         "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
+        "/transaction_manager/event_subscribers",
         "/transaction_manager/pending_inbound_bytes",
         "/transaction_manager/pending_inbound_timing",
         "/dialog_manager/dialogs",
         "/dialog_manager/dialog_lookup",
         "/dialog_manager/early_dialog_lookup",
         "/dialog_manager/terminated_bye_lookup",
+        "/dialog_manager/terminated_bye_deadlines",
         "/dialog_manager/transaction_to_dialog",
         "/dialog_manager/transaction_dialog_route_hash",
         "/dialog_manager/dialog_invite_transactions",
@@ -199,7 +224,9 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
         "/dialog_manager/outbound_flow_tasks",
         "/dialog_manager/flow_by_destination",
         "/dialog_manager/flow_by_aor",
-        "/media_adapter/session_to_dialog",
+        "/media_adapter/media_resources",
+        "/media_adapter/media_create_reservations",
+        "/media_adapter/registry_media_bindings",
         "/media_adapter/dialog_to_session",
         "/media_adapter/media_sessions",
         "/media_adapter/audio_receivers",
@@ -219,10 +246,14 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
         "/cleanup/active_total",
     ];
 
+    let live_lifecycle_entries = metric(snapshot, "/lifecycle/entries")
+        .saturating_sub(metric(snapshot, "/lifecycle/terminal_entries"));
+
     POINTERS
         .iter()
         .map(|pointer| metric(snapshot, pointer))
-        .sum()
+        .sum::<u64>()
+        + live_lifecycle_entries
 }
 
 fn endpoint_global_retained_total(snapshot: &Value) -> u64 {

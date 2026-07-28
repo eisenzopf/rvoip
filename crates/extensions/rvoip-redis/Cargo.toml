@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-redis"
-version = "0.1.3"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 homepage.workspace = true
@@ -12,13 +12,23 @@ categories.workspace = true
 keywords.workspace = true
 description = "Redis-backed auth provider implementations for RVoIP"
 
+[features]
+default = []
+moq = ["dep:rvoip-moq"]
+
 [dependencies]
 async-trait = { workspace = true }
-redis = { version = "0.27", default-features = false, features = ["script", "tokio-comp"] }
+chrono = { workspace = true }
+redis = { version = "0.27", default-features = false, features = ["cluster-async", "connection-manager", "script", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
 rvoip-auth-core.workspace = true
+rvoip-moq = { workspace = true, optional = true }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync", "time"] }
+uuid.workspace = true
 
 [dev-dependencies]
+rvoip-core-traits.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]

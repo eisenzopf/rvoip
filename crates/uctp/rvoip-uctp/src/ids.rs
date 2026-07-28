@@ -13,13 +13,89 @@ pub use rvoip_core::ids::{
     ConnectionId, ConversationId, IdentityId, MessageId, ParticipantId, SessionId, StreamId,
 };
 
+/// Metadata-only diagnostic view of a wire or core correlation identifier.
+///
+/// Correlation identifiers remain available through their normal typed and
+/// serialized forms for routing. Logging code should construct this view
+/// instead of recording the identifier itself so peer-controlled values,
+/// including control characters, cannot cross the diagnostic boundary.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct CorrelationIdDiagnostic {
+    present: bool,
+    bytes: usize,
+}
+
+impl CorrelationIdDiagnostic {
+    /// Describe a required identifier without retaining its value.
+    pub fn new(value: &str) -> Self {
+        Self {
+            present: !value.is_empty(),
+            bytes: value.len(),
+        }
+    }
+
+    /// Describe an optional identifier without retaining its value.
+    pub fn optional(value: Option<&str>) -> Self {
+        Self {
+            present: value.is_some(),
+            bytes: value.map(str::len).unwrap_or_default(),
+        }
+    }
+}
+
+impl fmt::Debug for CorrelationIdDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CorrelationIdDiagnostic")
+            .field("present", &self.present)
+            .field("bytes", &self.bytes)
+            .finish()
+    }
+}
+
+/// Maximum UTF-8 byte length accepted for a wire envelope identifier.
+/// Envelope IDs are ASCII by grammar, so this is also the character bound.
+pub const MAX_ENVELOPE_ID_BYTES: usize = 128;
+
+/// Validate the bounded wire grammar for an envelope or correlation ID.
+///
+/// IDs may use any non-empty URI-unreserved ASCII string. The generated
+/// `env_<simple-uuid>` form is canonical, while ULIDs and application-defined
+/// identifiers remain interoperable as required by the protocol.
+pub fn validate_envelope_id(value: &str) -> Result<(), &'static str> {
+    if value.len() > MAX_ENVELOPE_ID_BYTES {
+        return Err("envelope id exceeds 128 bytes");
+    }
+    if value.is_empty() {
+        return Err("envelope id is empty");
+    }
+    if !value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+    {
+        return Err("envelope id contains invalid characters");
+    }
+    Ok(())
+}
+
 /// Globally unique envelope identifier. Format: `env_<simple-uuid>`.
 ///
-/// CONVERSATION_PROTOCOL.md §3.1 marks the format advisory — receivers
-/// must accept any string. Senders SHOULD use this shape so logs and
-/// trace IDs are uniformly searchable.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+/// The canonical UUID suffix is generated locally. Receivers accept the
+/// bounded URI-unreserved grammar documented by [`validate_envelope_id`] so
+/// replay keys and correlation lookups cannot retain attacker-controlled
+/// strings of arbitrary size.
+#[derive(Clone, Eq, Hash, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct EnvelopeId(pub String);
+
+impl fmt::Debug for EnvelopeId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EnvelopeId")
+            .field("bytes", &self.0.len())
+            .field("valid", &self.validate().is_ok())
+            .finish()
+    }
+}
 
 impl EnvelopeId {
     pub fn new() -> Self {
@@ -32,6 +108,11 @@ impl EnvelopeId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Validate this ID for use on the UCTP wire.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        validate_envelope_id(&self.0)
     }
 }
 
@@ -74,4 +155,57 @@ pub fn new_connection_id() -> ConnectionId {
 
 pub fn new_stream_id() -> StreamId {
     StreamId::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envelope_id_accepts_generated_ulid_and_readable_forms() {
+        assert!(EnvelopeId::new().validate().is_ok());
+        assert!(validate_envelope_id("01HXYZ0123456789ABCDEFGHJK").is_ok());
+        assert!(validate_envelope_id("env_request-1.retry_2~a").is_ok());
+        assert!(validate_envelope_id("request_1").is_ok());
+    }
+
+    #[test]
+    fn envelope_id_rejects_empty_and_unsafe_characters() {
+        for invalid in ["", "env_has space", "env_line\nbreak"] {
+            assert!(
+                validate_envelope_id(invalid).is_err(),
+                "unexpectedly accepted {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_id_rejects_values_over_byte_limit() {
+        let oversized = format!("env_{}", "a".repeat(MAX_ENVELOPE_ID_BYTES - 3));
+        assert_eq!(oversized.len(), MAX_ENVELOPE_ID_BYTES + 1);
+        assert!(validate_envelope_id(&oversized).is_err());
+        let boundary = format!("env_{}", "a".repeat(MAX_ENVELOPE_ID_BYTES - 4));
+        assert_eq!(boundary.len(), MAX_ENVELOPE_ID_BYTES);
+        assert!(validate_envelope_id(&boundary).is_ok());
+    }
+
+    #[test]
+    fn correlation_id_diagnostics_never_retain_malicious_values() {
+        const CANARY: &str = "uctp-correlation-canary\r\nAuthorization: exposed";
+
+        for diagnostic in [
+            CorrelationIdDiagnostic::new(CANARY),
+            CorrelationIdDiagnostic::optional(Some(CANARY)),
+        ] {
+            let rendered = format!("{diagnostic:?}");
+            assert!(!rendered.contains(CANARY));
+            assert!(!rendered.contains("Authorization: exposed"));
+            assert!(rendered.contains("present: true"));
+            assert!(rendered.contains(&format!("bytes: {}", CANARY.len())));
+        }
+
+        let missing = format!("{:?}", CorrelationIdDiagnostic::optional(None));
+        assert!(missing.contains("present: false"));
+        assert!(missing.contains("bytes: 0"));
+    }
 }

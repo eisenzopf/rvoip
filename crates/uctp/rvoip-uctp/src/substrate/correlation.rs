@@ -14,10 +14,40 @@ use tokio::time::timeout;
 use crate::envelope::UctpEnvelope;
 use crate::errors::SubstrateError;
 use crate::ids::EnvelopeId;
+use crate::types::MessageType;
+
+struct PendingEntry {
+    sender: oneshot::Sender<UctpEnvelope>,
+    expectation: Option<ReplyExpectation>,
+}
+
+#[derive(Clone)]
+struct ReplyExpectation {
+    sid: Option<String>,
+    connid: Option<String>,
+    request_type: MessageType,
+}
+
+impl ReplyExpectation {
+    fn for_request(request: &UctpEnvelope) -> Self {
+        Self {
+            sid: request.sid.clone(),
+            connid: request.connid.clone(),
+            request_type: request.msg_type.clone(),
+        }
+    }
+
+    fn matches(&self, reply: &UctpEnvelope) -> bool {
+        self.sid == reply.sid
+            && self.connid == reply.connid
+            && (matches!(reply.msg_type, MessageType::Ack | MessageType::Error)
+                || reply.msg_type == self.request_type)
+    }
+}
 
 #[derive(Default)]
 pub struct Pending {
-    inner: DashMap<EnvelopeId, oneshot::Sender<UctpEnvelope>>,
+    inner: DashMap<EnvelopeId, PendingEntry>,
 }
 
 impl Pending {
@@ -32,7 +62,13 @@ impl Pending {
         ttl: Duration,
     ) -> Result<UctpEnvelope, SubstrateError> {
         let (tx, rx) = oneshot::channel();
-        self.inner.insert(id.clone(), tx);
+        self.inner.insert(
+            id.clone(),
+            PendingEntry {
+                sender: tx,
+                expectation: None,
+            },
+        );
         match timeout(ttl, rx).await {
             Ok(Ok(env)) => Ok(env),
             Ok(Err(_)) => {
@@ -55,14 +91,30 @@ impl Pending {
             return Err(env);
         };
         let key = EnvelopeId::from_string(reply_to.clone());
+        if self.inner.get(&key).is_some_and(|entry| {
+            entry
+                .expectation
+                .as_ref()
+                .is_some_and(|expectation| !expectation.matches(&env))
+        }) {
+            return Err(env);
+        }
         match self.inner.remove(&key) {
-            Some((_, tx)) => {
+            Some((_, entry)) => {
                 // If the receiver is gone, the response is dropped.
-                let _ = tx.send(env);
+                let _ = entry.sender.send(env);
                 Ok(())
             }
             None => Err(env),
         }
+    }
+
+    /// Whether `in_reply_to` currently names a locally registered request.
+    /// Coordinators use this read-only check to apply authentication,
+    /// signature, replay, and scope gates before removing the waiter.
+    pub fn has_waiter(&self, in_reply_to: &str) -> bool {
+        self.inner
+            .contains_key(&EnvelopeId::from_string(in_reply_to.to_owned()))
     }
 
     /// Drop every pending waiter; used during coordinator shutdown.
@@ -100,10 +152,17 @@ pub async fn send_and_wait(
     ttl: Duration,
 ) -> Result<UctpEnvelope, SubstrateError> {
     let req_id = crate::ids::EnvelopeId::from_string(env.id.clone());
+    let expectation = ReplyExpectation::for_request(&env);
     // Register before sending so an immediate reply doesn't fire
     // through deliver() into an empty map.
     let (tx, rx) = tokio::sync::oneshot::channel();
-    pending.inner.insert(req_id.clone(), tx);
+    pending.inner.insert(
+        req_id.clone(),
+        PendingEntry {
+            sender: tx,
+            expectation: Some(expectation),
+        },
+    );
     if out_tx.send(env).await.is_err() {
         pending.inner.remove(&req_id);
         return Err(SubstrateError::Closed);
@@ -176,5 +235,47 @@ mod tests {
         let env = env_with("env_x", Some("env_y"));
         let returned = p.deliver(env).unwrap_err();
         assert_eq!(returned.in_reply_to.as_deref(), Some("env_y"));
+    }
+
+    #[tokio::test]
+    async fn send_and_wait_rejects_reply_for_another_resource_or_type() {
+        let pending = std::sync::Arc::new(Pending::new());
+        let (out_tx, mut out_rx) = tokio::sync::mpsc::channel(1);
+        let request = UctpEnvelope::new(MessageType::ConnectionUpdate, serde_json::Value::Null)
+            .with_sid("sid-a")
+            .with_connid("conn-a");
+        let request_id = request.id.clone();
+        let pending_for_wait = std::sync::Arc::clone(&pending);
+        let waiter = tokio::spawn(async move {
+            send_and_wait(
+                &out_tx,
+                pending_for_wait.as_ref(),
+                request,
+                Duration::from_secs(1),
+            )
+            .await
+        });
+        let _sent = out_rx.recv().await.expect("request should be sent");
+
+        let wrong_sid = UctpEnvelope::new(MessageType::ConnectionUpdate, serde_json::Value::Null)
+            .with_sid("sid-b")
+            .with_connid("conn-a")
+            .with_in_reply_to(request_id.clone());
+        assert!(pending.deliver(wrong_sid).is_err());
+        assert_eq!(pending.len(), 1, "mismatched reply must retain waiter");
+
+        let wrong_type = UctpEnvelope::new(MessageType::DtmfSend, serde_json::Value::Null)
+            .with_sid("sid-a")
+            .with_connid("conn-a")
+            .with_in_reply_to(request_id.clone());
+        assert!(pending.deliver(wrong_type).is_err());
+        assert_eq!(pending.len(), 1, "wrong reply type must retain waiter");
+
+        let valid = UctpEnvelope::new(MessageType::Ack, serde_json::Value::Null)
+            .with_sid("sid-a")
+            .with_connid("conn-a")
+            .with_in_reply_to(request_id);
+        assert!(pending.deliver(valid).is_ok());
+        assert_eq!(waiter.await.unwrap().unwrap().msg_type, MessageType::Ack);
     }
 }

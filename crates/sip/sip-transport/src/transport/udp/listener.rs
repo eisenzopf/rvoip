@@ -12,12 +12,10 @@ use crate::error::{Error, Result};
 #[cfg(test)]
 use tracing::error;
 
-// Reserved for the upcoming oversized-datagram drop path; kept so the
-// constant has one canonical home when that lands.
-#[allow(dead_code)]
-const MAX_UDP_PACKET_SIZE: usize = 65_507;
-// Buffer size for receiving packets
-const UDP_BUFFER_SIZE: usize = 8192;
+// Large enough for every ordinary UDP payload. Using the previous 8 KiB
+// buffer let the kernel truncate a legal SIP datagram without telling the
+// parser that bytes were missing.
+const UDP_BUFFER_SIZE: usize = 65_535;
 
 /// UDP listener for receiving SIP messages
 pub struct UdpListener {
@@ -42,9 +40,17 @@ impl UdpListener {
     ) -> Result<Self> {
         let std_socket =
             bind_std_udp_socket(addr, socket_options).map_err(|e| Error::BindFailed(addr, e))?;
-        let socket = UdpSocket::from_std(std_socket).map_err(|e| Error::BindFailed(addr, e))?;
-
-        let local_addr = socket.local_addr().map_err(Error::LocalAddrFailed)?;
+        let local_addr = std_socket.local_addr().map_err(Error::LocalAddrFailed)?;
+        // Register the socket with the same reactor that owns the bounded SIP
+        // UDP poller. Sends may still await this socket from callers on other
+        // executors; Tokio's registration wakes the polling task normally.
+        let socket =
+            crate::transport::runtime::spawn_sip_udp_io(
+                async move { UdpSocket::from_std(std_socket) },
+            )
+            .await
+            .map_err(|_| Error::Other("SIP UDP socket registration task failed".to_string()))?
+            .map_err(|e| Error::BindFailed(addr, e))?;
 
         Ok(Self {
             socket: Arc::new(socket),
@@ -70,7 +76,7 @@ impl UdpListener {
     /// Receives a packet from the UDP socket
     pub async fn receive(&self) -> Result<(Bytes, SocketAddr, SocketAddr)> {
         // Stack-allocated receive buffer. Previously we allocated a
-        // fresh 8 KiB `BytesMut` per packet and zero-filled it with
+        // fresh `BytesMut` per packet and zero-filled it with
         // `resize(_, 0)` — ~480 MB/s of heap churn at 60K req/s. The
         // stack buffer is reused for every call (tokio stores it in
         // the receive task's stack frame across awaits) and the

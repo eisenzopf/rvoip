@@ -31,6 +31,8 @@ const BYE_TRACE_VALUE: &str = "trace-bye-proxy-auth";
 const REFER_TRACE_VALUE: &str = "trace-refer-proxy-auth";
 const UPDATE_TRACE_VALUE: &str = "trace-update-auth";
 const NOTIFY_TRACE_VALUE: &str = "trace-notify-auth";
+const INFO_TRACE_VALUE: &str = "trace-info-auth-int";
+const INFO_BODY: &[u8] = b"binary-info:\xff\x00\xfe";
 const REFER_TARGET: &str = "sip:transfer-target@127.0.0.1:36188";
 const UPDATE_SDP: &str = "v=0\r\n\
 o=alice 0 1 IN IP4 127.0.0.1\r\n\
@@ -45,6 +47,7 @@ enum ChallengedMethod {
     Refer,
     Update,
     Notify,
+    Info,
 }
 
 impl ChallengedMethod {
@@ -54,6 +57,7 @@ impl ChallengedMethod {
             Self::Refer => Method::Refer,
             Self::Update => Method::Update,
             Self::Notify => Method::Notify,
+            Self::Info => Method::Info,
         }
     }
 
@@ -63,6 +67,7 @@ impl ChallengedMethod {
             Self::Refer => "REFER",
             Self::Update => "UPDATE",
             Self::Notify => "NOTIFY",
+            Self::Info => "INFO",
         }
     }
 
@@ -76,6 +81,22 @@ impl ChallengedMethod {
             (Self::Update, ChallengeKind::Proxy407) => "update-407-nonce",
             (Self::Notify, ChallengeKind::Origin401) => "notify-401-nonce",
             (Self::Notify, ChallengeKind::Proxy407) => "notify-407-nonce",
+            (Self::Info, ChallengeKind::Origin401) => "info-401-nonce",
+            (Self::Info, ChallengeKind::Proxy407) => "info-407-nonce",
+            (Self::Bye, ChallengeKind::Origin401AuthInt) => "bye-auth-int-nonce",
+            (Self::Refer, ChallengeKind::Origin401AuthInt) => "refer-auth-int-nonce",
+            (Self::Update, ChallengeKind::Origin401AuthInt) => "update-auth-int-nonce",
+            (Self::Notify, ChallengeKind::Origin401AuthInt) => "notify-auth-int-nonce",
+            (Self::Info, ChallengeKind::Origin401AuthInt) => "info-auth-int-nonce",
+        }
+    }
+
+    fn auth_int_body(self) -> &'static [u8] {
+        match self {
+            Self::Refer | Self::Bye => b"",
+            Self::Update => UPDATE_SDP.as_bytes(),
+            Self::Notify => b"<presence/>",
+            Self::Info => INFO_BODY,
         }
     }
 }
@@ -84,11 +105,13 @@ impl ChallengedMethod {
 enum ChallengeKind {
     Origin401,
     Proxy407,
+    Origin401AuthInt,
 }
 
 #[derive(Debug, Clone)]
 struct MidDialogCapture {
     raw: String,
+    body: Vec<u8>,
     cseq: u32,
     trace_value: Option<String>,
     authorization: Option<String>,
@@ -186,6 +209,18 @@ async fn notify_407_retry_uses_proxy_authorization() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refer_notify_info_and_update_auth_int_sign_exact_bodies() {
+    for (uas_port, uac_port, method) in [
+        (36200, 36201, ChallengedMethod::Refer),
+        (36202, 36203, ChallengedMethod::Notify),
+        (36204, 36205, ChallengedMethod::Info),
+        (36206, 36207, ChallengedMethod::Update),
+    ] {
+        run_in_dialog_auth_retry(uas_port, uac_port, method, ChallengeKind::Origin401AuthInt).await;
+    }
+}
+
 async fn run_in_dialog_auth_retry(
     uas_port: u16,
     uac_port: u16,
@@ -265,6 +300,19 @@ async fn run_in_dialog_auth_retry(
                 .send()
                 .await
                 .expect("notify.send()");
+        }
+        ChallengedMethod::Info => {
+            coord
+                .info(&call_id, "application/dtmf-relay")
+                .with_body(bytes::Bytes::from_static(INFO_BODY))
+                .with_raw_header(
+                    HeaderName::Other(TRACE_HEADER_NAME.to_string()),
+                    INFO_TRACE_VALUE,
+                )
+                .expect("X-Trace on INFO")
+                .send()
+                .await
+                .expect("info.send()");
         }
     }
 
@@ -362,6 +410,7 @@ async fn spawn_raw_auth_uas(
                 let idx = count_task.fetch_add(1, Ordering::SeqCst);
                 captures_task.lock().await.push(MidDialogCapture {
                     raw: String::from_utf8_lossy(bytes).into_owned(),
+                    body: request.body().to_vec(),
                     cseq: request.cseq().map(|cseq| cseq.sequence()).unwrap_or(0),
                     trace_value: request
                         .raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string())),
@@ -397,10 +446,15 @@ async fn spawn_raw_auth_uas(
 }
 
 fn build_challenge_response(request: &Request, nonce: &str, kind: ChallengeKind) -> Message {
+    let qop = if kind == ChallengeKind::Origin401AuthInt {
+        "auth-int"
+    } else {
+        "auth"
+    };
     let challenge =
-        format!(r#"Digest realm="{REALM}", nonce="{nonce}", algorithm=MD5, qop="auth""#);
+        format!(r#"Digest realm="{REALM}", nonce="{nonce}", algorithm=MD5, qop="{qop}""#);
     match kind {
-        ChallengeKind::Origin401 => {
+        ChallengeKind::Origin401 | ChallengeKind::Origin401AuthInt => {
             let mut resp = create_response(request, StatusCode::Unauthorized);
             resp.headers.push(TypedHeader::Other(
                 HeaderName::WwwAuthenticate,
@@ -442,7 +496,7 @@ fn assert_retry_request(
     uas_port: u16,
 ) {
     match challenge_kind {
-        ChallengeKind::Origin401 => {
+        ChallengeKind::Origin401 | ChallengeKind::Origin401AuthInt => {
             let auth = capture
                 .authorization
                 .as_deref()
@@ -452,7 +506,7 @@ fn assert_retry_request(
                 "401 retry must not carry Proxy-Authorization: {:?}",
                 capture.proxy_authorization
             );
-            assert_digest_header(auth, method, uas_port);
+            assert_digest_header(auth, method, challenge_kind, uas_port);
         }
         ChallengeKind::Proxy407 => {
             let proxy_auth = capture
@@ -464,13 +518,18 @@ fn assert_retry_request(
                 "407 retry must not carry Authorization: {:?}",
                 capture.authorization
             );
-            assert_digest_header(proxy_auth, method, uas_port);
+            assert_digest_header(proxy_auth, method, challenge_kind, uas_port);
         }
     }
     assert_method_fields_survive(capture, method);
 }
 
-fn assert_digest_header(value: &str, method: ChallengedMethod, uas_port: u16) {
+fn assert_digest_header(
+    value: &str,
+    method: ChallengedMethod,
+    challenge_kind: ChallengeKind,
+    uas_port: u16,
+) {
     assert!(
         value.starts_with("Digest "),
         "retry {} auth header must be a full Digest response: {value}",
@@ -480,7 +539,11 @@ fn assert_digest_header(value: &str, method: ChallengedMethod, uas_port: u16) {
         value.contains(r#"username="alice""#)
             && value.contains(r#"realm="testrealm""#)
             && value.contains("response=")
-            && value.contains(r#"qop=auth"#),
+            && value.contains(if challenge_kind == ChallengeKind::Origin401AuthInt {
+                r#"qop=auth-int"#
+            } else {
+                r#"qop=auth"#
+            }),
         "retry {} auth header is incomplete: {value}",
         method.as_str()
     );
@@ -489,6 +552,23 @@ fn assert_digest_header(value: &str, method: ChallengedMethod, uas_port: u16) {
         "retry {} Digest URI must use the in-dialog remote target: {value}",
         method.as_str()
     );
+    if challenge_kind == ChallengeKind::Origin401AuthInt {
+        let parsed = rvoip_sip::auth::DigestAuthenticator::parse_authorization(value)
+            .expect("parse tracked auth-int Authorization");
+        assert_eq!(parsed.qop.as_deref(), Some("auth-int"));
+        assert!(
+            rvoip_sip::auth::DigestAuthenticator::new(REALM)
+                .validate_response_with_body(
+                    &parsed,
+                    method.as_str(),
+                    "password",
+                    Some(method.auth_int_body()),
+                )
+                .expect("validate tracked auth-int response"),
+            "{} auth-int response must validate against the exact body",
+            method.as_str()
+        );
+    }
 }
 
 fn assert_method_fields_survive(capture: &MidDialogCapture, method: ChallengedMethod) {
@@ -530,6 +610,13 @@ fn assert_method_fields_survive(capture: &MidDialogCapture, method: ChallengedMe
                 capture.raw.contains("<presence/>"),
                 "NOTIFY retry must preserve body; got:\n{}",
                 capture.raw
+            );
+        }
+        ChallengedMethod::Info => {
+            assert_eq!(capture.trace_value.as_deref(), Some(INFO_TRACE_VALUE));
+            assert_eq!(
+                capture.body, INFO_BODY,
+                "INFO retry must preserve non-UTF8 body bytes"
             );
         }
     }

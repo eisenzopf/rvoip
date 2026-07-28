@@ -22,38 +22,40 @@ mod common;
 /// burns a UDP socket pair, RTP port window, and dialog/session state.
 const BACKLOG: [usize; 4] = [0, 50, 250, 1000];
 
+// Keep real RTP allocation in this benchmark: the steady-state cost under
+// test includes the media resources attached to every dialog.  The previous
+// shared 200-port window could not represent the declared 250- and
+// 1,000-dialog cases, so those cases measured allocator exhaustion instead
+// of dialog-table behavior.  Each peer gets a disjoint, reusable range large
+// enough for the maximum backlog plus the one measured call.  A Criterion
+// iteration fully shuts its peers down before the next iteration reuses it.
+const STEADY_MEDIA_CAPACITY: usize = 2048;
+const SERVER_MEDIA_START: u16 = 20_000;
+const CLIENT_MEDIA_START: u16 = 24_000;
+
+const _: () = assert!(STEADY_MEDIA_CAPACITY > BACKLOG[BACKLOG.len() - 1]);
+
 async fn build_server(port: u16) -> StreamPeer {
-    let (m0, m1) = common::next_media_window();
-    let cfg = Config {
-        media_port_start: m0,
-        media_port_end: m1,
-        ..Config::local("bench-steady-server", port)
-    };
+    let cfg = Config::local("bench-steady-server", port)
+        .with_media_port_capacity(SERVER_MEDIA_START, STEADY_MEDIA_CAPACITY);
     StreamPeer::with_config(cfg).await.expect("server peer")
 }
 
 async fn build_client(port: u16) -> StreamPeer {
-    let (m0, m1) = common::next_media_window();
-    let cfg = Config {
-        media_port_start: m0,
-        media_port_end: m1,
-        ..Config::local("bench-steady-client", port)
-    };
+    let cfg = Config::local("bench-steady-client", port)
+        .with_media_port_capacity(CLIENT_MEDIA_START, STEADY_MEDIA_CAPACITY);
     StreamPeer::with_config(cfg).await.expect("client peer")
 }
 
 fn spawn_auto_answer(mut peer: StreamPeer) -> tokio::task::JoinHandle<StreamPeer> {
     tokio::spawn(async move {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(30), peer.wait_for_incoming()).await {
-                Ok(Ok(incoming)) => {
-                    if let Ok(handle) = incoming.accept().await {
-                        tokio::spawn(async move {
-                            let _ = handle.wait_for_end(Some(Duration::from_secs(300))).await;
-                        });
-                    }
-                }
-                Ok(Err(_)) | Err(_) => break,
+        while let Ok(Ok(incoming)) =
+            tokio::time::timeout(Duration::from_secs(30), peer.wait_for_incoming()).await
+        {
+            if let Ok(handle) = incoming.accept().await {
+                tokio::spawn(async move {
+                    let _ = handle.wait_for_end(Some(Duration::from_secs(300))).await;
+                });
             }
         }
         peer

@@ -32,16 +32,13 @@ impl DialogServer {
     ) -> ApiResult<CallHandle> {
         debug!("Handling INVITE from {}", source);
 
-        // Delegate to dialog manager
-        self.dialog_manager
-            .handle_invite(request.clone(), source)
-            .await
-            .map_err(ApiError::from)?;
-
-        // Create dialog from request
+        // A manually supplied INVITE is causally owned by this API call. Use
+        // the same transaction/dialog mechanics as protocol ingress, but
+        // return the exact owned dialog instead of publishing a session event
+        // and then recovering ownership through SIP-header lookup.
         let dialog_id = self
             .dialog_manager
-            .create_dialog(&request)
+            .handle_direct_invite(request, source)
             .await
             .map_err(ApiError::from)?;
 
@@ -71,15 +68,9 @@ impl DialogServer {
         sdp_answer: Option<String>,
     ) -> ApiResult<()> {
         info!("Accepting call for dialog {}", dialog_id);
-
-        // Build 200 OK response
-        // TODO: This should use dialog manager's response building capabilities
-        // when they become available in the API
-        debug!(
-            "Call would be accepted for dialog {} with SDP: {:?}",
-            dialog_id,
-            sdp_answer.is_some()
-        );
+        CallHandle::new(dialog_id.clone(), self.dialog_manager.clone())
+            .answer(sdp_answer)
+            .await?;
 
         // Update statistics
         {
@@ -111,12 +102,9 @@ impl DialogServer {
             "Rejecting call for dialog {} with status {}",
             dialog_id, status_code
         );
-
-        // TODO: This should use dialog manager's response building capabilities
-        debug!(
-            "Call would be rejected for dialog {} with status {} reason: {:?}",
-            dialog_id, status_code, reason
-        );
+        CallHandle::new(dialog_id.clone(), self.dialog_manager.clone())
+            .reject(status_code, reason)
+            .await?;
 
         // Update statistics
         {

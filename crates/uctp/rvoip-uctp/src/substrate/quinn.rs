@@ -1,6 +1,7 @@
 //! Shared quinn endpoint helpers.
 //!
-//! Both `rvoip-quic` (ALPN `uctp/1`) and `rvoip-webtransport` (ALPN `h3`)
+//! Both `rvoip-quic` (ALPN [`crate::UCTP_RAW_QUIC_ALPN`]) and
+//! `rvoip-webtransport` (ALPN [`crate::UCTP_WEBTRANSPORT_ALPN`])
 //! can deploy onto a single shared `quinn::Endpoint`. [`dispatch_by_alpn`]
 //! is the single-consumer accept loop that fans handshook
 //! `quinn::Connection`s out to per-adapter channels by their negotiated

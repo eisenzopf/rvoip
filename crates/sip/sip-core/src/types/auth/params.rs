@@ -11,12 +11,22 @@ use std::fmt;
 ///
 /// Represents a generic name-value parameter used in SIP authentication headers.
 /// Parameters are typically presented as `name="value"` pairs in header fields.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthParam {
     /// Parameter name
     pub name: String,
     /// Parameter value
     pub value: String,
+}
+
+impl fmt::Debug for AuthParam {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthParam")
+            .field("name_bytes", &self.name.len())
+            .field("value_bytes", &self.value.len())
+            .finish()
+    }
 }
 
 impl fmt::Display for AuthParam {
@@ -33,7 +43,7 @@ impl fmt::Display for AuthParam {
 /// Different parameters are used depending on whether they appear in:
 /// - Server-issued challenges (WWW-Authenticate/Proxy-Authenticate headers)
 /// - Client-provided credentials (Authorization/Proxy-Authorization headers)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DigestParam {
     // Challenge & Credentials
     /// Authentication realm (mandatory in challenges and credentials)
@@ -69,6 +79,45 @@ pub enum DigestParam {
     Param(AuthParam),
 }
 
+impl fmt::Debug for DigestParam {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("DigestParam");
+        match self {
+            Self::Realm(value) => debug
+                .field("kind", &"realm")
+                .field("value_bytes", &value.len()),
+            Self::Nonce(value) => debug
+                .field("kind", &"nonce")
+                .field("value_bytes", &value.len()),
+            Self::Opaque(value) => debug
+                .field("kind", &"opaque")
+                .field("value_bytes", &value.len()),
+            Self::Algorithm(value) => debug.field("kind", &"algorithm").field("algorithm", value),
+            Self::Domain(values) => debug
+                .field("kind", &"domain")
+                .field("value_count", &values.len()),
+            Self::Stale(value) => debug.field("kind", &"stale").field("stale", value),
+            Self::Qop(values) => debug
+                .field("kind", &"qop-list")
+                .field("value_count", &values.len()),
+            Self::Username(value) => debug
+                .field("kind", &"username")
+                .field("value_bytes", &value.len()),
+            Self::Uri(_) => debug.field("kind", &"uri"),
+            Self::Response(value) => debug
+                .field("kind", &"response")
+                .field("value_bytes", &value.len()),
+            Self::Cnonce(value) => debug
+                .field("kind", &"client-nonce")
+                .field("value_bytes", &value.len()),
+            Self::MsgQop(value) => debug.field("kind", &"qop").field("qop", value),
+            Self::NonceCount(_) => debug.field("kind", &"nonce-count"),
+            Self::Param(value) => debug.field("kind", &"extension").field("value", value),
+        };
+        debug.finish()
+    }
+}
+
 impl fmt::Display for DigestParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -101,7 +150,7 @@ impl fmt::Display for DigestParam {
 ///
 /// These parameters are used in the Authentication-Info header field, which is sent by
 /// servers after successful authentication to provide additional information to clients.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AuthenticationInfoParam {
     /// Next nonce to be used by the client
     NextNonce(String),
@@ -115,6 +164,26 @@ pub enum AuthenticationInfoParam {
     NonceCount(u32), // nc-value (hex, parsed to u32)
 }
 
+impl fmt::Debug for AuthenticationInfoParam {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("AuthenticationInfoParam");
+        match self {
+            Self::NextNonce(value) => debug
+                .field("kind", &"next-nonce")
+                .field("value_bytes", &value.len()),
+            Self::Qop(value) => debug.field("kind", &"qop").field("qop", value),
+            Self::ResponseAuth(value) => debug
+                .field("kind", &"response-auth")
+                .field("value_bytes", &value.len()),
+            Self::Cnonce(value) => debug
+                .field("kind", &"client-nonce")
+                .field("value_bytes", &value.len()),
+            Self::NonceCount(_) => debug.field("kind", &"nonce-count"),
+        };
+        debug.finish()
+    }
+}
+
 impl fmt::Display for AuthenticationInfoParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,6 +192,76 @@ impl fmt::Display for AuthenticationInfoParam {
             AuthenticationInfoParam::ResponseAuth(v) => write!(f, "rspauth=\"{}\"", v),
             AuthenticationInfoParam::Cnonce(v) => write!(f, "cnonce=\"{}\"", v),
             AuthenticationInfoParam::NonceCount(v) => write!(f, "nc={:08x}", v),
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    const SECRET: &str = "auth-param-direct-debug-canary";
+
+    #[test]
+    fn authentication_parameter_debug_is_metadata_only_without_changing_wire_or_serde() {
+        let uri = Uri::from_str(&format!("sip:{SECRET}@example.invalid")).unwrap();
+        let digest = vec![
+            DigestParam::Realm(SECRET.into()),
+            DigestParam::Nonce(SECRET.into()),
+            DigestParam::Opaque(SECRET.into()),
+            DigestParam::Algorithm(Algorithm::Other(SECRET.into())),
+            DigestParam::Domain(vec![SECRET.into()]),
+            DigestParam::Qop(vec![Qop::Other(SECRET.into())]),
+            DigestParam::Username(SECRET.into()),
+            DigestParam::Uri(uri),
+            DigestParam::Response(SECRET.into()),
+            DigestParam::Cnonce(SECRET.into()),
+            DigestParam::MsgQop(Qop::Other(SECRET.into())),
+            DigestParam::Param(AuthParam {
+                name: SECRET.into(),
+                value: SECRET.into(),
+            }),
+        ];
+        let info = vec![
+            AuthenticationInfoParam::NextNonce(SECRET.into()),
+            AuthenticationInfoParam::Qop(Qop::Other(SECRET.into())),
+            AuthenticationInfoParam::ResponseAuth(SECRET.into()),
+            AuthenticationInfoParam::Cnonce(SECRET.into()),
+        ];
+
+        for value in &digest {
+            assert!(!format!("{value:?}").contains(SECRET));
+        }
+        for value in &info {
+            assert!(!format!("{value:?}").contains(SECRET));
+        }
+
+        let extension = AuthParam {
+            name: SECRET.into(),
+            value: SECRET.into(),
+        };
+        assert!(!format!("{extension:?}").contains(SECRET));
+        assert!(extension.to_string().contains(SECRET));
+        assert!(digest
+            .iter()
+            .all(|value| value.to_string().contains(SECRET)));
+        assert!(info.iter().all(|value| value.to_string().contains(SECRET)));
+        assert!(serde_json::to_string(&digest).unwrap().contains(SECRET));
+        assert!(serde_json::to_string(&info).unwrap().contains(SECRET));
+    }
+
+    #[test]
+    fn authentication_parameter_types_cannot_regain_derived_debug() {
+        let source = include_str!("params.rs");
+        for declaration in [
+            "pub struct AuthParam",
+            "pub enum DigestParam",
+            "pub enum AuthenticationInfoParam",
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            assert!(!source[derive_offset..declaration_offset].contains("Debug"));
         }
     }
 }

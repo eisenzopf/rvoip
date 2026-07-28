@@ -15,7 +15,7 @@ use users_core::{
     UsersConfig, UsersCoreAuthProvider,
 };
 
-use rvoip_core_traits::identity::IdentityAssurance;
+use rvoip_core_traits::identity::{AuthenticatedPrincipal, IdentityAssurance};
 use rvoip_core_traits::ids::IdentityId;
 use rvoip_sip::api::handlers::AutoAnswerHandler;
 use rvoip_sip::api::stream_peer::EventReceiver;
@@ -83,7 +83,8 @@ async fn endpoint_uac_retries_bearer_invite_against_unified_uas() -> anyhow::Res
 
     assert_eq!(identity.scheme, SipAuthScheme::Bearer);
     assert_eq!(identity.source, SipAuthSource::Origin);
-    assert_eq!(identity.subject.as_deref(), Some("user_alice"));
+    let expected_subject = static_bearer_subject();
+    assert_eq!(identity.subject.as_deref(), Some(expected_subject.as_str()));
     assert!(identity.scopes.iter().any(|scope| scope == "sip.invite"));
     Ok(())
 }
@@ -314,7 +315,8 @@ async fn stream_peer_retries_bearer_invite_against_unified_uas() -> anyhow::Resu
 
     assert_eq!(identity.scheme, SipAuthScheme::Bearer);
     assert_eq!(identity.source, SipAuthSource::Origin);
-    assert_eq!(identity.subject.as_deref(), Some("user_alice"));
+    let expected_subject = static_bearer_subject();
+    assert_eq!(identity.subject.as_deref(), Some(expected_subject.as_str()));
     Ok(())
 }
 
@@ -519,7 +521,8 @@ async fn callback_peer_retries_bearer_invite_against_unified_uas() -> anyhow::Re
 
     assert_eq!(identity.scheme, SipAuthScheme::Bearer);
     assert_eq!(identity.source, SipAuthSource::Origin);
-    assert_eq!(identity.subject.as_deref(), Some("user_alice"));
+    let expected_subject = static_bearer_subject();
+    assert_eq!(identity.subject.as_deref(), Some(expected_subject.as_str()));
     Ok(())
 }
 
@@ -982,6 +985,16 @@ async fn seed_users_core() -> anyhow::Result<(TempDir, users_core::Authenticatio
 }
 
 struct StaticBearerValidator;
+
+fn static_bearer_subject() -> String {
+    let identity = IdentityId::from_string("user_alice");
+    AuthenticatedPrincipal::from_assurance(IdentityAssurance::UserAuthorized {
+        identity: identity.clone(),
+        user_id: identity,
+        scopes: vec!["sip.invite".to_string()],
+    })
+    .subject
+}
 
 fn bearer_uas_auth() -> SipAuthService {
     SipAuthService::new()

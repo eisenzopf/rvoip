@@ -1,5 +1,7 @@
 use crate::error::{Error, Result};
+use crate::transport::{next_transport_flow_id, validate_typed_outbound_message, TransportFlowId};
 use bytes::{Buf, BufMut, BytesMut};
+use rvoip_sip_core::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
 use rvoip_sip_core::{parse_message, Message};
 use std::io;
 use std::net::SocketAddr;
@@ -7,19 +9,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 use tracing::{debug, trace, warn};
 
 // Buffer sizes
 const INITIAL_BUFFER_SIZE: usize = 8192;
-const MAX_MESSAGE_SIZE: usize = 65535;
 
 /// A frame pulled off a stream-oriented SIP connection. RFC 5626 §3.5.1
 /// introduces two non-SIP frames the wire may carry — a single CRLF
 /// pong and a CRLFCRLF ping — both only legal at the start of the
 /// receive buffer (never embedded between messages). Anything else is a
 /// regular SIP message.
-#[derive(Debug)]
 pub enum ReceivedFrame {
     /// A parsed SIP message paired with the original wire bytes that
     /// the parser consumed. The bytes are preserved end-to-end so
@@ -35,6 +35,20 @@ pub enum ReceivedFrame {
     KeepAlivePing,
 }
 
+impl std::fmt::Debug for ReceivedFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(message, bytes) => formatter
+                .debug_struct("Message")
+                .field("parsed", message)
+                .field("wire_bytes", &bytes.len())
+                .finish(),
+            Self::KeepAlivePong => formatter.write_str("KeepAlivePong"),
+            Self::KeepAlivePing => formatter.write_str("KeepAlivePing"),
+        }
+    }
+}
+
 /// TCP connection for SIP messages.
 ///
 /// The underlying `TcpStream` is split into owned read and write halves
@@ -45,6 +59,8 @@ pub enum ReceivedFrame {
 /// where a ping task writes while the reader simultaneously awaits a
 /// pong.
 pub struct TcpConnection {
+    /// Opaque identity for this concrete socket lifetime.
+    flow_id: TransportFlowId,
     /// Owned write half. Held under a mutex so concurrent senders
     /// serialise their writes (RFC 3261 §7.5 requires atomic message
     /// delivery over stream transports).
@@ -60,6 +76,9 @@ pub struct TcpConnection {
     peer_addr: SocketAddr,
     /// Whether the connection is closed
     closed: AtomicBool,
+    /// Wakes a blocked read immediately when pool/transport lifecycle closes
+    /// this exact socket.
+    close_signal: watch::Sender<bool>,
     /// Buffer for receiving data
     recv_buffer: Mutex<BytesMut>,
 }
@@ -78,11 +97,13 @@ impl TcpConnection {
         let local_addr = stream.local_addr().map_err(Error::LocalAddrFailed)?;
         let (read_half, write_half) = stream.into_split();
         Ok(Self {
+            flow_id: next_transport_flow_id(),
             write_half: Mutex::new(write_half),
             read_half: Mutex::new(read_half),
             local_addr,
             peer_addr,
             closed: AtomicBool::new(false),
+            close_signal: watch::channel(false).0,
             recv_buffer: Mutex::new(BytesMut::with_capacity(INITIAL_BUFFER_SIZE)),
         })
     }
@@ -90,6 +111,11 @@ impl TcpConnection {
     /// Returns the peer address of the connection
     pub fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
+    }
+
+    /// Returns the opaque identity for this concrete socket lifetime.
+    pub fn flow_id(&self) -> TransportFlowId {
+        self.flow_id
     }
 
     /// Returns the local address of the connection
@@ -102,6 +128,7 @@ impl TcpConnection {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(message)?;
 
         let message_bytes = message.to_bytes();
         let mut writer = self.write_half.lock().await;
@@ -191,6 +218,10 @@ impl TcpConnection {
         // Acquire locks for the buffer and read half
         let mut recv_buffer = self.recv_buffer.lock().await;
         let mut reader = self.read_half.lock().await;
+        let mut close_rx = self.close_signal.subscribe();
+        if *close_rx.borrow() {
+            return Err(Error::TransportClosed);
+        }
 
         loop {
             // RFC 5626 §3.5.1: keep-alive frames only legal at buffer
@@ -219,7 +250,14 @@ impl TcpConnection {
             // No complete frame, read more data
             let mut temp_buffer = vec![0; 8192];
 
-            match reader.read(&mut temp_buffer).await {
+            let read = tokio::select! {
+                changed = close_rx.changed() => {
+                    let _ = changed;
+                    return Err(Error::TransportClosed);
+                }
+                read = reader.read(&mut temp_buffer) => read,
+            };
+            match read {
                 Ok(0) => {
                     // End of stream
                     if recv_buffer.is_empty() {
@@ -232,10 +270,6 @@ impl TcpConnection {
                 }
                 Ok(n) => {
                     trace!("Read {} bytes from {}", n, self.peer_addr);
-
-                    if recv_buffer.len() + n > MAX_MESSAGE_SIZE {
-                        return Err(Error::MessageTooLarge(recv_buffer.len() + n));
-                    }
 
                     recv_buffer.put_slice(&temp_buffer[0..n]);
                 }
@@ -268,89 +302,32 @@ impl TcpConnection {
             return Ok(None);
         }
 
-        // First check if we have headers and body
-        if let Some(double_crlf_pos) = self.find_double_crlf(buffer) {
-            // Found header/body separator, now check Content-Length
-            let header_slice = &buffer[0..double_crlf_pos + 4]; // Include the separator
-
-            // Try to extract Content-Length
-            let content_length = self.extract_content_length(header_slice);
-
-            // Calculate total message length
-            let total_length = double_crlf_pos + 4 + content_length;
-
-            // Check if we have the complete message
-            if buffer.len() >= total_length {
-                // We have a complete message, extract it
-                let message_slice = &buffer[0..total_length];
-
-                // Snapshot the wire bytes BEFORE parsing so we can hand
-                // them downstream byte-exact (RFC 8224 STIR/SHAKEN, SBC
-                // signature preservation, replay tooling). One
-                // allocation per inbound frame; matches the UDP path's
-                // shape (Bytes::copy_from_slice).
-                let raw_bytes = bytes::Bytes::copy_from_slice(message_slice);
-
-                // Parse the message
-                match parse_message(message_slice) {
-                    Ok(message) => {
-                        // Message parsed successfully
-                        trace!("Parsed complete SIP message ({} bytes)", total_length);
-
-                        // Remove the message from the buffer
-                        buffer.advance(total_length);
-
-                        return Ok(Some((message, raw_bytes)));
-                    }
-                    Err(e) => {
-                        // Parsing error
-                        warn!("Failed to parse SIP message: {}", e);
-
-                        // Advance past this malformed message to avoid getting stuck
-                        buffer.advance(total_length);
-
-                        return Err(Error::ParseError(e.to_string()));
-                    }
-                }
+        let frame = match inspect_sip_frame_with_policy(buffer, SipFramingPolicy::Stream) {
+            Ok(SipFrameStatus::Incomplete { .. }) => return Ok(None),
+            Ok(SipFrameStatus::Complete(frame)) => frame,
+            Err(error) => {
+                self.closed.store(true, Ordering::Relaxed);
+                warn!(
+                    error_class = error.class(),
+                    "Rejecting malformed SIP TCP frame"
+                );
+                return Err(Error::ParseError(error.to_string()));
             }
-        }
+        };
+        let message_slice = &buffer[..frame.total_bytes];
+        let raw_bytes = bytes::Bytes::copy_from_slice(message_slice);
+        let message = parse_message(message_slice).map_err(|error| {
+            self.closed.store(true, Ordering::Relaxed);
+            warn!(
+                error_class = "sip-syntax",
+                "Rejecting malformed SIP TCP message"
+            );
+            Error::ParseError(error.to_string())
+        })?;
 
-        // No complete message found
-        Ok(None)
-    }
-
-    /// Finds the position of the double CRLF (end of headers)
-    fn find_double_crlf(&self, buffer: &BytesMut) -> Option<usize> {
-        for i in 0..buffer.len().saturating_sub(3) {
-            if buffer[i] == b'\r'
-                && buffer[i + 1] == b'\n'
-                && buffer[i + 2] == b'\r'
-                && buffer[i + 3] == b'\n'
-            {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    /// Extracts the Content-Length value from the header section
-    fn extract_content_length(&self, header_slice: &[u8]) -> usize {
-        let header_str = String::from_utf8_lossy(header_slice);
-
-        // Simple parsing to extract Content-Length
-        for line in header_str.lines() {
-            let line = line.trim();
-            if line.to_lowercase().starts_with("content-length:") {
-                if let Some(value_str) = line.split(':').nth(1) {
-                    if let Ok(length) = value_str.trim().parse::<usize>() {
-                        return length;
-                    }
-                }
-            }
-        }
-
-        // Default to 0 if not found
-        0
+        trace!("Parsed complete SIP message ({} bytes)", frame.total_bytes);
+        buffer.advance(frame.total_bytes);
+        Ok(Some((message, raw_bytes)))
     }
 
     /// Closes the TCP connection
@@ -359,6 +336,7 @@ impl TcpConnection {
             // Already closed
             return Ok(());
         }
+        self.close_signal.send_replace(true);
 
         // Shutting down the write half closes the socket from both
         // directions (read half will return EOF on its next poll).
@@ -394,8 +372,39 @@ impl Drop for TcpConnection {
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::{ContentLengthBuilderExt, SimpleRequestBuilder};
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::framing::{MAX_SIP_BODY_BYTES, MAX_SIP_HEADER_BYTES};
+    use rvoip_sip_core::{CallId, Method, Request, Response, StatusCode, TypedHeader, Uri};
     use tokio::net::TcpListener;
+
+    async fn buffered_test_connection() -> (TcpConnection, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = TcpStream::connect(address).await.unwrap();
+        let (server, peer) = listener.accept().await.unwrap();
+        (TcpConnection::from_stream(server, peer).unwrap(), client)
+    }
+
+    fn minimal_request(content_length_headers: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut message = b"OPTIONS sip:service.example SIP/2.0\r\n".to_vec();
+        message.extend_from_slice(content_length_headers);
+        message.extend_from_slice(b"\r\n\r\n");
+        message.extend_from_slice(body);
+        message
+    }
+
+    #[test]
+    fn received_frame_debug_never_renders_exact_wire_bytes() {
+        const SECRET: &str = "received-frame-wire-secret-canary";
+        let message = Message::Request(Request::new(
+            Method::Options,
+            Uri::custom(format!("sip:{SECRET}@example.test")),
+        ));
+        let frame =
+            ReceivedFrame::Message(message, bytes::Bytes::copy_from_slice(SECRET.as_bytes()));
+        let rendered = format!("{frame:?}");
+        assert!(!rendered.contains(SECRET), "frame debug leaked: {rendered}");
+        assert!(rendered.contains(&format!("wire_bytes: {}", SECRET.len())));
+    }
 
     #[tokio::test]
     async fn test_tcp_connection_connect() {
@@ -467,6 +476,60 @@ mod tests {
         }
 
         // Clean up
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn typed_direct_connection_rejects_unsafe_serialized_fields_before_socket_io() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let client = TcpStream::connect(server_addr).await.unwrap();
+        let mut server = accept.await.unwrap();
+        let connection = TcpConnection::from_stream(client, server_addr).unwrap();
+        let mut unsafe_header = Request::new(Method::Options, Uri::sip("example.test"));
+        unsafe_header.headers.push(TypedHeader::CallId(CallId::new(
+            "safe\r\nX-Injected: direct-header-secret",
+        )));
+        let unsafe_method = Request::new(
+            Method::Extension("SAFE\r\nX-Injected: direct-method-secret".into()),
+            Uri::sip("example.test"),
+        );
+        for message in [
+            Message::Response(
+                Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: direct-reason-secret"),
+            ),
+            Message::Request(unsafe_header),
+            Message::Request(unsafe_method),
+        ] {
+            let error = connection
+                .send_message(&message)
+                .await
+                .expect_err("typed direct send must fail closed");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            for secret in [
+                "direct-reason-secret",
+                "direct-header-secret",
+                "direct-method-secret",
+            ] {
+                assert!(!error.to_string().contains(secret));
+            }
+        }
+        let mut buffer = [0u8; 64];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                server.read(&mut buffer)
+            )
+            .await
+            .is_err(),
+            "rejected typed direct send must write no bytes",
+        );
+
+        let raw = b"X-Verbatim: direct-raw-retained\r\n";
+        connection.send_raw_bytes(raw).await.unwrap();
+        server.read_exact(&mut buffer[..raw.len()]).await.unwrap();
+        assert_eq!(&buffer[..raw.len()], raw);
         connection.close().await.unwrap();
     }
 
@@ -543,6 +606,113 @@ mod tests {
 
         // Clean up
         connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_framing_accepts_compact_and_hcolon_content_length() {
+        for header in [b"L: 4".as_slice(), b"Content-Length \t : 4".as_slice()] {
+            let (connection, _peer) = buffered_test_connection().await;
+            let message = minimal_request(header, b"body");
+            let mut buffer = BytesMut::from(message.as_slice());
+
+            let (parsed, raw) = connection
+                .try_parse_message(&mut buffer)
+                .unwrap()
+                .expect("Content-Length frame");
+            assert!(buffer.is_empty());
+            assert_eq!(raw.as_ref(), message);
+            let Message::Request(request) = parsed else {
+                panic!("request expected");
+            };
+            assert_eq!(request.body(), b"body");
+            assert!(!connection.is_closed());
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_rejects_all_ambiguous_content_lengths_without_consuming_following_request() {
+        let valid_second = minimal_request(b"Content-Length: 0", b"");
+        for (headers, class) in [
+            (b"Via: missing-length".as_slice(), "missing-content-length"),
+            (
+                b"Content-Length: 0\r\nContent-Length: 0".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"Content-Length: 0\r\nl: 1".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"Content-Length \t: 0\r\nl : 1".as_slice(),
+                "duplicate-content-length",
+            ),
+            (
+                b"L: 1\r\nCONTENT-LENGTH: 0".as_slice(),
+                "duplicate-content-length",
+            ),
+            (b"Content-Length: nope".as_slice(), "invalid-content-length"),
+            (b"l: \xff".as_slice(), "invalid-content-length"),
+            (
+                b"Content-Length: 184467440737095516160".as_slice(),
+                "content-length-overflow",
+            ),
+        ] {
+            let (connection, _peer) = buffered_test_connection().await;
+            let mut bytes = minimal_request(headers, b"");
+            bytes.extend_from_slice(&valid_second);
+            let original = bytes.clone();
+            let mut buffer = BytesMut::from(bytes.as_slice());
+
+            let error = connection
+                .try_parse_message(&mut buffer)
+                .expect_err("ambiguous frame must be rejected");
+            assert!(
+                matches!(&error, Error::ParseError(detail) if detail.contains(class)),
+                "unexpected framing class: {error}"
+            );
+            assert_eq!(buffer.as_ref(), original);
+            assert!(connection.is_closed());
+            assert!(matches!(
+                connection.try_parse_message(&mut buffer),
+                Err(Error::ParseError(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn tcp_rejects_slow_endless_headers_and_huge_bodies_at_shared_bounds() {
+        let (connection, _peer) = buffered_test_connection().await;
+        let mut slow =
+            BytesMut::from(&b"OPTIONS sip:service.example SIP/2.0\r\nX-Fold: value\r\n"[..]);
+        let mut continuation = vec![b'a'; 1_022];
+        continuation[0] = b' ';
+        continuation.extend_from_slice(b"\r\n");
+        while slow.len() <= MAX_SIP_HEADER_BYTES {
+            slow.extend_from_slice(&continuation);
+            if slow.len() <= MAX_SIP_HEADER_BYTES {
+                assert!(connection.try_parse_message(&mut slow).unwrap().is_none());
+            }
+        }
+        let error = connection.try_parse_message(&mut slow).unwrap_err();
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("header-too-large")
+        ));
+        assert!(connection.is_closed());
+
+        let (connection, _peer) = buffered_test_connection().await;
+        let huge = minimal_request(
+            format!("Content-Length: {}", MAX_SIP_BODY_BYTES + 1).as_bytes(),
+            b"",
+        );
+        let mut buffer = BytesMut::from(huge.as_slice());
+        let error = connection.try_parse_message(&mut buffer).unwrap_err();
+        assert!(matches!(
+            &error,
+            Error::ParseError(detail) if detail.contains("body-too-large")
+        ));
+        assert_eq!(buffer.as_ref(), huge);
+        assert!(connection.is_closed());
     }
 
     /// RFC 5626 §3.5.1: a bare `\r\n` at buffer offset 0 is a keep-alive

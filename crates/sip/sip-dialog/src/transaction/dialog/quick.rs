@@ -1134,12 +1134,15 @@ pub fn subscribe_out_of_dialog_with_extras(
     }
 
     // Pre-computed Digest / Bearer authorization (used by 401 retry
-    // and by callers with externally-computed credentials).
+    // and by callers with externally-computed credentials). The shared
+    // constructor enforces the final single-line wire bound.
     if let Some(auth) = authorization {
-        request.headers.push(TypedHeader::Other(
-            HeaderName::Authorization,
-            HeaderValue::Raw(auth.into_bytes()),
-        ));
+        request
+            .headers
+            .push(rvoip_sip_core::validation::validated_authorization_header(
+                HeaderName::Authorization,
+                auth,
+            )?);
     }
 
     if let Some(headers) = extra_headers {
@@ -1262,7 +1265,7 @@ pub fn message_out_of_dialog_with_extras(
     from_tag: Option<String>,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
-    use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+    use rvoip_sip_core::types::header::HeaderName;
 
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
@@ -1287,12 +1290,15 @@ pub fn message_out_of_dialog_with_extras(
             .build();
 
     // Pre-computed Digest / Bearer authorization (used by 401 retry
-    // and by callers with externally-computed credentials).
+    // and by callers with externally-computed credentials). The shared
+    // constructor enforces the final single-line wire bound.
     if let Some(auth) = authorization {
-        request.headers.push(TypedHeader::Other(
-            HeaderName::Authorization,
-            HeaderValue::Raw(auth.into_bytes()),
-        ));
+        request
+            .headers
+            .push(rvoip_sip_core::validation::validated_authorization_header(
+                HeaderName::Authorization,
+                auth,
+            )?);
     }
 
     if let Some(headers) = extra_headers {
@@ -1677,6 +1683,79 @@ mod tests {
         .expect("MESSAGE");
 
         assert_eq!(request.first_via_transport(), Some("TLS"));
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
+    fn out_of_dialog_precomputed_auth_rejects_line_smuggling() {
+        let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
+        let malicious = "Bearer safe\r\nX-Injected: yes".to_string();
+
+        let subscribe = subscribe_out_of_dialog_with_extras(
+            "sips:events@pbx.example.com;transport=tls",
+            "sips:1001@pbx.example.com",
+            "sips:1001@192.0.2.10:5071;transport=tls",
+            "dialog",
+            3600,
+            None,
+            Some(malicious.clone()),
+            1,
+            None,
+            None,
+            local_addr,
+            None,
+        )
+        .expect_err("SUBSCRIBE must reject malicious precomputed auth");
+        assert!(!subscribe.to_string().contains(&malicious));
+
+        let message = message_out_of_dialog_with_extras(
+            "sips:1002@pbx.example.com;transport=tls",
+            "sips:1001@pbx.example.com",
+            "hello",
+            1,
+            local_addr,
+            None,
+            Some(malicious.clone()),
+            None,
+            None,
+            None,
+        )
+        .expect_err("MESSAGE must reject malicious precomputed auth");
+        assert!(!message.to_string().contains(&malicious));
+    }
+
+    #[test]
+    fn out_of_dialog_precomputed_auth_preserves_valid_wire_value() {
+        let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
+        let authorization = "Digest username=\"alice\", response=\"safe\"";
+        let request = message_out_of_dialog_with_extras(
+            "sips:1002@pbx.example.com;transport=tls",
+            "sips:1001@pbx.example.com",
+            "hello",
+            1,
+            local_addr,
+            None,
+            Some(authorization.to_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("valid precomputed authorization");
+
+        assert_eq!(
+            request
+                .raw_header_value(&HeaderName::Authorization)
+                .as_deref(),
+            Some(authorization)
+        );
+        let wire = request.to_string();
+        assert_eq!(
+            wire.split("\r\n")
+                .filter(|line| line.starts_with("Authorization:"))
+                .count(),
+            1,
+            "valid precomputed auth must serialize as exactly one header line",
+        );
         rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 

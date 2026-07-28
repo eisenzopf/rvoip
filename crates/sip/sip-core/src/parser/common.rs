@@ -290,12 +290,44 @@ mod tests {
 }
 
 // Define HeaderValue and make it public
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HeaderValue(pub Vec<u8>);
+
+impl std::fmt::Debug for HeaderValue {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HeaderValue")
+            .field("value_bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl HeaderValue {
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod header_value_diagnostic_safety_tests {
+    use super::*;
+
+    #[test]
+    fn parser_header_value_debug_is_metadata_only() {
+        const SECRET: &str = "parser-header-value-direct-debug-canary";
+        let value = HeaderValue(SECRET.as_bytes().to_vec());
+        let debug = format!("{value:?}");
+        assert!(!debug.contains(SECRET));
+        assert!(debug.contains("value_bytes"));
+        assert_eq!(value.as_bytes(), SECRET.as_bytes());
+    }
+
+    #[test]
+    fn parser_header_value_cannot_regain_derived_debug() {
+        let source = include_str!("common.rs");
+        let declaration = source.find("pub struct HeaderValue").unwrap();
+        let derive = source[..declaration].rfind("#[derive(").unwrap();
+        assert!(!source[derive..declaration].contains("Debug"));
     }
 }
 

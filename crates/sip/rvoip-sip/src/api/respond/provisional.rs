@@ -7,7 +7,8 @@ use rvoip_sip_core::types::Method;
 use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
-use crate::errors::Result;
+use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
 
 /// Builds and sends a 1xx provisional response (e.g. 180 Ringing,
@@ -15,6 +16,7 @@ use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
 pub struct ProvisionalBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     code: u16,
     sdp: Option<String>,
     require_100rel: bool,
@@ -23,9 +25,20 @@ pub struct ProvisionalBuilder {
 
 impl ProvisionalBuilder {
     pub(crate) fn new(coord: Arc<UnifiedCoordinator>, call_id: CallId, code: u16) -> Self {
+        let lifecycle_handle = coord.helpers.state_machine.store.lifecycle_handle(&call_id);
+        Self::new_captured(coord, call_id, lifecycle_handle, code)
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+        code: u16,
+    ) -> Self {
         Self {
             coord,
             call_id,
+            lifecycle_handle,
             code,
             sdp: None,
             require_100rel: false,
@@ -47,6 +60,10 @@ impl ProvisionalBuilder {
 
     /// Send the provisional response on the wire.
     pub async fn send(mut self) -> Result<()> {
+        let lifecycle_handle = self
+            .lifecycle_handle
+            .as_ref()
+            .ok_or_else(|| SessionError::SessionNotFound(self.call_id.to_string()))?;
         let mut extras = take_staged(&mut self.state);
 
         // Per design §3.3 setter table, `with_require_100rel(true)`
@@ -59,21 +76,32 @@ impl ProvisionalBuilder {
             ));
         }
 
-        // The legacy send_early_media path always emits 183 with the
-        // reliability bits driven by Config + peer Supported, so when
-        // no extras are staged and the requested code matches the
-        // legacy default, keep that path for backwards-compatibility.
+        // Preserve the compatibility path's peer-capability rejection for
+        // ordinary 180/183 sends. Dispatch itself still enters through the
+        // captured exact lifecycle below.
         if extras.is_empty() && (self.code == 183 || self.code == 180) {
-            return self.coord.send_early_media(&self.call_id, self.sdp).await;
+            if !self
+                .coord
+                .dialog_adapter()
+                .peer_supports_100rel(&self.call_id)
+                .await?
+            {
+                return Err(crate::errors::SessionError::UnreliableProvisionalsNotSupported);
+            }
         }
 
-        // SIP_API_DESIGN_2 Phase D: extras-aware provisional dispatch.
-        // Routes through `send_response_with_options` so 100rel /
-        // Server / Allow staging from the upstream leg ride to the
-        // downstream wire intact.
+        // The requested 1xx, body, and headers enter the exact-session lane as
+        // one response envelope. The YAML SendEarlyMedia transition remains
+        // the lifecycle/action-order authority and dialog-core owns RSeq.
         self.coord
-            .dialog_adapter()
-            .send_response_with_options(&self.call_id, self.code, self.sdp, extras)
+            .helpers
+            .send_provisional_with_response(
+                &self.call_id,
+                lifecycle_handle,
+                self.code,
+                self.sdp,
+                extras,
+            )
             .await
     }
 }

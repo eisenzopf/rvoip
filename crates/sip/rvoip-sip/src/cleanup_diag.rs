@@ -160,6 +160,13 @@ pub struct CleanupDiagSnapshot {
     pub setup_teardown_watchdog_transition_failed: u64,
     pub setup_teardown_watchdog_release_completed: u64,
     pub setup_teardown_watchdog_release_failed: u64,
+    pub session_event_dispatch_saturated: u64,
+    pub session_event_dispatch_dropped: u64,
+    pub session_event_dispatch_closed: u64,
+    pub session_event_publication_failed: u64,
+    pub session_event_publication_timed_out: u64,
+    pub session_event_dispatch_shutdown_timeouts: u64,
+    pub session_event_dispatch_aborted_workers: u64,
     pub stages: Vec<CleanupStageSnapshot>,
 }
 
@@ -263,6 +270,13 @@ static SETUP_TEARDOWN_WATCHDOG_FIRED: AtomicU64 = AtomicU64::new(0);
 static SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED: AtomicU64 = AtomicU64::new(0);
 static SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED: AtomicU64 = AtomicU64::new(0);
 static SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_DISPATCH_SATURATED: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_DISPATCH_DROPPED: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_DISPATCH_CLOSED: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_PUBLICATION_FAILED: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_PUBLICATION_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_DISPATCH_SHUTDOWN_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+static SESSION_EVENT_DISPATCH_ABORTED_WORKERS: AtomicU64 = AtomicU64::new(0);
 
 /// Enable or disable cleanup diagnostics for this process.
 pub fn set_enabled(enabled: bool) {
@@ -346,6 +360,16 @@ pub fn snapshot() -> CleanupDiagSnapshot {
             .load(Ordering::Relaxed),
         setup_teardown_watchdog_release_failed: SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED
             .load(Ordering::Relaxed),
+        session_event_dispatch_saturated: SESSION_EVENT_DISPATCH_SATURATED.load(Ordering::Relaxed),
+        session_event_dispatch_dropped: SESSION_EVENT_DISPATCH_DROPPED.load(Ordering::Relaxed),
+        session_event_dispatch_closed: SESSION_EVENT_DISPATCH_CLOSED.load(Ordering::Relaxed),
+        session_event_publication_failed: SESSION_EVENT_PUBLICATION_FAILED.load(Ordering::Relaxed),
+        session_event_publication_timed_out: SESSION_EVENT_PUBLICATION_TIMED_OUT
+            .load(Ordering::Relaxed),
+        session_event_dispatch_shutdown_timeouts: SESSION_EVENT_DISPATCH_SHUTDOWN_TIMEOUTS
+            .load(Ordering::Relaxed),
+        session_event_dispatch_aborted_workers: SESSION_EVENT_DISPATCH_ABORTED_WORKERS
+            .load(Ordering::Relaxed),
         stages,
     }
 }
@@ -369,6 +393,26 @@ pub fn format_summary(snapshot: &CleanupDiagSnapshot) -> String {
             snapshot.setup_teardown_watchdog_transition_failed,
             snapshot.setup_teardown_watchdog_release_completed,
             snapshot.setup_teardown_watchdog_release_failed,
+        ));
+    }
+    let session_event_total = snapshot
+        .session_event_dispatch_saturated
+        .saturating_add(snapshot.session_event_dispatch_dropped)
+        .saturating_add(snapshot.session_event_dispatch_closed)
+        .saturating_add(snapshot.session_event_publication_failed)
+        .saturating_add(snapshot.session_event_publication_timed_out)
+        .saturating_add(snapshot.session_event_dispatch_shutdown_timeouts)
+        .saturating_add(snapshot.session_event_dispatch_aborted_workers);
+    if session_event_total > 0 {
+        out.push_str(&format!(
+            " session_event_dispatch:saturated={} dropped={} closed={} publish_failed={} publish_timed_out={} shutdown_timeouts={} aborted_workers={}",
+            snapshot.session_event_dispatch_saturated,
+            snapshot.session_event_dispatch_dropped,
+            snapshot.session_event_dispatch_closed,
+            snapshot.session_event_publication_failed,
+            snapshot.session_event_publication_timed_out,
+            snapshot.session_event_dispatch_shutdown_timeouts,
+            snapshot.session_event_dispatch_aborted_workers,
         ));
     }
     for stage in &snapshot.stages {
@@ -404,7 +448,7 @@ fn stage_snapshot(stage: CleanupStage) -> CleanupStageSnapshot {
         completed,
         failed,
         active: metric.active.load(Ordering::Relaxed),
-        avg_us: if observed == 0 { 0 } else { sum_us / observed },
+        avg_us: sum_us.checked_div(observed).unwrap_or(0),
         p50_us: percentile_us(metric, observed, 50),
         p95_us: percentile_us(metric, observed, 95),
         p99_us: percentile_us(metric, observed, 99),
@@ -476,6 +520,39 @@ pub(crate) fn record_setup_teardown_watchdog_release_failed() {
     SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED.fetch_add(1, Ordering::Relaxed);
 }
 
+pub(crate) fn record_session_event_dispatch_saturated() {
+    SESSION_EVENT_DISPATCH_SATURATED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_dispatch_dropped() {
+    SESSION_EVENT_DISPATCH_DROPPED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_dispatch_dropped_by(count: usize) {
+    SESSION_EVENT_DISPATCH_DROPPED.fetch_add(count as u64, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_dispatch_closed() {
+    SESSION_EVENT_DISPATCH_CLOSED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_publication_failed() {
+    SESSION_EVENT_PUBLICATION_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[allow(dead_code)]
+pub(crate) fn record_session_event_publication_timed_out() {
+    SESSION_EVENT_PUBLICATION_TIMED_OUT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_dispatch_shutdown_timeout() {
+    SESSION_EVENT_DISPATCH_SHUTDOWN_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_session_event_dispatch_aborted_workers(count: usize) {
+    SESSION_EVENT_DISPATCH_ABORTED_WORKERS.fetch_add(count as u64, Ordering::Relaxed);
+}
+
 fn metrics() -> &'static [StageMetrics] {
     METRICS
         .get_or_init(|| {
@@ -529,6 +606,13 @@ pub(crate) fn reset_for_tests() {
     SETUP_TEARDOWN_WATCHDOG_TRANSITION_FAILED.store(0, Ordering::Relaxed);
     SETUP_TEARDOWN_WATCHDOG_RELEASE_COMPLETED.store(0, Ordering::Relaxed);
     SETUP_TEARDOWN_WATCHDOG_RELEASE_FAILED.store(0, Ordering::Relaxed);
+    SESSION_EVENT_DISPATCH_SATURATED.store(0, Ordering::Relaxed);
+    SESSION_EVENT_DISPATCH_DROPPED.store(0, Ordering::Relaxed);
+    SESSION_EVENT_DISPATCH_CLOSED.store(0, Ordering::Relaxed);
+    SESSION_EVENT_PUBLICATION_FAILED.store(0, Ordering::Relaxed);
+    SESSION_EVENT_PUBLICATION_TIMED_OUT.store(0, Ordering::Relaxed);
+    SESSION_EVENT_DISPATCH_SHUTDOWN_TIMEOUTS.store(0, Ordering::Relaxed);
+    SESSION_EVENT_DISPATCH_ABORTED_WORKERS.store(0, Ordering::Relaxed);
 }
 
 #[cfg(test)]

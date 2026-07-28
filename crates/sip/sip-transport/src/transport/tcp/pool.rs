@@ -1,6 +1,9 @@
 use super::TcpConnection;
+use crate::error::{Error, Result};
+use crate::transport::TransportFlowId;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -38,7 +41,9 @@ pub struct ConnectionPool {
     /// Configuration for the pool
     config: PoolConfig,
     /// Active connections by remote address
-    connections: Mutex<HashMap<SocketAddr, ConnectionMeta>>,
+    connections: Arc<Mutex<HashMap<SocketAddr, ConnectionMeta>>>,
+    /// Shared shutdown state for the real pool and its cleanup task.
+    closed: Arc<AtomicBool>,
 }
 
 impl ConnectionPool {
@@ -46,36 +51,44 @@ impl ConnectionPool {
     pub fn new(config: PoolConfig) -> Self {
         let pool = Self {
             config,
-            connections: Mutex::new(HashMap::new()),
+            connections: Arc::new(Mutex::new(HashMap::new())),
+            closed: Arc::new(AtomicBool::new(false)),
         };
-
-        // Start the cleanup task
-        pool.spawn_cleanup_task();
 
         pool
     }
 
     /// Adds a connection to the pool
-    pub async fn add_connection(&self, addr: SocketAddr, connection: Arc<TcpConnection>) {
+    pub async fn add_connection(
+        &self,
+        addr: SocketAddr,
+        connection: Arc<TcpConnection>,
+    ) -> Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            let _ = connection.close().await;
+            return Err(Error::TransportClosed);
+        }
         let mut connections = self.connections.lock().await;
-
-        // If the pool is full and this is a new connection, try to remove the oldest one
-        if connections.len() >= self.config.max_connections && !connections.contains_key(&addr) {
-            if let Some((oldest_addr, _)) = connections
-                .iter()
-                .min_by_key(|(_, meta)| meta.last_activity)
-            {
-                let oldest_addr = *oldest_addr;
-                debug!(
-                    "Pool is full, removing oldest connection to {}",
-                    oldest_addr
-                );
-                connections.remove(&oldest_addr);
-            }
+        if self.closed.load(Ordering::Acquire) {
+            drop(connections);
+            let _ = connection.close().await;
+            return Err(Error::TransportClosed);
         }
 
-        // Add or update the connection
-        connections.insert(
+        // Reject new admission at the configured cap. Removing only the map
+        // entry leaves its reader task and socket alive, which both violates
+        // the cap and makes exact-flow responses impossible. Existing flows
+        // remain stable; callers can surface overload and retry elsewhere.
+        if connections.len() >= self.config.max_connections && !connections.contains_key(&addr) {
+            drop(connections);
+            let _ = connection.close().await;
+            return Err(Error::ConnectionLimitReached);
+        }
+
+        // A replacement at the same address does not grow the pool, but the
+        // displaced socket still has a reader. Close it after publishing the
+        // replacement so its exact-flow cleanup cannot remove the new entry.
+        let displaced = connections.insert(
             addr,
             ConnectionMeta {
                 connection,
@@ -88,6 +101,15 @@ impl ConnectionPool {
             addr,
             connections.len()
         );
+        drop(connections);
+
+        if let Some(displaced) = displaced {
+            if let Err(error) = displaced.connection.close().await {
+                error!("Error closing replaced connection to {}: {}", addr, error);
+            }
+        }
+
+        Ok(())
     }
 
     /// Gets a connection from the pool if it exists
@@ -105,6 +127,37 @@ impl ConnectionPool {
         None
     }
 
+    /// Gets a connection only when both its peer address and opaque socket
+    /// lifetime identity match.
+    pub async fn get_connection_for_flow(
+        &self,
+        addr: &SocketAddr,
+        flow_id: TransportFlowId,
+    ) -> Option<Arc<TcpConnection>> {
+        let mut connections = self.connections.lock().await;
+        let meta = connections.get_mut(addr)?;
+        if meta.connection.flow_id() != flow_id {
+            return None;
+        }
+        meta.last_activity = Instant::now();
+        Some(meta.connection.clone())
+    }
+
+    /// Resolves a live address-keyed TCP entry to its opaque socket identity.
+    pub fn flow_id_for(&self, addr: &SocketAddr) -> Option<TransportFlowId> {
+        let connections = self.connections.try_lock().ok()?;
+        connections.get(addr).map(|meta| meta.connection.flow_id())
+    }
+
+    /// Awaited exact-flow lookup for security-sensitive response validation.
+    pub async fn resolve_flow_id_for(&self, addr: &SocketAddr) -> Option<TransportFlowId> {
+        self.connections
+            .lock()
+            .await
+            .get(addr)
+            .map(|meta| meta.connection.flow_id())
+    }
+
     /// Removes a connection from the pool
     pub async fn remove_connection(&self, addr: &SocketAddr) {
         let mut connections = self.connections.lock().await;
@@ -115,6 +168,17 @@ impl ConnectionPool {
                 addr,
                 connections.len()
             );
+        }
+    }
+
+    /// Removes the entry only if it still refers to the closing socket.
+    pub async fn remove_connection_for_flow(&self, addr: &SocketAddr, flow_id: TransportFlowId) {
+        let mut connections = self.connections.lock().await;
+        if connections
+            .get(addr)
+            .is_some_and(|meta| meta.connection.flow_id() == flow_id)
+        {
+            connections.remove(addr);
         }
     }
 
@@ -132,6 +196,7 @@ impl ConnectionPool {
 
     /// Closes all connections in the pool
     pub async fn close_all(&self) {
+        self.closed.store(true, Ordering::Release);
         let mut connections = self.connections.lock().await;
 
         info!(
@@ -147,18 +212,17 @@ impl ConnectionPool {
         }
     }
 
-    /// Spawns a task to periodically clean up idle connections
-    fn spawn_cleanup_task(&self) {
-        let pool = Arc::new(self.clone());
-
-        tokio::spawn(async move {
-            let mut cleanup_interval = interval(Duration::from_secs(60));
-
-            loop {
-                cleanup_interval.tick().await;
-                pool.cleanup_idle_connections().await;
+    /// Run periodic cleanup against the shared live pool. The owning
+    /// transport supervises this future and aborts/joins it during close.
+    pub(crate) async fn run_cleanup(self) {
+        let mut cleanup_interval = interval(Duration::from_secs(60));
+        while !self.closed.load(Ordering::Acquire) {
+            cleanup_interval.tick().await;
+            if self.closed.load(Ordering::Acquire) {
+                break;
             }
-        });
+            self.cleanup_idle_connections().await;
+        }
     }
 
     /// Cleans up idle connections that have exceeded the timeout
@@ -195,7 +259,8 @@ impl Clone for ConnectionPool {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            connections: Mutex::new(HashMap::new()),
+            connections: self.connections.clone(),
+            closed: self.closed.clone(),
         }
     }
 }
@@ -203,7 +268,6 @@ impl Clone for ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Result;
     use std::net::{IpAddr, Ipv4Addr};
     use tokio::sync::Mutex as TokioMutex;
 
@@ -300,5 +364,34 @@ mod tests {
 
         // Verify pool configuration
         assert_eq!(pool.config.max_connections, 2);
+    }
+
+    #[tokio::test]
+    async fn cloned_pool_cleanup_mutates_the_live_shared_registry() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let dialing = tokio::spawn(async move { TcpConnection::connect(destination).await });
+        let (_server_stream, _) = listener.accept().await.unwrap();
+        let connection = Arc::new(dialing.await.unwrap().unwrap());
+        let flow_id = connection.flow_id();
+
+        let pool = ConnectionPool::new(PoolConfig {
+            max_connections: 2,
+            idle_timeout: Duration::from_millis(5),
+        });
+        pool.add_connection(destination, connection.clone())
+            .await
+            .unwrap();
+        let cleanup_view = pool.clone();
+        assert_eq!(
+            cleanup_view.resolve_flow_id_for(&destination).await,
+            Some(flow_id)
+        );
+
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        cleanup_view.cleanup_idle_connections().await;
+
+        assert_eq!(pool.resolve_flow_id_for(&destination).await, None);
+        assert!(connection.is_closed());
     }
 }

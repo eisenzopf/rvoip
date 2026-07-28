@@ -39,7 +39,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bytes::Bytes;
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_core::adapter::ConnectionAdapter;

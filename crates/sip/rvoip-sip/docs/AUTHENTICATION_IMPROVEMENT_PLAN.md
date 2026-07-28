@@ -40,7 +40,7 @@ Implemented in the authentication-improvement change:
   qop `auth`, qop `auth-int` when a request body is available, and exactly one
   `stale=true` recovery retry with a fresh nonce.
 - `SipDigestAuthService` rejects realm mismatch, invalid qop, malformed
-  nonce-count, and nonce-count replay per `(username, nonce)`, and returns a
+  nonce-count, and nonce-count replay per `(username, nonce, cnonce)`, and returns a
   stale challenge for expired issued nonces.
 
 The original assessment below is retained as design history.

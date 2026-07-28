@@ -32,8 +32,8 @@ use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, 
 use rvoip_core::error::{Result as RvResult, RvoipError};
 use rvoip_core::events::Event;
 use rvoip_core::identity::{
-    Credential, Device, Identity, IdentityAssurance, IdentityProvider, ReachabilityChange,
-    ReachabilityHint,
+    AuthenticatedPrincipal, AuthenticationMethod, Credential, Device, Identity, IdentityAssurance,
+    IdentityProvider, ReachabilityChange, ReachabilityHint,
 };
 use rvoip_core::ids::{ConnectionId, IdentityId, ParticipantId, SessionId};
 use rvoip_core::message::Message;
@@ -81,23 +81,21 @@ impl ConnectionAdapter for StepUpAdapter {
         AdapterKind::Substrate
     }
     async fn originate(&self, request: OriginateRequest) -> RvResult<ConnectionHandle> {
-        Ok(ConnectionHandle {
-            connection: Connection {
-                id: ConnectionId::new(),
-                session_id: request.session_id,
-                participant_id: request.participant_id,
-                transport: Transport::Quic,
-                direction: Direction::Outbound,
-                state: ConnectionState::Connecting,
-                capabilities: request.capabilities,
-                negotiated_codecs: NegotiatedCodecs::default(),
-                streams: vec![],
-                messaging_enabled: false,
-                transport_handle: TransportHandle(Arc::new(())),
-                opened_at: Utc::now(),
-                closed_at: None,
-            },
-        })
+        Ok(ConnectionHandle::new(Connection {
+            id: ConnectionId::new(),
+            session_id: request.session_id,
+            participant_id: request.participant_id,
+            transport: Transport::Quic,
+            direction: Direction::Outbound,
+            state: ConnectionState::Connecting,
+            capabilities: request.capabilities,
+            negotiated_codecs: NegotiatedCodecs::default(),
+            streams: vec![],
+            messaging_enabled: false,
+            transport_handle: TransportHandle(Arc::new(())),
+            opened_at: Utc::now(),
+            closed_at: None,
+        }))
     }
     async fn accept(&self, _c: ConnectionId) -> RvResult<()> {
         Ok(())
@@ -174,8 +172,77 @@ impl ConnectionAdapter for StepUpAdapter {
 // exercised by this test.
 struct AcceptingProvider;
 
+struct LegacyOnlyProvider;
+
 #[async_trait]
 impl IdentityProvider for AcceptingProvider {
+    async fn resolve(&self, _id_ref: &str) -> RvResult<Identity> {
+        Err(RvoipError::NotImplemented("resolve"))
+    }
+    async fn devices(&self, _id: IdentityId) -> RvResult<Vec<Device>> {
+        Ok(vec![])
+    }
+    async fn reachable_via(&self, _id: IdentityId) -> RvResult<Vec<ReachabilityHint>> {
+        Ok(vec![])
+    }
+    async fn authenticate(
+        &self,
+        _credential: Credential,
+    ) -> RvResult<(IdentityId, IdentityAssurance)> {
+        Ok((
+            IdentityId::from_string("id_p12_test"),
+            IdentityAssurance::Identified {
+                credential_kind: rvoip_core::identity::CredentialKind::OAuth2Dpop,
+            },
+        ))
+    }
+    async fn authenticate_principal(
+        &self,
+        credential: Credential,
+    ) -> RvResult<AuthenticatedPrincipal> {
+        let token = match credential {
+            Credential::Bearer(token) => token,
+            _ => String::new(),
+        };
+        let mut principal = AuthenticatedPrincipal {
+            subject: "id_p12_test".into(),
+            tenant: Some("p12-tenant".into()),
+            scopes: vec![],
+            issuer: Some("p12-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(2)),
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::Identified {
+                credential_kind: rvoip_core::identity::CredentialKind::OAuth2Dpop,
+            },
+        };
+        match token.as_str() {
+            "cross-issuer" => principal.issuer = Some("other-issuer".into()),
+            "incomplete" => principal.tenant = None,
+            "scope-mismatch" => principal.scopes = vec!["calls:admin".into()],
+            "actor-token" => {
+                principal.subject = "agent:bot".into();
+                principal.scopes = vec!["calls:admin".into()];
+                principal.assurance = IdentityAssurance::UserAuthorized {
+                    identity: IdentityId::from_string("agent:bot"),
+                    user_id: IdentityId::from_string("agent:bot"),
+                    scopes: vec!["calls:admin".into()],
+                };
+            }
+            _ => {}
+        }
+        Ok(principal)
+    }
+    async fn assurance_level(&self, _id: IdentityId) -> RvResult<IdentityAssurance> {
+        Ok(IdentityAssurance::Anonymous)
+    }
+    fn subscribe_reachability(&self) -> mpsc::Receiver<ReachabilityChange> {
+        let (_tx, rx) = mpsc::channel(1);
+        rx
+    }
+}
+
+#[async_trait]
+impl IdentityProvider for LegacyOnlyProvider {
     async fn resolve(&self, _id_ref: &str) -> RvResult<Identity> {
         Err(RvoipError::NotImplemented("resolve"))
     }
@@ -213,6 +280,30 @@ async fn next_event(rx: &mut Receiver<Event>) -> Event {
 }
 
 async fn track_inbound(tx: &mpsc::Sender<AdapterEvent>, conn: &ConnectionId) {
+    track_inbound_connection(tx, conn).await;
+    tx.send(AdapterEvent::PrincipalAuthenticated {
+        connection_id: conn.clone(),
+        participant_id: "p12-participant".into(),
+        principal: AuthenticatedPrincipal {
+            subject: "id_p12_test".into(),
+            tenant: Some("p12-tenant".into()),
+            scopes: vec!["calls:read".into()],
+            issuer: Some("p12-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::UserAuthorized {
+                identity: IdentityId::from_string("id_p12_test"),
+                user_id: IdentityId::from_string("id_p12_test"),
+                scopes: vec!["calls:read".into()],
+            },
+        },
+    })
+    .await
+    .expect("principal");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+}
+
+async fn track_inbound_connection(tx: &mpsc::Sender<AdapterEvent>, conn: &ConnectionId) {
     tx.send(AdapterEvent::InboundConnection {
         connection: Connection {
             id: conn.clone(),
@@ -365,4 +456,125 @@ async fn complete_step_up_emits_assurance_changed() {
         }
     }
     assert!(saw, "IdentityAssuranceChanged not emitted");
+    let retained = orch
+        .connection_principal(&conn)
+        .expect("retained principal");
+    assert_eq!(retained.subject, "id_p12_test");
+    assert_eq!(retained.issuer.as_deref(), Some("p12-test-issuer"));
+    assert_eq!(retained.tenant.as_deref(), Some("p12-tenant"));
+    assert!(matches!(
+        retained.assurance,
+        IdentityAssurance::Identified { .. }
+    ));
+}
+
+#[tokio::test]
+async fn complete_step_up_rejects_connections_without_an_authenticated_owner() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, tx, _counts) = StepUpAdapter::new();
+    orch.register(adapter).expect("register");
+
+    let conn = ConnectionId::new();
+    track_inbound_connection(&tx, &conn).await;
+    let result = orch
+        .complete_step_up(
+            conn,
+            Credential::Bearer("test-token".into()),
+            Arc::new(AcceptingProvider),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(RvoipError::AdmissionRejected(
+            "step-up requires an authenticated connection owner"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn complete_step_up_rejects_credentials_for_a_different_owner() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, tx, _counts) = StepUpAdapter::new();
+    orch.register(adapter).expect("register");
+
+    let conn = ConnectionId::new();
+    track_inbound_connection(&tx, &conn).await;
+    tx.send(AdapterEvent::PrincipalAuthenticated {
+        connection_id: conn.clone(),
+        participant_id: "p12-participant".into(),
+        principal: AuthenticatedPrincipal {
+            subject: "different-owner".into(),
+            tenant: Some("p12-tenant".into()),
+            scopes: vec!["calls:read".into()],
+            issuer: Some("p12-test-issuer".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Bearer,
+            assurance: IdentityAssurance::UserAuthorized {
+                identity: IdentityId::from_string("different-owner"),
+                user_id: IdentityId::from_string("different-owner"),
+                scopes: vec!["calls:read".into()],
+            },
+        },
+    })
+    .await
+    .expect("principal");
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let result = orch
+        .complete_step_up(
+            conn,
+            Credential::Bearer("test-token".into()),
+            Arc::new(AcceptingProvider),
+        )
+        .await;
+    assert!(matches!(
+        result,
+        Err(RvoipError::AdmissionRejected(
+            "step-up credential does not belong to the connection owner"
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn complete_step_up_rejects_legacy_incomplete_cross_domain_and_actor_credentials() {
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, tx, _counts) = StepUpAdapter::new();
+    orch.register(adapter).expect("register");
+
+    let conn = ConnectionId::new();
+    track_inbound(&tx, &conn).await;
+
+    let legacy = orch
+        .complete_step_up(
+            conn.clone(),
+            Credential::Bearer("test-token".into()),
+            Arc::new(LegacyOnlyProvider),
+        )
+        .await;
+    assert!(matches!(legacy, Err(RvoipError::NotImplemented(_))));
+
+    for token in [
+        "incomplete",
+        "cross-issuer",
+        "scope-mismatch",
+        "actor-token",
+    ] {
+        let result = orch
+            .complete_step_up(
+                conn.clone(),
+                Credential::Bearer(token.into()),
+                Arc::new(AcceptingProvider),
+            )
+            .await;
+        assert!(
+            matches!(result, Err(RvoipError::AdmissionRejected(_))),
+            "step-up token {token} unexpectedly succeeded"
+        );
+    }
+
+    let retained = orch
+        .connection_principal(&conn)
+        .expect("retained principal");
+    assert_eq!(retained.subject, "id_p12_test");
+    assert_eq!(retained.scopes, vec!["calls:read"]);
 }

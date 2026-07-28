@@ -1,81 +1,124 @@
 //! Error types for registrar-core
 
-use thiserror::Error;
+use std::{error, fmt};
 
 /// Result type alias for registrar operations
 pub type Result<T> = std::result::Result<T, RegistrarError>;
 
 /// Main error type for registrar operations
-#[derive(Error, Debug)]
+#[derive(Clone)]
 pub enum RegistrarError {
     /// User not found in registry
-    #[error("User not found: {0}")]
     UserNotFound(String),
 
     /// Contact not found for user
-    #[error("Contact not found: {uri} for user {user}")]
     ContactNotFound { user: String, uri: String },
 
     /// Registration has expired
-    #[error("Registration expired for user: {0}")]
     RegistrationExpired(String),
 
     /// Invalid registration parameters
-    #[error("Invalid registration: {0}")]
     InvalidRegistration(String),
 
     /// Maximum contacts exceeded
-    #[error("Maximum contacts ({max}) exceeded for user: {user}")]
     MaxContactsExceeded { user: String, max: usize },
 
     /// Subscription not found
-    #[error("Subscription not found: {0}")]
     SubscriptionNotFound(String),
 
     /// Invalid subscription
-    #[error("Invalid subscription: {0}")]
     InvalidSubscription(String),
 
     /// Maximum subscriptions exceeded
-    #[error("Maximum subscriptions ({max}) exceeded for user: {user}")]
     MaxSubscriptionsExceeded { user: String, max: usize },
 
     /// Presence not found
-    #[error("Presence not found for user: {0}")]
     PresenceNotFound(String),
 
     /// Invalid presence data
-    #[error("Invalid presence data: {0}")]
     InvalidPresence(String),
 
     /// PIDF XML parsing error
-    #[error("PIDF parsing error: {0}")]
     PidfError(String),
 
     /// Event bus error
-    #[error("Event bus error: {0}")]
     EventBusError(String),
 
     /// Configuration error
-    #[error("Configuration error: {0}")]
     ConfigError(String),
 
     /// Storage error (for future persistent storage)
-    #[error("Storage error: {0}")]
     StorageError(String),
 
     /// Timeout error
-    #[error("Operation timed out: {0}")]
     Timeout(String),
 
     /// Internal error
-    #[error("Internal error: {0}")]
     Internal(String),
 
     /// Other errors
-    #[error("{0}")]
     Other(String),
 }
+
+impl RegistrarError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::UserNotFound(_) => "user-not-found",
+            Self::ContactNotFound { .. } => "contact-not-found",
+            Self::RegistrationExpired(_) => "registration-expired",
+            Self::InvalidRegistration(_) => "invalid-registration",
+            Self::MaxContactsExceeded { .. } => "max-contacts-exceeded",
+            Self::SubscriptionNotFound(_) => "subscription-not-found",
+            Self::InvalidSubscription(_) => "invalid-subscription",
+            Self::MaxSubscriptionsExceeded { .. } => "max-subscriptions-exceeded",
+            Self::PresenceNotFound(_) => "presence-not-found",
+            Self::InvalidPresence(_) => "invalid-presence",
+            Self::PidfError(_) => "pidf",
+            Self::EventBusError(_) => "event-bus",
+            Self::ConfigError(_) => "configuration",
+            Self::StorageError(_) => "storage",
+            Self::Timeout(_) => "timeout",
+            Self::Internal(_) => "internal",
+            Self::Other(_) => "other",
+        }
+    }
+}
+
+impl fmt::Display for RegistrarError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "SIP registrar operation failed (class={}",
+            self.diagnostic_class()
+        )?;
+        match self {
+            Self::MaxContactsExceeded { max, .. } | Self::MaxSubscriptionsExceeded { max, .. } => {
+                write!(formatter, ", max={max}")?
+            }
+            _ => {}
+        }
+        formatter.write_str(")")
+    }
+}
+
+impl fmt::Debug for RegistrarError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegistrarError")
+            .field("class", &self.diagnostic_class())
+            .field(
+                "max",
+                &match self {
+                    Self::MaxContactsExceeded { max, .. }
+                    | Self::MaxSubscriptionsExceeded { max, .. } => Some(*max),
+                    _ => None,
+                },
+            )
+            .finish()
+    }
+}
+
+impl error::Error for RegistrarError {}
 
 impl From<std::io::Error> for RegistrarError {
     fn from(err: std::io::Error) -> Self {
@@ -92,5 +135,50 @@ impl From<serde_json::Error> for RegistrarError {
 impl From<quick_xml::Error> for RegistrarError {
     fn from(err: quick_xml::Error) -> Self {
         RegistrarError::PidfError(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn every_registrar_error_variant_is_payload_free() {
+        const CANARY: &str = "registrar-error-direct-secret-canary";
+        let errors = vec![
+            RegistrarError::UserNotFound(CANARY.into()),
+            RegistrarError::ContactNotFound {
+                user: CANARY.into(),
+                uri: CANARY.into(),
+            },
+            RegistrarError::RegistrationExpired(CANARY.into()),
+            RegistrarError::InvalidRegistration(CANARY.into()),
+            RegistrarError::MaxContactsExceeded {
+                user: CANARY.into(),
+                max: 10,
+            },
+            RegistrarError::SubscriptionNotFound(CANARY.into()),
+            RegistrarError::InvalidSubscription(CANARY.into()),
+            RegistrarError::MaxSubscriptionsExceeded {
+                user: CANARY.into(),
+                max: 20,
+            },
+            RegistrarError::PresenceNotFound(CANARY.into()),
+            RegistrarError::InvalidPresence(CANARY.into()),
+            RegistrarError::PidfError(CANARY.into()),
+            RegistrarError::EventBusError(CANARY.into()),
+            RegistrarError::ConfigError(CANARY.into()),
+            RegistrarError::StorageError(CANARY.into()),
+            RegistrarError::Timeout(CANARY.into()),
+            RegistrarError::Internal(CANARY.into()),
+            RegistrarError::Other(CANARY.into()),
+        ];
+
+        for error in errors {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
+            assert!(!error.diagnostic_class().is_empty());
+            assert!(std::error::Error::source(&error).is_none());
+        }
     }
 }

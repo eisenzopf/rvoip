@@ -1,6 +1,6 @@
 # rvoip-client
 
-> ⚠️ **Experimental (`0.1.x`)** — the first real path is UCTP over QUIC
+> ⚠️ **Experimental surface** (unified `0.3.x` release) — the first real path is UCTP over QUIC
 > signaling. `Client::connect("uctp+quic://...")` performs the QUIC dial and
 > bearer handshake, `Client::call(..., SessionMedium::Voice)` sends
 > `session.invite`, and `SessionHandle::end()` sends `session.end`.

@@ -20,624 +20,240 @@
 /// - Section 8.2.6: Generating automatic responses
 /// - Section 9.2: CANCEL handling
 /// - Section 17.1.1.3: ACK handling
-use std::net::{IpAddr, SocketAddr};
-use std::str::FromStr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
-use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::{Transport, TransportEvent, TransportFlowId, TransportRoute};
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::diagnostics;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::runner::HasLifecycle;
 use crate::transaction::server::ServerTransaction;
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::utils::{create_ack_from_invite, transaction_key_from_message};
+use crate::transaction::{SipRequestAuthorization, SipRequestIngressContext, SipRequestRejection};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionKind, TransactionState};
 
 use super::types::*;
 use super::TransactionManager;
 
-/// Handle transport message events and route them to appropriate transactions.
-///
-/// This is the main entry point for all incoming SIP messages from the transport
-/// layer. It implements the message matching rules specified in RFC 3261 sections
-/// 17.1.3 (client transactions) and 17.2.3 (server transactions).
-///
-/// The function:
-/// 1. Identifies the transaction that should handle the message
-/// 2. Routes requests/responses to appropriate transactions
-/// 3. Handles special cases (ACK, CANCEL)
-/// 4. Reports "stray" messages that don't match any transaction
-///
-/// # Arguments
-/// * `event` - The transport event containing the message and addressing information
-/// * `transport` - The transport layer for sending responses
-/// * `client_transactions` - Map of active client transactions
-/// * `server_transactions` - Map of active server transactions
-/// * `events_tx` - Channel for broadcasting transaction events
-/// * `event_subscribers` - Additional event subscribers
-/// * `manager` - Reference to the TransactionManager
-///
-/// # Returns
-/// * `Result<()>` - Success or error depending on message processing outcome
-///
-/// Retained for the upcoming transport-event dispatcher refactor; today
-/// the manager dispatches transport events inline.
-#[allow(dead_code)]
-pub(crate) async fn handle_transport_message(
-    event: TransportEvent,
-    transport: &Arc<dyn Transport>,
-    client_transactions: &Arc<
-        dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>,
-    >,
-    server_transactions: &Arc<dashmap::DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
-    events_tx: &mpsc::Sender<TransactionEvent>,
-    event_subscribers: &Arc<arc_swap::ArcSwap<Vec<super::EventSubscriber>>>,
-    manager: &TransactionManager,
-) -> Result<()> {
-    match event {
-        TransportEvent::MessageReceived {
-            message,
-            source,
-            destination: _,
-            ..
-        } => {
-            match message {
-                Message::Request(request) => {
-                    // First, determine the transaction ID/key
-                    let tx_id =
-                        match transaction_key_from_message(&Message::Request(request.clone())) {
-                            Some(key) => key,
-                            None => {
-                                return Err(Error::Other(
-                                    "Could not determine transaction ID from request".into(),
-                                ));
-                            }
-                        };
+fn bind_client_response_route(
+    expected: &TransportRoute,
+    source: SocketAddr,
+    transport_type: TransportType,
+    ingress_flow_id: Option<TransportFlowId>,
+) -> Option<TransportRoute> {
+    if expected.destination != source || expected.transport_type != Some(transport_type) {
+        return None;
+    }
 
-                    // Handle ACK specially
-                    if request.method() == Method::Ack {
-                        let ack_request = request.clone();
+    let mut bound = expected.clone();
+    match transport_type {
+        TransportType::Udp => {
+            if ingress_flow_id.is_some() {
+                return None;
+            }
+            bound.flow_id = None;
+        }
+        TransportType::Tcp | TransportType::Tls | TransportType::Ws | TransportType::Wss => {
+            // A stream response is authenticated only by the opaque flow that
+            // carried the original request. Resolving by address here could
+            // bind a retired transaction to a later co-addressed connection.
+            let expected_flow_id = expected.flow_id?;
+            if ingress_flow_id != Some(expected_flow_id) {
+                return None;
+            }
+            bound.flow_id = Some(expected_flow_id);
+        }
+    }
+    Some(bound)
+}
 
-                        // DashMap path — either direct key hit or a
-                        // dialog-identifier lookup via the manager's ACK
-                        // index. Neither holds across `.await`.
-                        let tx_opt = server_transactions
-                            .get(&tx_id)
-                            .map(|entry| entry.value().clone());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientResponseRouteAuthentication {
+    Authenticated,
+    UnknownTransaction,
+    Rejected,
+}
 
-                        // If we found a transaction, process the ACK
-                        if let Some(tx) = tx_opt {
-                            let tx_id = tx.id().clone();
-                            let tx_kind = tx.kind();
+/// Exact rollback guard for the interval after a server transaction becomes
+/// visible but before authorization/rejection and TU handoff establish its
+/// durable owner. Its synchronous Drop path is cancellation-safe.
+struct StagedServerPublicationGuard {
+    manager: TransactionManager,
+    transaction: Arc<dyn ServerTransaction>,
+    committed: bool,
+}
 
-                            if tx_kind == TransactionKind::InviteServer {
-                                debug!(%tx_id, "Processing ACK for server INVITE transaction");
+impl StagedServerPublicationGuard {
+    fn new(manager: &TransactionManager, transaction: Arc<dyn ServerTransaction>) -> Self {
+        Self {
+            manager: manager.clone(),
+            transaction,
+            committed: false,
+        }
+    }
 
-                                let tx_clone = tx.clone();
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
 
-                                // Use a timeout to avoid blocking indefinitely if the transaction is shutting down
-                                match tokio::time::timeout(
-                                    std::time::Duration::from_millis(500),
-                                    tx_clone.process_request(ack_request.clone()),
-                                )
-                                .await
-                                {
-                                    Ok(result) => {
-                                        // Process the result
-                                        match result {
-                                            Ok(_) => {
-                                                // Successfully processed ACK
-                                                manager
-                                                    .mark_invite_2xx_response_cache_acked(&tx_id);
+impl Drop for StagedServerPublicationGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.manager
+                .rollback_failed_server_initialization(&self.transaction);
+        }
+    }
+}
 
-                                                // Broadcast the event
-                                                TransactionManager::broadcast_event(
-                                                    TransactionEvent::AckReceived {
-                                                        transaction_id: tx_id.clone(),
-                                                        request: ack_request,
-                                                    },
-                                                    events_tx,
-                                                    event_subscribers,
-                                                    Some(&manager.subscriber_to_transactions),
-                                                    Some(&manager.transaction_to_subscribers),
-                                                    None,
-                                                )
-                                                .await;
+impl TransactionManager {
+    fn absorb_compact_non_invite_client_response(&self, transaction_id: &TransactionKey) -> bool {
+        self.compact_non_invite_tombstones
+            .get(transaction_id)
+            .is_some_and(|entry| entry.value().is_client())
+    }
 
-                                                return Ok(());
-                                            }
-                                            Err(e) => {
-                                                // Transaction error - likely channel closed
-                                                warn!(%tx_id, error=%e, "Failed to process ACK request, treating as stray ACK");
-                                                // Fall through to stray ACK handling
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {
-                                        // Timeout waiting for transaction to process ACK
-                                        warn!(%tx_id, "Timeout processing ACK request, treating as stray ACK");
-                                        // Fall through to stray ACK handling
-                                    }
-                                }
-                            }
-                            // else: not an INVITE server transaction → fall through
-                        }
+    pub(super) async fn replay_compact_non_invite_server_response(
+        &self,
+        transaction_id: &TransactionKey,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Result<bool> {
+        let replay = self
+            .compact_non_invite_tombstones
+            .get(transaction_id)
+            .and_then(|entry| {
+                let tombstone = entry.value();
+                let (wire, route) = tombstone.server_replay()?;
+                Some((
+                    wire.clone(),
+                    route.clone(),
+                    tombstone.expires_at(),
+                    tombstone.generation(),
+                ))
+            });
+        let Some((wire, route, expires_at, generation)) = replay else {
+            return Ok(false);
+        };
 
-                        if let Some(invite_tx_id) = manager.find_server_invite_for_ack(&ack_request)
-                        {
-                            TransactionManager::broadcast_event(
-                                TransactionEvent::AckReceived {
-                                    transaction_id: invite_tx_id,
-                                    request: ack_request,
-                                },
-                                events_tx,
-                                event_subscribers,
-                                Some(&manager.subscriber_to_transactions),
-                                Some(&manager.transaction_to_subscribers),
-                                None,
-                            )
-                            .await;
-                            return Ok(());
-                        }
+        if expires_at <= Instant::now() {
+            // The lifecycle scheduler owns the tombstone, route/auth indexes,
+            // terminal state, public event ordering, and dialog ACK fence as
+            // one exact-generation cleanup. A retransmission at the expiry
+            // boundary may only expedite that owner; it must never delete the
+            // map entry directly and leave the derived indexes/events behind.
+            if let Some(scheduler) = self.lifecycle_scheduler.as_ref() {
+                scheduler.request_compact_expiry(transaction_id.clone(), generation);
+            }
+            // The request matched an authentic retained generation. Absorb it
+            // while the scheduler completes expiry instead of falling through
+            // to new-transaction creation (which would only hit the fence).
+            return Ok(true);
+        }
 
-                        // Handle as stray ACK if we reached this point
-                        debug!("Received ACK that doesn't match any server transaction");
-                        TransactionManager::broadcast_event(
-                            TransactionEvent::StrayAck {
-                                request: ack_request,
-                                source,
-                            },
-                            events_tx,
-                            event_subscribers,
-                            Some(&manager.subscriber_to_transactions),
-                            Some(&manager.transaction_to_subscribers),
-                            None,
-                        )
-                        .await;
+        let expected_transport = route.transport_type.unwrap_or(TransportType::Udp);
+        let ingress_route = ingress_context.response_route();
+        let ingress_transport = ingress_route.transport_type.unwrap_or(TransportType::Udp);
+        if expected_transport != TransportType::Udp
+            || ingress_transport != TransportType::Udp
+            || route.destination != ingress_route.destination
+            || ingress_route.flow_id.is_some()
+        {
+            warn!(
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                "Dropping compact non-INVITE retransmission from a different transport peer"
+            );
+            return Ok(true);
+        }
 
-                        return Ok(());
-                    }
+        if self.request_ingress_authorizer().is_some()
+            && self.peek_inbound_principal(transaction_id).is_some()
+            && self
+                .inbound_principal_for_context(transaction_id, ingress_context)
+                .is_none()
+        {
+            warn!(
+                transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                "Dropping compact non-INVITE retransmission from an unauthorized peer"
+            );
+            return Ok(true);
+        }
 
-                    // Handle CANCEL specially
-                    if request.method() == Method::Cancel {
-                        // Extract the branch parameter from the CANCEL request
-                        let cancel_branch = match request.first_via() {
-                            Some(via) => match via.branch() {
-                                Some(branch) => branch.to_string(),
-                                None => {
-                                    debug!(
-                                        "CANCEL request has no branch parameter, can't find matching INVITE"
-                                    );
-                                    // Fall through to stray CANCEL handling
-                                    handle_stray_cancel(request.clone(), source, transport).await?;
+        self.transport
+            .send_message_raw_via(wire, route)
+            .await
+            .map_err(|error| {
+                Error::transport_error(error, "Failed to replay compact non-INVITE server response")
+            })?;
+        Ok(true)
+    }
 
-                                    // Broadcast stray CANCEL event
-                                    TransactionManager::broadcast_event(
-                                        TransactionEvent::StrayCancel { request, source },
-                                        events_tx,
-                                        event_subscribers,
-                                        Some(&manager.subscriber_to_transactions),
-                                        Some(&manager.transaction_to_subscribers),
-                                        None,
-                                    )
-                                    .await;
-                                    return Ok(());
-                                }
-                            },
-                            None => {
-                                debug!(
-                                    "CANCEL request has no Via header, can't find matching INVITE"
-                                );
-                                // Fall through to stray CANCEL handling
-                                handle_stray_cancel(request.clone(), source, transport).await?;
+    /// Authenticate a response against either the active transaction route or
+    /// the bounded INVITE tombstone that replaced it. A transaction key alone
+    /// is attacker-controlled wire data and is never sufficient to revive a
+    /// retired transaction.
+    async fn authenticate_client_response_route(
+        &self,
+        transaction_id: &TransactionKey,
+        source: SocketAddr,
+        transport_type: TransportType,
+        ingress_flow_id: Option<TransportFlowId>,
+    ) -> ClientResponseRouteAuthentication {
+        let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) else {
+            return ClientResponseRouteAuthentication::UnknownTransaction;
+        };
 
-                                // Broadcast stray CANCEL event
-                                TransactionManager::broadcast_event(
-                                    TransactionEvent::StrayCancel { request, source },
-                                    events_tx,
-                                    event_subscribers,
-                                    Some(&manager.subscriber_to_transactions),
-                                    Some(&manager.transaction_to_subscribers),
-                                    None,
-                                )
-                                .await;
-                                return Ok(());
-                            }
-                        };
-
-                        // Create a modified key for the INVITE transaction with the same branch
-                        let invite_tx_id = TransactionKey::new(cancel_branch, Method::Invite, true);
-
-                        debug!("Looking for INVITE transaction with key: {}", invite_tx_id);
-
-                        // Check if we have a matching INVITE transaction with the same branch.
-                        // Clone the Arc out of the DashMap shard so the shard
-                        // guard drops before any subsequent `.await`.
-                        let tx_clone_opt = server_transactions.get(&invite_tx_id).and_then(|r| {
-                            let tx = r.value();
-                            if tx.kind() == TransactionKind::InviteServer {
-                                Some((tx.clone(), invite_tx_id.clone()))
-                            } else {
-                                None
-                            }
-                        });
-
-                        if let Some((tx, tx_id_clone)) = tx_clone_opt {
-                            // Now proceed with the transaction outside the lock
-                            let request_clone = request.clone();
-
-                            debug!(%tx_id_clone, "Processing CANCEL for server INVITE transaction");
-
-                            // Broadcast event
-                            TransactionManager::broadcast_event(
-                                TransactionEvent::CancelReceived {
-                                    transaction_id: tx_id_clone.clone(),
-                                    cancel_request: request_clone.clone(),
-                                },
-                                events_tx,
-                                event_subscribers,
-                                Some(&manager.subscriber_to_transactions),
-                                Some(&manager.transaction_to_subscribers),
-                                None,
-                            )
-                            .await;
-
-                            // Send OK response to CANCEL
-                            let mut builder = ResponseBuilder::new(StatusCode::Ok, None);
-
-                            // Add necessary headers
-                            if let Some(to) = request_clone.to() {
-                                builder = builder.header(TypedHeader::To(to.clone()));
-                            }
-
-                            if let Some(from) = request_clone.from() {
-                                builder = builder.header(TypedHeader::From(from.clone()));
-                            }
-
-                            if let Some(call_id) = request_clone.call_id() {
-                                builder = builder.header(TypedHeader::CallId(call_id.clone()));
-                            }
-
-                            if let Some(cseq) = request_clone.cseq() {
-                                builder = builder.header(TypedHeader::CSeq(cseq.clone()));
-                            }
-
-                            if let Some(via) = request_clone.header(&HeaderName::Via) {
-                                builder = builder.header(via.clone());
-                            }
-
-                            // Build and send response to CANCEL
-                            let cancel_response = builder.build();
-                            if let Err(e) = transport
-                                .send_message(Message::Response(cancel_response), source)
-                                .await
-                            {
-                                return Err(Error::transport_error(
-                                    e,
-                                    "Failed to send 200 OK response to CANCEL",
-                                ));
-                            }
-
-                            // Now send 487 Request Terminated for the original INVITE
-                            debug!(%tx_id_clone, "Sending 487 Request Terminated for the original INVITE");
-
-                            let mut builder =
-                                ResponseBuilder::new(StatusCode::RequestTerminated, None);
-
-                            if let Some(invite_request) = tx.original_request().await {
-                                // Add necessary headers from the INVITE request
-                                if let Some(to) = invite_request.to() {
-                                    builder = builder.header(TypedHeader::To(to.clone()));
-                                }
-
-                                if let Some(from) = invite_request.from() {
-                                    builder = builder.header(TypedHeader::From(from.clone()));
-                                }
-
-                                if let Some(call_id) = invite_request.call_id() {
-                                    builder = builder.header(TypedHeader::CallId(call_id.clone()));
-                                }
-
-                                if let Some(cseq) = invite_request.cseq() {
-                                    builder = builder.header(TypedHeader::CSeq(cseq.clone()));
-                                }
-
-                                if let Some(via) = invite_request.header(&HeaderName::Via) {
-                                    builder = builder.header(via.clone());
-                                }
-
-                                // Build the 487 response
-                                let invite_response = builder.build();
-
-                                // Instead of sending directly through the transport,
-                                // send through the transaction's send_response method
-                                // This ensures proper state transition and processing
-                                if let Err(e) = tx.send_response(invite_response).await {
-                                    warn!(%tx_id_clone, error=%e, "Failed to send 487 Request Terminated through transaction");
-                                    return Err(Error::Other(format!(
-                                        "Failed to send 487 Request Terminated: {}",
-                                        e
-                                    )));
-                                }
-                            }
-
-                            return Ok(());
-                        }
-
-                        // If no matching transaction was found, handle as stray CANCEL
-                        debug!("Received CANCEL that doesn't match any INVITE server transaction");
-                        handle_stray_cancel(request.clone(), source, transport).await?;
-
-                        // Broadcast stray CANCEL event
-                        TransactionManager::broadcast_event(
-                            TransactionEvent::StrayCancel { request, source },
-                            events_tx,
-                            event_subscribers,
-                            Some(&manager.subscriber_to_transactions),
-                            Some(&manager.transaction_to_subscribers),
-                            None,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-
-                    // Handle regular request retransmission and new requests.
-                    // Clone the Arc out of the DashMap shard before any `.await`.
-                    let existing_tx = server_transactions.get(&tx_id).map(|r| r.value().clone());
-
-                    if let Some(tx) = existing_tx {
-                        debug!(%tx_id, "Processing retransmission of existing request");
-
-                        let lifecycle = tx.data().get_lifecycle();
-                        if !matches!(lifecycle, TransactionLifecycle::Active) {
-                            if request.method() == Method::Invite
-                                && manager
-                                    .retransmit_cached_invite_2xx_response(&tx_id, source)
-                                    .await?
-                            {
-                                return Ok(());
-                            }
-                            debug!(%tx_id, ?lifecycle, "Skipping request processing for non-active transaction");
-                            return Ok(());
-                        }
-
-                        if request.method() == Method::Invite
-                            && tx.state() == TransactionState::Terminated
-                            && manager
-                                .retransmit_cached_invite_2xx_response(&tx_id, source)
-                                .await?
-                        {
-                            return Ok(());
-                        }
-
-                        tx.process_request(request.clone()).await?;
-                        return Ok(());
-                    }
-
-                    if request.method() == Method::Invite
-                        && manager
-                            .retransmit_cached_invite_2xx_response(&tx_id, source)
-                            .await?
+        let expected = match state.value() {
+            super::ClientResponseRouteState::Active { route, .. } => route.clone(),
+            super::ClientResponseRouteState::Retired(retired) => {
+                if retired.expires_at <= Instant::now() {
+                    let expires_at = retired.expires_at;
+                    let deadline_version = retired.deadline_version;
+                    drop(state);
+                    if self
+                        .transaction_destinations
+                        .remove_if(transaction_id, |_, current| {
+                            current.retired().is_some_and(|retired| {
+                                retired.deadline_version == deadline_version
+                                    && retired.expires_at == expires_at
+                                    && retired.expires_at <= Instant::now()
+                            })
+                        })
+                        .is_some()
                     {
-                        return Ok(());
+                        self.decrement_retired_client_transaction_count();
+                        self.unschedule_retired_client_deadline(
+                            transaction_id,
+                            expires_at,
+                            deadline_version,
+                        );
                     }
-
-                    // If we get here, this is a new request
-                    debug!(%tx_id, method = ?request.method(), "Received new request, delegate to proper handler");
-
-                    // Delegate to the actual request handler which will create appropriate transactions
-                    // and generate the correct InviteRequest or NonInviteRequest events
-                    if let Err(e) = manager.handle_request(request, source).await {
-                        warn!(error=%e, "Failed to handle new request");
-                    }
-
-                    return Ok(());
+                    return ClientResponseRouteAuthentication::UnknownTransaction;
                 }
-                Message::Response(response) => {
-                    // Try to match the response to a client transaction by deriving its ID
-                    let tx_id =
-                        match transaction_key_from_message(&Message::Response(response.clone())) {
-                            Some(key) => key,
-                            None => {
-                                return Err(Error::Other(
-                                    "Could not determine transaction ID from response".into(),
-                                ));
-                            }
-                        };
-
-                    // Look up the client transaction — clone Arc out of shard.
-                    let client_tx_arc = client_transactions.get(&tx_id).map(|r| r.value().clone());
-
-                    if let Some(tx) = client_tx_arc {
-                        let tx_kind = tx.kind();
-                        let remote_addr = tx.remote_addr();
-
-                        debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
-
-                        let lifecycle = tx.data().get_lifecycle();
-                        if !matches!(lifecycle, TransactionLifecycle::Active) {
-                            debug!(%tx_id, ?lifecycle, "Skipping response processing for non-active transaction");
-                            return Ok(());
-                        }
-
-                        tx.process_response(response.clone()).await?;
-
-                        // Automatic ACK for non-2xx responses to INVITE
-                        if !response.status().is_success()
-                            && tx_kind == TransactionKind::InviteClient
-                        {
-                            debug!(%tx_id, status=%response.status(), "Sending ACK automatically for non-2xx response");
-
-                            // Create a dummy request for ACK creation
-                            let dummy_uri = if let Some(to) = response.to() {
-                                to.address().uri.clone()
-                            } else {
-                                Uri::sip("invalid")
-                            };
-
-                            let dummy_request = Request::new(Method::Invite, dummy_uri);
-
-                            match create_ack_from_invite(&dummy_request, &response) {
-                                Ok(ack_request) => {
-                                    // Send the ACK
-                                    if let Err(e) = transport
-                                        .send_message(Message::Request(ack_request), remote_addr)
-                                        .await
-                                    {
-                                        return Err(Error::transport_error(
-                                            e,
-                                            "Failed to send ACK for non-2xx response",
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(%tx_id, error=%e, "Failed to create ACK request");
-                                }
-                            }
-                        }
-
-                        return Ok(());
-                    }
-
-                    // If we get here, this is a stray response
-                    debug!(status=%response.status(), "Received stray response that doesn't match any client transaction");
-
-                    // Broadcast stray response event
-                    TransactionManager::broadcast_event(
-                        TransactionEvent::StrayResponse { response, source },
-                        events_tx,
-                        event_subscribers,
-                        Some(&manager.subscriber_to_transactions),
-                        Some(&manager.transaction_to_subscribers),
-                        None,
-                    )
-                    .await;
-
-                    return Ok(());
-                }
+                retired.route.clone()
             }
-        }
-        TransportEvent::Error { error } => {
-            warn!("Transport error: {}", error);
-            // TODO: Determine if any transactions were affected by this error
-            // and propagate the error to them
-        }
-        _ => {
-            // Ignore other transport events for now
-        }
-    }
+        };
 
-    Ok(())
-}
+        let Some(bound) =
+            bind_client_response_route(&expected, source, transport_type, ingress_flow_id)
+        else {
+            return ClientResponseRouteAuthentication::Rejected;
+        };
 
-/// Determine ACK destination for 2xx responses according to RFC 3261 Section 13.2.2.4.
-///
-/// For 2xx responses to INVITE, ACK requests are sent directly from the TU to the peer.
-/// This function implements the algorithm to determine where to send the ACK based on:
-/// 1. The Contact header if present
-/// 2. Fallback to Via header received/rport parameters or sent-by value
-///
-/// # Arguments
-/// * `response` - The 2xx response to ACK
-///
-/// # Returns
-/// * `Option<SocketAddr>` - The destination socket address if it can be determined
-///
-/// `utils::determine_ack_destination` is the canonical implementation
-/// at the module surface; this variant + its `resolve_*` helpers
-/// below are kept for the upcoming DNS-aware fallback path.
-#[allow(dead_code)]
-pub(crate) async fn determine_ack_destination(response: &Response) -> Option<SocketAddr> {
-    if let Some(contact_header) = response.header(&HeaderName::Contact) {
-        if let TypedHeader::Contact(contact) = contact_header {
-            if let Some(addr) = contact.addresses().next() {
-                if let Some(dest) = resolve_uri_to_socketaddr(&addr.uri).await {
-                    return Some(dest);
-                }
+        match state.value_mut() {
+            super::ClientResponseRouteState::Active { route, .. } => *route = bound,
+            super::ClientResponseRouteState::Retired(retired) if retired.route != bound => {
+                retired.route = bound
             }
+            super::ClientResponseRouteState::Retired(_) => {}
         }
-    }
-
-    // Try via received/rport
-    if let Some(via) = response.first_via() {
-        if let (Some(received_ip_str), Some(port)) = (
-            via.received().map(|ip| ip.to_string()),
-            via.rport().flatten(),
-        ) {
-            if let Ok(ip) = IpAddr::from_str(&received_ip_str) {
-                let dest = SocketAddr::new(ip, port);
-                return Some(dest);
-            } else {
-                warn!(ip=%received_ip_str, "Failed to parse received IP in Via");
-            }
-        }
-
-        // Fallback to Via host/port
-        // For the sent_by, use ViaHeader struct fields
-        if let Some(via_header) = via.headers().first() {
-            let host = &via_header.sent_by_host;
-            let port = via_header.sent_by_port.unwrap_or(5060);
-
-            if let Some(dest) = resolve_host_to_socketaddr(host, port).await {
-                return Some(dest);
-            }
-        }
-    }
-    None
-}
-
-/// Helper to resolve URI host to SocketAddr for ACK destinations.
-///
-/// This implements the address resolution for SIP URIs according to
-/// RFC 3263 procedures.
-///
-/// # Arguments
-/// * `uri` - SIP URI to resolve
-///
-/// # Returns
-/// * `Option<SocketAddr>` - Resolved socket address if successful
-#[allow(dead_code)]
-async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-    // Delegate to the shared RFC 3263 resolver. Preserves the ACK
-    // destination semantics (`sips:`→5061 default, `transport=` / scheme
-    // honoured) while picking up NAPTR / SRV / weighted selection.
-    crate::dialog::dialog_utils::resolve_uri_to_socketaddr(uri).await
-}
-
-/// Helper to resolve Host enum to SocketAddr for network addressing.
-///
-/// SIP specification allows both IP addresses and domain names as hosts.
-/// This function resolves them to socket addresses for actual transmission.
-///
-/// # Arguments
-/// * `host` - SIP host to resolve (IP or domain)
-/// * `port` - Port number to use
-///
-/// # Returns
-/// * `Option<SocketAddr>` - Resolved socket address if successful
-#[allow(dead_code)]
-async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> Option<SocketAddr> {
-    match host {
-        rvoip_sip_core::Host::Address(ip) => Some(SocketAddr::new(*ip, port)),
-        rvoip_sip_core::Host::Domain(domain) => {
-            if let Ok(ip) = IpAddr::from_str(domain) {
-                return Some(SocketAddr::new(ip, port));
-            }
-            match tokio::net::lookup_host(format!("{}:{}", domain, port)).await {
-                Ok(mut addrs) => addrs.next(),
-                Err(e) => {
-                    error!(error = %e, domain = %domain, "DNS lookup failed for ACK destination");
-                    None
-                }
-            }
-        }
+        ClientResponseRouteAuthentication::Authenticated
     }
 }
 
@@ -764,20 +380,67 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or error depending on message processing outcome
     pub(crate) async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
+        let Some(_dispatch_operation) = self.admission_lifecycle.try_enter_existing() else {
+            debug!("Dropping transport event because transaction manager is stopping");
+            return Ok(());
+        };
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => Ok(()),
+            result = self.handle_transport_event_inner(event) => result,
+        }
+    }
+
+    async fn handle_transport_event_inner(&self, event: TransportEvent) -> Result<()> {
         match event {
             TransportEvent::MessageReceived {
                 message,
                 source,
                 destination,
                 transport_type,
+                flow_id,
                 raw_bytes,
                 timing,
+                connection_metadata,
             } => {
                 debug!("Received message from {}", source);
                 self.publish_inbound_sip_trace(&message, source, destination, transport_type)
                     .await;
                 let transaction_key =
                     crate::transaction::utils::transaction_key_from_message(&message);
+                if let (Message::Response(response), Some(key)) =
+                    (&message, transaction_key.as_ref())
+                {
+                    match self
+                        .authenticate_client_response_route(key, source, transport_type, flow_id)
+                        .await
+                    {
+                        ClientResponseRouteAuthentication::Authenticated => {}
+                        ClientResponseRouteAuthentication::Rejected => {
+                            warn!(
+                                transport = %transport_type,
+                                ingress_flow = flow_id.is_some(),
+                                "Dropping client response received outside its authenticated transaction route"
+                            );
+                            return Ok(());
+                        }
+                        ClientResponseRouteAuthentication::UnknownTransaction => {
+                            Self::broadcast_event(
+                                TransactionEvent::StrayResponse {
+                                    response: response.clone(),
+                                    source,
+                                },
+                                &self.events_tx,
+                                &self.event_subscribers,
+                                Some(&self.subscriber_to_transactions),
+                                Some(&self.transaction_to_subscribers),
+                                None,
+                            )
+                            .await;
+                            return Ok(());
+                        }
+                    }
+                }
                 if let Some(bytes) = raw_bytes.as_ref() {
                     let cache_raw_bytes = match &message {
                         Message::Request(request) => {
@@ -828,29 +491,54 @@ impl TransactionManager {
                         self.pending_inbound_timing.insert(key.clone(), timing);
                     }
                 }
-                self.handle_message(message, source, destination).await
+                let ingress_context =
+                    SipRequestIngressContext::new(source, destination, transport_type);
+                let ingress_context = match flow_id {
+                    Some(flow_id) => ingress_context.with_flow_id(flow_id),
+                    None => ingress_context,
+                };
+                let ingress_context = match connection_metadata {
+                    Some(metadata) => ingress_context.with_connection_metadata(metadata),
+                    None => ingress_context,
+                };
+                self.handle_message(message, source, destination, &ingress_context)
+                    .await
             }
-            TransportEvent::KeepAlivePongReceived { source, .. } => {
+            TransportEvent::KeepAlivePongReceived {
+                source, flow_id, ..
+            } => {
                 // RFC 5626 §3.5.1 pong arrived on a connection-oriented
                 // transport. Forward to dialog-core's outbound-flow
                 // monitor if it's subscribed; no-op otherwise.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
-                    let _ = sender.try_send(
-                        crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source },
-                    );
+                    let _ = sender
+                        .send(
+                            crate::manager::outbound_flow::FlowTransportEvent::PongReceived {
+                                source,
+                                flow_id,
+                            },
+                        )
+                        .await;
                 }
                 Ok(())
             }
-            TransportEvent::ConnectionClosed { remote_addr, .. } => {
+            TransportEvent::ConnectionClosed {
+                remote_addr,
+                flow_id,
+                ..
+            } => {
                 // Connection-oriented transport lost its flow. Forward
                 // so outbound-flow monitor can emit OutboundFlowFailed
                 // and trigger re-REGISTER.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
-                    let _ = sender.try_send(
-                        crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
-                            remote_addr,
-                        },
-                    );
+                    let _ = sender
+                        .send(
+                            crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
+                                remote_addr,
+                                flow_id,
+                            },
+                        )
+                        .await;
                 }
                 Ok(())
             }
@@ -879,18 +567,65 @@ impl TransactionManager {
         message: Message,
         source: SocketAddr,
         _destination: SocketAddr,
+        ingress_context: &SipRequestIngressContext,
     ) -> Result<()> {
         match message {
             Message::Request(request) => {
                 // Special handling for ACK to 2xx responses
                 if request.method() == Method::Ack {
                     // ACK requests matching a 2xx response are end-to-end and don't have a transaction
-                    return self.handle_ack_request(request, source).await;
+                    return self
+                        .handle_ack_request(request, source, ingress_context)
+                        .await;
                 }
 
-                self.handle_request(request, source).await
+                self.handle_request(request, source, ingress_context).await
             }
             Message::Response(response) => self.handle_response(response, source).await,
+        }
+    }
+
+    async fn enforce_ingress_authorization(
+        &self,
+        transaction: &Arc<dyn ServerTransaction>,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+        inherited_principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
+    ) -> Result<bool> {
+        let Some(authorizer) = self.request_ingress_authorizer() else {
+            return Ok(true);
+        };
+
+        let decision = match inherited_principal {
+            Some(principal) => SipRequestAuthorization::Authorized { principal },
+            None => authorizer.authorize(request, ingress_context).await,
+        };
+
+        match decision {
+            SipRequestAuthorization::Authorized { principal } => {
+                self.retain_inbound_principal(transaction.id().clone(), principal, ingress_context);
+                Ok(true)
+            }
+            SipRequestAuthorization::Rejected(SipRequestRejection {
+                status,
+                headers,
+                reason,
+            }) => {
+                let mut response =
+                    crate::transaction::utils::response_builders::create_response(request, status);
+                response.headers.extend(headers);
+                if let Some(reason) = reason {
+                    warn!(
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                        source = %ingress_context.source,
+                        reason_present=true,
+                        reason_len=reason.len(),
+                        "SIP listener authorization rejected request"
+                    );
+                }
+                self.send_response(transaction.id(), response).await?;
+                Ok(false)
+            }
         }
     }
 
@@ -907,7 +642,12 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<()>` - Success or error depending on request processing outcome
-    async fn handle_request(&self, request: Request, source: SocketAddr) -> Result<()> {
+    async fn handle_request(
+        &self,
+        request: Request,
+        source: SocketAddr,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Result<()> {
         // Try to find a matching transaction
         if let Some(key) = crate::transaction::utils::transaction_key_from_message(
             &Message::Request(request.clone()),
@@ -925,25 +665,71 @@ impl TransactionManager {
                 } else if request.method() == Method::Bye {
                     diagnostics::record_duplicate_bye_existing_transaction();
                 }
+                // A rejected request deliberately has no retained principal.
+                // Retransmit its last transaction response without invoking
+                // the authorizer again or publishing a TU event. This covers
+                // both UDP retransmissions and duplicates racing a slow auth
+                // provider.
+                if self.request_ingress_authorizer().is_some() {
+                    if self.peek_inbound_principal(&key).is_some()
+                        && self
+                            .inbound_principal_for_context(&key, ingress_context)
+                            .is_none()
+                    {
+                        warn!(
+                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
+                            source = %ingress_context.source,
+                            "Dropping transaction replay from a different authenticated peer binding"
+                        );
+                        return Ok(());
+                    }
+                    if self.peek_inbound_principal(&key).is_none() {
+                        let last_response = transaction.data().last_response.lock().await.clone();
+                        if let Some(response) = last_response {
+                            let wire_bytes =
+                                bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
+                            self.send_cached_response(
+                                response,
+                                wire_bytes,
+                                ingress_context.response_route(),
+                                "Failed to retransmit listener authorization response",
+                            )
+                            .await
+                            .map_err(|error| {
+                                Error::transport_error(
+                                    error,
+                                    "Failed to retransmit listener authorization response",
+                                )
+                            })?;
+                        }
+                        return Ok(());
+                    }
+                }
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     if request.method() == Method::Invite {
                         if self
-                            .retransmit_cached_invite_2xx_response(&key, source)
+                            .retransmit_cached_invite_2xx_response_on_route(
+                                &key,
+                                ingress_context.response_route(),
+                            )
                             .await?
                         {
                             return Ok(());
                         }
                         diagnostics::record_duplicate_invite_cache_miss();
                     }
-                    debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping request processing for non-active transaction");
                     return Ok(());
                 }
                 if request.method() == Method::Invite
                     && transaction.state() == TransactionState::Terminated
                 {
                     if self
-                        .retransmit_cached_invite_2xx_response(&key, source)
+                        .retransmit_cached_invite_2xx_response_on_route(
+                            &key,
+                            ingress_context.response_route(),
+                        )
                         .await?
                     {
                         return Ok(());
@@ -958,26 +744,109 @@ impl TransactionManager {
                 return result;
             }
 
+            if request.method() != Method::Invite
+                && self
+                    .replay_compact_non_invite_server_response(&key, ingress_context)
+                    .await?
+            {
+                return Ok(());
+            }
+
             if request.method() == Method::Invite
                 && self
-                    .retransmit_cached_invite_2xx_response(&key, source)
+                    .retransmit_cached_invite_2xx_response_on_route(
+                        &key,
+                        ingress_context.response_route(),
+                    )
                     .await?
             {
                 return Ok(());
             }
         }
 
+        // ACK and CANCEL are not independently challenged. A matching CANCEL
+        // inherits the principal of the INVITE transaction it terminates.
+        // When listener authorization is enabled, an unmatched CANCEL is
+        // rejected with 481 and never reaches the TU.
+        let inherited_cancel_principal = if request.method() == Method::Cancel
+            && self.request_ingress_authorizer().is_some()
+        {
+            crate::transaction::utils::transaction_key_from_message(&Message::Request(
+                request.clone(),
+            ))
+            .map(|key| key.with_method(Method::Invite))
+            .and_then(|invite_key| self.inbound_principal_for_context(&invite_key, ingress_context))
+        } else {
+            None
+        };
+
+        // Reject an unmatched or differently bound CANCEL before allocating a
+        // server transaction. Otherwise an attacker that guesses the INVITE
+        // branch can create the CANCEL transaction first and poison the key,
+        // preventing the legitimately bound peer from cancelling the call.
+        if request.method() == Method::Cancel
+            && self.request_ingress_authorizer().is_some()
+            && inherited_cancel_principal.is_none()
+        {
+            handle_stray_cancel(request, ingress_context.response_route(), &self.transport).await?;
+            return Ok(());
+        }
+
+        // Keep shutdown's in-flight fence continuously held across creation,
+        // authorization/rejection and primary TU handoff. The nested create
+        // guard protects its own map publication; this outer guard prevents a
+        // slow authorizer from resuming after shutdown has force-cleared maps.
+        let _staged_operation = self.admission_lifecycle.try_enter().ok_or_else(|| {
+            Error::Other("transaction manager is draining; inbound request rejected".into())
+        })?;
+
         // No existing transaction found, create a new one
         let create_started = diagnostics::transaction_timing_enabled().then(Instant::now);
-        let transaction = self
-            .create_server_transaction(request.clone(), source)
-            .await?;
+        let transaction = match self
+            .create_server_transaction_deferred_events_on_route(
+                request.clone(),
+                ingress_context.response_route(),
+            )
+            .await
+        {
+            Ok(transaction) => transaction,
+            Err(Error::TransactionCapacityExhausted { resource, limit }) => {
+                warn!(
+                    resource,
+                    limit, "Rejecting inbound SIP request at transaction retention capacity"
+                );
+                send_stateless_transaction_overload(
+                    &request,
+                    ingress_context.response_route(),
+                    &self.transport,
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(started) = create_started {
             diagnostics::record_server_transaction_create(started.elapsed());
         }
+        let publication = StagedServerPublicationGuard::new(self, transaction.clone());
+
+        if !self
+            .enforce_ingress_authorization(
+                &transaction,
+                &request,
+                ingress_context,
+                inherited_cancel_principal,
+            )
+            .await?
+        {
+            // A successfully installed transaction response is the durable
+            // owner for authorization rejection and future retransmissions.
+            publication.commit();
+            return Ok(());
+        }
 
         // Notify the transaction user about the new transaction
-        match transaction.kind() {
+        let publication_result = match transaction.kind() {
             TransactionKind::InviteServer => {
                 send_transaction_event(
                     &self.events_tx,
@@ -988,14 +857,34 @@ impl TransactionManager {
                     },
                 )
                 .await
-                .ok();
             }
             TransactionKind::NonInviteServer => {
                 // For non-INVITE requests, notify based on the method
                 match request.method() {
                     Method::Cancel => {
-                        // CANCEL events are handled in create_server_transaction
-                        // to link them with the target INVITE transaction
+                        let invite_tx_id = transaction.id().with_method(Method::Invite);
+                        if self.server_transactions.contains_key(&invite_tx_id) {
+                            send_transaction_event(
+                                &self.events_tx,
+                                crate::transaction::TransactionEvent::CancelRequest {
+                                    transaction_id: transaction.id().clone(),
+                                    target_transaction_id: invite_tx_id,
+                                    request,
+                                    source,
+                                },
+                            )
+                            .await
+                        } else {
+                            send_transaction_event(
+                                &self.events_tx,
+                                crate::transaction::TransactionEvent::NonInviteRequest {
+                                    transaction_id: transaction.id().clone(),
+                                    request,
+                                    source,
+                                },
+                            )
+                            .await
+                        }
                     }
                     _ => {
                         send_transaction_event(
@@ -1007,15 +896,25 @@ impl TransactionManager {
                             },
                         )
                         .await
-                        .ok();
                     }
                 }
             }
             // Client transaction kinds shouldn't occur here, but handle them for completeness
             TransactionKind::InviteClient | TransactionKind::NonInviteClient => {
                 warn!("Unexpected client transaction kind in handle_request");
+                Err(tokio::sync::mpsc::error::SendError(
+                    crate::transaction::TransactionEvent::TransactionTerminated {
+                        transaction_id: transaction.id().clone(),
+                    },
+                ))
             }
-        }
+        };
+        publication_result.map_err(|error| {
+            Error::Other(format!(
+                "failed to publish authenticated inbound transaction to TU: {error}"
+            ))
+        })?;
+        publication.commit();
 
         Ok(())
     }
@@ -1045,14 +944,17 @@ impl TransactionManager {
         if let Some(key) = crate::transaction::utils::transaction_key_from_message(
             &Message::Response(response.clone()),
         ) {
-            debug!(id=%key, "🔍 RESPONSE HANDLER: Generated transaction key from response");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "🔍 RESPONSE HANDLER: Generated transaction key from response");
 
             // Debug the current client transactions (gated on debug level)
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let client_keys: Vec<String> = self
                     .client_transactions
                     .iter()
-                    .map(|r| r.key().to_string())
+                    .map(|r| {
+                        crate::transaction::safe_diagnostics::SafeTransactionKey::new(r.key())
+                            .to_string()
+                    })
                     .collect();
                 debug!(
                     "🔍 RESPONSE HANDLER: Current client transactions: {:?}",
@@ -1060,7 +962,7 @@ impl TransactionManager {
                 );
             }
 
-            debug!(id=%key, "Found matching transaction for response");
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Found matching transaction for response");
 
             if key.is_server() {
                 return Err(Error::Other(format!(
@@ -1076,40 +978,51 @@ impl TransactionManager {
                 .client_transactions
                 .get(&key)
                 .map(|r| r.value().clone());
-            let mut processed = false;
+            let mut processed = self.absorb_compact_non_invite_client_response(&key);
+            if processed {
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Absorbed retransmitted final response in compact Timer K tombstone");
+            }
 
-            if let Some(transaction) = tx_arc {
-                debug!(
+            if !processed {
+                if let Some(transaction) = tx_arc {
+                    debug!(
                     "🔍 RESPONSE HANDLER: Found matching client transaction, processing response"
                 );
 
-                let lifecycle = transaction.data().get_lifecycle();
-                if !matches!(lifecycle, TransactionLifecycle::Active) {
-                    debug!(%key, ?lifecycle, "Skipping response processing for non-active transaction");
-                    return Ok(());
-                }
-
-                let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
-                let process_result = transaction.process_response(response.clone()).await;
-                if let Some(started) = dispatch_started {
-                    diagnostics::record_existing_transaction_dispatch(started.elapsed());
-                }
-                if let Err(e) = process_result {
-                    warn!(id=%key, error=%e, "Error processing response");
+                    let lifecycle = transaction.data().get_lifecycle();
+                    if !matches!(lifecycle, TransactionLifecycle::Active) {
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping response processing for non-active transaction");
+                        // Preserve the historical suppression of every retired
+                        // response except INVITE 2xx. A late/forked INVITE 2xx
+                        // must reach the TU for ACK/cleanup, while replaying a
+                        // retired provisional or failure response would repeat
+                        // application state transitions.
+                        processed =
+                            !(key.method() == &Method::Invite && response.status().is_success());
+                    } else {
+                        let dispatch_started =
+                            diagnostics::transaction_timing_enabled().then(Instant::now);
+                        let process_result = transaction.process_response(response.clone()).await;
+                        if let Some(started) = dispatch_started {
+                            diagnostics::record_existing_transaction_dispatch(started.elapsed());
+                        }
+                        if let Err(e) = process_result {
+                            warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing response");
+                        } else {
+                            debug!(
+                            "🔍 RESPONSE HANDLER: Successfully processed response in transaction"
+                        );
+                            processed = true;
+                        }
+                    }
                 } else {
-                    debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
-                    processed = true;
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "No matching client transaction found for response key");
                 }
-            } else {
-                debug!(
-                    "🔍 RESPONSE HANDLER: No matching client transaction found for key {}",
-                    key
-                );
             }
 
             // If not processed via transaction, still send the event
             if !processed {
-                debug!(id=%key, "Response matches key but no active transaction found");
+                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Response matches key but no active transaction found");
 
                 // Deliver to the transaction user anyway
                 let status = response.status();
@@ -1204,7 +1117,12 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<()>` - Success or error depending on ACK processing
-    async fn handle_ack_request(&self, request: Request, source: SocketAddr) -> Result<()> {
+    async fn handle_ack_request(
+        &self,
+        request: Request,
+        source: SocketAddr,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Result<()> {
         debug!("Processing ACK request with dialog-based matching");
 
         // First try direct branch-based matching for non-2xx ACKs
@@ -1219,15 +1137,24 @@ impl TransactionManager {
                 .map(|r| r.value().clone());
             if let Some(transaction) = invite_tx {
                 if transaction.state() != TransactionState::Confirmed {
-                    let lifecycle = transaction.data().get_lifecycle();
-                    if !matches!(lifecycle, TransactionLifecycle::Active) {
-                        debug!(%invite_key, ?lifecycle, "Skipping ACK processing for non-active transaction");
+                    if self.request_ingress_authorizer().is_some()
+                        && self
+                            .inbound_principal_for_context(&invite_key, ingress_context)
+                            .is_none()
+                    {
+                        warn!(
+                            transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key),
+                            source = %source,
+                            "Dropping non-2xx ACK from an unauthorized transport peer"
+                        );
                         return Ok(());
                     }
-                    debug!(
-                        "Processing ACK for non-2xx response in transaction {}",
-                        invite_key
-                    );
+                    let lifecycle = transaction.data().get_lifecycle();
+                    if !matches!(lifecycle, TransactionLifecycle::Active) {
+                        debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key), ?lifecycle, "Skipping ACK processing for non-active transaction");
+                        return Ok(());
+                    }
+                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_key), "Processing ACK for non-2xx response");
                     self.mark_invite_2xx_response_cache_acked(&invite_key);
                     let dispatch_started =
                         diagnostics::transaction_timing_enabled().then(Instant::now);
@@ -1244,10 +1171,19 @@ impl TransactionManager {
         // Use dialog-based matching (Call-ID, From tag, To tag) through the
         // server INVITE dialog index.
         if let Some(tx_id) = self.find_server_invite_for_ack(&request) {
-            debug!(
-                "Found ACK for 2xx response using dialog-based matching: {}",
-                tx_id
-            );
+            if self.request_ingress_authorizer().is_some()
+                && self
+                    .inbound_principal_for_context(&tx_id, ingress_context)
+                    .is_none()
+            {
+                warn!(
+                    transaction_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+                    source = %source,
+                    "Dropping 2xx ACK from an unauthorized transport peer"
+                );
+                return Ok(());
+            }
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Found ACK for 2xx response using dialog-based matching");
             self.mark_invite_2xx_response_cache_acked(&tx_id);
 
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
@@ -1269,6 +1205,11 @@ impl TransactionManager {
         // No matching INVITE transaction found, this is a stray ACK
         debug!("No matching INVITE transaction found for ACK request");
 
+        if self.request_ingress_authorizer().is_some() {
+            warn!(source = %source, "Dropping stray ACK while listener authorization is enabled");
+            return Ok(());
+        }
+
         // Notify the transaction user about the stray ACK
         send_transaction_event(
             &self.events_tx,
@@ -1284,7 +1225,10 @@ impl TransactionManager {
         let (exact_key, fallback_key) = ServerInviteDialogKey::ack_lookup_keys(request)?;
 
         if let Some(entry) = self.lookup_server_invite_by_dialog_key(&exact_key) {
-            debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog index");
+            debug!(
+                call_id_len = exact_key.call_id.len(),
+                "Found matching INVITE server transaction for ACK by dialog index"
+            );
             let transaction_id = entry.transaction_id;
             self.mark_invite_2xx_response_cache_acked(&transaction_id);
             return Some(transaction_id);
@@ -1292,16 +1236,24 @@ impl TransactionManager {
 
         if let Some(fallback_key) = fallback_key.as_ref() {
             if let Some(entry) = self.lookup_server_invite_by_dialog_key(fallback_key) {
-                debug!(call_id=%fallback_key.call_id, "Found matching INVITE server transaction for ACK by dialog index fallback");
-                let transaction_id = entry.transaction_id.clone();
-                self.insert_server_invite_dialog_index_entry(exact_key, entry);
+                debug!(
+                    call_id_len = fallback_key.call_id.len(),
+                    "Found matching INVITE server transaction for ACK by dialog index fallback"
+                );
+                // Keep the initial INVITE's no-To-tag binding canonical. A
+                // successful response adds the local To tag to its ACK, so
+                // caching that exact lookup would retain a second equivalent
+                // key and retirement deadline for every normal call. Reusing
+                // the fallback on duplicate ACKs preserves matching while
+                // retaining exactly one binding for the transaction.
+                let transaction_id = entry.transaction_id;
                 self.mark_invite_2xx_response_cache_acked(&transaction_id);
                 return Some(transaction_id);
             }
         }
 
         debug!(
-            call_id=%exact_key.call_id,
+            call_id_len = exact_key.call_id.len(),
             "No matching INVITE server transaction for ACK in dialog index"
         );
         None
@@ -1317,7 +1269,14 @@ impl TransactionManager {
             .map(|entry| entry.value().clone())?;
 
         if entry.is_expired(std::time::Instant::now()) {
-            self.server_invite_dialog_index.remove(dialog_key);
+            // Do not let an expired snapshot race with a replacement binding
+            // for the same dialog key. The deadline generation is the exact
+            // identity of the observed index entry.
+            self.server_invite_dialog_index
+                .remove_if(dialog_key, |_, current| {
+                    current.deadline_generation == entry.deadline_generation
+                        && current.is_expired(std::time::Instant::now())
+                });
             None
         } else {
             Some(entry)
@@ -1326,7 +1285,7 @@ impl TransactionManager {
 }
 
 async fn send_transaction_event(
-    events_tx: &mpsc::Sender<TransactionEvent>,
+    events_tx: &crate::transaction::event_sender::TransactionEventSender,
     event: TransactionEvent,
 ) -> std::result::Result<(), mpsc::error::SendError<TransactionEvent>> {
     let started = diagnostics::transaction_timing_enabled().then(Instant::now);
@@ -1343,7 +1302,7 @@ async fn send_transaction_event(
 #[allow(dead_code)]
 async fn handle_stray_cancel(
     request: Request,
-    source: SocketAddr,
+    response_route: rvoip_sip_transport::TransportRoute,
     transport: &Arc<dyn Transport>,
 ) -> Result<()> {
     // Send 481 Transaction Does Not Exist
@@ -1375,7 +1334,7 @@ async fn handle_stray_cancel(
 
     // Send the response
     if let Err(e) = transport
-        .send_message(Message::Response(cancel_response), source)
+        .send_message_via(Message::Response(cancel_response), response_route)
         .await
     {
         return Err(Error::transport_error(
@@ -1385,4 +1344,48 @@ async fn handle_stray_cancel(
     }
 
     Ok(())
+}
+
+/// Reject before server-transaction allocation when bounded Timer J/K
+/// retention is saturated. The response is stateless by design: allocating a
+/// transaction here would consume the capacity whose absence triggered it.
+async fn send_stateless_transaction_overload(
+    request: &Request,
+    response_route: TransportRoute,
+    transport: &Arc<dyn Transport>,
+) -> Result<()> {
+    // ACK never receives a response. It is normally handled before this path,
+    // but retain the RFC rule defensively.
+    if request.method() == Method::Ack {
+        return Ok(());
+    }
+
+    let mut builder = ResponseBuilder::new(StatusCode::ServiceUnavailable, None).header(
+        TypedHeader::RetryAfter(rvoip_sip_core::types::retry_after::RetryAfter::new(1)),
+    );
+    if let Some(to) = request.to() {
+        builder = builder.header(TypedHeader::To(to.clone()));
+    }
+    if let Some(from) = request.from() {
+        builder = builder.header(TypedHeader::From(from.clone()));
+    }
+    if let Some(call_id) = request.call_id() {
+        builder = builder.header(TypedHeader::CallId(call_id.clone()));
+    }
+    if let Some(cseq) = request.cseq() {
+        builder = builder.header(TypedHeader::CSeq(cseq.clone()));
+    }
+    if let Some(via) = request.header(&HeaderName::Via) {
+        builder = builder.header(via.clone());
+    }
+
+    transport
+        .send_message_via(Message::Response(builder.build()), response_route)
+        .await
+        .map_err(|error| {
+            Error::transport_error(
+                error,
+                "Failed to send stateless transaction overload response",
+            )
+        })
 }

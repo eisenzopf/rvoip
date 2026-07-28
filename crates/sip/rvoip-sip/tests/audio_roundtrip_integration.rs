@@ -13,10 +13,13 @@
 //! would pass even if the received stream were silence, self-loopback,
 //! or mostly-dropped.
 
-use std::env;
+mod support;
+
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_SIP_PORT: u16 = 35090;
 const BOB_SIP_PORT: u16 = 35091;
@@ -45,30 +48,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
-fn build_examples() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "stream_peer_audio_alice",
-            "--example",
-            "stream_peer_audio_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // `build_examples` has already materialized the executables. Launch them
+    // directly: two nested `cargo run` processes serialize on Cargo's artifact
+    // lock, leaving the second peer unable to start until the first exits.
+    let mut cmd = std::process::Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -111,7 +95,7 @@ fn read_wav(path: &Path) -> Vec<i16> {
 
 #[test]
 fn audio_roundtrip_delivers_peer_tone() {
-    build_examples();
+    build_examples(&["stream_peer_audio_alice", "stream_peer_audio_bob"]);
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let out_dir = tmp.path().to_string_lossy().to_string();

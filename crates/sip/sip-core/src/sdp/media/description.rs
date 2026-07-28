@@ -14,6 +14,20 @@ use nom::{
 /// Parse a media description line using nom
 /// Format: `m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]`*
 pub fn parse_media_description_nom(input: &str) -> IResult<&str, MediaDescription> {
+    match parse_media_description_nom_inner(input) {
+        Err(nom::Err::Error(error)) => Err(nom::Err::Error(nom::error::Error::new(
+            &input[..0],
+            error.code,
+        ))),
+        Err(nom::Err::Failure(error)) => Err(nom::Err::Failure(nom::error::Error::new(
+            &input[..0],
+            error.code,
+        ))),
+        result => result,
+    }
+}
+
+fn parse_media_description_nom_inner(input: &str) -> IResult<&str, MediaDescription> {
     // m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]*
     let (input, _) = opt(tag("m="))(input)?;
     let (input, (media_type, _, port_info, _, protocol, _, formats)) = tuple((
@@ -49,6 +63,12 @@ pub fn parse_media_description_nom(input: &str) -> IResult<&str, MediaDescriptio
 
 /// Parse a media description
 pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
+    let invalid_media_field = || {
+        Error::SdpParsingError(format!(
+            "class=media-field; line=0; field_bytes={}",
+            value.len()
+        ))
+    };
     // Try the nom parser first
     if let Ok((_, media)) = parse_media_description_nom(value) {
         return Ok(media);
@@ -64,19 +84,13 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
 
     let parts: Vec<&str> = value_to_parse.split_whitespace().collect();
     if parts.len() < 4 {
-        return Err(Error::SdpParsingError(format!(
-            "Invalid m= line format: {}",
-            value
-        )));
+        return Err(invalid_media_field());
     }
 
     // Parse media type
     let media = parts[0].to_string();
     if !is_valid_media_type(&media) {
-        return Err(Error::SdpParsingError(format!(
-            "Invalid media type: {}",
-            media
-        )));
+        return Err(invalid_media_field());
     }
 
     // Parse port and optional port count
@@ -85,23 +99,13 @@ pub fn parse_media_description_line(value: &str) -> Result<MediaDescription> {
 
     let port = match port_parts[0].parse::<u16>() {
         Ok(p) => p,
-        Err(_) => {
-            return Err(Error::SdpParsingError(format!(
-                "Invalid port: {}",
-                port_parts[0]
-            )))
-        }
+        Err(_) => return Err(invalid_media_field()),
     };
 
     let port_count = if port_parts.len() > 1 {
         match port_parts[1].parse::<u16>() {
             Ok(c) => Some(c),
-            Err(_) => {
-                return Err(Error::SdpParsingError(format!(
-                    "Invalid port count: {}",
-                    port_parts[1]
-                )))
-            }
+            Err(_) => return Err(invalid_media_field()),
         }
     } else {
         None
@@ -315,5 +319,12 @@ mod tests {
         assert_eq!(media.port, 49170, "Incorrect port");
         assert_eq!(media.protocol, "RTP/AVP", "Incorrect protocol");
         assert_eq!(media.formats, vec!["0", "8"], "Incorrect formats");
+    }
+
+    #[test]
+    fn nom_media_error_does_not_retain_rejected_input() {
+        let canary = "NOM_MEDIA_CANARY_SECRET_b49c";
+        let error = parse_media_description_nom(canary).unwrap_err();
+        assert!(!format!("{error:?}").contains(canary));
     }
 }

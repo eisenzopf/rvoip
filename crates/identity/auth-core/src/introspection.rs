@@ -6,16 +6,22 @@
 //! enforced by asking the authorization server on each validation.
 
 use std::collections::HashSet;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    unix_time_from_seconds, validate_optional_token_id, AuthenticatedPrincipal,
+    AuthenticationMethod, BearerAuthError, BearerValidator, ValidatedBearer,
+};
 
 /// OAuth2 token introspection validator for opaque Bearer tokens.
 #[derive(Clone)]
@@ -30,6 +36,7 @@ struct Inner {
     client_auth: Option<IntrospectionClientAuth>,
     issuers: Option<HashSet<String>>,
     audiences: Option<HashSet<String>>,
+    require_token_id: bool,
 }
 
 #[derive(Clone)]
@@ -41,7 +48,7 @@ enum IntrospectionClientAuth {
     Bearer(String),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct IntrospectionResponse {
     active: bool,
     #[serde(default)]
@@ -57,14 +64,75 @@ struct IntrospectionResponse {
     #[serde(default)]
     iss: Option<String>,
     #[serde(default)]
+    exp: Option<u64>,
+    #[serde(default)]
+    iat: Option<u64>,
+    #[serde(default, alias = "token_id")]
+    jti: Option<String>,
+    #[serde(default, alias = "tenant", alias = "tid")]
+    tenant_id: Option<String>,
+    #[serde(default)]
     aud: Option<IntrospectionAudience>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for IntrospectionResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IntrospectionResponse")
+            .field("active", &self.active)
+            .field("subject_present", &self.sub.is_some())
+            .field("username_present", &self.username.is_some())
+            .field("client_id_present", &self.client_id.is_some())
+            .field("scope_present", &self.scope.is_some())
+            .field("scope_bytes", &self.scope.as_ref().map_or(0, String::len))
+            .field(
+                "scope_list_count",
+                &self.scopes.as_ref().map_or(0, Vec::len),
+            )
+            .field("issuer_present", &self.iss.is_some())
+            .field("expires_at_present", &self.exp.is_some())
+            .field("issued_at_present", &self.iat.is_some())
+            .field("token_id_present", &self.jti.is_some())
+            .field("tenant_present", &self.tenant_id.is_some())
+            .field("audience_present", &self.aud.is_some())
+            .field(
+                "audience_count",
+                &self.aud.as_ref().map_or(0, IntrospectionAudience::len),
+            )
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum IntrospectionAudience {
     One(String),
     Many(Vec<String>),
+}
+
+impl IntrospectionAudience {
+    fn len(&self) -> usize {
+        match self {
+            Self::One(_) => 1,
+            Self::Many(values) => values.len(),
+        }
+    }
+}
+
+impl fmt::Debug for IntrospectionAudience {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::One(value) => formatter
+                .debug_struct("One")
+                .field("value_present", &!value.is_empty())
+                .field("value_bytes", &value.len())
+                .finish(),
+            Self::Many(values) => formatter
+                .debug_struct("Many")
+                .field("value_count", &values.len())
+                .finish(),
+        }
+    }
 }
 
 impl OAuth2IntrospectionValidator {
@@ -82,6 +150,7 @@ impl OAuth2IntrospectionValidator {
                 client_auth: None,
                 issuers: None,
                 audiences: None,
+                require_token_id: false,
             }),
         }
     }
@@ -103,6 +172,7 @@ impl OAuth2IntrospectionValidator {
                 }),
                 issuers: inner.issuers.clone(),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -117,6 +187,7 @@ impl OAuth2IntrospectionValidator {
                 client_auth: Some(IntrospectionClientAuth::Bearer(token.into())),
                 issuers: inner.issuers.clone(),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -140,6 +211,7 @@ impl OAuth2IntrospectionValidator {
                         .collect(),
                 ),
                 audiences: inner.audiences.clone(),
+                require_token_id: inner.require_token_id,
             }),
         }
     }
@@ -164,6 +236,23 @@ impl OAuth2IntrospectionValidator {
                         .map(|audience| audience.as_ref().to_string())
                         .collect(),
                 ),
+                require_token_id: inner.require_token_id,
+            }),
+        }
+    }
+
+    /// Require the introspection server to return a non-empty, bounded `jti`
+    /// or `token_id` rather than using a local credential fingerprint.
+    pub fn with_required_token_id(self) -> Self {
+        let inner = &*self.inner;
+        Self {
+            inner: Arc::new(Inner {
+                endpoint: inner.endpoint.clone(),
+                client: inner.client.clone(),
+                client_auth: inner.client_auth.clone(),
+                issuers: inner.issuers.clone(),
+                audiences: inner.audiences.clone(),
+                require_token_id: true,
             }),
         }
     }
@@ -208,6 +297,17 @@ impl OAuth2IntrospectionValidator {
 #[async_trait]
 impl BearerValidator for OAuth2IntrospectionValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal)
+    }
+
+    async fn validate_credential(&self, token: &str) -> Result<ValidatedBearer, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -218,6 +318,25 @@ impl BearerValidator for OAuth2IntrospectionValidator {
         validate_issuer(&response, self.inner.issuers.as_ref())?;
         validate_audience(&response, self.inner.audiences.as_ref())?;
 
+        let explicit_token_id = validate_optional_token_id(response.jti.clone())?;
+        if self.inner.require_token_id && explicit_token_id.is_none() {
+            return Err(BearerAuthError::Invalid(
+                "introspection response missing required token id".into(),
+            ));
+        }
+        let token_id = explicit_token_id.or_else(|| Some(credential_fingerprint(token)));
+        let issued_at = response
+            .iat
+            .map(|iat| unix_time_from_seconds(iat, "introspection iat"))
+            .transpose()?;
+
+        let expires_at = response.exp.map(expiration_from_unix).transpose()?;
+        if expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+            return Err(BearerAuthError::Invalid(
+                "active introspection response is expired".into(),
+            ));
+        }
+
         let subject = response
             .sub
             .or(response.username)
@@ -225,14 +344,44 @@ impl BearerValidator for OAuth2IntrospectionValidator {
             .ok_or_else(|| {
                 BearerAuthError::Invalid("active introspection response missing subject".into())
             })?;
-        let identity = IdentityId::from_string(subject);
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_response(response.scope, response.scopes);
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
-            scopes,
-        })
+            scopes: scopes.clone(),
+        };
+        ValidatedBearer::new(
+            AuthenticatedPrincipal {
+                subject,
+                tenant: response.tenant_id,
+                scopes,
+                issuer: response.iss,
+                expires_at,
+                method: AuthenticationMethod::OAuth2Introspection,
+                assurance,
+            },
+            token_id,
+            issued_at,
+        )
     }
+}
+
+/// Produce a stable opaque-token identifier without retaining the credential.
+/// The result is correlation-sensitive and is only returned through the
+/// redacting [`ValidatedBearer`] metadata surface; it is never logged here.
+fn credential_fingerprint(token: &str) -> String {
+    let digest = Sha256::digest(token.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| {
+            BearerAuthError::Invalid("introspection exp is outside the supported range".into())
+        })
 }
 
 fn validate_issuer(
@@ -295,4 +444,53 @@ fn scopes_from_response(scope: Option<String>, scopes: Option<Vec<String>>) -> V
         }
     }
     values
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "introspection-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_response_keeps_values_out_of_debug() {
+        let response: IntrospectionResponse = serde_json::from_value(serde_json::json!({
+            "active": true,
+            "sub": CANARY,
+            "username": CANARY,
+            "client_id": CANARY,
+            "scope": CANARY,
+            "scopes": [CANARY],
+            "iss": CANARY,
+            "exp": 2,
+            "iat": 1,
+            "jti": CANARY,
+            "tenant_id": CANARY,
+            "aud": [CANARY],
+        }))
+        .unwrap();
+        let one: IntrospectionAudience = serde_json::from_value(serde_json::json!(CANARY)).unwrap();
+
+        for rendered in [
+            format!("{response:?}"),
+            format!("{:?}", response.aud.as_ref().unwrap()),
+            format!("{one:?}"),
+        ] {
+            assert!(!rendered.contains(CANARY), "response leaked: {rendered}");
+        }
+
+        assert_eq!(response.sub.as_deref(), Some(CANARY));
+        assert_eq!(response.username.as_deref(), Some(CANARY));
+        assert_eq!(response.client_id.as_deref(), Some(CANARY));
+        assert_eq!(response.scope.as_deref(), Some(CANARY));
+        assert_eq!(response.scopes.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(response.iss.as_deref(), Some(CANARY));
+        assert_eq!(response.jti.as_deref(), Some(CANARY));
+        assert_eq!(response.tenant_id.as_deref(), Some(CANARY));
+        assert!(matches!(
+            response.aud,
+            Some(IntrospectionAudience::Many(ref values)) if values == &[CANARY]
+        ));
+        assert!(matches!(one, IntrospectionAudience::One(ref value) if value == CANARY));
+    }
 }

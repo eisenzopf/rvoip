@@ -1,5 +1,6 @@
 //! Native WebRTC client surface (INTERFACE_DESIGN §15.3).
 
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -13,15 +14,38 @@ use crate::errors::{Result, WebRtcError};
 use crate::peer::{PeerRole, RvoipPeerConnection};
 
 /// Thin newtype over webrtc-rs SDP offer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Offer(pub String);
 
+impl fmt::Debug for Offer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Offer")
+            .field("sdp_bytes", &self.0.len())
+            .finish()
+    }
+}
+
 /// Thin newtype over webrtc-rs SDP answer.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Answer {
     pub sdp: String,
     /// Server-side [`ConnectionId`] when signaling returns one (WebSocket answer).
     pub connection_id: Option<String>,
+}
+
+impl fmt::Debug for Answer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Answer")
+            .field("sdp_bytes", &self.sdp.len())
+            .field("connection_id_present", &self.connection_id.is_some())
+            .field(
+                "connection_id_bytes",
+                &self.connection_id.as_deref().map(str::len),
+            )
+            .finish()
+    }
 }
 
 impl Answer {
@@ -34,14 +58,37 @@ impl Answer {
 }
 
 /// Thin newtype over ICE candidate init JSON.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IceCandidate(pub String);
 
+impl fmt::Debug for IceCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IceCandidate")
+            .field("candidate_bytes", &self.0.len())
+            .finish()
+    }
+}
+
 /// Outbound call target (thin until `rvoip-client` exists).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum CallTarget {
     Uri(String),
     Participant(String),
+}
+
+impl fmt::Debug for CallTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (kind, value_bytes) = match self {
+            Self::Uri(value) => ("uri", value.len()),
+            Self::Participant(value) => ("participant", value.len()),
+        };
+        formatter
+            .debug_struct("CallTarget")
+            .field("kind", &kind)
+            .field("value_bytes", &value_bytes)
+            .finish()
+    }
 }
 
 /// Session medium.

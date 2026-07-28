@@ -2,9 +2,22 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+macro_rules! metadata_only_debug {
+    ($($type:ty),+ $(,)?) => {
+        $(
+            impl fmt::Debug for $type {
+                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    formatter.write_str(stringify!($type))
+                }
+            }
+        )+
+    };
+}
 
 /// `session.invite` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionInvite {
     pub from: String,
     pub to: Vec<String>,
@@ -15,14 +28,14 @@ pub struct SessionInvite {
 }
 
 /// `session.accept` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionAccept {
     pub by: String,
     pub capabilities_answer: serde_json::Value,
 }
 
 /// `session.reject` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionReject {
     pub by: String,
     pub reason_code: u16,
@@ -30,7 +43,7 @@ pub struct SessionReject {
 }
 
 /// `session.end` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionEnd {
     pub by: String,
     pub reason_code: u16,
@@ -38,7 +51,7 @@ pub struct SessionEnd {
 }
 
 /// `session.update` (bidi) payload — mid-session change.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionUpdate {
     pub kind: String,
     #[serde(default)]
@@ -46,7 +59,7 @@ pub struct SessionUpdate {
 }
 
 /// `session.cancel` (bidi) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionCancel {
     pub by: String,
     pub reason_code: u16,
@@ -54,7 +67,7 @@ pub struct SessionCancel {
 }
 
 /// `session.started` (S→C, multicast) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionStarted {
     pub started_at: DateTime<Utc>,
     pub participants_present: Vec<String>,
@@ -63,7 +76,7 @@ pub struct SessionStarted {
 }
 
 /// `session.ended` (S→C, multicast) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionEnded {
     pub ended_at: DateTime<Utc>,
     #[serde(default)]
@@ -75,28 +88,28 @@ pub struct SessionEnded {
 }
 
 /// `session.participant.joined` (S→C, multicast) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionParticipantJoined {
     pub participant: JoinedParticipant,
     pub via_connection: String,
 }
 
 /// `session.participant.left` (S→C, multicast) payload.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionParticipantLeft {
     pub participant_id: String,
     pub left_at: DateTime<Utc>,
     pub reason: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ActiveConnection {
     pub connid: String,
     pub participant_id: String,
     pub transport: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct JoinedParticipant {
     pub participant_id: String,
     pub identity_id: String,
@@ -106,3 +119,18 @@ pub struct JoinedParticipant {
     pub display_name: Option<String>,
     pub joined_at: DateTime<Utc>,
 }
+
+metadata_only_debug!(
+    SessionInvite,
+    SessionAccept,
+    SessionReject,
+    SessionEnd,
+    SessionUpdate,
+    SessionCancel,
+    SessionStarted,
+    SessionEnded,
+    SessionParticipantJoined,
+    SessionParticipantLeft,
+    ActiveConnection,
+    JoinedParticipant,
+);

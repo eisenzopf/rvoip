@@ -253,12 +253,21 @@ The short smoke records RSS slope but only enforces the RSS growth gate when
 the post-drain window reaches the scenario's `minRssGateWindowSecs`; use a
 longer `RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS` for citable RSS-gate evidence.
 
+The beta high-density contract uses a 30-CPS warmup for 30 seconds, 160 CPS
+for 90 seconds, and a 30-CPS recovery for 90 seconds. It keeps RTP decode and
+application `AudioFrame` delivery enabled. Acceptance requires ASR at least
+0.995, zero media-setup and teardown failures, exact-zero caller/receiver
+retention and active receivers after drain, and caller/receiver RSS growth no
+greater than 15 MB/hour. Audio-delivery suppression is diagnostic-only and is
+rejected by the full beta gate.
+
 The bundled burst recipes are starting points:
 
 | Recipe | Intended use |
 | --- | --- |
 | `carrier-burst-balanced` | Default carrier media burst profile. |
 | `carrier-burst-high-density` | Larger SIP/media queues and media pools for dense bursts. |
+| `carrier-burst-uac-high-density` | Sharded UAC transport, transaction, dialog, and session-delivery lanes for dense bursts; no server admission or media watchdog policy. |
 | `carrier-burst-memory-tight` | Smaller RTP/media queues and media pools for memory-sensitive overload tests. |
 
 Carrier burst recipes enable `activeCallNoMediaTimeoutSecs: 60` and

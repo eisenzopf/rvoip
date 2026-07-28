@@ -21,7 +21,8 @@ pub struct UctpWtClient {
 impl UctpWtClient {
     /// Dial a WT URL like `https://127.0.0.1:4433/uctp`.
     ///
-    /// `client_config` MUST include ALPN `b"h3"` in `alpn_protocols`.
+    /// `client_config` MUST include the current WebTransport ALPN in
+    /// `alpn_protocols`.
     pub async fn connect(
         endpoint: &quinn::Endpoint,
         server: SocketAddr,
@@ -30,7 +31,7 @@ impl UctpWtClient {
     ) -> Result<Arc<Self>> {
         let mut tls = (*client_config).clone();
         if tls.alpn_protocols.is_empty() {
-            tls.alpn_protocols = vec![b"h3".to_vec()];
+            tls.alpn_protocols = vec![rvoip_uctp::UCTP_WEBTRANSPORT_ALPN_BYTES.to_vec()];
         }
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| {
             rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))

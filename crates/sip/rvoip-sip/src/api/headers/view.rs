@@ -47,10 +47,7 @@ pub trait SipHeaderView {
 /// case-insensitive on `s` per RFC 3261 §7.3.1. The other variants
 /// are unit-like so equality is already correct.
 pub(crate) fn header_name_eq(a: &HeaderName, b: &HeaderName) -> bool {
-    match (a, b) {
-        (HeaderName::Other(x), HeaderName::Other(y)) => x.eq_ignore_ascii_case(y),
-        _ => a == b,
-    }
+    a.wire_eq(b)
 }
 
 /// Internal helper that implements the default trait body over a

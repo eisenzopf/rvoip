@@ -11,9 +11,12 @@
 //! The test is considered passing iff both child processes exit 0. Alice
 //! drives the hangup at the end.
 
-use std::env;
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35073;
 const BOB_PORT: u16 = 35074;
@@ -26,13 +29,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // Both examples are built first. Launching the binaries directly avoids
+    // keeping Bob inside a nested Cargo process that can lock Alice out of
+    // the shared artifact directory.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -42,37 +43,13 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e))
 }
 
-fn build_examples() {
-    let output = Command::new(cargo_bin())
-        .args([
-            "build",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_glare_retry_alice",
-            "--example",
-            "regression_glare_retry_bob",
-        ])
-        .output()
-        .expect("failed to invoke cargo build");
-    if !output.status.success() {
-        let _ = std::io::Write::write_all(&mut std::io::stderr(), &output.stderr);
-        panic!(
-            "cargo build failed (exit={:?}); stderr printed above",
-            output.status.code()
-        );
-    }
-}
-
 #[test]
 fn glare_retry_converges_to_on_hold() {
-    build_examples();
+    build_examples(&["regression_glare_retry_alice", "regression_glare_retry_bob"]);
 
     // Both peers sleep until this wall-clock instant before calling hold().
-    // Use a generous 8 s lead time: `cargo run --quiet` can take a couple
-    // of seconds to resolve dependencies even when the example binary is
-    // pre-built, and Alice additionally needs to establish the call and
-    // reach Active before the glare window opens.
+    // Use a generous 8 s lead time so Alice can establish the call and both
+    // peers can reach Active before the glare window opens on loaded CI.
     let start_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system time before epoch")
@@ -108,7 +85,7 @@ fn glare_retry_converges_to_on_hold() {
         }
     };
 
-    let alice_status = alice_status.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
+    let alice_status = alice_status.unwrap_or_else(|| panic!("Alice did not finish within 45s"));
     assert!(
         alice_status.success(),
         "Alice exited with {:?} (expected 0 = saw stable OnHold)",

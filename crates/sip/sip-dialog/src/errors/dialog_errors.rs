@@ -4,64 +4,160 @@
 //! dialog creation, state management, request routing, and protocol handling.
 
 use std::time::SystemTime;
-use thiserror::Error;
+use std::{error, fmt};
 
 /// Result type for dialog operations
 pub type DialogResult<T> = Result<T, DialogError>;
 
 /// Main error type for dialog operations
-#[derive(Error, Debug, Clone)]
+#[derive(Clone)]
 pub enum DialogError {
     /// Dialog not found
-    #[error("Dialog not found: {id}")]
     DialogNotFound { id: String },
 
     /// Invalid dialog state for operation
-    #[error("Invalid dialog state: expected {expected}, got {actual}")]
     InvalidState { expected: String, actual: String },
 
     /// Dialog already exists
-    #[error("Dialog already exists: {id}")]
     DialogAlreadyExists { id: String },
 
     /// Transaction error from transaction-core
-    #[error("Transaction error: {message}")]
     TransactionError { message: String },
 
     /// SIP protocol error
-    #[error("SIP protocol error: {message}")]
     ProtocolError { message: String },
 
     /// Request routing error
-    #[error("Request routing error: {message}")]
     RoutingError { message: String },
 
     /// SDP negotiation error
-    #[error("SDP negotiation error: {message}")]
     SdpError { message: String },
 
     /// Internal error with context
-    #[error("Internal error: {message}")]
     InternalError {
         message: String,
         context: Option<ErrorContext>,
     },
 
     /// Network/connectivity error
-    #[error("Network error: {message}")]
     NetworkError { message: String },
 
     /// Timeout error
-    #[error("Operation timed out: {operation}")]
     TimeoutError { operation: String },
 
     /// Configuration error
-    #[error("Configuration error: {message}")]
     ConfigError { message: String },
 }
 
+impl DialogError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::DialogNotFound { .. } => "dialog-not-found",
+            Self::InvalidState { .. } => "invalid-state",
+            Self::DialogAlreadyExists { .. } => "dialog-already-exists",
+            Self::TransactionError { .. } => "transaction",
+            Self::ProtocolError { .. } => "protocol",
+            Self::RoutingError { .. } => "routing",
+            Self::SdpError { .. } => "sdp",
+            Self::InternalError { .. } => "internal",
+            Self::NetworkError { .. } => "network",
+            Self::TimeoutError { .. } => "timeout",
+            Self::ConfigError { .. } => "configuration",
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn every_dialog_error_variant_is_payload_free() {
+        const CANARY: &str = "dialog-error-direct-secret-canary";
+        let context = ErrorContext {
+            dialog_id: Some(CANARY.into()),
+            transaction_id: Some(CANARY.into()),
+            call_id: Some(CANARY.into()),
+            timestamp: SystemTime::UNIX_EPOCH,
+            details: Some(CANARY.into()),
+        };
+        let errors = vec![
+            DialogError::DialogNotFound { id: CANARY.into() },
+            DialogError::InvalidState {
+                expected: CANARY.into(),
+                actual: CANARY.into(),
+            },
+            DialogError::DialogAlreadyExists { id: CANARY.into() },
+            DialogError::TransactionError {
+                message: CANARY.into(),
+            },
+            DialogError::ProtocolError {
+                message: CANARY.into(),
+            },
+            DialogError::RoutingError {
+                message: CANARY.into(),
+            },
+            DialogError::SdpError {
+                message: CANARY.into(),
+            },
+            DialogError::InternalError {
+                message: CANARY.into(),
+                context: Some(context.clone()),
+            },
+            DialogError::NetworkError {
+                message: CANARY.into(),
+            },
+            DialogError::TimeoutError {
+                operation: CANARY.into(),
+            },
+            DialogError::ConfigError {
+                message: CANARY.into(),
+            },
+        ];
+
+        for error in errors {
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(CANARY), "payload leaked: {rendered}");
+            assert!(!error.diagnostic_class().is_empty());
+            assert!(std::error::Error::source(&error).is_none());
+        }
+        assert!(!format!("{context:?}").contains(CANARY));
+    }
+}
+
+impl fmt::Display for DialogError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "SIP dialog operation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl fmt::Debug for DialogError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DialogError")
+            .field("class", &self.diagnostic_class())
+            .field(
+                "context_present",
+                &matches!(
+                    self,
+                    Self::InternalError {
+                        context: Some(_),
+                        ..
+                    }
+                ),
+            )
+            .finish()
+    }
+}
+
+impl error::Error for DialogError {}
+
 /// Additional context for errors
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ErrorContext {
     /// Dialog ID if applicable
     pub dialog_id: Option<String>,
@@ -77,6 +173,19 @@ pub struct ErrorContext {
 
     /// Additional details
     pub details: Option<String>,
+}
+
+impl fmt::Debug for ErrorContext {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ErrorContext")
+            .field("dialog_id_present", &self.dialog_id.is_some())
+            .field("transaction_id_present", &self.transaction_id.is_some())
+            .field("call_id_present", &self.call_id.is_some())
+            .field("timestamp", &self.timestamp)
+            .field("details_present", &self.details.is_some())
+            .finish()
+    }
 }
 
 impl Default for ErrorContext {

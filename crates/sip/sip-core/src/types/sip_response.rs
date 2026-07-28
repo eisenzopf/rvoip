@@ -90,7 +90,7 @@ use crate::types::StatusCode;
 /// // Or use a convenience method for common responses
 /// let trying = Response::trying();
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
     /// The SIP version
     pub version: Version,
@@ -102,6 +102,19 @@ pub struct Response {
     pub headers: Vec<TypedHeader>,
     /// The body of the response
     pub body: Bytes,
+}
+
+impl fmt::Debug for Response {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Response")
+            .field("status", &self.status.as_u16())
+            .field("reason_present", &self.reason.is_some())
+            .field("reason_bytes", &self.reason.as_ref().map_or(0, String::len))
+            .field("header_count", &self.headers.len())
+            .field("body_bytes", &self.body.len())
+            .finish()
+    }
 }
 
 impl Response {

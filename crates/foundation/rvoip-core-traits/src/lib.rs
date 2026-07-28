@@ -38,10 +38,38 @@
 //! move-cost tradeoff grows.
 
 pub mod adapter;
+pub mod broadcast;
 pub mod capability;
 pub mod connection;
+pub mod data;
 pub mod error;
 pub mod harness;
 pub mod identity;
 pub mod ids;
 pub mod stream;
+
+pub use adapter::{
+    ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
+    OutboundActivation, TransferStatus, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
+    MAX_INBOUND_METADATA_BYTES, MAX_INBOUND_METADATA_FIELDS, MAX_INBOUND_METADATA_NAME_BYTES,
+    MAX_INBOUND_METADATA_VALUE_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
+};
+pub use broadcast::{
+    BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
+    BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
+    BroadcastHealthStatus, BroadcastLifecycleDescriptor, BroadcastLifecycleState,
+    BroadcastProtocolDescriptor, BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop,
+    BroadcastRelayRole, BroadcastResource, BroadcastSanitizedEvent,
+    BroadcastSanitizedEventCapability, BroadcastSanitizedEventError, BroadcastSanitizedEventKind,
+    BroadcastSubstrate, BroadcastTransport, MAX_BROADCAST_EVENT_JSON_INTEGER,
+};
+pub use data::{
+    DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,
+    MAX_DATA_LABEL_BYTES, MAX_DATA_MESSAGE_BYTES, MAX_DATA_MESSAGE_ID_BYTES,
+};
+pub use identity::{
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, PrincipalOwnershipKey,
+};
+pub use ids::TransferAttemptId;

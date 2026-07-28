@@ -25,7 +25,7 @@ pub type CallId = SessionId;
 /// [`rvoip_sip_core::parse_message`] to get a typed
 /// [`rvoip_sip_core::Message`] back if the consumer wants to inspect headers
 /// programmatically.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SipTrace {
     /// Inbound or outbound at the local transport boundary.
     pub direction: SipTraceDirection,
@@ -39,7 +39,8 @@ pub struct SipTrace {
     pub timestamp_unix_millis: u64,
     /// SIP start line, for example `INVITE sip:bob@example.com SIP/2.0`.
     pub start_line: String,
-    /// Wire-level SIP `Call-ID` header value when present.
+    /// Trace-policy result for the SIP `Call-ID` header when present. This is
+    /// the original only when the active policy keeps or passes it through.
     pub sip_call_id: Option<String>,
     /// rvoip-sip session id after mapping, when known.
     pub session_id: Option<CallId>,
@@ -49,8 +50,22 @@ pub struct SipTrace {
     pub original_len: usize,
     /// Whether `raw_message` was truncated for bounded diagnostics.
     pub truncated: bool,
-    /// Whether sensitive headers were redacted.
+    /// Whether headers or body content were redacted.
     pub redacted: bool,
+}
+
+impl std::fmt::Debug for SipTrace {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SipTrace")
+            .field("direction", &self.direction)
+            .field("original_len", &self.original_len)
+            .field("raw_message_bytes", &self.raw_message.len())
+            .field("truncated", &self.truncated)
+            .field("redacted", &self.redacted)
+            .field("session_present", &self.session_id.is_some())
+            .finish()
+    }
 }
 
 /// Typed classification for REFER transfer requests.
@@ -69,7 +84,10 @@ pub enum TransferKind {
 }
 
 /// Evidence that a transfer target actually progressed beyond REFER receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Keep the public evidence payloads source-compatible; callers construct and
+// pattern-match these variants directly.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TransferTargetEvidence {
     /// A REFER `message/sipfrag` produced provisional target progress before
     /// the final successful sipfrag.
@@ -93,6 +111,27 @@ pub enum TransferTargetEvidence {
         /// Dialog state reported by the dialog-package NOTIFY.
         dialog: DialogInfo,
     },
+}
+
+impl std::fmt::Debug for TransferTargetEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReferProgressThenFinal {
+                progress_status_code,
+                progress_reason,
+                final_status_code,
+                final_reason,
+            } => formatter
+                .debug_struct("ReferProgressThenFinal")
+                .field("progress_status_code", progress_status_code)
+                .field("progress_reason_bytes", &progress_reason.len())
+                .field("final_status_code", final_status_code)
+                .field("final_reason_bytes", &final_reason.len())
+                .finish(),
+            Self::LocalTargetLeg { .. } => formatter.write_str("LocalTargetLeg"),
+            Self::DialogPackage { .. } => formatter.write_str("DialogPackage"),
+        }
+    }
 }
 
 impl TransferKind {
@@ -120,7 +159,7 @@ impl TransferKind {
 /// This intentionally preserves the raw header value while extracting the
 /// common `state`, `expires`, and `reason` parameters. Use
 /// [`Event::subscription_state`] to parse a NOTIFY event on demand.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SubscriptionState {
     /// Primary state token, such as `active`, `pending`, or `terminated`.
     pub state: String,
@@ -130,6 +169,19 @@ pub struct SubscriptionState {
     pub reason: Option<String>,
     /// Original header value.
     pub raw: String,
+}
+
+impl std::fmt::Debug for SubscriptionState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SubscriptionState")
+            .field("state_bytes", &self.state.len())
+            .field("expires", &self.expires)
+            .field("reason_present", &self.reason.is_some())
+            .field("reason_bytes", &self.reason.as_ref().map_or(0, String::len))
+            .field("raw_bytes", &self.raw.len())
+            .finish()
+    }
 }
 
 impl SubscriptionState {
@@ -196,7 +248,7 @@ pub struct MediaSecurityState {
 /// media, registration, or transfer activity occurs. Use
 /// [`Event::call_id`] to route per-call events, or one of the `is_*`
 /// helpers to classify events in generic event loops.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum Event {
     // ===== Call Lifecycle Events =====
     /// Incoming call received
@@ -213,6 +265,16 @@ pub enum Event {
         to: String,
         /// Remote SDP offer, if the INVITE contained one.
         sdp: Option<String>,
+    },
+
+    /// Listener authentication completed for an inbound call.
+    ///
+    /// This follows [`Event::IncomingCall`] and carries no credential material.
+    IncomingCallAuthenticated {
+        /// Session identifier assigned to the authenticated INVITE.
+        call_id: CallId,
+        /// Complete canonical principal retained from listener enforcement.
+        principal: rvoip_core_traits::identity::AuthenticatedPrincipal,
     },
 
     /// Call was answered (200 OK received for outgoing call)
@@ -693,11 +755,307 @@ pub enum Event {
     },
 }
 
+impl std::fmt::Debug for Event {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncomingCall { from, to, sdp, .. } => formatter
+                .debug_struct("IncomingCall")
+                .field("from_bytes", &from.len())
+                .field("to_bytes", &to.len())
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::IncomingCallAuthenticated { principal, .. } => formatter
+                .debug_struct("IncomingCallAuthenticated")
+                .field("principal", principal)
+                .finish(),
+            Self::CallAnswered { sdp, .. } => formatter
+                .debug_struct("CallAnswered")
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallProgress {
+                status_code,
+                reason,
+                sdp,
+                ..
+            } => formatter
+                .debug_struct("CallProgress")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .field("sdp_present", &sdp.is_some())
+                .field("sdp_bytes", &sdp.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::CallEnded { reason, .. } => formatter
+                .debug_struct("CallEnded")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::CallFailed {
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("CallFailed")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::CallProgressDetailed(response) => formatter
+                .debug_tuple("CallProgressDetailed")
+                .field(response)
+                .finish(),
+            Self::CallEstablishedDetailed(response) => formatter
+                .debug_tuple("CallEstablishedDetailed")
+                .field(response)
+                .finish(),
+            Self::CallFailedDetailed(response) => formatter
+                .debug_tuple("CallFailedDetailed")
+                .field(response)
+                .finish(),
+            Self::CallCancelled { .. } => formatter.write_str("CallCancelled"),
+            Self::SessionRefreshed { expires_secs, .. } => formatter
+                .debug_struct("SessionRefreshed")
+                .field("expires_secs", expires_secs)
+                .finish(),
+            Self::SessionRefreshFailed { reason, .. } => formatter
+                .debug_struct("SessionRefreshFailed")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::CallAuthRetrying {
+                status_code, realm, ..
+            } => formatter
+                .debug_struct("CallAuthRetrying")
+                .field("status_code", status_code)
+                .field("realm_present", &!realm.is_empty())
+                .field("realm_bytes", &realm.len())
+                .finish(),
+            Self::ReferReceived {
+                refer_to,
+                referred_by,
+                replaces,
+                transaction_id,
+                transfer_type,
+                request,
+                ..
+            } => formatter
+                .debug_struct("ReferReceived")
+                .field("refer_to_bytes", &refer_to.len())
+                .field("referred_by_present", &referred_by.is_some())
+                .field(
+                    "referred_by_bytes",
+                    &referred_by.as_ref().map_or(0, String::len),
+                )
+                .field("replaces_present", &replaces.is_some())
+                .field("replaces_bytes", &replaces.as_ref().map_or(0, String::len))
+                .field("transaction_id_bytes", &transaction_id.len())
+                .field(
+                    "transfer_kind",
+                    &TransferKind::from_header_value(transfer_type),
+                )
+                .field("request_present", &request.is_some())
+                .finish(),
+            Self::TransferAccepted { refer_to, .. } => formatter
+                .debug_struct("TransferAccepted")
+                .field("refer_to_bytes", &refer_to.len())
+                .finish(),
+            Self::ReferCompleted {
+                target,
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("ReferCompleted")
+                .field("target_bytes", &target.len())
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::TransferFailed {
+                reason,
+                status_code,
+                ..
+            } => formatter
+                .debug_struct("TransferFailed")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::ReferProgress {
+                status_code,
+                reason,
+                ..
+            } => formatter
+                .debug_struct("ReferProgress")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::ReferNotify {
+                status_code,
+                reason,
+                subscription_state,
+                body,
+                ..
+            } => formatter
+                .debug_struct("ReferNotify")
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .field("subscription_state_present", &subscription_state.is_some())
+                .field(
+                    "subscription_state_bytes",
+                    &subscription_state
+                        .as_ref()
+                        .map_or(0, |state| state.raw.len()),
+                )
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::TransferTargetAnswered { evidence, .. } => {
+                let evidence_kind = match evidence {
+                    TransferTargetEvidence::ReferProgressThenFinal { .. } => "refer-progress-final",
+                    TransferTargetEvidence::LocalTargetLeg { .. } => "local-target-leg",
+                    TransferTargetEvidence::DialogPackage { .. } => "dialog-package",
+                };
+                formatter
+                    .debug_struct("TransferTargetAnswered")
+                    .field("evidence_kind", &evidence_kind)
+                    .finish()
+            }
+            Self::TransferReplacementDialogObserved { .. } => {
+                formatter.write_str("TransferReplacementDialogObserved")
+            }
+            Self::TransferReplacementDialogTerminated { reason, .. } => formatter
+                .debug_struct("TransferReplacementDialogTerminated")
+                .field("reason_present", &reason.is_some())
+                .field("reason_bytes", &reason.as_ref().map_or(0, String::len))
+                .finish(),
+            Self::NotifyReceived {
+                event_package,
+                subscription_state,
+                content_type,
+                body,
+                request,
+                ..
+            } => formatter
+                .debug_struct("NotifyReceived")
+                .field("event_package_bytes", &event_package.len())
+                .field("subscription_state_present", &subscription_state.is_some())
+                .field(
+                    "subscription_state_bytes",
+                    &subscription_state.as_ref().map_or(0, String::len),
+                )
+                .field("content_type_present", &content_type.is_some())
+                .field(
+                    "content_type_bytes",
+                    &content_type.as_ref().map_or(0, String::len),
+                )
+                .field("body_present", &body.is_some())
+                .field("body_bytes", &body.as_ref().map_or(0, String::len))
+                .field("request_present", &request.is_some())
+                .finish(),
+            Self::InfoReceived { request, .. } => formatter
+                .debug_tuple("InfoReceived")
+                .field(request)
+                .finish(),
+            Self::MessageReceived { request, .. } => formatter
+                .debug_tuple("MessageReceived")
+                .field(request)
+                .finish(),
+            Self::OptionsReceived { request, .. } => formatter
+                .debug_tuple("OptionsReceived")
+                .field(request)
+                .finish(),
+            Self::UpdateReceived { request, .. } => formatter
+                .debug_tuple("UpdateReceived")
+                .field(request)
+                .finish(),
+            Self::IncomingRegister { register } => formatter
+                .debug_tuple("IncomingRegister")
+                .field(register)
+                .finish(),
+            Self::DialogPackageNotify { dialogs, .. } => formatter
+                .debug_struct("DialogPackageNotify")
+                .field("dialog_count", &dialogs.len())
+                .finish(),
+            Self::DialogStateChanged { .. } => formatter.write_str("DialogStateChanged"),
+            Self::CallOnHold { .. } => formatter.write_str("CallOnHold"),
+            Self::CallResumed { .. } => formatter.write_str("CallResumed"),
+            Self::RemoteCallOnHold { .. } => formatter.write_str("RemoteCallOnHold"),
+            Self::RemoteCallResumed { .. } => formatter.write_str("RemoteCallResumed"),
+            Self::CallMuted { .. } => formatter.write_str("CallMuted"),
+            Self::CallUnmuted { .. } => formatter.write_str("CallUnmuted"),
+            Self::DtmfReceived { .. } => formatter.write_str("DtmfReceived"),
+            Self::MediaQualityChanged {
+                packet_loss_percent,
+                jitter_ms,
+                ..
+            } => formatter
+                .debug_struct("MediaQualityChanged")
+                .field("packet_loss_percent", packet_loss_percent)
+                .field("jitter_ms", jitter_ms)
+                .finish(),
+            Self::MediaSecurityNegotiated {
+                keying,
+                suite,
+                profile,
+                contexts_installed,
+                ..
+            } => formatter
+                .debug_struct("MediaSecurityNegotiated")
+                .field("keying", keying)
+                .field("suite", suite)
+                .field("profile", profile)
+                .field("contexts_installed", contexts_installed)
+                .finish(),
+            Self::IceConnected { selected_addr, .. } => formatter
+                .debug_struct("IceConnected")
+                .field("selected_addr", selected_addr)
+                .finish(),
+            Self::RegistrationSuccess {
+                registrar,
+                expires,
+                contact,
+            } => formatter
+                .debug_struct("RegistrationSuccess")
+                .field("registrar_bytes", &registrar.len())
+                .field("expires", expires)
+                .field("contact_bytes", &contact.len())
+                .finish(),
+            Self::RegistrationFailed {
+                registrar,
+                status_code,
+                reason,
+            } => formatter
+                .debug_struct("RegistrationFailed")
+                .field("registrar_bytes", &registrar.len())
+                .field("status_code", status_code)
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::UnregistrationSuccess { registrar } => formatter
+                .debug_struct("UnregistrationSuccess")
+                .field("registrar_bytes", &registrar.len())
+                .finish(),
+            Self::UnregistrationFailed { registrar, reason } => formatter
+                .debug_struct("UnregistrationFailed")
+                .field("registrar_bytes", &registrar.len())
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::SipTrace(trace) => formatter.debug_tuple("SipTrace").field(trace).finish(),
+            Self::NetworkError { error, .. } => formatter
+                .debug_struct("NetworkError")
+                .field("error_bytes", &error.len())
+                .finish(),
+            Self::AuthenticationRequired { realm, .. } => formatter
+                .debug_struct("AuthenticationRequired")
+                .field("realm_present", &!realm.is_empty())
+                .field("realm_bytes", &realm.len())
+                .finish(),
+        }
+    }
+}
+
 impl Event {
     /// Get the call ID associated with this event (if any)
     pub fn call_id(&self) -> Option<&CallId> {
         match self {
             Event::IncomingCall { call_id, .. }
+            | Event::IncomingCallAuthenticated { call_id, .. }
             | Event::CallAnswered { call_id, .. }
             | Event::CallProgress { call_id, .. }
             | Event::CallEnded { call_id, .. }
@@ -762,6 +1120,7 @@ impl Event {
         matches!(
             self,
             Event::IncomingCall { .. }
+                | Event::IncomingCallAuthenticated { .. }
                 | Event::CallAnswered { .. }
                 | Event::CallProgress { .. }
                 | Event::CallEnded { .. }
@@ -843,6 +1202,145 @@ impl Event {
                 ..
             } => Some(parsed.clone()),
             _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_safety_tests {
+    use super::*;
+    use chrono::Utc;
+    use rvoip_core_traits::identity::{
+        AuthenticatedPrincipal, AuthenticationMethod, IdentityAssurance,
+    };
+
+    #[test]
+    fn principal_refer_register_and_trace_events_never_debug_raw_values() {
+        const SUBJECT: &str = "app-principal-subject-secret-canary";
+        const TENANT: &str = "app-principal-tenant-secret-canary";
+        const REFER_TO: &str = "sip:app-refer-target-secret-canary@example.com";
+        const REFERRED_BY: &str = "sip:app-referrer-secret-canary@example.com";
+        const REPLACES: &str = "app-replaces-secret-canary";
+        const TRANSACTION: &str = "app-transaction-secret-canary";
+        const REGISTRAR: &str = "sip:app-registrar-secret-canary@example.com";
+        const CONTACT: &str = "sip:app-contact-secret-canary@example.com";
+        const AUTHORIZATION: &str = "Digest response=app-auth-secret-canary";
+        const RAW_MESSAGE: &str = "REGISTER sip:app-raw-secret-canary SIP/2.0";
+
+        let principal = AuthenticatedPrincipal {
+            subject: SUBJECT.into(),
+            tenant: Some(TENANT.into()),
+            scopes: vec!["app-scope-secret-canary".into()],
+            issuer: Some("app-issuer-secret-canary".into()),
+            expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
+            method: AuthenticationMethod::Jwt,
+            assurance: IdentityAssurance::Anonymous,
+        };
+        let register = crate::api::incoming::IncomingRegister::synthetic(
+            TRANSACTION.into(),
+            "sip:app-from-secret-canary@example.com".into(),
+            REGISTRAR.into(),
+            CONTACT.into(),
+            300,
+            Some(AUTHORIZATION.into()),
+            "app-call-id-secret-canary".into(),
+        );
+        let events = [
+            Event::IncomingCallAuthenticated {
+                call_id: "app-call-secret-canary".into(),
+                principal,
+            },
+            Event::ReferReceived {
+                call_id: "app-call-secret-canary".into(),
+                refer_to: REFER_TO.into(),
+                referred_by: Some(REFERRED_BY.into()),
+                replaces: Some(REPLACES.into()),
+                transaction_id: TRANSACTION.into(),
+                transfer_type: "blind".into(),
+                request: None,
+            },
+            Event::IncomingRegister { register },
+            Event::RegistrationSuccess {
+                registrar: REGISTRAR.into(),
+                expires: 300,
+                contact: CONTACT.into(),
+            },
+            Event::SipTrace(SipTrace {
+                direction: SipTraceDirection::Inbound,
+                transport: "UDP".into(),
+                local_addr: "127.0.0.1:5060".into(),
+                remote_addr: "127.0.0.1:5070".into(),
+                timestamp_unix_millis: 1,
+                start_line: RAW_MESSAGE.into(),
+                sip_call_id: Some("app-trace-call-id-secret-canary".into()),
+                session_id: Some("app-trace-session-secret-canary".into()),
+                raw_message: RAW_MESSAGE.into(),
+                original_len: RAW_MESSAGE.len(),
+                truncated: false,
+                redacted: false,
+            }),
+        ];
+
+        let rendered = events
+            .iter()
+            .map(|event| {
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(event.clone());
+                format!("{event:?} {wrapped:?}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        for variant in [
+            "IncomingCallAuthenticated",
+            "ReferReceived",
+            "IncomingRegister",
+            "RegistrationSuccess",
+            "SipTrace",
+        ] {
+            assert!(rendered.contains(variant));
+        }
+        for secret in [
+            SUBJECT,
+            TENANT,
+            REFER_TO,
+            REFERRED_BY,
+            REPLACES,
+            TRANSACTION,
+            REGISTRAR,
+            CONTACT,
+            AUTHORIZATION,
+            RAW_MESSAGE,
+            "app-scope-secret-canary",
+            "app-issuer-secret-canary",
+            "app-call-id-secret-canary",
+            "app-trace-session-secret-canary",
+        ] {
+            assert!(
+                !rendered.contains(secret),
+                "debug leaked {secret}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn app_event_source_keeps_payload_containers_on_manual_debug() {
+        let source = include_str!("events.rs");
+        for declaration in [
+            "pub struct SipTrace",
+            "pub enum TransferTargetEvidence",
+            "pub struct SubscriptionState",
+            "pub enum Event",
+        ] {
+            let declaration_offset = source
+                .find(declaration)
+                .unwrap_or_else(|| panic!("missing declaration {declaration}"));
+            let prefix = &source[..declaration_offset];
+            let derive_offset = prefix
+                .rfind("#[derive(")
+                .unwrap_or_else(|| panic!("missing derive for {declaration}"));
+            assert!(
+                !prefix[derive_offset..].contains("Debug"),
+                "{declaration} regained derived Debug"
+            );
         }
     }
 }

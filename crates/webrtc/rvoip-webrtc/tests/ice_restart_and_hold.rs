@@ -2,13 +2,11 @@
 
 #![cfg(feature = "signaling-whip")]
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest};
 use rvoip_core::connection::Direction;
 use rvoip_core::ids::{ParticipantId, SessionId};
-use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig};
 
 fn ice_ufrag(sdp: &str) -> Option<&str> {
@@ -36,6 +34,7 @@ async fn restart_ice_produces_new_ufrag_on_offerer() {
             direction: Direction::Outbound,
             capabilities: server.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");
@@ -77,6 +76,7 @@ async fn hold_resume_updates_local_sdp_when_renegotiation_enabled() {
             direction: Direction::Outbound,
             capabilities: server.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

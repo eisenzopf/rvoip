@@ -23,7 +23,7 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::Utc;
-use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest};
+use rvoip_core::adapter::{ConnectionAdapter, OriginateRequest, RejectReason};
 use rvoip_core::capability::CapabilityDescriptor;
 use rvoip_core::commands::InboundAction;
 use rvoip_core::config::Config as CoreConfig;
@@ -193,6 +193,8 @@ impl WebRtcConfig {
 pub struct SipConfig {
     bind: String,
     domain: String,
+    sip_advertised_addr: Option<SocketAddr>,
+    media_public_addr: Option<SocketAddr>,
     role_capabilities: RoleCapabilities,
     registrar_users: HashMap<String, String>,
 }
@@ -203,6 +205,8 @@ impl SipConfig {
         Self {
             bind: addr.into(),
             domain: "callcenter.local".into(),
+            sip_advertised_addr: None,
+            media_public_addr: None,
             role_capabilities: RoleCapabilities::default(),
             registrar_users: HashMap::new(),
         }
@@ -211,6 +215,27 @@ impl SipConfig {
     /// Set the SIP AOR domain/realm.
     pub fn domain(mut self, domain: impl Into<String>) -> Self {
         self.domain = domain.into();
+        self
+    }
+
+    /// Advertise a concrete peer-facing SIP address while retaining the
+    /// configured bind address.
+    ///
+    /// The address is used for SIP Via/Contact generation, and its IP is used
+    /// for RTP SDP. This is required when binding SIP to an unspecified
+    /// address such as `0.0.0.0`.
+    pub fn advertised_addr(mut self, address: SocketAddr) -> Self {
+        self.sip_advertised_addr = Some(address);
+        self
+    }
+
+    /// Override the peer-facing RTP address placed in SDP.
+    ///
+    /// Port `0` keeps each locally allocated RTP port while replacing only
+    /// the advertised IP. When omitted, [`Self::advertised_addr`] supplies
+    /// its IP as the media default.
+    pub fn media_public_addr(mut self, address: SocketAddr) -> Self {
+        self.media_public_addr = Some(address);
         self
     }
 
@@ -286,10 +311,23 @@ pub struct CustomerPolicy {
 }
 
 impl CustomerPolicy {
+    /// Allow customers to use only SIP.
+    pub fn sip_only() -> Self {
+        Self::only([Transport::Sip])
+    }
+
     /// Allow customers to use only WebRTC.
     pub fn webrtc_only() -> Self {
+        Self::only([Transport::WebRtc])
+    }
+
+    /// Allow customers to use exactly the supplied transports.
+    pub fn only<I>(transports: I) -> Self
+    where
+        I: IntoIterator<Item = Transport>,
+    {
         Self {
-            transports: HashSet::from([Transport::WebRtc]),
+            transports: transports.into_iter().collect(),
         }
     }
 
@@ -376,6 +414,14 @@ pub struct BridgeEvidence {
 /// High-level app event stream.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    /// An inbound customer call was admitted to the app conversation.
+    InboundCallAccepted {
+        /// Transport-independent connection identifier used by bridges and
+        /// extensions such as `rvoip::vapi`.
+        connection_id: ConnectionId,
+        /// Transport that accepted the caller.
+        transport: Transport,
+    },
     /// A conversation was created or attached for a customer.
     ConversationStarted {
         /// Conversation identifier.
@@ -583,6 +629,9 @@ impl RvoipAppBuilder {
         }
 
         let orchestrator = Orchestrator::new(CoreConfig::default());
+        // Subscribe before any adapter starts a listener so an immediate
+        // inbound call cannot race app admission-loop startup.
+        let core_events = orchestrator.subscribe_events();
         let directory = Arc::new(Directory::default());
         let mut addresses = RvoipAppAddresses::default();
         let mut sip_coordinator = None;
@@ -591,23 +640,29 @@ impl RvoipAppBuilder {
         let mut webrtc_adapter = None;
 
         if let Some(sip) = self.sip {
-            if !sip
+            let employee_voice = sip
                 .role_capabilities
-                .allows(Role::Employee, Capability::Voice)
-            {
+                .allows(Role::Employee, Capability::Voice);
+            let customer_voice = self.customers.allows(Transport::Sip)
+                && sip
+                    .role_capabilities
+                    .allows(Role::Customer, Capability::Voice);
+            if !employee_voice && !customer_voice {
                 return Err(AppError::Policy(
-                    "SIP is configured but employee voice is not allowed".into(),
+                    "SIP is configured but neither employee nor customer voice is allowed".into(),
                 ));
             }
             let sip_addr = parse_socket_addr(&sip.bind)?;
+            if sip_addr.ip().is_unspecified() && sip.sip_advertised_addr.is_none() {
+                return Err(AppError::Policy(
+                    "a concrete SIP advertised address is required for an unspecified bind".into(),
+                ));
+            }
             let sip_addr = resolve_udp_bind_addr(sip_addr)?;
-            let coordinator = UnifiedCoordinator::new(LowSipConfig::on(
-                "rvoip-gateway",
-                sip_addr.ip(),
-                sip_addr.port(),
-            ))
-            .await
-            .map_err(|error| AppError::Sip(error.to_string()))?;
+            let low_sip = make_low_sip_config(&sip, sip_addr);
+            let coordinator = UnifiedCoordinator::new(low_sip)
+                .await
+                .map_err(|error| AppError::Sip(error.to_string()))?;
             let registrar = coordinator
                 .start_registration_server(&sip.domain, sip.registrar_users)
                 .await
@@ -616,8 +671,10 @@ impl RvoipAppBuilder {
                 .await
                 .map_err(|error| AppError::Sip(error.to_string()))?;
             orchestrator.register(adapter as Arc<dyn ConnectionAdapter>)?;
-            for employee in &self.employees.employees {
-                directory.add_sip_aor(employee, format!("sip:{employee}@{}", sip.domain));
+            if employee_voice {
+                for employee in &self.employees.employees {
+                    directory.add_sip_aor(employee, format!("sip:{employee}@{}", sip.domain));
+                }
             }
             addresses.sip = Some(sip_addr);
             contact_resolver = Some(RegistrarContactResolver::new(registrar));
@@ -630,12 +687,15 @@ impl RvoipAppBuilder {
                     "WebRTC is configured but customers are not allowed to use WebRTC".into(),
                 ));
             }
-            if !webrtc
+            let customer_text = webrtc
                 .role_capabilities
-                .allows(Role::Customer, Capability::Text)
-            {
+                .allows(Role::Customer, Capability::Text);
+            let customer_voice = webrtc
+                .role_capabilities
+                .allows(Role::Customer, Capability::Voice);
+            if !customer_text && !customer_voice {
                 return Err(AppError::Policy(
-                    "WebRTC customer text is required for the app runtime".into(),
+                    "WebRTC customer text or voice is required for the app runtime".into(),
                 ));
             }
             let mut config = LowWebRtcConfig::loopback();
@@ -671,7 +731,10 @@ impl RvoipAppBuilder {
             .await?;
         let customer_participant = ParticipantId::new();
         let employee_participant = ParticipantId::new();
-        let (app_events, _) = broadcast::channel(64);
+        // Retain the initial receiver until the application subscribes. This
+        // preserves events emitted between listener startup and the caller's
+        // first `subscribe_events()` call.
+        let (app_events, initial_app_events) = broadcast::channel(64);
 
         let state = Arc::new(AppState {
             orchestrator,
@@ -683,6 +746,7 @@ impl RvoipAppBuilder {
             customer_participant,
             employee_participant,
             assigned_employee,
+            customers: self.customers,
             customer_connection: Mutex::new(None),
             bridge: Mutex::new(None),
             app_events: app_events.clone(),
@@ -690,7 +754,7 @@ impl RvoipAppBuilder {
             voice_routing: self.voice_routing,
             escalation_command,
         });
-        spawn_app_event_loop(Arc::clone(&state));
+        spawn_app_event_loop(Arc::clone(&state), core_events);
 
         let mut http_task = None;
         if let Some(http) = self.http {
@@ -705,6 +769,7 @@ impl RvoipAppBuilder {
 
         Ok(RvoipApp {
             state,
+            initial_events: StdMutex::new(Some(initial_app_events)),
             _webrtc_server: webrtc_server,
             _sip_coordinator: sip_coordinator,
             _http_task: http_task,
@@ -732,6 +797,7 @@ impl Default for RvoipAppBuilder {
 /// Running high-level rvoip gateway app.
 pub struct RvoipApp {
     state: Arc<AppState>,
+    initial_events: StdMutex<Option<broadcast::Receiver<AppEvent>>>,
     _webrtc_server: Option<WebRtcServer>,
     _sip_coordinator: Option<Arc<UnifiedCoordinator>>,
     _http_task: Option<tokio::task::JoinHandle<()>>,
@@ -746,7 +812,11 @@ impl RvoipApp {
 
     /// Subscribe to high-level app events.
     pub fn subscribe_events(&self) -> broadcast::Receiver<AppEvent> {
-        self.state.app_events.subscribe()
+        self.initial_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| self.state.app_events.subscribe())
     }
 
     /// Resolved service addresses.
@@ -894,6 +964,7 @@ struct AppState {
     customer_participant: ParticipantId,
     employee_participant: ParticipantId,
     assigned_employee: String,
+    customers: CustomerPolicy,
     customer_connection: Mutex<Option<ConnectionId>>,
     bridge: Mutex<Option<BridgeEvidence>>,
     app_events: broadcast::Sender<AppEvent>,
@@ -1061,6 +1132,7 @@ impl AppState {
                 direction: Direction::Outbound,
                 capabilities: CapabilityDescriptor::default(),
                 transport: Some(CoreTransport::Sip),
+                context: Default::default(),
             })
             .await?;
         let employee_connection = handle.connection.id.clone();
@@ -1083,27 +1155,44 @@ impl AppState {
     }
 }
 
-fn spawn_app_event_loop(state: Arc<AppState>) {
+fn spawn_app_event_loop(state: Arc<AppState>, core_events: broadcast::Receiver<Event>) {
     tokio::spawn(async move {
-        if let Err(error) = run_app_event_loop(state).await {
+        if let Err(error) = run_app_event_loop(state, core_events).await {
             tracing::warn!(error = %error, "rvoip app event loop stopped");
         }
     });
 }
 
-async fn run_app_event_loop(state: Arc<AppState>) -> AppResult<()> {
-    let mut events = state.orchestrator.subscribe_events();
+async fn run_app_event_loop(
+    state: Arc<AppState>,
+    mut events: broadcast::Receiver<Event>,
+) -> AppResult<()> {
     loop {
         match events.recv().await {
             Ok(Event::ConnectionInbound { connection_id, .. }) => {
-                handle_inbound_connection(&state, connection_id).await?;
+                if let Err(error) = handle_inbound_connection(&state, connection_id.clone()).await {
+                    // A caller can CANCEL or disconnect while application
+                    // policy is accepting it. That call fails independently;
+                    // later callers must still reach the admission loop.
+                    tracing::warn!(
+                        %connection_id,
+                        error = %error,
+                        "failed to route inbound app connection"
+                    );
+                }
             }
             Ok(Event::MessageReceived {
                 message_id,
                 conversation_id,
                 ..
             }) if conversation_id == state.conversation_id => {
-                handle_message_received(&state, message_id).await?;
+                if let Err(error) = handle_message_received(&state, message_id.clone()).await {
+                    tracing::warn!(
+                        %message_id,
+                        error = %error,
+                        "failed to handle inbound app message"
+                    );
+                }
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1119,11 +1208,41 @@ async fn handle_inbound_connection(
     state: &Arc<AppState>,
     connection_id: ConnectionId,
 ) -> AppResult<()> {
-    let Some(adapter) = &state.webrtc_adapter else {
-        return Ok(());
+    let transport = match state.orchestrator.connection_transport(&connection_id)? {
+        CoreTransport::Sip => Transport::Sip,
+        CoreTransport::WebRtc => Transport::WebRtc,
+        _ => {
+            state
+                .orchestrator
+                .route_inbound_connection(
+                    connection_id,
+                    InboundAction::Reject {
+                        reason: RejectReason::NotAcceptable,
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
     };
-    if !adapter.routes().contains_key(&connection_id) {
+    if !state.customers.allows(transport) {
+        state
+            .orchestrator
+            .route_inbound_connection(
+                connection_id,
+                InboundAction::Reject {
+                    reason: RejectReason::Forbidden,
+                },
+            )
+            .await?;
         return Ok(());
+    }
+    if transport == Transport::WebRtc {
+        let Some(adapter) = &state.webrtc_adapter else {
+            return Ok(());
+        };
+        if !adapter.routes().contains_key(&connection_id) {
+            return Ok(());
+        }
     }
 
     state
@@ -1136,7 +1255,11 @@ async fn handle_inbound_connection(
             },
         )
         .await?;
-    *state.customer_connection.lock().await = Some(connection_id);
+    *state.customer_connection.lock().await = Some(connection_id.clone());
+    let _ = state.app_events.send(AppEvent::InboundCallAccepted {
+        connection_id,
+        transport,
+    });
     let _ = state.app_events.send(AppEvent::ConversationStarted {
         conversation_id: state.conversation_id.clone(),
         assigned_employee: state.assigned_employee.clone(),
@@ -1278,6 +1401,19 @@ async fn serve_customer_html(State(state): State<StaticState>) -> impl IntoRespo
     }
 }
 
+fn make_low_sip_config(config: &SipConfig, bind: SocketAddr) -> LowSipConfig {
+    let mut low = LowSipConfig::on("rvoip-gateway", bind.ip(), bind.port());
+    if let Some(advertised) = config.sip_advertised_addr {
+        low = low
+            .with_sip_advertised_addr(advertised)
+            .with_media_public_addr(SocketAddr::new(advertised.ip(), 0));
+    }
+    if let Some(media_public) = config.media_public_addr {
+        low = low.with_media_public_addr(media_public);
+    }
+    low
+}
+
 fn parse_socket_addr(addr: &str) -> AppResult<SocketAddr> {
     addr.parse().map_err(|source| AppError::InvalidBind {
         addr: addr.to_string(),
@@ -1308,6 +1444,55 @@ mod tests {
         assert!(!cfg
             .role_capabilities
             .allows(Role::Employee, Capability::Text));
+    }
+
+    #[test]
+    fn customer_policy_selects_the_inbound_transport() {
+        let sip = CustomerPolicy::sip_only();
+        assert!(sip.allows(Transport::Sip));
+        assert!(!sip.allows(Transport::WebRtc));
+
+        let both = CustomerPolicy::only([Transport::Sip, Transport::WebRtc]);
+        assert!(both.allows(Transport::Sip));
+        assert!(both.allows(Transport::WebRtc));
+    }
+
+    #[test]
+    fn sip_advertisement_preserves_wildcard_bind_and_sets_media_ip() {
+        let advertised = "192.0.2.10:5060".parse().expect("advertised address");
+        let config = SipConfig::bind("0.0.0.0:5060").advertised_addr(advertised);
+        let low = make_low_sip_config(&config, "0.0.0.0:5060".parse().expect("bind"));
+
+        assert_eq!(
+            low.bind_addr,
+            "0.0.0.0:5060".parse::<SocketAddr>().expect("wildcard bind")
+        );
+        assert_eq!(
+            low.local_ip,
+            "0.0.0.0".parse::<std::net::IpAddr>().expect("wildcard IP")
+        );
+        assert_eq!(low.sip_advertised_addr, Some(advertised));
+        assert_eq!(
+            low.media_public_addr,
+            Some("192.0.2.10:0".parse::<SocketAddr>().expect("media address"))
+        );
+    }
+
+    #[test]
+    fn explicit_media_advertisement_overrides_sip_advertised_ip() {
+        let config = SipConfig::bind("0.0.0.0:5060")
+            .advertised_addr("192.0.2.10:5060".parse().expect("SIP address"))
+            .media_public_addr("198.51.100.20:0".parse().expect("media address"));
+        let low = make_low_sip_config(&config, "0.0.0.0:5060".parse().expect("bind"));
+
+        assert_eq!(
+            low.media_public_addr,
+            Some(
+                "198.51.100.20:0"
+                    .parse::<SocketAddr>()
+                    .expect("media address")
+            )
+        );
     }
 
     #[test]
@@ -1357,6 +1542,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wildcard_sip_bind_requires_advertised_address() {
+        let result = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(SipConfig::bind("0.0.0.0:5060").allow(Role::Customer, [Capability::Voice]))
+            .employees(EmployeePolicy::named(["vapi-agent"]))
+            .assignment(AssignmentPolicy::fixed("vapi-agent"))
+            .build()
+            .await;
+
+        match result {
+            Err(AppError::Policy(reason)) => {
+                assert!(reason.contains("advertised address"), "{reason}");
+            }
+            Err(other) => panic!("expected advertised-address policy error, got {other}"),
+            Ok(_) => panic!("wildcard SIP bind must fail without an advertised address"),
+        }
+    }
+
+    #[tokio::test]
     async fn unregistered_sip_employee_fails_contact_resolution() {
         let app = RvoipApp::builder()
             .sip(
@@ -1375,12 +1579,156 @@ mod tests {
         match result {
             Err(AppError::ContactResolution(reason)) => {
                 assert!(
-                    reason.contains("no live contacts") || reason.contains("User not found"),
+                    reason.contains("no live contacts")
+                        || reason.contains("User not found")
+                        || reason.contains("user-not-found"),
                     "{reason}"
                 );
             }
             Err(other) => panic!("expected contact resolution failure, got {other}"),
             Ok(contact) => panic!("unexpected contact resolution: {contact:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn sip_customer_inbound_emits_accepted_call() {
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::sip_only())
+            .sip(
+                SipConfig::bind("127.0.0.1:0")
+                    .domain("test.local")
+                    .allow(Role::Customer, [Capability::Voice]),
+            )
+            .employees(EmployeePolicy::named(["vapi-agent"]))
+            .assignment(AssignmentPolicy::fixed("vapi-agent"))
+            .build()
+            .await
+            .expect("build SIP customer app");
+        let mut app_events = app.subscribe_events();
+        let gateway = app.addresses().sip.expect("SIP listener");
+
+        let caller_addr = resolve_udp_bind_addr("127.0.0.1:0".parse().expect("loopback socket"))
+            .expect("allocate caller port");
+        let caller = UnifiedCoordinator::new(LowSipConfig::on(
+            "caller",
+            caller_addr.ip(),
+            caller_addr.port(),
+        ))
+        .await
+        .expect("start SIP caller");
+        let call_id = caller
+            .invite(
+                Some(format!("sip:caller@{caller_addr}")),
+                format!("sip:vapi@{gateway}"),
+            )
+            .send()
+            .await
+            .expect("send SIP INVITE");
+
+        let (connection_id, transport) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match app_events.recv().await {
+                    Ok(AppEvent::InboundCallAccepted {
+                        connection_id,
+                        transport,
+                    }) => break (connection_id, transport),
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("app event stream closed before inbound acceptance")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("inbound SIP customer was not accepted");
+
+        assert_eq!(transport, Transport::Sip);
+        assert_eq!(
+            app.orchestrator()
+                .connection_transport(&connection_id)
+                .expect("accepted connection transport"),
+            CoreTransport::Sip
+        );
+        assert!(
+            app.orchestrator().session_of(&connection_id).is_some(),
+            "accepted caller must be routed into the app session"
+        );
+
+        let _ = caller.bye(&call_id).send().await;
+        let _ = caller.shutdown_gracefully(None).await;
+    }
+
+    #[tokio::test]
+    async fn webrtc_voice_customer_emits_accepted_call() {
+        use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
+
+        let app = RvoipApp::builder()
+            .customers(CustomerPolicy::webrtc_only())
+            .webrtc(WebRtcConfig::ws("127.0.0.1:0").allow(Role::Customer, [Capability::Voice]))
+            .employees(EmployeePolicy::named(["vapi-agent"]))
+            .assignment(AssignmentPolicy::fixed("vapi-agent"))
+            .build()
+            .await
+            .expect("build WebRTC customer app");
+        let mut app_events = app.subscribe_events();
+        let adapter = app.webrtc_adapter().expect("WebRTC adapter");
+
+        let mut peer_config = LowWebRtcConfig::loopback();
+        peer_config.trickle_ice = false;
+        let caller = RvoipPeerConnection::new(&peer_config, PeerRole::Offerer)
+            .await
+            .expect("create WebRTC caller");
+        let offer = caller
+            .create_offer_and_gather()
+            .await
+            .expect("create WebRTC offer");
+        let offered_connection = adapter
+            .apply_remote_offer(&offer)
+            .await
+            .expect("apply WebRTC offer");
+        let answer = adapter
+            .local_sdp(&offered_connection)
+            .expect("WebRTC answer");
+        caller
+            .set_remote_answer(&answer)
+            .await
+            .expect("apply WebRTC answer");
+
+        let accepted_connection = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match app_events.recv().await {
+                    Ok(AppEvent::InboundCallAccepted {
+                        connection_id,
+                        transport: Transport::WebRtc,
+                    }) => break connection_id,
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Closed) => {
+                        panic!("app event stream closed before WebRTC acceptance")
+                    }
+                }
+            }
+        })
+        .await
+        .expect("inbound WebRTC customer was not accepted");
+
+        assert_eq!(accepted_connection, offered_connection);
+        assert_eq!(
+            app.orchestrator()
+                .connection_transport(&accepted_connection)
+                .expect("accepted connection transport"),
+            CoreTransport::WebRtc
+        );
+        assert!(
+            app.orchestrator()
+                .session_of(&accepted_connection)
+                .is_some(),
+            "accepted WebRTC caller must be routed into the app session"
+        );
+
+        let _ = app
+            .orchestrator()
+            .end_connection(accepted_connection, rvoip_core::adapter::EndReason::Normal)
+            .await;
+        let _ = caller.close().await;
     }
 }

@@ -449,15 +449,25 @@ impl EndpointEvents {
 
     /// Wait for the next endpoint event.
     pub async fn next(&mut self) -> Result<Option<EndpointEvent>> {
-        Ok(self.events.next().await.map(|event| self.map_event(event)))
+        Ok(self
+            .events
+            .next_with_lifecycle()
+            .await
+            .map(|(event, lifecycle_handle)| self.map_event(event, lifecycle_handle)))
     }
 
     /// Return the next endpoint event if one is ready immediately.
     pub fn try_next(&mut self) -> Option<EndpointEvent> {
-        self.events.try_next().map(|event| self.map_event(event))
+        self.events
+            .try_next_with_lifecycle()
+            .map(|(event, lifecycle_handle)| self.map_event(event, lifecycle_handle))
     }
 
-    fn map_event(&self, event: Event) -> EndpointEvent {
+    fn map_event(
+        &self,
+        event: Event,
+        lifecycle_handle: Option<crate::session_registry::SessionRegistryHandle>,
+    ) -> EndpointEvent {
         match event {
             Event::IncomingCall {
                 call_id,
@@ -465,8 +475,14 @@ impl EndpointEvents {
                 to,
                 sdp,
             } => {
-                let incoming =
-                    IncomingCall::new(call_id, from, to, sdp, self.control.coordinator().clone());
+                let incoming = IncomingCall::new_captured(
+                    call_id,
+                    from,
+                    to,
+                    sdp,
+                    self.control.coordinator().clone(),
+                    lifecycle_handle,
+                );
                 EndpointEvent::IncomingCall(EndpointIncomingCall::new(
                     incoming,
                     self.registrar.clone(),
@@ -486,7 +502,11 @@ impl EndpointEvents {
             },
             Event::CallAnswered { call_id, sdp } => EndpointEvent::CallAnswered {
                 call: EndpointCall::new(
-                    SessionHandle::new(call_id, self.control.coordinator().clone()),
+                    SessionHandle::new_captured(
+                        call_id,
+                        self.control.coordinator().clone(),
+                        lifecycle_handle,
+                    ),
                     self.registrar.clone(),
                     self.transport,
                 ),
@@ -693,7 +713,7 @@ pub enum EndpointEvent {
 }
 
 /// Endpoint-level SIP trace event.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EndpointSipTrace {
     /// Inbound or outbound at the local transport boundary.
     pub direction: crate::api::events::SipTraceDirection,
@@ -707,7 +727,8 @@ pub struct EndpointSipTrace {
     pub timestamp_unix_millis: u64,
     /// SIP start line.
     pub start_line: String,
-    /// Wire-level SIP `Call-ID` header value when present.
+    /// Trace-policy result for the SIP `Call-ID` header when present. This is
+    /// the original only when the active policy keeps or passes it through.
     pub sip_call_id: Option<String>,
     /// Endpoint call/session id after mapping, when known.
     pub session_id: Option<EndpointCallId>,
@@ -717,13 +738,42 @@ pub struct EndpointSipTrace {
     pub original_len: usize,
     /// Whether `raw_message` was truncated for bounded diagnostics.
     pub truncated: bool,
-    /// Whether sensitive headers were redacted.
+    /// Whether headers or body content were redacted.
     pub redacted: bool,
 }
 
+impl fmt::Debug for EndpointSipTrace {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointSipTrace")
+            .field("direction", &self.direction)
+            .field("transport_bytes", &self.transport.len())
+            .field("local_addr_bytes", &self.local_addr.len())
+            .field("remote_addr_bytes", &self.remote_addr.len())
+            .field("timestamp_unix_millis", &self.timestamp_unix_millis)
+            .field("start_line_bytes", &self.start_line.len())
+            .field("sip_call_id_present", &self.sip_call_id.is_some())
+            .field("session_id_present", &self.session_id.is_some())
+            .field("raw_message_bytes", &self.raw_message.len())
+            .field("original_len", &self.original_len)
+            .field("truncated", &self.truncated)
+            .field("redacted", &self.redacted)
+            .finish()
+    }
+}
+
 /// Opaque call identifier for Endpoint applications.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct EndpointCallId(CallId);
+
+impl fmt::Debug for EndpointCallId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointCallId")
+            .field("bytes", &self.0.as_str().len())
+            .finish()
+    }
+}
 
 impl fmt::Display for EndpointCallId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -820,7 +870,8 @@ impl EndpointCall {
 impl fmt::Debug for EndpointCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EndpointCall")
-            .field("id", &self.id().to_string())
+            .field("id_present", &!self.handle.id().as_str().is_empty())
+            .field("id_bytes", &self.handle.id().as_str().len())
             .finish()
     }
 }
@@ -910,9 +961,12 @@ impl EndpointIncomingCall {
 impl fmt::Debug for EndpointIncomingCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EndpointIncomingCall")
-            .field("id", &self.id().to_string())
-            .field("from", &self.from())
-            .field("to", &self.to())
+            .field("id_present", &!self.incoming.call_id.as_str().is_empty())
+            .field("id_bytes", &self.incoming.call_id.as_str().len())
+            .field("from_present", &!self.from().is_empty())
+            .field("from_bytes", &self.from().len())
+            .field("to_present", &!self.to().is_empty())
+            .field("to_bytes", &self.to().len())
             .finish()
     }
 }
@@ -973,7 +1027,7 @@ impl EndpointAudioReceiver {
 }
 
 /// Mono or interleaved PCM16 audio frame used by Endpoint audio.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct EndpointAudioFrame {
     /// PCM16 samples, interleaved when channels is greater than one.
     pub samples: Vec<i16>,
@@ -983,6 +1037,18 @@ pub struct EndpointAudioFrame {
     pub channels: u8,
     /// RTP-style timestamp.
     pub timestamp: u32,
+}
+
+impl fmt::Debug for EndpointAudioFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointAudioFrame")
+            .field("sample_count", &self.samples.len())
+            .field("sample_rate", &self.sample_rate)
+            .field("channels", &self.channels)
+            .field("timestamp", &self.timestamp)
+            .finish()
+    }
 }
 
 impl EndpointAudioFrame {
@@ -1045,7 +1111,7 @@ pub enum EndpointRegistrationStatus {
 }
 
 /// Registration lifecycle snapshot exposed by Endpoint.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EndpointRegistrationInfo {
     /// Coarse registration status.
     pub status: EndpointRegistrationStatus,
@@ -1063,6 +1129,26 @@ pub struct EndpointRegistrationInfo {
     pub retry_count: u32,
     /// Last failure, if any.
     pub last_failure: Option<String>,
+}
+
+impl fmt::Debug for EndpointRegistrationInfo {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointRegistrationInfo")
+            .field("status", &self.status)
+            .field("registrar_present", &self.registrar.is_some())
+            .field("contact_present", &self.contact.is_some())
+            .field("expires_secs", &self.expires_secs)
+            .field("accepted_expires_secs", &self.accepted_expires_secs)
+            .field("next_refresh_in", &self.next_refresh_in)
+            .field("retry_count", &self.retry_count)
+            .field("last_failure_present", &self.last_failure.is_some())
+            .field(
+                "last_failure_bytes",
+                &self.last_failure.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
 }
 
 impl From<RegistrationInfo> for EndpointRegistrationInfo {
@@ -1095,7 +1181,10 @@ impl From<RegistrationInfo> for EndpointRegistrationInfo {
 ///
 /// Use [`EndpointBuilder::auth`] with [`SipClientAuth`]
 /// for non-Digest schemes such as Bearer, Basic, or AKA.
-#[derive(Debug, Clone)]
+///
+/// `Debug` exposes only configuration presence and expiry so account identity,
+/// credentials, and SIP URIs cannot enter diagnostics.
+#[derive(Clone)]
 pub struct SipAccount {
     /// SIP URI of the registrar, for example `sip:pbx.example.com` or
     /// `sips:pbx.example.com:5061`.
@@ -1112,6 +1201,21 @@ pub struct SipAccount {
     pub from_uri: Option<String>,
     /// Optional Contact URI override.
     pub contact_uri: Option<String>,
+}
+
+impl fmt::Debug for SipAccount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SipAccount")
+            .field("registrar_configured", &!self.registrar.is_empty())
+            .field("username_configured", &!self.username.is_empty())
+            .field("auth_username_configured", &self.auth_username.is_some())
+            .field("password_configured", &!self.password.is_empty())
+            .field("expires", &self.expires)
+            .field("from_uri_configured", &self.from_uri.is_some())
+            .field("contact_uri_configured", &self.contact_uri.is_some())
+            .finish()
+    }
 }
 
 impl SipAccount {
@@ -1207,7 +1311,10 @@ impl SipAccount {
 ///
 /// Prefer [`SipAccount`] for new code. `EndpointAccount` is retained for
 /// backwards compatibility.
-#[derive(Debug, Clone)]
+///
+/// `Debug` exposes only configuration presence and expiry so account identity,
+/// credentials, and SIP URIs cannot enter diagnostics.
+#[derive(Clone)]
 pub struct EndpointAccount {
     /// SIP URI of the registrar, for example `sip:pbx.example.com` or
     /// `sips:pbx.example.com:5061`.
@@ -1224,6 +1331,21 @@ pub struct EndpointAccount {
     pub from_uri: Option<String>,
     /// Optional Contact URI override.
     pub contact_uri: Option<String>,
+}
+
+impl fmt::Debug for EndpointAccount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointAccount")
+            .field("registrar_configured", &!self.registrar.is_empty())
+            .field("username_configured", &!self.username.is_empty())
+            .field("auth_username_configured", &self.auth_username.is_some())
+            .field("password_configured", &!self.password.is_empty())
+            .field("expires", &self.expires)
+            .field("from_uri_configured", &self.from_uri.is_some())
+            .field("contact_uri_configured", &self.contact_uri.is_some())
+            .finish()
+    }
 }
 
 impl EndpointAccount {
@@ -1301,7 +1423,10 @@ impl From<EndpointAccount> for SipAccount {
 }
 
 /// Serde-friendly endpoint configuration for CLI tools and simple apps.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` reports operational settings and child-configuration presence
+/// without formatting identities, URIs, filesystem paths, or credentials.
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointConfig {
     /// Display/configuration name.
@@ -1357,8 +1482,88 @@ pub struct EndpointConfig {
     pub register_on_start: Option<bool>,
 }
 
+impl fmt::Debug for EndpointConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("EndpointConfig");
+        debug
+            .field("name_configured", &self.name.is_some())
+            .field("profile", &self.profile)
+            .field("bind_configured", &self.bind.is_some())
+            .field("advertise_configured", &self.advertise.is_some())
+            .field("account_configured", &self.account.is_some())
+            .field("network_configured", &self.network.is_some())
+            .field("media_configured", &self.media.is_some())
+            .field("performance_configured", &self.performance.is_some())
+            .field("auto_180_ringing", &self.auto_180_ringing)
+            .field("auto_100_trying", &self.auto_100_trying)
+            .field(
+                "fast_auto_accept_incoming_calls",
+                &self.fast_auto_accept_incoming_calls,
+            )
+            .field("cleanup_diagnostics", &self.cleanup_diagnostics)
+            .field("cleanup_diagnostic_events", &self.cleanup_diagnostic_events)
+            .field(
+                "app_event_channel_capacity",
+                &self.app_event_channel_capacity,
+            )
+            .field(
+                "sip_transaction_command_channel_capacity",
+                &self.sip_transaction_command_channel_capacity,
+            )
+            .field(
+                "server_call_admission_limit",
+                &self.server_call_admission_limit,
+            )
+            .field(
+                "server_call_admission_soft_limit",
+                &self.server_call_admission_soft_limit,
+            )
+            .field(
+                "server_call_admission_pacing_delay_ms",
+                &self.server_call_admission_pacing_delay_ms,
+            )
+            .field(
+                "server_overload_retry_after_secs",
+                &self.server_overload_retry_after_secs,
+            );
+        #[cfg(feature = "perf-tests")]
+        debug.field(
+            "perf_max_rss_growth_mb_per_hr",
+            &self.perf_max_rss_growth_mb_per_hr,
+        );
+        debug
+            .field("srtp_diagnostics", &self.srtp_diagnostics)
+            .field("rtp_diagnostics", &self.rtp_diagnostics)
+            .field("media_sdp_diagnostics", &self.media_sdp_diagnostics)
+            .field(
+                "sip_trace_enabled",
+                &self.sip_trace.as_ref().map(|trace| trace.enabled),
+            )
+            .field(
+                "sip_trace_capacity",
+                &self.sip_trace.as_ref().map(|trace| trace.capacity),
+            )
+            .field(
+                "sip_trace_sensitive_redaction",
+                &self
+                    .sip_trace
+                    .as_ref()
+                    .map(|trace| trace.redact_sensitive_headers),
+            )
+            .field(
+                "sip_trace_include_body",
+                &self.sip_trace.as_ref().map(|trace| trace.include_body),
+            )
+            .field("register_on_start", &self.register_on_start)
+            .finish()
+    }
+}
+
 /// Serde-friendly SIP account settings.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` exposes only configuration presence and expiry so account identity,
+/// credentials, and SIP URIs cannot enter diagnostics.
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointAccountConfig {
     /// SIP registrar URI.
@@ -1375,6 +1580,21 @@ pub struct EndpointAccountConfig {
     pub from_uri: Option<String>,
     /// Optional Contact URI override.
     pub contact_uri: Option<String>,
+}
+
+impl fmt::Debug for EndpointAccountConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointAccountConfig")
+            .field("registrar_configured", &!self.registrar.is_empty())
+            .field("username_configured", &!self.username.is_empty())
+            .field("auth_username_configured", &self.auth_username.is_some())
+            .field("password_configured", &!self.password.is_empty())
+            .field("expires", &self.expires)
+            .field("from_uri_configured", &self.from_uri.is_some())
+            .field("contact_uri_configured", &self.contact_uri.is_some())
+            .finish()
+    }
 }
 
 impl TryFrom<EndpointAccountConfig> for EndpointAccount {
@@ -1399,7 +1619,10 @@ impl TryFrom<EndpointAccountConfig> for EndpointAccount {
 }
 
 /// Serde-friendly network and signalling settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` reports transport, capacities, and presence flags without formatting
+/// server URIs, SIP instance identifiers, or certificate/key paths.
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointNetworkConfig {
     /// SIP bind address.
@@ -1426,8 +1649,30 @@ pub struct EndpointNetworkConfig {
     pub udp_parse_queue_capacity: Option<usize>,
 }
 
+impl fmt::Debug for EndpointNetworkConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointNetworkConfig")
+            .field("bind_configured", &self.bind.is_some())
+            .field("advertise_configured", &self.advertise.is_some())
+            .field("transport", &self.transport)
+            .field("stun_configured", &self.stun.is_some())
+            .field("outbound_proxy_configured", &self.outbound_proxy.is_some())
+            .field("sip_instance_configured", &self.sip_instance.is_some())
+            .field("tls_bind_configured", &self.tls_bind.is_some())
+            .field("tls_cert_configured", &self.tls_cert_path.is_some())
+            .field("tls_key_configured", &self.tls_key_path.is_some())
+            .field("udp_parse_workers", &self.udp_parse_workers)
+            .field("udp_parse_queue_capacity", &self.udp_parse_queue_capacity)
+            .finish()
+    }
+}
+
 /// Serde-friendly media settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `Debug` reports media modes and port settings without formatting the public
+/// media address.
+#[derive(Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EndpointMediaConfig {
     /// Public media address as an IP address or socket address string.
@@ -1442,6 +1687,20 @@ pub struct EndpointMediaConfig {
     pub signaling_only_rtp_port: Option<u16>,
     /// SRTP negotiation policy.
     pub srtp: Option<EndpointSrtpMode>,
+}
+
+impl fmt::Debug for EndpointMediaConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EndpointMediaConfig")
+            .field("public_address_configured", &self.public_address.is_some())
+            .field("port_start", &self.port_start)
+            .field("port_end", &self.port_end)
+            .field("enabled", &self.enabled)
+            .field("signaling_only_rtp_port", &self.signaling_only_rtp_port)
+            .field("srtp", &self.srtp)
+            .finish()
+    }
 }
 
 /// Serde-friendly deployment profile names.
@@ -1509,9 +1768,15 @@ pub enum EndpointSrtpMode {
 /// These variants intentionally mirror the existing [`Config`] profile
 /// constructors so `Endpoint` remains a convenience layer, not a second SIP
 /// configuration system.
-#[derive(Debug, Clone)]
+///
+/// `Debug` reports only the selected profile variant. In particular, the
+/// `Custom` variant never delegates to the embedded runtime configuration.
+// Boxing `Custom(Config)` would break the public constructor/pattern API.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Default)]
 pub enum EndpointProfile {
     /// Local loopback development profile.
+    #[default]
     Local,
     /// Directly reachable LAN PBX endpoint.
     LanPbx,
@@ -1529,11 +1794,22 @@ pub enum EndpointProfile {
     Custom(Config),
 }
 
-impl Default for EndpointProfile {
-    fn default() -> Self {
-        Self::Local
+impl fmt::Debug for EndpointProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Local => "Local",
+            Self::LanPbx => "LanPbx",
+            Self::AsteriskUdp => "AsteriskUdp",
+            Self::AsteriskTlsSrtpRegisteredFlow => "AsteriskTlsSrtpRegisteredFlow",
+            Self::FreeSwitchInternal => "FreeSwitchInternal",
+            Self::FreeSwitchTlsSrtpReachableContact => "FreeSwitchTlsSrtpReachableContact",
+            Self::CarrierSbc => "CarrierSbc",
+            Self::Custom(_) => "Custom",
+        })
     }
 }
+
+type EndpointConfigurator = Box<dyn FnOnce(&mut Config) + Send>;
 
 /// Builder for [`Endpoint`].
 ///
@@ -1585,7 +1861,7 @@ pub struct EndpointBuilder {
     sip_trace: Option<crate::api::events::SipTraceConfig>,
     from_uri: Option<String>,
     contact_uri: Option<String>,
-    configurators: Vec<Box<dyn FnOnce(&mut Config) + Send>>,
+    configurators: Vec<EndpointConfigurator>,
 }
 
 impl EndpointBuilder {
@@ -2589,6 +2865,199 @@ fn parse_uri(value: &str, label: &str) -> Result<Uri> {
 mod tests {
     use super::*;
     use crate::api::unified::{SipContactMode, SipTlsMode};
+    use crate::UnifiedCoordinator;
+    use rvoip_sip_core::types::{headers::HeaderValue, HeaderName, TypedHeader};
+
+    const DEBUG_SECRET: &str = "endpoint-account-secret-canary";
+    const DEBUG_SECRET_HEADER: &str = "X-Endpoint-Account-Secret-Canary";
+
+    fn debug_secret_header() -> TypedHeader {
+        TypedHeader::Other(
+            HeaderName::Other(DEBUG_SECRET_HEADER.into()),
+            HeaderValue::Raw(DEBUG_SECRET.as_bytes().to_vec()),
+        )
+    }
+
+    fn assert_debug_redacted(debug: &str) {
+        assert!(
+            !debug.contains(DEBUG_SECRET),
+            "credential or URI escaped through {debug}"
+        );
+        assert!(
+            !debug.contains(DEBUG_SECRET_HEADER),
+            "header name escaped through {debug}"
+        );
+    }
+
+    #[test]
+    fn endpoint_account_debug_redacts_credentials_uris_and_enclosing_configs() {
+        let sip_account = SipAccount::new(
+            format!("sips:{DEBUG_SECRET}@registrar.invalid"),
+            DEBUG_SECRET,
+            DEBUG_SECRET,
+        )
+        .auth_username(DEBUG_SECRET)
+        .expires(601)
+        .from_uri(format!("sip:{DEBUG_SECRET}@from.invalid"))
+        .contact_uri(format!("sip:{DEBUG_SECRET}@contact.invalid"));
+        let endpoint_account = sip_account.endpoint_account();
+        let account_config = EndpointAccountConfig {
+            registrar: format!("sips:{DEBUG_SECRET}@registrar.invalid"),
+            username: DEBUG_SECRET.into(),
+            auth_username: Some(DEBUG_SECRET.into()),
+            password: DEBUG_SECRET.into(),
+            expires: Some(602),
+            from_uri: Some(format!("sip:{DEBUG_SECRET}@from.invalid")),
+            contact_uri: Some(format!("sip:{DEBUG_SECRET}@contact.invalid")),
+        };
+        let network = EndpointNetworkConfig {
+            bind: Some("127.0.0.1:5060".parse().unwrap()),
+            advertise: Some("192.0.2.10:5060".parse().unwrap()),
+            transport: Some(EndpointTransport::Tls),
+            stun: Some(format!("stun:{DEBUG_SECRET}@stun.invalid")),
+            outbound_proxy: Some(format!("sips:{DEBUG_SECRET}@proxy.invalid")),
+            sip_instance: Some(format!("urn:uuid:{DEBUG_SECRET}")),
+            tls_bind: Some("127.0.0.1:5061".parse().unwrap()),
+            tls_cert_path: Some(PathBuf::from(format!("/{DEBUG_SECRET}/cert.pem"))),
+            tls_key_path: Some(PathBuf::from(format!("/{DEBUG_SECRET}/key.pem"))),
+            udp_parse_workers: Some(3),
+            udp_parse_queue_capacity: Some(4096),
+        };
+        let media = EndpointMediaConfig {
+            public_address: Some(DEBUG_SECRET.into()),
+            port_start: Some(20_000),
+            port_end: Some(20_100),
+            enabled: Some(true),
+            signaling_only_rtp_port: Some(9),
+            srtp: Some(EndpointSrtpMode::Required),
+        };
+        let endpoint_config = EndpointConfig {
+            name: Some(DEBUG_SECRET.into()),
+            profile: Some(EndpointProfileName::CarrierSbc),
+            bind: Some("127.0.0.1:5060".parse().unwrap()),
+            advertise: Some("192.0.2.10:5060".parse().unwrap()),
+            account: Some(account_config.clone()),
+            network: Some(network.clone()),
+            media: Some(media.clone()),
+            performance: Some(PerformanceConfig {
+                profile: DEBUG_SECRET.into(),
+                capacity: Some(100),
+                signaling_only_rtp_port: Some(9),
+                recipe_path: Some(PathBuf::from(format!("/{DEBUG_SECRET}/recipe.yaml"))),
+            }),
+            auto_180_ringing: Some(false),
+            sip_trace: Some(crate::api::events::SipTraceConfig::enabled()),
+            register_on_start: Some(true),
+            ..Default::default()
+        };
+        let mut custom = Config::local(DEBUG_SECRET, 5060);
+        custom.credentials = Some(Credentials::new(DEBUG_SECRET, DEBUG_SECRET));
+        custom.auth = Some(SipClientAuth::bearer_token(DEBUG_SECRET));
+        custom.pai_uri = Some(format!("sip:{DEBUG_SECRET}@pai.invalid"));
+        custom.outbound_proxy_uri = Some(format!("sips:{DEBUG_SECRET}@proxy.invalid"));
+        custom.sip_instance = Some(format!("urn:uuid:{DEBUG_SECRET}"));
+        custom.contact_uri = Some(format!("sip:{DEBUG_SECRET}@contact.invalid"));
+        custom.auto_emit_extra_headers = vec![debug_secret_header()];
+        let custom_profile = EndpointProfile::Custom(custom);
+
+        let sip_account_debug = format!("{sip_account:?}");
+        let endpoint_account_debug = format!("{endpoint_account:?}");
+        let account_config_debug = format!("{account_config:?}");
+        let network_debug = format!("{network:?}");
+        let media_debug = format!("{media:?}");
+        let endpoint_config_debug = format!("{endpoint_config:?}");
+        let custom_profile_debug = format!("{custom_profile:?}");
+
+        for debug in [
+            &sip_account_debug,
+            &endpoint_account_debug,
+            &account_config_debug,
+            &network_debug,
+            &media_debug,
+            &endpoint_config_debug,
+            &custom_profile_debug,
+        ] {
+            assert_debug_redacted(debug);
+        }
+        assert!(sip_account_debug.contains("password_configured: true"));
+        assert!(sip_account_debug.contains("expires: 601"));
+        assert!(endpoint_account_debug.contains("contact_uri_configured: true"));
+        assert!(account_config_debug.contains("expires: Some(602)"));
+        assert!(network_debug.contains("transport: Some(Tls)"));
+        assert!(network_debug.contains("udp_parse_queue_capacity: Some(4096)"));
+        assert!(media_debug.contains("srtp: Some(Required)"));
+        assert!(endpoint_config_debug.contains("profile: Some(CarrierSbc)"));
+        assert!(endpoint_config_debug.contains("account_configured: true"));
+        assert_eq!(custom_profile_debug, "Custom");
+    }
+
+    #[test]
+    fn endpoint_runtime_debug_is_payload_free() {
+        let trace = EndpointSipTrace {
+            direction: crate::api::events::SipTraceDirection::Inbound,
+            transport: DEBUG_SECRET.to_string(),
+            local_addr: DEBUG_SECRET.to_string(),
+            remote_addr: DEBUG_SECRET.to_string(),
+            timestamp_unix_millis: 1,
+            start_line: DEBUG_SECRET.to_string(),
+            sip_call_id: Some(DEBUG_SECRET.to_string()),
+            session_id: Some(EndpointCallId(CallId::from_string(DEBUG_SECRET))),
+            raw_message: DEBUG_SECRET.to_string(),
+            original_len: DEBUG_SECRET.len(),
+            truncated: false,
+            redacted: false,
+        };
+        let registration = EndpointRegistrationInfo {
+            status: EndpointRegistrationStatus::Failed,
+            registrar: Some(DEBUG_SECRET.to_string()),
+            contact: Some(DEBUG_SECRET.to_string()),
+            expires_secs: Some(60),
+            accepted_expires_secs: None,
+            next_refresh_in: None,
+            retry_count: 1,
+            last_failure: Some(DEBUG_SECRET.to_string()),
+        };
+        let frame = EndpointAudioFrame::new(vec![42, -42], 8_000, 1, 7);
+
+        for rendered in [
+            format!("{trace:?}"),
+            format!("{registration:?}"),
+            format!("{frame:?}"),
+        ] {
+            assert_debug_redacted(&rendered);
+            assert!(!rendered.contains("42"), "audio samples leaked: {rendered}");
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_call_wrappers_redact_call_ids_and_party_uris() {
+        let coordinator = UnifiedCoordinator::new(Config::local("endpoint-debug", 0))
+            .await
+            .expect("coordinator");
+        let call_id = CallId::from_string(DEBUG_SECRET);
+        let call = EndpointCall::new(
+            SessionHandle::new(call_id.clone(), Arc::clone(&coordinator)),
+            Some(format!("sip:{DEBUG_SECRET}@registrar.invalid")),
+            EndpointTransport::Udp,
+        );
+        let incoming = EndpointIncomingCall::new(
+            IncomingCall::new(
+                call_id,
+                format!("sip:{DEBUG_SECRET}@from.invalid"),
+                format!("sip:{DEBUG_SECRET}@to.invalid"),
+                None,
+                Arc::clone(&coordinator),
+            ),
+            Some(format!("sip:{DEBUG_SECRET}@registrar.invalid")),
+            EndpointTransport::Udp,
+        );
+
+        for rendered in [format!("{call:?}"), format!("{incoming:?}")] {
+            assert_debug_redacted(&rendered);
+            assert!(rendered.contains("id_bytes"));
+        }
+        coordinator.shutdown();
+    }
 
     #[test]
     fn endpoint_builder_maps_asterisk_tls_profile() {
@@ -2701,7 +3170,10 @@ mod tests {
     #[test]
     fn endpoint_requires_registrar_for_bare_target() {
         let err = normalize_target(None, "1002", EndpointTransport::Udp).unwrap_err();
-        assert!(err.to_string().contains("registrar"));
+        assert!(matches!(
+            err,
+            SessionError::ConfigError(ref detail) if detail.contains("registrar")
+        ));
     }
 
     #[test]

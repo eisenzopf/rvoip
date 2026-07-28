@@ -67,7 +67,10 @@ pub fn generate_ephemeral(
 
 /// Compute a TURN REST credential: `base64(HMAC-SHA256(secret, username))`.
 pub fn compute_credential(secret: &[u8], username: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    let mut mac = match HmacSha256::new_from_slice(secret) {
+        Ok(mac) => mac,
+        Err(_) => unreachable!("HMAC-SHA256 accepts keys of any length"),
+    };
     mac.update(username.as_bytes());
     let tag = mac.finalize().into_bytes();
     base64::engine::general_purpose::STANDARD.encode(tag)
@@ -96,7 +99,7 @@ mod tests {
             Some("bob"),
         );
         assert_eq!(cfg.urls, vec!["turn:turn.example.com:3478"]);
-        let username = cfg.username.expect("username");
+        let username = cfg.username.clone().expect("username");
         assert!(username.ends_with(":bob"));
         let expiry: u64 = username
             .split(':')
@@ -118,7 +121,7 @@ mod tests {
     #[test]
     fn generate_without_hint_omits_colon() {
         let cfg = generate_ephemeral("turn:x", b"k", Duration::from_secs(60), None);
-        let username = cfg.username.unwrap();
+        let username = cfg.username.clone().unwrap();
         assert!(!username.contains(':'), "no hint → no colon: {username}");
     }
 }

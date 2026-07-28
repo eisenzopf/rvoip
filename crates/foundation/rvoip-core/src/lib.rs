@@ -56,7 +56,8 @@
 //! ```
 //!
 //! [`Orchestrator::register`] dispatches every per-connection command
-//! ([`Orchestrator::route_inbound_connection`], [`Orchestrator::originate_connection`],
+//! ([`Orchestrator::route_inbound_connection`], [`Orchestrator::prepare_outbound_connection`],
+//! [`PreparedOutboundConnection::commit`], [`Orchestrator::originate_connection`],
 //! [`Orchestrator::end_connection`], [`Orchestrator::hold`], [`Orchestrator::resume`],
 //! [`Orchestrator::transfer_connection`], [`Orchestrator::send_dtmf`],
 //! [`Orchestrator::mute`], [`Orchestrator::unmute`],
@@ -111,6 +112,7 @@
 
 pub mod adapter;
 pub mod bridge;
+pub mod broadcast;
 pub mod capability;
 pub mod commands;
 pub mod config;
@@ -121,7 +123,10 @@ pub mod events;
 pub mod harness;
 pub mod identity;
 pub mod ids;
+pub mod inbound_admission;
+pub mod media_graph;
 pub mod message;
+pub mod operational_events;
 pub mod orchestrator;
 pub mod participant;
 pub mod session;
@@ -130,12 +135,27 @@ pub mod store;
 pub mod stream;
 pub mod subscriptions;
 pub mod vcon;
+pub mod virtual_publisher;
 
 pub use adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
-    PlaybackHandle, RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
+    ExternalConnectionReference, ExternalConnectionReferenceError, InboundConnectionContext,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
+    OriginateRequest, OutboundActivation, PlaybackHandle, RejectReason, SignatureHeaders,
+    TransferAttemptId, TransferStatus, TransferTarget, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
+    MAX_INBOUND_ROUTING_HINT_BYTES,
 };
-pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
+pub use bridge::{BridgeError, BridgeHandle, BridgeManager, DirectionalMediaBridgePlan};
+pub use broadcast::{
+    BroadcastDescriptor, BroadcastDrainDescriptor, BroadcastDrainReason, BroadcastDrainRequest,
+    BroadcastDrainState, BroadcastEndpoint, BroadcastHealthDescriptor, BroadcastHealthIssue,
+    BroadcastHealthStatus, BroadcastLifecycleDescriptor, BroadcastLifecycleState,
+    BroadcastProtocolDescriptor, BroadcastProtocolFamily, BroadcastPublisher, BroadcastRelayHop,
+    BroadcastRelayRole, BroadcastResource, BroadcastSanitizedEvent,
+    BroadcastSanitizedEventCapability, BroadcastSanitizedEventError, BroadcastSanitizedEventKind,
+    BroadcastSubstrate, BroadcastTransport, MAX_BROADCAST_EVENT_JSON_INTEGER,
+};
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};
 pub use commands::{
     AttachmentRef, AudioSource, Command, InboundAction, ListenerSink, ListenerTarget,
@@ -147,26 +167,51 @@ pub use conversation::{Conversation, ConversationPolicy, ConversationState};
 pub use error::{Result, RvoipError};
 pub use events::{AnomalyKind, ConnectionProgressKind, Event, SessionQualityReport, UsageKind};
 pub use identity::{
-    Credential, CredentialKind, Device, DtlsFingerprint, Identity, IdentityAssurance,
-    IdentityProvider, Jwk,
+    AuthenticatedPrincipal, AuthenticationMethod, BearerAuthError, Credential, CredentialKind,
+    Device, DtlsFingerprint, Identity, IdentityAssurance, IdentityProvider, Jwk,
+    PrincipalOwnershipKey,
 };
 pub use ids::{
     AiAttachmentId, AttachmentId, BridgeId, ConnectionId, ConversationId, DeviceId, IdentityId,
-    ListenerId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId, StreamId, TenantId,
-    TranscriptionId,
+    ListenerId, MediaRouteId, MessageId, ParticipantId, PlaybackId, RecordingId, SessionId,
+    StreamId, TenantId, TranscriptionId,
+};
+pub use inbound_admission::{
+    InboundAdmission, ProvisionalMediaRoute, StagedInboundDataChannel, StagedInboundDataPolicy,
+    StagedInboundDataReceiver, StagedInboundDataSender, MAX_STAGED_INBOUND_DATA_CAPACITY,
+    MAX_STAGED_INBOUND_DATA_LABELS,
+};
+pub use media_graph::{
+    start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,
+    DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
-pub use orchestrator::Orchestrator;
+pub use operational_events::{
+    OperationalEndReason, OperationalEvent, OperationalEventKind, OperationalEventStreamHealth,
+    OperationalEventStreamHealthSubscription, OperationalFailureReason, OperationalTransferOutcome,
+    OperationalTransferTarget,
+};
+pub use orchestrator::{Orchestrator, PreparedOutboundConnection};
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
+pub use rvoip_core_traits::data::{
+    DataMessage, DataMessageValidationError, DataReliability, MAX_CONTENT_TYPE_BYTES,
+    MAX_DATA_LABEL_BYTES, MAX_DATA_MESSAGE_BYTES, MAX_DATA_MESSAGE_ID_BYTES,
+};
 pub use session::{Session, SessionMedium, SessionState};
 pub use store::{
     ConversationFilter, ConversationStore, MemoryConversationStore, MemoryMessageStore,
     MemoryVconStore, MessageFilter, MessagePage, MessageStore, PageCursor, VconStore,
 };
-pub use stream::{MediaFrame, MediaStream, MediaStreamHandle, QualitySnapshot, StreamKind};
+pub use stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, MediaStreamHandle, QualitySnapshot,
+    StreamKind,
+};
 pub use vcon::{
     DefaultVconBuilder, VconAnalysis, VconAnalysisKind, VconAttachment, VconBuilderHandle,
     VconDialog, VconDialogKind, VconParty, VconRef, VconSnapshot,
+};
+pub use virtual_publisher::{
+    ManagedVirtualPublisher, VirtualPublisherDescriptor, DEFAULT_VIRTUAL_PUBLISHER_QUEUE_CAPACITY,
 };
 
 // V2.A.8 — when `vcon-signing` is enabled, re-export the

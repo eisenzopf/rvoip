@@ -9,9 +9,12 @@
 //! — it requires session-core wiring to drop incoming UPDATEs, which
 //! is not currently exposed by the public API.
 
-use std::env;
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35065;
 const BOB_PORT: u16 = 35066;
@@ -24,13 +27,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // Build the pair once, then launch the executables directly. Nested
+    // `cargo run` peers can serialize behind Cargo's artifact lock and leave
+    // Alice unable to start before the outer deadline.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -43,20 +44,10 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
 
 #[test]
 fn session_timer_refresh_emits_event() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_session_timer_alice",
-            "--example",
-            "regression_session_timer_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
+    build_examples(&[
+        "regression_session_timer_alice",
+        "regression_session_timer_bob",
+    ]);
 
     let env_vars: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),
@@ -89,7 +80,7 @@ fn session_timer_refresh_emits_event() {
 
     let status = match exit {
         Some(s) => s,
-        None => panic!("Alice did not finish within 30s"),
+        None => panic!("Alice did not finish within 45s"),
     };
 
     assert!(

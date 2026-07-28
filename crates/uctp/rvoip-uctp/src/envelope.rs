@@ -8,7 +8,9 @@
 
 use chrono::{DateTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::fmt;
 
+use crate::compatibility::UCTP_ENVELOPE_VERSION;
 use crate::errors::UctpError;
 use crate::types::MessageType;
 
@@ -16,7 +18,7 @@ use crate::types::MessageType;
 /// `serde_json::Value` for two-layer decoding — see module docs).
 ///
 /// Field order matches CONVERSATION_PROTOCOL.md §3.1.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct UctpEnvelope<T = serde_json::Value> {
     /// Protocol version. v0 = 1.
     pub v: u8,
@@ -65,13 +67,30 @@ pub struct UctpEnvelope<T = serde_json::Value> {
     pub signature: Option<rvoip_auth_core::sig9421::EnvelopeSignature>,
 }
 
+impl<T> fmt::Debug for UctpEnvelope<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UctpEnvelope")
+            .field("version", &self.v)
+            .field("message_type", &self.msg_type)
+            .field("envelope_id_present", &!self.id.is_empty())
+            .field("conversation_present", &self.cid.is_some())
+            .field("session_present", &self.sid.is_some())
+            .field("connection_present", &self.connid.is_some())
+            .field("reply_correlation_present", &self.in_reply_to.is_some())
+            .field("payload_present", &true)
+            .field("signature_present", &self.signature.is_some())
+            .finish()
+    }
+}
+
 impl<T> UctpEnvelope<T> {
     /// Build a new envelope with sensible defaults. Caller fills in
     /// routing fields (`cid` / `sid` / `connid` / `in_reply_to`) via
     /// the chainable setters below.
     pub fn new(msg_type: MessageType, payload: T) -> Self {
         Self {
-            v: 1,
+            v: UCTP_ENVELOPE_VERSION,
             msg_type,
             id: crate::ids::new_envelope_id().to_string(),
             ts: Utc::now(),

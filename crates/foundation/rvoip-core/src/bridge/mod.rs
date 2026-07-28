@@ -23,8 +23,54 @@ pub mod frame_pump;
 
 pub use cross_handle::CrossBridgeHandle;
 
+/// Enabled media directions for one two-Connection bridge.
+///
+/// The names are relative to the exact `a` and `b` Connection arguments. A
+/// disabled direction neither acquires that source's single-consumer receiver
+/// nor installs a sink route. Application-data bridging remains independent
+/// and bidirectional.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectionalMediaBridgePlan {
+    a_to_b: bool,
+    b_to_a: bool,
+}
+
+impl DirectionalMediaBridgePlan {
+    /// Build a validated directional plan. A bridge with no media direction
+    /// is rejected rather than reserving both Connections without a route.
+    pub fn new(a_to_b: bool, b_to_a: bool) -> crate::Result<Self> {
+        if !a_to_b && !b_to_a {
+            return Err(crate::RvoipError::AdmissionRejected(
+                "media bridge must enable at least one direction",
+            ));
+        }
+        Ok(Self { a_to_b, b_to_a })
+    }
+
+    #[must_use]
+    pub const fn bidirectional() -> Self {
+        Self {
+            a_to_b: true,
+            b_to_a: true,
+        }
+    }
+
+    #[must_use]
+    pub const fn a_to_b(self) -> bool {
+        self.a_to_b
+    }
+
+    #[must_use]
+    pub const fn b_to_a(self) -> bool {
+        self.b_to_a
+    }
+}
+
 /// Map an `audio_codecs` codec name (per CONVERSATION_PROTOCOL.md §8)
-/// to its standard RTP payload type.
+/// to its media-graph codec key.
+///
+/// Most keys are the codec's conventional RTP payload type. `pcm_s16le`
+/// uses the internal-only key 120; transports must not advertise or emit it.
 ///
 /// Returns `None` for codec names not in the table so the bridge layer
 /// can produce a clear "unsupported codec" diagnostic
@@ -37,7 +83,21 @@ pub fn codec_to_pt(name: &str) -> Option<u8> {
         "pcma" | "g.711-a" | "g711-a" => Some(8),
         "g729" | "g.729" => Some(18),
         "opus" => Some(111),
+        "pcm_s16le" | "pcm-s16le" => Some(rvoip_media_core::codec::audio::payload_type::PCM_S16LE),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod codec_mapping_tests {
+    use super::codec_to_pt;
+    use rvoip_media_core::codec::audio::payload_type::PCM_S16LE;
+
+    #[test]
+    fn maps_internal_pcm_name_to_reserved_key() {
+        assert_eq!(codec_to_pt("pcm_s16le"), Some(PCM_S16LE));
+        assert_eq!(codec_to_pt("PCM_S16LE"), Some(PCM_S16LE));
+        assert_eq!(PCM_S16LE, 120);
     }
 }
 

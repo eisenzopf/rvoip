@@ -16,6 +16,18 @@ use webrtc::peer_connection::{
     RTCSignalingState,
 };
 
+pub(crate) const MAX_SEEN_DATA_CHANNELS: usize = 64;
+
+/// Route-owned local ICE signaling event. Completion is explicit and
+/// overflow is terminal: signalers must never mistake either condition for a
+/// candidate or silently continue with a partial candidate set.
+#[derive(Clone, Debug)]
+pub enum LocalIceEvent {
+    Candidate(RTCIceCandidate),
+    Complete,
+    Overflow,
+}
+
 /// Per-channel drop counters surfaced via [`HandlerChannels::drops`].
 #[derive(Default, Debug)]
 pub struct HandlerDropCounters {
@@ -50,7 +62,9 @@ pub struct HandlerChannels {
     /// Outbound (locally-gathered) ICE candidates. Drains in order via the
     /// per-peer `recv_local_ice_candidate()` API so trickle-capable signalers
     /// can forward them to the remote peer.
-    pub local_ice: mpsc::Sender<RTCIceCandidate>,
+    pub local_ice: mpsc::Sender<LocalIceEvent>,
+    pub local_ice_complete_pending: Arc<AtomicBool>,
+    pub local_ice_overflowed: Arc<AtomicBool>,
     pub drops: Arc<HandlerDropCounters>,
 }
 
@@ -76,6 +90,8 @@ impl HandlerChannels {
         let (data_channel_tx, data_channel_rx) = mpsc::channel(cap.max(2));
         let data_channels_seen = Arc::new(SyncMutex::new(Vec::new()));
         let (local_ice_tx, local_ice_rx) = mpsc::channel(cap.max(2));
+        let local_ice_complete_pending = Arc::new(AtomicBool::new(false));
+        let local_ice_overflowed = Arc::new(AtomicBool::new(false));
         let drops = Arc::new(HandlerDropCounters::default());
         (
             Self {
@@ -89,6 +105,8 @@ impl HandlerChannels {
                 data_channel: data_channel_tx,
                 data_channels_seen: Arc::clone(&data_channels_seen),
                 local_ice: local_ice_tx,
+                local_ice_complete_pending: Arc::clone(&local_ice_complete_pending),
+                local_ice_overflowed: Arc::clone(&local_ice_overflowed),
                 drops: Arc::clone(&drops),
             },
             HandlerReceivers {
@@ -99,6 +117,8 @@ impl HandlerChannels {
                 data_channel: data_channel_rx,
                 data_channels_seen,
                 local_ice: local_ice_rx,
+                local_ice_complete_pending,
+                local_ice_overflowed,
             },
             connected_flag,
             failed_flag,
@@ -115,7 +135,9 @@ pub struct HandlerReceivers {
     pub remote_track: mpsc::Receiver<Arc<dyn TrackRemote>>,
     pub data_channel: mpsc::Receiver<Arc<dyn DataChannel>>,
     pub data_channels_seen: Arc<SyncMutex<Vec<Arc<dyn DataChannel>>>>,
-    pub local_ice: mpsc::Receiver<RTCIceCandidate>,
+    pub local_ice: mpsc::Receiver<LocalIceEvent>,
+    pub local_ice_complete_pending: Arc<AtomicBool>,
+    pub local_ice_overflowed: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -136,6 +158,18 @@ impl PeerConnectionEventHandler for ConnectionHandler {
             // try_send is fine here: gather_complete is one-shot and the consumer
             // is awaiting recv() on a cap-1 channel.
             let _ = self.channels.gather_complete.try_send(());
+            if self
+                .channels
+                .local_ice
+                .try_send(LocalIceEvent::Complete)
+                .is_err()
+            {
+                // Completion is lossless even when the bounded candidate
+                // queue is full; the consumer synthesizes it after draining.
+                self.channels
+                    .local_ice_complete_pending
+                    .store(true, Ordering::Release);
+            }
         }
     }
 
@@ -164,7 +198,16 @@ impl PeerConnectionEventHandler for ConnectionHandler {
         ));
         // Best-effort forward for trickle signalers. Drop on backpressure rather
         // than block the webrtc-rs internal event task.
-        if self.channels.local_ice.try_send(event.candidate).is_err() {
+        if self.channels.local_ice_overflowed.load(Ordering::Acquire)
+            || self
+                .channels
+                .local_ice
+                .try_send(LocalIceEvent::Candidate(event.candidate))
+                .is_err()
+        {
+            self.channels
+                .local_ice_overflowed
+                .store(true, Ordering::Release);
             let dropped = self.channels.drops.state.fetch_add(1, Ordering::Relaxed) + 1;
             warn!(
                 dropped,
@@ -180,10 +223,30 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_ice_connection_state_change(&self, _state: RTCIceConnectionState) {}
 
     async fn on_data_channel(&self, dc: Arc<dyn DataChannel>) {
-        self.channels
-            .data_channels_seen
-            .lock()
-            .push(Arc::clone(&dc));
+        let accepted = {
+            let mut seen = self.channels.data_channels_seen.lock();
+            if seen.len() >= MAX_SEEN_DATA_CHANNELS {
+                false
+            } else {
+                seen.push(Arc::clone(&dc));
+                true
+            }
+        };
+        if !accepted {
+            let dropped = self
+                .channels
+                .drops
+                .data_channel
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            warn!(
+                dropped,
+                maximum = MAX_SEEN_DATA_CHANNELS,
+                "too many remotely-created WebRTC data channels; closing excess channel"
+            );
+            let _ = dc.close().await;
+            return;
+        }
         if let Err(e) = self.channels.data_channel.try_send(dc) {
             let dropped = self
                 .channels
@@ -213,5 +276,43 @@ impl PeerConnectionEventHandler for ConnectionHandler {
                 "WebRTC remote-track event channel full; dropping inbound track"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_ice_overflow_is_sticky_and_completion_remains_pending() {
+        let (channels, mut receivers, ..) = HandlerChannels::pair(1);
+        let handler = ConnectionHandler::new(channels);
+
+        handler
+            .on_ice_candidate(RTCPeerConnectionIceEvent::default())
+            .await;
+        handler
+            .on_ice_candidate(RTCPeerConnectionIceEvent::default())
+            .await;
+        handler
+            .on_ice_candidate(RTCPeerConnectionIceEvent::default())
+            .await;
+        assert!(receivers.local_ice_overflowed.load(Ordering::Acquire));
+
+        handler
+            .on_ice_gathering_state_change(RTCIceGatheringState::Complete)
+            .await;
+        assert!(
+            receivers.local_ice_complete_pending.load(Ordering::Acquire),
+            "completion must survive a full bounded candidate queue"
+        );
+        assert!(matches!(
+            receivers.local_ice.recv().await,
+            Some(LocalIceEvent::Candidate(_))
+        ));
+        assert!(matches!(
+            receivers.local_ice.recv().await,
+            Some(LocalIceEvent::Candidate(_))
+        ));
     }
 }

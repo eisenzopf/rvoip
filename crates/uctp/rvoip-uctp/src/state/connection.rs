@@ -1,7 +1,11 @@
-//! `UctpConnectionState` + transitions + per-Connection
-//! `stream_local_id` allocator (§3.6 of `UCTP_IMPLEMENTATION_PLAN.md`).
+//! `UctpConnectionState` + transitions and negotiated Stream bookkeeping.
+//!
+//! `stream_local_id` allocation deliberately does not live here: the UCTP
+//! datagram header has no Session or Connection discriminator, so the owning
+//! physical peer's media router is the only safe allocation authority.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::errors::UctpError;
 use crate::ids::StreamId;
@@ -13,7 +17,7 @@ use crate::ids::StreamId;
 /// is assigned at `connection.ready` and announced via `stream.opened`,
 /// so the chosen-codec / direction / kind from negotiation must be held
 /// here until the ready transition.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AcceptedStream {
     /// Wire-level Stream id (the offerer-chosen `id` from the
     /// `streams_offered[*]` entry — opaque to the server).
@@ -29,6 +33,19 @@ pub struct AcceptedStream {
     /// identity to the `SubscriptionHandler` for `from_participant`
     /// resolution.
     pub participant: String,
+}
+
+impl fmt::Debug for AcceptedStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcceptedStream")
+            .field("stream_id_present", &!self.strm_id.is_empty())
+            .field("kind_present", &!self.kind.is_empty())
+            .field("direction_present", &!self.direction.is_empty())
+            .field("chosen_codec_present", &self.chosen_codec.is_some())
+            .field("participant_present", &!self.participant.is_empty())
+            .finish()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,10 +75,8 @@ pub enum ConnectionInput {
     EndReceived,
 }
 
-#[derive(Debug)]
 pub struct ConnectionMachine {
     state: UctpConnectionState,
-    allocator: StreamLocalIdAllocator,
     streams: HashMap<u16, StreamId>,
     /// Streams that survived negotiation at `connection.offer` time and
     /// are awaiting `stream.opened` emission on `connection.ready`.
@@ -87,6 +102,18 @@ pub struct ConnectionMachine {
     lifetime_span: tracing::Span,
 }
 
+impl fmt::Debug for ConnectionMachine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionMachine")
+            .field("state", &self.state)
+            .field("bound_stream_count", &self.streams.len())
+            .field("pending_stream_count", &self.pending_streams.len())
+            .field("streams_announced", &self.streams_announced)
+            .finish()
+    }
+}
+
 impl ConnectionMachine {
     pub fn new_negotiating() -> Self {
         Self::new_negotiating_with_span(tracing::Span::none())
@@ -100,7 +127,6 @@ impl ConnectionMachine {
     pub fn new_negotiating_with_span(lifetime_span: tracing::Span) -> Self {
         Self {
             state: UctpConnectionState::Negotiating,
-            allocator: StreamLocalIdAllocator::new(),
             streams: HashMap::new(),
             pending_streams: Vec::new(),
             streams_announced: false,
@@ -128,38 +154,73 @@ impl ConnectionMachine {
         self.streams_announced = false;
     }
 
-    /// Drain the pending streams set and allocate a `stream_local_id`
-    /// for each, returning `(AcceptedStream, allocated_id)` pairs.
-    /// Idempotent — second call after the first allocation returns an
-    /// empty Vec (so duplicate `connection.ready` envelopes don't
-    /// re-announce streams).
-    pub fn take_pending_streams(&mut self) -> Result<Vec<(AcceptedStream, u16)>, UctpError> {
+    /// Claim the pending negotiated streams for binding by the peer-scoped
+    /// media router. Idempotent — a duplicate `connection.ready` sees an
+    /// empty list after the first claim.
+    pub fn take_pending_streams(&mut self) -> Vec<AcceptedStream> {
         if self.streams_announced {
-            return Ok(Vec::new());
-        }
-        let mut out = Vec::with_capacity(self.pending_streams.len());
-        for stream in std::mem::take(&mut self.pending_streams) {
-            let local_id = self.allocator.next()?;
-            self.streams
-                .insert(local_id, StreamId::from_string(stream.strm_id.clone()));
-            out.push((stream, local_id));
+            return Vec::new();
         }
         self.streams_announced = true;
-        Ok(out)
+        std::mem::take(&mut self.pending_streams)
     }
 
-    /// Allocate a new stream-local id for a given Stream ID, and record
-    /// the mapping so inbound datagrams can resolve back.
-    pub fn open_stream(&mut self, strm_id: StreamId) -> Result<u16, UctpError> {
-        let local_id = self.allocator.next()?;
+    /// Restore a failed all-or-nothing binding request so a repeated ready can
+    /// retry. Callers must remove any substrate bindings they committed before
+    /// invoking this method.
+    pub fn restore_pending_streams(&mut self, streams: Vec<AcceptedStream>) {
+        if streams.is_empty() {
+            return;
+        }
+        self.pending_streams = streams;
+        self.streams_announced = false;
+    }
+
+    /// Record a local ID already allocated by the physical peer's sole media
+    /// router. Zero is reserved; rebinding an ID to a different Stream fails.
+    pub fn bind_stream(&mut self, local_id: u16, strm_id: StreamId) -> Result<(), UctpError> {
+        if local_id == 0 {
+            return Err(UctpError::InvalidStreamBinding("zero-local-id"));
+        }
+        if let Some(existing) = self.streams.get(&local_id) {
+            if existing != &strm_id {
+                return Err(UctpError::InvalidStreamBinding("duplicate-local-id"));
+            }
+            return Ok(());
+        }
         self.streams.insert(local_id, strm_id);
-        Ok(local_id)
+        Ok(())
     }
 
     /// Look up which `StreamId` an inbound datagram's
     /// `stream_local_id` belongs to.
     pub fn resolve_stream(&self, local_id: u16) -> Option<&StreamId> {
         self.streams.get(&local_id)
+    }
+
+    /// Snapshot Streams that reached binding/announcement bookkeeping. Pending
+    /// offers are deliberately excluded: teardown must never unregister a
+    /// same-named publisher owned by another Connection when this Connection
+    /// failed before `stream.opened`.
+    pub fn stream_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .streams
+            .values()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Number of stream handles already allocated on this Connection.
+    ///
+    /// A new `connection.offer` replaces any not-yet-announced pending offer,
+    /// but it must not reset the resource budget consumed by streams that were
+    /// already announced. The coordinator uses this count to enforce the
+    /// per-Connection cap cumulatively across re-offers.
+    pub fn opened_stream_count(&self) -> usize {
+        self.streams.len()
     }
 
     /// Apply an input. Returns the new state or an illegal-transition error.
@@ -202,29 +263,6 @@ impl ConnectionMachine {
         };
         self.state = next;
         Ok(next)
-    }
-}
-
-/// Monotonically-increasing per-Connection 16-bit handle allocator.
-/// Returns [`UctpError::StreamHandleExhausted`] at u16::MAX wrap.
-#[derive(Debug)]
-struct StreamLocalIdAllocator {
-    next: u16,
-}
-
-impl StreamLocalIdAllocator {
-    fn new() -> Self {
-        Self { next: 1 }
-    }
-
-    fn next(&mut self) -> Result<u16, UctpError> {
-        let id = self.next;
-        if id == 0 {
-            return Err(UctpError::StreamHandleExhausted);
-        }
-        // u16::MAX → 0 wrap signals exhaustion on next call.
-        self.next = self.next.wrapping_add(1);
-        Ok(id)
     }
 }
 

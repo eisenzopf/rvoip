@@ -626,6 +626,16 @@ Redis-backed contracts:
 - `TokenRevocationChecker` for revoked token ids;
 - `AuthRateLimiter` for fail-closed rate-limit/lockout policy.
 
+Secure SIP authentication uses the additive atomic limiter contract. Implement
+`reserve_auth_attempt` to reserve peer and subject capacity before credential
+validation, and `complete_auth_attempt` to consume that reservation after the
+result is known. A failed attempt retains one count; success must release only
+the supplied reservation. The legacy `check_auth_attempt`/
+`record_auth_result` pair remains source-compatible but is not called by the
+secure listener because the gap between those calls permits concurrent
+over-admission. The additive methods fail closed by default, so migrate custom
+limiters before enabling them on a listener.
+
 ### Audit Export
 
 Use `rvoip-audit` when auth events need to leave the process.
@@ -735,6 +745,29 @@ Use cleartext opt-ins only for explicit legacy or test environments:
 - UAC Bearer: `SipClientAuth::bearer_token(...).allow_bearer_over_cleartext(true)`;
 - UAS Basic: `SipAuthService::allow_basic_over_cleartext(true)`;
 - UAS Bearer: `SipAuthService::allow_bearer_over_cleartext(true)`.
+
+### Tenant-bound listener admission
+
+Every enabled `SipListenerAuthPolicy` must name exactly one tenant. Use
+`SipListenerAuthPolicy::authenticated_for_tenant(...)` for Digest/Bearer or
+`SipListenerAuthPolicy::enabled_for_tenant(...)` before adding trusted-CIDR or
+mTLS mappings. Existing builder chains can call `.with_tenant(...)`; legacy
+enabled policies without it fail closed at coordinator startup and at direct
+admission.
+
+Tenant values must be 1–128 characters, already trimmed, and contain no
+control characters. The listener stamps its tenant only onto locally generated
+Digest principals. Bearer validators and explicit trusted-CIDR/mTLS mappings
+must already contain the exact listener tenant. Missing or mismatched values
+are rejected so credentials from one tenant cannot attach to another tenant's
+SIP listener.
+
+mTLS fingerprint mappings are selectors for certificates verified by the
+transport, not a substitute for certificate verification. Configure a real
+TLS listener and client trust anchors with
+`Config::require_tls_client_certificate(...)` or
+`Config::verify_optional_tls_client_certificate(...)`. Startup rejects an
+mTLS mapping when transport-level client-certificate verification is disabled.
 
 ## Storage Choices
 

@@ -1,5 +1,6 @@
 //! Smoke-test every `ConnectionAdapter` method on `WebRtcAdapter`.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use rvoip_core::adapter::{
@@ -9,6 +10,32 @@ use rvoip_core::connection::Direction;
 use rvoip_core::ids::{ParticipantId, SessionId};
 use rvoip_core::message::{ContentType, Message, MessageRecipients};
 use rvoip_webrtc::{WebRtcAdapter, WebRtcConfig};
+
+fn assert_unique_offer_mids(sdp: &str, stage: &str) {
+    let mids = sdp
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("a=mid:"))
+        .collect::<Vec<_>>();
+    let unique = mids.iter().copied().collect::<HashSet<_>>();
+    assert_eq!(
+        mids.len(),
+        unique.len(),
+        "{stage} offer contains duplicate RFC 8843 MIDs: {mids:?}"
+    );
+
+    for group in sdp
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').strip_prefix("a=group:BUNDLE "))
+    {
+        let bundled = group.split_whitespace().collect::<Vec<_>>();
+        let unique = bundled.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(
+            bundled.len(),
+            unique.len(),
+            "{stage} offer contains duplicate BUNDLE MIDs: {bundled:?}"
+        );
+    }
+}
 
 #[tokio::test]
 async fn adapter_smoke_all_methods() {
@@ -27,6 +54,7 @@ async fn adapter_smoke_all_methods() {
             direction: Direction::Outbound,
             capabilities: caps.clone(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");
@@ -55,8 +83,35 @@ async fn adapter_smoke_all_methods() {
         .expect("streams");
     assert!(!streams.is_empty());
 
+    let initial_dtmf = adapter.send_dtmf(conn_id.clone(), "1", 100).await;
+    assert!(
+        initial_dtmf.is_ok(),
+        "RFC 4733 DTMF expected to succeed after initial negotiation: {initial_dtmf:?}"
+    );
+
     adapter.hold(conn_id.clone()).await.expect("hold");
+    let hold_offer = adapter.local_sdp(&conn_id).expect("hold offer");
+    assert_unique_offer_mids(&hold_offer, "hold");
+    let hold_answer = adapter2
+        .apply_ice_restart_offer(inbound_id.clone(), &hold_offer)
+        .await
+        .expect("answer hold offer");
+    adapter
+        .apply_remote_answer(conn_id.clone(), &hold_answer)
+        .await
+        .expect("apply hold answer");
+
     adapter.resume(conn_id.clone()).await.expect("resume");
+    let resume_offer = adapter.local_sdp(&conn_id).expect("resume offer");
+    assert_unique_offer_mids(&resume_offer, "resume");
+    let resume_answer = adapter2
+        .apply_ice_restart_offer(inbound_id.clone(), &resume_offer)
+        .await
+        .expect("answer resume offer");
+    adapter
+        .apply_remote_answer(conn_id.clone(), &resume_answer)
+        .await
+        .expect("apply resume answer");
 
     let msg = Message {
         id: rvoip_core::ids::MessageId::new(),
@@ -77,7 +132,20 @@ async fn adapter_smoke_all_methods() {
     let dtmf = adapter.send_dtmf(conn_id.clone(), "1", 100).await;
     assert!(dtmf.is_ok(), "RFC 4733 DTMF expected to succeed: {dtmf:?}");
 
-    let _ = adapter.renegotiate_media(conn_id.clone(), caps).await;
+    adapter
+        .renegotiate_media(conn_id.clone(), caps)
+        .await
+        .expect("renegotiate media");
+    let media_offer = adapter.local_sdp(&conn_id).expect("media re-offer");
+    assert_unique_offer_mids(&media_offer, "media renegotiation");
+    let media_answer = adapter2
+        .apply_ice_restart_offer(inbound_id.clone(), &media_offer)
+        .await
+        .expect("answer media re-offer");
+    adapter
+        .apply_remote_answer(conn_id.clone(), &media_answer)
+        .await
+        .expect("apply media answer");
 
     let assurance = adapter
         .verify_request_signature(
@@ -131,6 +199,7 @@ async fn subscribe_events_receives_inbound_connection() {
             direction: Direction::Outbound,
             capabilities: adapter2.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

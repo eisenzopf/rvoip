@@ -7,30 +7,42 @@ pub use listener::WebSocketListener;
 pub(crate) use stream::SipWsStream;
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent, TransportType};
+use crate::transport::{
+    next_transport_flow_id,
+    runtime::{
+        next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
+        OutboundDialCoordinator, TransportTaskSet,
+    },
+    safe_method_label, send_control_event, transport_authority_for_request,
+    validate_typed_outbound_message, HandshakeAdmissionConfig, Transport, TransportAuthority,
+    TransportEvent, TransportFlowId, TransportRoute, TransportType,
+};
 use futures_util::StreamExt;
 use rvoip_sip_core::Message;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use tokio::sync::{mpsc, Mutex};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
+use tokio::sync::{mpsc, Mutex, OwnedSemaphorePermit, Semaphore};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, warn};
 
-pub use crate::transport::tls::TlsClientConfig;
-use crate::transport::OutboundTlsConfig;
+#[cfg(feature = "wss")]
+pub use crate::transport::tls::{TlsClientConfig, TlsServerClientAuthConfig};
 #[cfg(feature = "wss")]
 use tokio_rustls::TlsConnector;
 
-// SIP WebSocket subprotocol per RFC 7118 §4.1.
-// Both WS and WSS use "sip" — the subprotocol name identifies the
-// application-layer protocol (SIP), not the transport security.
+// RFC 7118 registers exactly one WebSocket subprotocol token for SIP.
+// Transport security is selected by the ws:// versus wss:// URI, not by a
+// second `sips` subprotocol token.
 pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
-pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sip";
+
+fn selected_subprotocol_is_exact(selected: Option<&str>, expected: &str) -> bool {
+    selected.is_some_and(|value| value == expected)
+}
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
@@ -42,39 +54,166 @@ pub struct WebSocketTransport {
 }
 
 struct WebSocketTransportInner {
-    listener: Arc<WebSocketListener>,
+    local_addr: SocketAddr,
     secure: bool,
-    /// Full connection pool: async mutex, holds the write half of each socket.
-    /// Used by the send/close paths that already run inside async tasks.
-    ///
-    /// Keyed by remote address **and** the per-call outbound TLS/WSS
-    /// client identity used to dial it — `None` is the transport's
-    /// baked-in default identity (`tls_connector`, unchanged behavior).
-    /// This means two calls to the same destination under different
-    /// identities never share a connection. Plain `ws://` connections
-    /// always register under `None` (no identity concept applies).
-    connections: Mutex<HashMap<(SocketAddr, Option<TlsClientConfig>), Arc<WebSocketConnection>>>,
-    /// Sync mirror of which peers are currently connected.
-    ///
-    /// `has_connection_to()` is a synchronous trait method called from the
-    /// multiplexer's dispatch path. Reading from the async `connections`
-    /// mutex there would require either `block_on` (forbidden) or
-    /// `try_lock` (returns false on contention, causing an incorrect UDP
-    /// fallback on that exact send). Instead, we maintain this
-    /// `std::sync::RwLock`-backed set that is always writable in O(1)
-    /// inside the async tasks that already hold `connections` and readable
-    /// in O(1) from any synchronous context without ever blocking for more
-    /// than a few nanoseconds (writes only hold the lock for a
-    /// `HashSet::insert` / `HashSet::remove`).
-    active_peers: RwLock<HashSet<SocketAddr>>,
+    connections: Mutex<HashMap<WebSocketConnectionKey, WebSocketConnectionRecord>>,
+    next_connection_generation: AtomicU64,
     closed: AtomicBool,
+    close_gate: Mutex<()>,
     events_tx: mpsc::Sender<TransportEvent>,
+    control_events_tx: mpsc::Sender<TransportEvent>,
+    tasks: Arc<TransportTaskSet>,
+    handshake_admission: HandshakeAdmissionConfig,
+    lifecycle: ConnectionLifecycleConfig,
+    outbound_dials: Arc<OutboundDialCoordinator<WebSocketConnectionKey>>,
+    inbound_established: Arc<Semaphore>,
+    outbound_established: Arc<Semaphore>,
+    inbound_trust_context: u64,
+    outbound_trust_context: u64,
     /// `TlsConnector` used by outbound `wss://` dials. `None` when
     /// `secure=false` or when no `TlsClientConfig` was supplied at
     /// bind time — `connect_to()` then errors with `NotImplemented`
     /// for `wss://` (matches pre-Phase-4-polish behaviour).
     #[cfg(feature = "wss")]
     tls_connector: Option<TlsConnector>,
+}
+
+#[derive(Clone)]
+struct WebSocketConnectionRecord {
+    generation: u64,
+    flow_id: TransportFlowId,
+    connection: Arc<WebSocketConnection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum WebSocketAuthorityHost {
+    Dns(String),
+    Ip(IpAddr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WebSocketAuthority {
+    host: WebSocketAuthorityHost,
+    port: u16,
+}
+
+impl WebSocketAuthority {
+    fn from_transport(authority: &TransportAuthority, port: u16) -> Self {
+        let host = match authority {
+            TransportAuthority::Dns(domain) => WebSocketAuthorityHost::Dns(domain.clone()),
+            TransportAuthority::Ip(address) => WebSocketAuthorityHost::Ip(*address),
+        };
+        Self { host, port }
+    }
+
+    fn for_address(destination: SocketAddr) -> Self {
+        let host = if destination.ip().is_loopback() {
+            WebSocketAuthorityHost::Dns("localhost".into())
+        } else {
+            WebSocketAuthorityHost::Ip(destination.ip())
+        };
+        Self {
+            host,
+            port: destination.port(),
+        }
+    }
+
+    fn http_authority(&self) -> String {
+        match self.host {
+            WebSocketAuthorityHost::Dns(ref domain) => format!("{domain}:{}", self.port),
+            WebSocketAuthorityHost::Ip(IpAddr::V4(address)) => {
+                format!("{address}:{}", self.port)
+            }
+            WebSocketAuthorityHost::Ip(IpAddr::V6(address)) => {
+                format!("[{address}]:{}", self.port)
+            }
+        }
+    }
+
+    #[cfg(feature = "wss")]
+    fn server_name(&self) -> Result<tokio_rustls::rustls::pki_types::ServerName<'static>> {
+        match &self.host {
+            WebSocketAuthorityHost::Dns(domain) => {
+                tokio_rustls::rustls::pki_types::ServerName::try_from(domain.clone())
+                    .map_err(|_| Error::InvalidAddress("invalid WSS authority".into()))
+            }
+            WebSocketAuthorityHost::Ip(address) => Ok((*address).into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WebSocketConnectionKey {
+    remote_addr: SocketAddr,
+    direction: ConnectionDirection,
+    authority: WebSocketAuthority,
+    trust_context: u64,
+    secure: bool,
+}
+
+impl WebSocketConnectionKey {
+    fn outbound(
+        remote_addr: SocketAddr,
+        authority: WebSocketAuthority,
+        trust_context: u64,
+        secure: bool,
+    ) -> Self {
+        Self {
+            remote_addr,
+            direction: ConnectionDirection::Outbound,
+            authority,
+            trust_context,
+            secure,
+        }
+    }
+
+    fn inbound(
+        remote_addr: SocketAddr,
+        local_addr: SocketAddr,
+        trust_context: u64,
+        secure: bool,
+    ) -> Self {
+        Self {
+            remote_addr,
+            direction: ConnectionDirection::Inbound,
+            authority: WebSocketAuthority::for_address(local_addr),
+            trust_context,
+            secure,
+        }
+    }
+}
+
+fn select_websocket_flow(
+    connections: &HashMap<WebSocketConnectionKey, WebSocketConnectionRecord>,
+    route: &TransportRoute,
+) -> Option<Arc<WebSocketConnection>> {
+    let flow_id = route.flow_id?;
+    connections.iter().find_map(|(key, record)| {
+        (key.remote_addr == route.destination
+            && record.flow_id == flow_id
+            && !record.connection.is_closed())
+        .then(|| record.connection.clone())
+    })
+}
+
+async fn close_websocket_connections(
+    connections: Vec<(WebSocketConnectionKey, WebSocketConnectionRecord)>,
+) {
+    // Start every bounded close at once. Drain duration is therefore one
+    // writer deadline, not connection_count × writer deadline.
+    let close_results =
+        futures_util::future::join_all(connections.iter().map(|(key, record)| async move {
+            (key.remote_addr, record.connection.close().await)
+        }))
+        .await;
+    for (remote_addr, result) in close_results {
+        if let Err(error) = result {
+            error!(
+                "Error closing WebSocket connection to {}: {}",
+                remote_addr, error
+            );
+        }
+    }
 }
 
 impl WebSocketTransport {
@@ -90,14 +229,93 @@ impl WebSocketTransport {
         key_path: Option<&str>,
         channel_capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_handshake_config(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind with a separately reserved lifecycle/control sender.
+    pub async fn bind_with_control_sender(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        control_events_tx: mpsc::Sender<TransportEvent>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         #[cfg(feature = "wss")]
         {
-            Self::bind_with_client_tls(addr, secure, cert_path, key_path, channel_capacity, None)
-                .await
+            Self::bind_with_tls_configs_handshake_and_control_sender(
+                addr,
+                secure,
+                cert_path,
+                key_path,
+                channel_capacity,
+                None,
+                TlsServerClientAuthConfig::default(),
+                HandshakeAdmissionConfig::default(),
+                control_events_tx,
+            )
+            .await
         }
         #[cfg(not(feature = "wss"))]
         {
-            Self::bind_inner(addr, secure, cert_path, key_path, channel_capacity).await
+            Self::bind_inner(
+                addr,
+                secure,
+                cert_path,
+                key_path,
+                channel_capacity,
+                HandshakeAdmissionConfig::default(),
+                Some(control_events_tx),
+            )
+            .await
+        }
+    }
+
+    /// Bind with an explicit deadline and concurrency limit for inbound and
+    /// outbound TCP, TLS, and HTTP/WebSocket handshakes. Each direction has an
+    /// independent global budget; outbound destinations are single-flight.
+    pub async fn bind_with_handshake_config(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        #[cfg(feature = "wss")]
+        {
+            Self::bind_with_tls_configs_and_handshake(
+                addr,
+                secure,
+                cert_path,
+                key_path,
+                channel_capacity,
+                None,
+                TlsServerClientAuthConfig::default(),
+                handshake_admission,
+            )
+            .await
+        }
+        #[cfg(not(feature = "wss"))]
+        {
+            Self::bind_inner(
+                addr,
+                secure,
+                cert_path,
+                key_path,
+                channel_capacity,
+                handshake_admission,
+                None,
+            )
+            .await
         }
     }
 
@@ -117,6 +335,111 @@ impl WebSocketTransport {
         channel_capacity: Option<usize>,
         client_tls: Option<TlsClientConfig>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_tls_configs(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            client_tls,
+            TlsServerClientAuthConfig::default(),
+        )
+        .await
+    }
+
+    /// Creates a WebSocket transport with independent outbound WSS client
+    /// configuration and inbound WSS client-certificate authentication.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_tls_configs(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+        server_client_auth: TlsServerClientAuthConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_tls_configs_and_handshake(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            client_tls,
+            server_client_auth,
+            HandshakeAdmissionConfig::default(),
+        )
+        .await
+    }
+
+    /// Bind with independent WSS client/server TLS policies and explicit
+    /// inbound/outbound handshake admission.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_tls_configs_and_handshake(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_tls_configs_and_optional_control_sender(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            client_tls,
+            server_client_auth,
+            handshake_admission,
+            None,
+        )
+        .await
+    }
+
+    /// Bind WSS/WS with a separately reserved lifecycle/control sender.
+    #[cfg(feature = "wss")]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn bind_with_tls_configs_handshake_and_control_sender(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+        control_events_tx: mpsc::Sender<TransportEvent>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_tls_configs_and_optional_control_sender(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            client_tls,
+            server_client_auth,
+            handshake_admission,
+            Some(control_events_tx),
+        )
+        .await
+    }
+
+    #[cfg(feature = "wss")]
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_with_tls_configs_and_optional_control_sender(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+        control_events_tx: Option<mpsc::Sender<TransportEvent>>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         let tls_connector = match (secure, client_tls) {
             (true, Some(cfg)) => {
                 let client_config = crate::transport::tls::build_client_config(&cfg)?;
@@ -131,6 +454,9 @@ impl WebSocketTransport {
             key_path,
             channel_capacity,
             tls_connector,
+            server_client_auth,
+            handshake_admission,
+            control_events_tx,
         )
         .await
     }
@@ -146,13 +472,28 @@ impl WebSocketTransport {
         key_path: Option<&str>,
         channel_capacity: Option<usize>,
         tls_connector: Option<TlsConnector>,
+        server_client_auth: TlsServerClientAuthConfig,
+        handshake_admission: HandshakeAdmissionConfig,
+        control_events_tx: Option<mpsc::Sender<TransportEvent>>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let handshake_admission =
+            handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
+        let control_events_tx = control_events_tx.unwrap_or_else(|| events_tx.clone());
 
         // Create the WebSocket listener
-        let listener = WebSocketListener::bind(addr, secure, cert_path, key_path).await?;
+        let listener = WebSocketListener::bind_with_client_auth_and_handshake(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            server_client_auth,
+            handshake_admission,
+        )
+        .await?;
         let local_addr = listener.local_addr()?;
 
         info!(
@@ -168,18 +509,36 @@ impl WebSocketTransport {
 
         let transport = WebSocketTransport {
             inner: Arc::new(WebSocketTransportInner {
-                listener: Arc::new(listener),
+                local_addr,
                 secure,
                 connections: Mutex::new(HashMap::new()),
-                active_peers: RwLock::new(HashSet::new()),
+                next_connection_generation: AtomicU64::new(1),
                 closed: AtomicBool::new(false),
+                close_gate: Mutex::new(()),
                 events_tx: events_tx.clone(),
+                control_events_tx,
+                tasks: TransportTaskSet::new(),
+                handshake_admission,
+                lifecycle,
+                outbound_dials: OutboundDialCoordinator::new(
+                    handshake_admission.max_concurrent,
+                    lifecycle.max_pending_dials,
+                    lifecycle.failure_backoff,
+                ),
+                inbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                outbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                inbound_trust_context: next_trust_context(),
+                outbound_trust_context: next_trust_context(),
                 tls_connector,
             }),
         };
 
         #[cfg(feature = "ws")]
-        transport.spawn_accept_loop();
+        transport.spawn_accept_loop(Arc::new(listener)).await?;
 
         Ok((transport, events_rx))
     }
@@ -193,11 +552,24 @@ impl WebSocketTransport {
         cert_path: Option<&str>,
         key_path: Option<&str>,
         channel_capacity: Option<usize>,
+        handshake_admission: HandshakeAdmissionConfig,
+        control_events_tx: Option<mpsc::Sender<TransportEvent>>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let handshake_admission =
+            handshake_admission.validate(if secure { "WSS" } else { "WS" })?;
+        let lifecycle = ConnectionLifecycleConfig::from_handshake(handshake_admission);
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
+        let control_events_tx = control_events_tx.unwrap_or_else(|| events_tx.clone());
 
-        let listener = WebSocketListener::bind(addr, secure, cert_path, key_path).await?;
+        let listener = WebSocketListener::bind_with_handshake_config(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            handshake_admission,
+        )
+        .await?;
         let local_addr = listener.local_addr()?;
 
         info!(
@@ -208,234 +580,448 @@ impl WebSocketTransport {
 
         let transport = WebSocketTransport {
             inner: Arc::new(WebSocketTransportInner {
-                listener: Arc::new(listener),
+                local_addr,
                 secure,
                 connections: Mutex::new(HashMap::new()),
-                active_peers: RwLock::new(HashSet::new()),
+                next_connection_generation: AtomicU64::new(1),
                 closed: AtomicBool::new(false),
+                close_gate: Mutex::new(()),
                 events_tx: events_tx.clone(),
+                control_events_tx,
+                tasks: TransportTaskSet::new(),
+                handshake_admission,
+                lifecycle,
+                outbound_dials: OutboundDialCoordinator::new(
+                    handshake_admission.max_concurrent,
+                    lifecycle.max_pending_dials,
+                    lifecycle.failure_backoff,
+                ),
+                inbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                outbound_established: Arc::new(Semaphore::new(
+                    lifecycle.max_established_per_direction,
+                )),
+                inbound_trust_context: next_trust_context(),
+                outbound_trust_context: next_trust_context(),
             }),
         };
 
         #[cfg(feature = "ws")]
-        transport.spawn_accept_loop();
+        transport.spawn_accept_loop(Arc::new(listener)).await?;
 
         Ok((transport, events_rx))
     }
 
-    /// Spawns a task to accept incoming connections
+    /// Start the raw TCP accept supervisor. Handshake permits are acquired
+    /// before `accept`, so userspace never owns more unauthenticated sockets
+    /// than the configured limit. Each accepted socket then completes its WSS
+    /// TLS and HTTP upgrade concurrently under one end-to-end deadline.
     #[cfg(feature = "ws")]
-    fn spawn_accept_loop(&self) {
-        let transport = self.clone();
+    async fn spawn_accept_loop(&self, listener: Arc<WebSocketListener>) -> Result<()> {
+        let weak_inner = Arc::downgrade(&self.inner);
+        let weak_tasks = Arc::downgrade(&self.inner.tasks);
+        let admission = self.inner.handshake_admission;
+        let semaphore = Arc::new(Semaphore::new(admission.max_concurrent));
 
-        tokio::spawn(async move {
-            let inner = &transport.inner;
-            let listener_clone = inner.listener.clone();
-
-            while !inner.closed.load(Ordering::Relaxed) {
-                // Accept a new connection
-                match listener_clone.accept().await {
-                    Ok((connection, reader)) => {
-                        let peer_addr = connection.peer_addr();
-                        debug!("Accepted WebSocket connection from {}", peer_addr);
-
-                        // Store the connection in both the async pool and the
-                        // sync peer index so `has_connection_to()` can answer
-                        // without acquiring the async mutex.
-                        let connection_arc = Arc::new(connection);
-                        {
-                            let mut connections = inner.connections.lock().await;
-                            // Inbound (server-accepted) connections always
-                            // register under the default identity — the
-                            // server side doesn't select per-call.
-                            connections.insert((peer_addr, None), connection_arc.clone());
-                            inner.active_peers.write().unwrap().insert(peer_addr);
-                        }
-
-                        // Handle the connection
-                        transport
-                            .clone()
-                            .spawn_connection_reader(connection_arc, reader, None);
+        let accepted = self
+            .inner
+            .tasks
+            .spawn(async move {
+                loop {
+                    let permit = match semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    };
+                    let Some(inner) = weak_inner.upgrade() else {
+                        break;
+                    };
+                    if inner.closed.load(Ordering::Acquire) {
+                        break;
                     }
-                    Err(e) => {
-                        if inner.closed.load(Ordering::Relaxed) {
-                            break;
-                        }
+                    drop(inner);
 
-                        error!("Error accepting WebSocket connection: {}", e);
-                        let _ = inner
-                            .events_tx
-                            .send(TransportEvent::Error {
-                                error: format!("Accept error: {}", e),
-                            })
+                    let (stream, peer_addr) = match listener.accept_tcp().await {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            error!("Error accepting WebSocket TCP connection: {}", error);
+                            if let Some(inner) = weak_inner.upgrade() {
+                                let _ = send_control_event(
+                                    &inner.control_events_tx,
+                                    TransportEvent::Error {
+                                        error: format!("Accept error: {error}"),
+                                    },
+                                )
+                                .await;
+                            }
+                            drop(permit);
+                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
+
+                    let Some(tasks) = weak_tasks.upgrade() else {
+                        break;
+                    };
+                    let listener = listener.clone();
+                    let weak_inner_for_handshake = weak_inner.clone();
+                    let _ = tasks
+                        .spawn(async move {
+                            let deadline = tokio::time::Instant::now() + admission.timeout;
+                            let upgraded = tokio::time::timeout_at(
+                                deadline,
+                                listener.upgrade_tcp(stream, peer_addr),
+                            )
                             .await;
 
-                        // Brief pause to avoid tight accept loop on errors
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    }
-                }
-            }
+                            let (connection, reader) = match upgraded {
+                                Ok(Ok(upgraded)) => upgraded,
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        source = %peer_addr,
+                                        error_class = "websocket_handshake_failed",
+                                        "WebSocket handshake rejected"
+                                    );
+                                    if let Some(inner) = weak_inner_for_handshake.upgrade() {
+                                        let _ = send_control_event(
+                                            &inner.control_events_tx,
+                                            TransportEvent::Error {
+                                                error: format!(
+                                                    "WebSocket handshake failed: {error}"
+                                                ),
+                                            },
+                                        )
+                                        .await;
+                                    }
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        source = %peer_addr,
+                                        timeout_ms = admission.timeout.as_millis(),
+                                        "WebSocket handshake timed out"
+                                    );
+                                    return;
+                                }
+                            };
 
-            // Notify that the transport is closed
-            info!("WebSocket accept loop terminated");
-            let _ = inner.events_tx.send(TransportEvent::Closed).await;
-        });
+                            let Some(inner) = weak_inner_for_handshake.upgrade() else {
+                                let _ = connection.close().await;
+                                return;
+                            };
+                            if inner.closed.load(Ordering::Acquire) {
+                                drop(inner);
+                                let _ = connection.close().await;
+                                return;
+                            }
+
+                            let established_permit =
+                                match inner.inbound_established.clone().try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        drop(inner);
+                                        warn!(
+                                            source = %peer_addr,
+                                            "WebSocket established inbound connection limit reached"
+                                        );
+                                        let _ = connection.close().await;
+                                        return;
+                                    }
+                                };
+
+                            debug!("Accepted WebSocket connection from {}", peer_addr);
+                            let connection = Arc::new(connection);
+                            let generation = inner
+                                .next_connection_generation
+                                .fetch_add(1, Ordering::Relaxed);
+                            let flow_id = next_transport_flow_id();
+                            let key = WebSocketConnectionKey::inbound(
+                                peer_addr,
+                                inner.local_addr,
+                                inner.inbound_trust_context,
+                                inner.secure,
+                            );
+                            let lifecycle = inner.lifecycle;
+                            let mut connections =
+                                match tokio::time::timeout_at(deadline, inner.connections.lock())
+                                    .await
+                                {
+                                    Ok(connections) => connections,
+                                    Err(_) => {
+                                        let _ = connection.close().await;
+                                        warn!(
+                                            source = %peer_addr,
+                                            "WebSocket registration timed out"
+                                        );
+                                        return;
+                                    }
+                                };
+                            connections.insert(
+                                key.clone(),
+                                WebSocketConnectionRecord {
+                                    generation,
+                                    flow_id,
+                                    connection: connection.clone(),
+                                },
+                            );
+                            drop(connections);
+                            drop(permit);
+                            drop(inner);
+
+                            Self::run_connection_reader(
+                                weak_inner_for_handshake,
+                                connection,
+                                reader,
+                                generation,
+                                flow_id,
+                                key,
+                                lifecycle,
+                                established_permit,
+                            )
+                            .await;
+                        })
+                        .await;
+                }
+                info!("WebSocket accept loop terminated");
+            })
+            .await;
+
+        if accepted.is_none() {
+            return Err(Error::TransportClosed);
+        }
+        Ok(())
     }
 
-    /// Spawns a task to read messages from a connection
+    /// Read one established connection without retaining a strong reference to
+    /// the transport across socket waits. This avoids a task/transport ownership
+    /// cycle while still making every reader joinable by `close()`.
     #[cfg(feature = "ws")]
-    fn spawn_connection_reader(
-        &self,
+    async fn run_connection_reader(
+        weak_inner: Weak<WebSocketTransportInner>,
         connection: Arc<WebSocketConnection>,
         mut reader: futures_util::stream::SplitStream<
             tokio_tungstenite::WebSocketStream<SipWsStream>,
         >,
-        identity: Option<TlsClientConfig>,
+        generation: u64,
+        flow_id: TransportFlowId,
+        key: WebSocketConnectionKey,
+        lifecycle: ConnectionLifecycleConfig,
+        _established_permit: OwnedSemaphorePermit,
     ) {
-        let transport = self.clone();
         let peer_addr = connection.peer_addr();
+        let mut activity = connection.activity_receiver();
+        let mut writer_closed = connection.writer_closed_receiver();
+        let established_at = tokio::time::Instant::now();
 
-        tokio::spawn(async move {
-            let inner = &transport.inner;
+        loop {
+            let Some(inner) = weak_inner.upgrade() else {
+                break;
+            };
+            if inner.closed.load(Ordering::Acquire)
+                || connection.is_closed()
+                || *writer_closed.borrow()
+            {
+                break;
+            }
+            drop(inner);
 
-            while !inner.closed.load(Ordering::Relaxed) && !connection.is_closed() {
-                // Read the next WebSocket message
-                let ws_message = match reader.next().await {
-                    Some(Ok(msg)) => msg,
-                    Some(Err(e)) => {
-                        // Distinguish "peer disconnected" from a real
-                        // protocol fault. RFC 6455 §5.5.1 says peers
-                        // SHOULD send a Close frame, but in practice
-                        // browsers, mobile networks, and load
-                        // balancers routinely just drop the socket.
-                        // tokio-tungstenite surfaces those as
-                        // `ConnectionClosed`, `AlreadyClosed`, or an
-                        // I/O error with `UnexpectedEof` /
-                        // `ConnectionReset` / `BrokenPipe`. None of
-                        // those should fire `TransportEvent::Error` or
-                        // log at ERROR — they're the normal disconnect
-                        // path. Anything else (`Protocol`, `Utf8`,
-                        // bad frame, etc.) is a real fault.
-                        let is_normal_close = match &e {
-                            tungstenite::Error::ConnectionClosed
-                            | tungstenite::Error::AlreadyClosed => true,
-                            tungstenite::Error::Io(io_err) => matches!(
-                                io_err.kind(),
-                                io::ErrorKind::UnexpectedEof
-                                    | io::ErrorKind::ConnectionReset
-                                    | io::ErrorKind::BrokenPipe
-                            ),
-                            _ => false,
-                        };
+            let deadline = lifecycle.next_deadline(*activity.borrow(), established_at);
+            let next_message = tokio::select! {
+                message = reader.next() => Some(message),
+                changed = activity.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    None
+                }
+                _ = writer_closed.changed() => break,
+                _ = tokio::time::sleep_until(deadline) => {
+                    debug!(destination = %peer_addr, "WebSocket connection lifecycle deadline reached");
+                    break;
+                }
+            };
+            let Some(next_message) = next_message else {
+                continue;
+            };
+            // Read the next WebSocket message
+            let ws_message = match next_message {
+                Some(Ok(msg)) => msg,
+                Some(Err(e)) => {
+                    // Distinguish "peer disconnected" from a real
+                    // protocol fault. RFC 6455 §5.5.1 says peers
+                    // SHOULD send a Close frame, but in practice
+                    // browsers, mobile networks, and load
+                    // balancers routinely just drop the socket.
+                    // tokio-tungstenite surfaces those as
+                    // `ConnectionClosed`, `AlreadyClosed`, or an
+                    // I/O error with `UnexpectedEof` /
+                    // `ConnectionReset` / `BrokenPipe`. None of
+                    // those should fire `TransportEvent::Error` or
+                    // log at ERROR — they're the normal disconnect
+                    // path. Anything else (`Protocol`, `Utf8`,
+                    // bad frame, etc.) is a real fault.
+                    let is_normal_close = match &e {
+                        tungstenite::Error::ConnectionClosed
+                        | tungstenite::Error::AlreadyClosed => true,
+                        tungstenite::Error::Io(io_err) => matches!(
+                            io_err.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ),
+                        _ => false,
+                    };
 
-                        if is_normal_close {
-                            debug!(
-                                "WebSocket connection from {} closed by peer: {}",
-                                peer_addr, e
-                            );
-                        } else {
-                            error!(
-                                "Error reading from WebSocket connection {}: {}",
-                                peer_addr, e
-                            );
-                            let _ = inner
-                                .events_tx
-                                .send(TransportEvent::Error {
+                    if is_normal_close {
+                        debug!(
+                            "WebSocket connection from {} closed by peer: {}",
+                            peer_addr, e
+                        );
+                    } else {
+                        error!(
+                            "Error reading from WebSocket connection {}: {}",
+                            peer_addr, e
+                        );
+                        if let Some(inner) = weak_inner.upgrade() {
+                            let _ = send_control_event(
+                                &inner.control_events_tx,
+                                TransportEvent::Error {
                                     error: format!(
                                         "WebSocket read error from {}: {}",
                                         peer_addr, e
                                     ),
-                                })
-                                .await;
+                                },
+                            )
+                            .await;
                         }
+                    }
 
+                    break;
+                }
+                None => {
+                    // End of stream
+                    debug!("WebSocket connection from {} closed by peer", peer_addr);
+                    break;
+                }
+            };
+
+            let is_keepalive_pong = matches!(&ws_message, tungstenite::Message::Pong(_));
+
+            // Process the WebSocket message
+            match connection.process_ws_message(ws_message) {
+                Ok(Some((sip_message, raw_bytes))) => {
+                    debug!("Received SIP message from {}", peer_addr);
+
+                    let Some(inner) = weak_inner.upgrade() else {
+                        break;
+                    };
+                    if inner.closed.load(Ordering::Acquire) {
                         break;
                     }
-                    None => {
-                        // End of stream
-                        debug!("WebSocket connection from {} closed by peer", peer_addr);
+
+                    // Send the event
+                    let event = TransportEvent::MessageReceived {
+                        message: sip_message,
+                        source: peer_addr,
+                        destination: inner.local_addr,
+                        transport_type: if inner.secure {
+                            TransportType::Wss
+                        } else {
+                            TransportType::Ws
+                        },
+                        flow_id: Some(flow_id),
+                        raw_bytes: Some(raw_bytes),
+                        timing: None,
+                        connection_metadata: connection.connection_metadata().cloned(),
+                    };
+
+                    if let Err(e) = inner.events_tx.try_send(event) {
+                        warn!(
+                            source = %peer_addr,
+                            error = %e,
+                            "WebSocket event queue unavailable; closing flow instead of blocking lifecycle cleanup"
+                        );
                         break;
                     }
-                };
-
-                // Process the WebSocket message
-                match connection.process_ws_message(ws_message) {
-                    Ok(Some((sip_message, raw_bytes))) => {
-                        debug!("Received SIP message from {}", peer_addr);
-
-                        // Get local address (for consistency with other transports)
-                        let local_addr = match inner.listener.local_addr() {
-                            Ok(addr) => addr,
-                            Err(e) => {
-                                error!("Failed to get local address: {}", e);
-                                continue;
-                            }
+                }
+                Ok(None) => {
+                    if is_keepalive_pong {
+                        let Some(inner) = weak_inner.upgrade() else {
+                            break;
                         };
-
-                        // Send the event
-                        let event = TransportEvent::MessageReceived {
-                            message: sip_message,
-                            source: peer_addr,
-                            destination: local_addr,
-                            transport_type: if inner.secure {
-                                TransportType::Wss
-                            } else {
-                                TransportType::Ws
+                        if !send_control_event(
+                            &inner.control_events_tx,
+                            TransportEvent::KeepAlivePongReceived {
+                                source: peer_addr,
+                                destination: inner.local_addr,
+                                flow_id: Some(flow_id),
                             },
-                            raw_bytes: Some(raw_bytes),
-                            timing: None,
-                        };
-
-                        if let Err(e) = inner.events_tx.send(event).await {
-                            error!("Error sending event: {}", e);
+                        )
+                        .await
+                        {
                             break;
                         }
                     }
-                    Ok(None) => {
-                        // Control message like ping/pong/close, already handled
-                        continue;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Error processing WebSocket message from {}: {}",
-                            peer_addr, e
-                        );
+                    // Other control messages are handled by tungstenite or
+                    // the connection lifecycle.
+                    continue;
+                }
+                Err(e) => {
+                    warn!(
+                        "Error processing WebSocket message from {}: {}",
+                        peer_addr, e
+                    );
 
-                        let _ = inner
-                            .events_tx
-                            .send(TransportEvent::Error {
+                    if let Some(inner) = weak_inner.upgrade() {
+                        let _ = send_control_event(
+                            &inner.control_events_tx,
+                            TransportEvent::Error {
                                 error: format!("WebSocket message processing error: {}", e),
-                            })
-                            .await;
+                            },
+                        )
+                        .await;
                     }
                 }
             }
+        }
 
-            // Connection closed — remove from both the async pool and the
-            // sync peer index so `has_connection_to()` immediately returns
-            // false for this address.
-            {
+        if let Some(inner) = weak_inner.upgrade() {
+            let removed = {
                 let mut connections = inner.connections.lock().await;
-                connections.remove(&(peer_addr, identity));
-                // Only clear the sync `active_peers` entry once no
-                // connection (under any identity) to this address
-                // remains — a different identity's connection to the
-                // same address may still be live.
-                let any_left = connections.keys().any(|(addr, _)| *addr == peer_addr);
-                if !any_left {
-                    inner.active_peers.write().unwrap().remove(&peer_addr);
+                if connections
+                    .get(&key)
+                    .is_some_and(|record| record.generation == generation)
+                {
+                    connections.remove(&key);
+                    true
+                } else {
+                    false
                 }
+            };
+            if removed {
+                let _ = send_control_event(
+                    &inner.control_events_tx,
+                    TransportEvent::ConnectionClosed {
+                        remote_addr: peer_addr,
+                        transport_type: if inner.secure {
+                            TransportType::Wss
+                        } else {
+                            TransportType::Ws
+                        },
+                        flow_id: Some(flow_id),
+                    },
+                )
+                .await;
             }
+        }
 
-            // Ensure the connection is closed
-            if !connection.is_closed() {
-                if let Err(e) = connection.close().await {
-                    error!("Error closing WebSocket connection to {}: {}", peer_addr, e);
-                }
+        if !connection.is_closed() {
+            if let Err(e) = connection.close().await {
+                error!("Error closing WebSocket connection to {}: {}", peer_addr, e);
             }
+        }
 
-            debug!("WebSocket connection reader for {} terminated", peer_addr);
-        });
+        debug!("WebSocket connection reader for {} terminated", peer_addr);
     }
 
     /// Connect to a remote WebSocket server.
@@ -449,200 +1035,413 @@ impl WebSocketTransport {
     ///    leaves the connector unset and WSS dials error with
     ///    `NotImplemented`; use [`Self::bind_with_client_tls`].
     /// 3. Build a WS handshake request with
-    ///    `Sec-WebSocket-Protocol: sip` (or `sips` for WSS) per
-    ///    RFC 7118 §4.5.
+    ///    `Sec-WebSocket-Protocol: sip` for both WS and WSS per RFC 7118
+    ///    §4.5.
     /// 4. Call `tokio_tungstenite::client_async` to negotiate the
     ///    WS upgrade on the established stream (plain TCP or TLS).
     /// 5. Register the resulting connection in the pool and spawn
     ///    its reader so inbound messages from the server reach
     ///    `TransportEvent::MessageReceived`.
     ///
-    /// Idempotent: a second call for the same `addr` returns the
-    /// existing connection if it's still open.
-    ///
-    /// `server_name_hint` is the SNI override for the WSS handshake.
-    /// When `None`, falls back to `ip_to_server_name(addr)` (loopback
-    /// → `"localhost"`, otherwise an IP-typed `ServerName`). Callers
-    /// with a known DNS hostname (the URI's host) should pass it
-    /// through so production CA-validated WSS handshakes resolve
-    /// correctly. The plain-WS path ignores this argument.
+    /// Idempotent only for the complete pool identity: remote address,
+    /// normalized HTTP/TLS authority, direction, security mode, and trust
+    /// context. WSS derives both `Host` and SNI from that one authority, so a
+    /// connection authenticated for one virtual host is never reused for a
+    /// different virtual host on the same address.
     #[cfg(feature = "ws")]
     async fn connect_to(
         &self,
         addr: SocketAddr,
-        #[cfg(feature = "wss")] server_name_hint: Option<
-            tokio_rustls::rustls::pki_types::ServerName<'static>,
-        >,
-        #[cfg(not(feature = "wss"))] _server_name_hint: (),
-        identity: Option<TlsClientConfig>,
+        authority: WebSocketAuthority,
     ) -> Result<Arc<WebSocketConnection>> {
-        // Check if we already have an open connection under this exact
-        // (address, identity) pair. A connection dialed under a
-        // different identity to the same address is a different pool
-        // entry and must not be reused here.
+        let deadline = tokio::time::Instant::now() + self.inner.handshake_admission.timeout;
+        let key = WebSocketConnectionKey::outbound(
+            addr,
+            authority.clone(),
+            self.inner.outbound_trust_context,
+            self.inner.secure,
+        );
         {
-            let connections = self.inner.connections.lock().await;
-            if let Some(conn) = connections.get(&(addr, identity.clone())) {
-                if !conn.is_closed() {
-                    return Ok(conn.clone());
-                }
+            let mut connections = tokio::time::timeout_at(deadline, self.inner.connections.lock())
+                .await
+                .map_err(|_| Error::ConnectionTimeout(addr))?;
+            if connections
+                .get(&key)
+                .is_some_and(|record| !record.connection.is_closed())
+            {
+                return Ok(connections[&key].connection.clone());
             }
+            connections.remove(&key);
         }
 
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-
-        // Pre-flight: for WSS dials, a `TlsConnector` must be available
-        // — either the transport's baked-in default (configured at bind
-        // time via `bind_with_client_tls`) or a per-call `identity`
-        // override. Surface this BEFORE opening TCP so the failure mode
-        // is obvious and doesn't depend on whether the destination is
+        // Pre-flight: for WSS dials, the TlsConnector must have been
+        // configured at bind time (via `bind_with_client_tls`).
+        // Surface this BEFORE opening TCP so the failure mode is
+        // obvious and doesn't depend on whether the destination is
         // listening.
         #[cfg(feature = "wss")]
-        if self.inner.secure && self.inner.tls_connector.is_none() && identity.is_none() {
+        if self.inner.secure && self.inner.tls_connector.is_none() {
             return Err(Error::NotImplemented(
                 "WSS client requires TlsClientConfig — use \
-                 WebSocketTransport::bind_with_client_tls or a per-call identity override"
+                 WebSocketTransport::bind_with_client_tls"
                     .into(),
             ));
         }
 
-        // Step 1 — open TCP. The destination IP/port were resolved
-        // by the upper layer; we don't do DNS here.
-        let tcp_stream = tokio::net::TcpStream::connect(addr)
-            .await
-            .map_err(|e| Error::ConnectFailed(addr, e))?;
+        let inner = self.inner.clone();
+        let managed_tasks = self.inner.tasks.clone();
+        let coordinator = self.inner.outbound_dials.clone();
 
-        // Step 2 — when `secure=true`, run the rustls handshake on
-        // the TCP stream BEFORE the WS upgrade (RFC 7118 §3 — wss is
-        // WS-over-TLS). The connector was built once at bind time
-        // from the supplied `TlsClientConfig`.
-        let (stream, subprotocol_advertised, url_scheme): (
-            SipWsStream,
-            &'static str,
-            &'static str,
-        ) = if self.inner.secure {
-            #[cfg(feature = "wss")]
-            {
-                // A per-call identity override builds an ad-hoc
-                // connector from that `TlsClientConfig`; otherwise reuse
-                // the transport's baked-in default connector (unchanged
-                // behavior).
-                let ad_hoc_connector = match &identity {
-                    Some(cfg) => Some(TlsConnector::from(std::sync::Arc::new(
-                        crate::transport::tls::build_client_config(cfg)?,
-                    ))),
-                    None => None,
-                };
-                let connector = ad_hoc_connector.as_ref().unwrap_or_else(|| {
-                    self.inner
-                        .tls_connector
-                        .as_ref()
-                        .expect("pre-flight guarantees tls_connector is Some when secure and no identity override")
-                });
-                let server_name = server_name_hint
-                    .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
-                let tls_stream = connector
-                    .connect(server_name, tcp_stream)
+        match coordinator.begin(key.clone())? {
+            DialAdmission::Follower { outcome, .. } => {
+                OutboundDialCoordinator::<WebSocketConnectionKey>::wait(outcome, deadline, addr)
+                    .await?;
+                tokio::time::timeout_at(deadline, self.inner.connections.lock())
                     .await
-                    .map_err(|e| {
-                        Error::TlsHandshakeFailed(format!(
-                            "WSS client handshake with {}: {}",
-                            addr, e
-                        ))
-                    })?;
-                (
-                    SipWsStream::ClientTls(tls_stream),
-                    SIP_WSS_SUBPROTOCOL,
-                    "wss",
-                )
+                    .map_err(|_| Error::ConnectionTimeout(addr))?
+                    .get(&key)
+                    .filter(|record| !record.connection.is_closed())
+                    .map(|record| record.connection.clone())
+                    .ok_or(Error::TransportClosed)
             }
-            #[cfg(not(feature = "wss"))]
-            {
-                return Err(Error::NotImplemented(
-                    "WSS client requires the `wss` cargo feature (rustls plumbing)".into(),
-                ));
+            DialAdmission::Leader {
+                key,
+                flight,
+                _pending,
+                cancellation,
+            } => {
+                let coordinator_for_task = coordinator.clone();
+                let pending_permit = _pending;
+                managed_tasks
+                    .run(async move {
+                        let mut cancellation = cancellation;
+                        let _pending_permit = pending_permit;
+                        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+                        let result = async {
+                            let _handshake = coordinator_for_task
+                                .acquire_handshake(deadline, addr)
+                                .await?;
+                            {
+                                let mut connections = tokio::time::timeout_at(
+                                    deadline,
+                                    inner.connections.lock(),
+                                )
+                                .await
+                                .map_err(|_| Error::ConnectionTimeout(addr))?;
+                                if let Some(record) = connections.get(&key) {
+                                    if !record.connection.is_closed() {
+                                        return Ok(record.connection.clone());
+                                    }
+                                }
+                                connections.remove(&key);
+                            }
+                            let established_permit = inner
+                                .outbound_established
+                                .clone()
+                                .try_acquire_owned()
+                                .map_err(|_| Error::ConnectionPoolExhausted)?;
+
+                            let (ws_stream, selected_subprotocol) =
+                                tokio::time::timeout_at(deadline, async {
+                                    let tcp_stream = tokio::net::TcpStream::connect(addr)
+                                        .await
+                                        .map_err(|e| Error::ConnectFailed(addr, e))?;
+
+                                    let (stream, subprotocol_advertised, url_scheme): (
+                                        SipWsStream,
+                                        &'static str,
+                                        &'static str,
+                                    ) = if inner.secure {
+                                        #[cfg(feature = "wss")]
+                                        {
+                                            let connector = inner.tls_connector.as_ref().expect(
+                                                "pre-flight guarantees configured WSS connector",
+                                            );
+                                            let server_name = authority.server_name()?;
+                                            let tls_stream = connector
+                                                .connect(server_name, tcp_stream)
+                                                .await
+                                                .map_err(|error| {
+                                                    crate::transport::tls::classify_tls_runtime_error(
+                                                        error,
+                                                        format!(
+                                                            "WSS client TLS handshake failed for {addr}"
+                                                        ),
+                                                    )
+                                                })?;
+                                            (
+                                                SipWsStream::ClientTls(tls_stream),
+                                                SIP_WS_SUBPROTOCOL,
+                                                "wss",
+                                            )
+                                        }
+                                        #[cfg(not(feature = "wss"))]
+                                        {
+                                            return Err(Error::NotImplemented(
+                                                "WSS client requires the `wss` cargo feature"
+                                                    .into(),
+                                            ));
+                                        }
+                                    } else {
+                                        (
+                                            SipWsStream::Plain(tcp_stream),
+                                            SIP_WS_SUBPROTOCOL,
+                                            "ws",
+                                        )
+                                    };
+
+                                    // HTTP Host and TLS SNI are derived from
+                                    // the same normalized authority.
+                                    let url = format!(
+                                        "{}://{}/",
+                                        url_scheme,
+                                        authority.http_authority()
+                                    );
+                                    let mut request =
+                                        url.into_client_request().map_err(|_error| {
+                                            Error::WebSocketHandshakeFailed(format!(
+                                                "WebSocket client request construction failed for {addr}"
+                                            ))
+                                        })?;
+                                    request.headers_mut().insert(
+                                        "Sec-WebSocket-Protocol",
+                                        http::HeaderValue::from_static(subprotocol_advertised),
+                                    );
+                                    let (ws_stream, response) =
+                                        tokio_tungstenite::client_async_with_config(
+                                            request,
+                                            stream,
+                                            Some(connection::sip_websocket_config()),
+                                        )
+                                        .await
+                                        .map_err(|_error| {
+                                            Error::WebSocketHandshakeFailed(format!(
+                                                "WebSocket client handshake failed for {addr}"
+                                            ))
+                                        })?;
+                                    let selected = response
+                                        .headers()
+                                        .get("Sec-WebSocket-Protocol")
+                                        .and_then(|value| value.to_str().ok());
+                                    if !selected_subprotocol_is_exact(
+                                        selected,
+                                        subprotocol_advertised,
+                                    ) {
+                                        return Err(Error::WebSocketHandshakeFailed(format!(
+                                            "WebSocket peer did not negotiate required subprotocol for {addr}"
+                                        )));
+                                    }
+                                    Ok::<_, Error>((
+                                        ws_stream,
+                                        subprotocol_advertised.to_string(),
+                                    ))
+                                })
+                                .await
+                                .map_err(|_| Error::ConnectionTimeout(addr))??;
+
+                            let (ws_writer, ws_reader) = ws_stream.split();
+                            let connection_arc = Arc::new(
+                                WebSocketConnection::from_writer_with_runtime(
+                                    ws_writer,
+                                    addr,
+                                    inner.secure,
+                                    selected_subprotocol,
+                                    None,
+                                    inner.lifecycle.writer_queue_capacity,
+                                    inner.lifecycle.write_timeout,
+                                ),
+                            );
+                            if inner.closed.load(Ordering::Acquire) {
+                                let _ = connection_arc.close().await;
+                                return Err(Error::TransportClosed);
+                            }
+
+                            let generation = inner
+                                .next_connection_generation
+                                .fetch_add(1, Ordering::Relaxed);
+                            let flow_id = next_transport_flow_id();
+                            let weak_inner = Arc::downgrade(&inner);
+                            let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                            let reader_connection = connection_arc.clone();
+                            let reader_key = key.clone();
+                            let lifecycle = inner.lifecycle;
+                            let reader_task = tokio::time::timeout_at(
+                                deadline,
+                                inner.tasks.spawn(async move {
+                                    if start_rx.await.is_ok() {
+                                        Self::run_connection_reader(
+                                            weak_inner,
+                                            reader_connection,
+                                            ws_reader,
+                                            generation,
+                                            flow_id,
+                                            reader_key,
+                                            lifecycle,
+                                            established_permit,
+                                        )
+                                        .await;
+                                    }
+                                }),
+                            )
+                            .await
+                            .map_err(|_| Error::ConnectionTimeout(addr))?
+                            .ok_or(Error::TransportClosed)?;
+
+                            let mut connections = match tokio::time::timeout_at(
+                                deadline,
+                                inner.connections.lock(),
+                            )
+                            .await
+                            {
+                                Ok(connections) => connections,
+                                Err(_) => {
+                                    reader_task.abort();
+                                    let _ = connection_arc.close().await;
+                                    return Err(Error::ConnectionTimeout(addr));
+                                }
+                            };
+                            connections.insert(
+                                key.clone(),
+                                WebSocketConnectionRecord {
+                                    generation,
+                                    flow_id,
+                                    connection: connection_arc.clone(),
+                                },
+                            );
+                            drop(connections);
+                            if start_tx.send(()).is_err() {
+                                reader_task.abort();
+                                let mut connections = inner.connections.lock().await;
+                                if connections
+                                    .get(&key)
+                                    .is_some_and(|record| record.generation == generation)
+                                {
+                                    connections.remove(&key);
+                                }
+                                drop(connections);
+                                let _ = connection_arc.close().await;
+                                return Err(Error::TransportClosed);
+                            }
+
+                            debug!(
+                                "WebSocket client connected to {} (subprotocol={})",
+                                addr,
+                                connection_arc.subprotocol()
+                            );
+                            Ok(connection_arc)
+                        }
+                        .await;
+                        coordinator_for_task.complete(
+                            &key,
+                            &flight,
+                            &result,
+                            &mut cancellation,
+                        );
+                        result
+                    })
+                    .await
             }
-        } else {
-            (SipWsStream::Plain(tcp_stream), SIP_WS_SUBPROTOCOL, "ws")
-        };
-
-        // Step 3 — build the WS handshake URL + subprotocol header.
-        // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
-        // `sips` for wss://.
-        let url = format!("{}://{}/", url_scheme, addr);
-        let mut request = url
-            .into_client_request()
-            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
-        request.headers_mut().insert(
-            "Sec-WebSocket-Protocol",
-            http::HeaderValue::from_static(subprotocol_advertised),
-        );
-
-        // Step 4 — run the WS upgrade on whichever stream variant we
-        // ended up with (Plain or ClientTls — they both implement
-        // AsyncRead+AsyncWrite via SipWsStream).
-        let (ws_stream, response) = tokio_tungstenite::client_async(request, stream)
-            .await
-            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
-
-        // Capture the server's selected subprotocol so the connection
-        // wrapper carries the negotiated value (mirrors what the
-        // listener path does).
-        let selected_subprotocol = response
-            .headers()
-            .get("Sec-WebSocket-Protocol")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .unwrap_or_else(|| subprotocol_advertised.to_string());
-
-        let (ws_writer, ws_reader) = ws_stream.split();
-
-        let connection = WebSocketConnection::from_writer(
-            ws_writer,
-            addr,
-            self.inner.secure,
-            selected_subprotocol,
-        );
-        let connection_arc = Arc::new(connection);
-
-        // Register in both the async pool and the sync peer index.
-        {
-            let mut connections = self.inner.connections.lock().await;
-            connections.insert((addr, identity.clone()), connection_arc.clone());
-            self.inner.active_peers.write().unwrap().insert(addr);
         }
-
-        // Spawn the reader so server-pushed responses (typical SIP
-        // case — UAS replies on the same WS the UAC opened) reach
-        // TransportEvent::MessageReceived.
-        self.clone()
-            .spawn_connection_reader(connection_arc.clone(), ws_reader, identity);
-
-        debug!(
-            "WebSocket client connected to {} (subprotocol={})",
-            addr,
-            connection_arc.subprotocol()
-        );
-
-        Ok(connection_arc)
     }
 }
 
 #[async_trait::async_trait]
 impl Transport for WebSocketTransport {
     fn local_addr(&self) -> Result<SocketAddr> {
-        self.inner.listener.local_addr()
+        Ok(self.inner.local_addr)
     }
 
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
+        let route = match &message {
+            Message::Request(request) => TransportRoute::new(destination)
+                .with_transport_type(if self.inner.secure {
+                    TransportType::Wss
+                } else {
+                    TransportType::Ws
+                })
+                .with_authority(transport_authority_for_request(request)?),
+            Message::Response(_) => {
+                TransportRoute::new(destination).with_transport_type(if self.inner.secure {
+                    TransportType::Wss
+                } else {
+                    TransportType::Ws
+                })
+            }
+        };
+        self.send_message_via(message, route).await
+    }
+
+    async fn send_message_via(&self, message: Message, route: TransportRoute) -> Result<()> {
+        self.send_message_on_route(message, route).await.map(|_| ())
+    }
+
+    async fn prepare_message_route(
+        &self,
+        message: &Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        validate_typed_outbound_message(message)?;
+        route.transport_type = Some(if self.inner.secure {
+            TransportType::Wss
+        } else {
+            TransportType::Ws
+        });
+        if route.flow_id.is_some() {
+            route.flow_id = self.resolve_flow_id_for_route(&route).await;
+            return route.flow_id.map(|_| route).ok_or(Error::TransportClosed);
+        }
+        if matches!(message, Message::Response(_)) {
+            return Err(Error::InvalidState(
+                "WebSocket responses require the exact ingress flow".into(),
+            ));
+        }
+
+        #[cfg(feature = "ws")]
+        {
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "outbound WebSocket requests require a next-hop authority".into(),
+                )
+            })?;
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let connection = self.connect_to(route.destination, authority).await?;
+            route.flow_id = self
+                .inner
+                .connections
+                .lock()
+                .await
+                .values()
+                .find(|record| Arc::ptr_eq(&record.connection, &connection))
+                .map(|record| record.flow_id);
+            route.flow_id.map(|_| route).ok_or(Error::TransportClosed)
+        }
+
+        #[cfg(not(feature = "ws"))]
+        Err(Error::NotImplemented(
+            "WebSocket transport not implemented".into(),
+        ))
+    }
+
+    async fn send_message_on_route(
+        &self,
+        message: Message,
+        mut route: TransportRoute,
+    ) -> Result<TransportRoute> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        validate_typed_outbound_message(&message)?;
+
+        let destination = route.destination;
 
         debug!(
             "Sending {} message to {}",
             if let Message::Request(ref req) = message {
-                format!("{}", req.method)
+                safe_method_label(&req.method).to_string()
             } else {
                 "response".to_string()
             },
@@ -651,23 +1450,49 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            // For WSS, derive SNI from the request's next-hop URI
-            // host so production CA-validated handshakes resolve.
-            // Mirrors the TLS transport's `tls_server_name_for_message`
-            // pattern. Plain WS ignores this.
-            #[cfg(feature = "wss")]
-            let server_name = if self.inner.secure {
-                crate::transport::tls::tls_server_name_for_message(&message, destination)
+            if route.flow_id.is_some() {
+                let connection = {
+                    let connections = self.inner.connections.lock().await;
+                    select_websocket_flow(&connections, &route)
+                }
+                .ok_or_else(|| {
+                    Error::InvalidState(format!(
+                        "WebSocket flow is no longer active for {destination}"
+                    ))
+                })?;
+                connection.send_message(&message).await?;
+                return Ok(route);
+            }
+
+            if matches!(message, Message::Response(_)) {
+                return Err(Error::InvalidState(
+                    "WebSocket responses require the exact ingress flow".into(),
+                ));
+            }
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "outbound WebSocket requests require a next-hop authority".into(),
+                )
+            })?;
+            let authority = WebSocketAuthority::from_transport(authority, destination.port());
+            let connection = self.connect_to(destination, authority).await?;
+            let flow_id = self
+                .inner
+                .connections
+                .lock()
+                .await
+                .values()
+                .find(|record| Arc::ptr_eq(&record.connection, &connection))
+                .map(|record| record.flow_id)
+                .ok_or(Error::TransportClosed)?;
+            connection.send_message(&message).await?;
+            route.transport_type = Some(if self.inner.secure {
+                TransportType::Wss
             } else {
-                None
-            };
-            #[cfg(not(feature = "wss"))]
-            let server_name = ();
-
-            let connection = self.connect_to(destination, server_name, None).await?;
-
-            // Send the message
-            connection.send_message(&message).await
+                TransportType::Ws
+            });
+            route.flow_id = Some(flow_id);
+            Ok(route)
         }
 
         #[cfg(not(feature = "ws"))]
@@ -677,9 +1502,15 @@ impl Transport for WebSocketTransport {
     }
 
     async fn send_message_raw(&self, bytes: bytes::Bytes, destination: SocketAddr) -> Result<()> {
+        self.send_message_raw_via(bytes, TransportRoute::new(destination))
+            .await
+    }
+
+    async fn send_message_raw_via(&self, bytes: bytes::Bytes, route: TransportRoute) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
+        let destination = route.destination;
         debug!(
             "WS: sending {} pre-built bytes to {}",
             bytes.len(),
@@ -688,16 +1519,30 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            // Raw-bytes send doesn't have a parsed message to derive
-            // SNI from. Fall back to IP-derived ServerName.
-            #[cfg(feature = "wss")]
-            let server_name: Option<
-                tokio_rustls::rustls::pki_types::ServerName<'static>,
-            > = None;
-            #[cfg(not(feature = "wss"))]
-            let server_name = ();
+            if route.flow_id.is_some() {
+                let connection = {
+                    let connections = self.inner.connections.lock().await;
+                    select_websocket_flow(&connections, &route)
+                }
+                .ok_or_else(|| {
+                    Error::InvalidState(format!(
+                        "WebSocket flow is no longer active for {destination}"
+                    ))
+                })?;
+                return connection.send_raw_bytes(bytes).await;
+            }
 
-            let connection = self.connect_to(destination, server_name, None).await?;
+            let authority = route.authority.as_ref().ok_or_else(|| {
+                Error::InvalidState(
+                    "raw WebSocket SIP sends require an authority or exact flow".into(),
+                )
+            })?;
+            let connection = self
+                .connect_to(
+                    destination,
+                    WebSocketAuthority::from_transport(authority, destination.port()),
+                )
+                .await?;
             connection.send_raw_bytes(bytes).await
         }
 
@@ -707,75 +1552,109 @@ impl Transport for WebSocketTransport {
         ))
     }
 
-    async fn send_message_with_tls_identity(
-        &self,
-        message: Message,
-        destination: SocketAddr,
-        identity: Option<&OutboundTlsConfig>,
-    ) -> Result<()> {
-        let Some(identity) = identity else {
-            return self.send_message(message, destination).await;
-        };
+    fn flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.inner.connections.try_lock().ok()?;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.connection.is_closed()
+                })
+                .then_some(flow_id);
+        }
 
+        if let Some(authority) = &route.authority {
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let key = WebSocketConnectionKey::outbound(
+                route.destination,
+                authority,
+                self.inner.outbound_trust_context,
+                self.inner.secure,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.connection.is_closed())
+                .map(|record| record.flow_id);
+        }
+
+        let mut matches = connections.iter().filter_map(|(key, record)| {
+            (key.remote_addr == route.destination && !record.connection.is_closed())
+                .then_some(record.flow_id)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    async fn resolve_flow_id_for_route(&self, route: &TransportRoute) -> Option<TransportFlowId> {
+        let connections = self.inner.connections.lock().await;
+        if let Some(flow_id) = route.flow_id {
+            return connections
+                .iter()
+                .any(|(key, record)| {
+                    key.remote_addr == route.destination
+                        && record.flow_id == flow_id
+                        && !record.connection.is_closed()
+                })
+                .then_some(flow_id);
+        }
+
+        if let Some(authority) = &route.authority {
+            let authority = WebSocketAuthority::from_transport(authority, route.destination.port());
+            let key = WebSocketConnectionKey::outbound(
+                route.destination,
+                authority,
+                self.inner.outbound_trust_context,
+                self.inner.secure,
+            );
+            return connections
+                .get(&key)
+                .filter(|record| !record.connection.is_closed())
+                .map(|record| record.flow_id);
+        }
+
+        let mut matches = connections.iter().filter_map(|(key, record)| {
+            (key.remote_addr == route.destination && !record.connection.is_closed())
+                .then_some(record.flow_id)
+        });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
+    }
+
+    async fn send_raw(&self, destination: SocketAddr, data: bytes::Bytes) -> Result<()> {
+        self.send_raw_via(TransportRoute::new(destination), data)
+            .await
+    }
+
+    async fn send_raw_via(&self, route: TransportRoute, data: bytes::Bytes) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-
-        #[cfg(feature = "ws")]
-        {
-            #[cfg(feature = "wss")]
-            let server_name_hint = match &identity.server_name {
-                Some(name) => Some(
-                    tokio_rustls::rustls::pki_types::ServerName::try_from(name.clone()).map_err(
-                        |e| {
-                            Error::TlsHandshakeFailed(format!(
-                                "invalid per-call SNI server_name {:?}: {}",
-                                name, e
-                            ))
-                        },
-                    )?,
-                ),
-                None => {
-                    if self.inner.secure {
-                        crate::transport::tls::tls_server_name_for_message(&message, destination)
-                    } else {
-                        None
-                    }
-                }
-            };
-            #[cfg(not(feature = "wss"))]
-            let server_name_hint = ();
-
-            let connection = self
-                .connect_to(destination, server_name_hint, Some(identity.client.clone()))
-                .await?;
-            connection.send_message(&message).await
+        if data.as_ref() != b"\r\n\r\n" {
+            return Err(Error::NotImplemented(
+                "WebSocket raw flow sends support only the RFC 5626 keepalive ping mapping".into(),
+            ));
         }
-
-        #[cfg(not(feature = "ws"))]
-        Err(Error::NotImplemented(
-            "WebSocket transport not implemented".into(),
-        ))
+        let connection = {
+            let connections = self.inner.connections.lock().await;
+            select_websocket_flow(&connections, &route)
+        }
+        .ok_or_else(|| {
+            Error::InvalidState(format!(
+                "exact WebSocket flow is required for raw send to {}",
+                route.destination
+            ))
+        })?;
+        connection.send_keepalive_ping().await
     }
 
-    async fn close(&self) -> Result<()> {
-        // Set the closed flag to prevent new operations.
-        self.inner.closed.store(true, Ordering::Relaxed);
-
-        // Close all connections and clear both indexes.
-        let mut connections = self.inner.connections.lock().await;
-        for ((addr, _), conn) in connections.drain() {
-            if let Err(e) = conn.close().await {
-                error!("Error closing WebSocket connection to {}: {}", addr, e);
-            }
-        }
-        self.inner.active_peers.write().unwrap().clear();
-
-        Ok(())
-    }
-
-    fn is_closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Relaxed)
+    fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
+        self.inner.connections.try_lock().is_ok_and(|connections| {
+            connections.iter().any(|(key, record)| {
+                key.remote_addr == remote_addr && !record.connection.is_closed()
+            })
+        })
     }
 
     fn supports_ws(&self) -> bool {
@@ -794,43 +1673,254 @@ impl Transport for WebSocketTransport {
         }
     }
 
-    /// Returns `true` when there is a live WebSocket connection to
-    /// `remote_addr`.
-    ///
-    /// Reads from the `active_peers` `std::sync::RwLock` rather than the
-    /// async `connections` mutex. This guarantees a correct answer on every
-    /// call — including under lock contention — without `block_on`, without
-    /// holding the async mutex across an await, and without ever returning a
-    /// false-negative that would cause the multiplexer to fall back to UDP
-    /// on that same send.
-    ///
-    /// The write side of `active_peers` is updated immediately whenever a
-    /// connection is inserted or removed from the async pool, so reads here
-    /// are always consistent with the pool state (no stale entries).
-    fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
+    fn get_connection_count(&self, transport_type: TransportType) -> usize {
+        if transport_type != self.default_transport_type() {
+            return 0;
+        }
         self.inner
-            .active_peers
-            .read()
-            .unwrap()
-            .contains(&remote_addr)
+            .connections
+            .try_lock()
+            .map(|connections| {
+                connections
+                    .values()
+                    .filter(|record| !record.connection.is_closed())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn close(&self) -> Result<()> {
+        let _close_guard = self.inner.close_gate.lock().await;
+        let already_closed = self.inner.closed.swap(true, Ordering::AcqRel);
+        self.inner.outbound_dials.close();
+        self.inner.inbound_established.close();
+        self.inner.outbound_established.close();
+        self.inner.tasks.close().await;
+        if already_closed {
+            return Ok(());
+        }
+
+        let connections: Vec<_> = self.inner.connections.lock().await.drain().collect();
+        close_websocket_connections(connections).await;
+
+        let _ = send_control_event(&self.inner.control_events_tx, TransportEvent::Closed).await;
+
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Relaxed)
     }
 }
 
 impl fmt::Debug for WebSocketTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.inner.listener.local_addr() {
-            Ok(addr) => write!(f, "WebSocketTransport({})", addr),
-            Err(_) => write!(f, "WebSocketTransport(<error>)"),
-        }
+        write!(f, "WebSocketTransport({})", self.inner.local_addr)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "wss")]
+    fn write_wss_test_certificate() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        use std::io::Write;
+
+        let directory = tempfile::tempdir().unwrap();
+        let cert_path = directory.path().join("server.pem");
+        let key_path = directory.path().join("server.key");
+        let certificate =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::File::create(&cert_path)
+            .unwrap()
+            .write_all(certificate.cert.pem().as_bytes())
+            .unwrap();
+        std::fs::File::create(&key_path)
+            .unwrap()
+            .write_all(certificate.signing_key.serialize_pem().as_bytes())
+            .unwrap();
+        (directory, cert_path, key_path)
+    }
+
+    #[cfg(feature = "ws")]
+    async fn connect_plain(
+        transport: &WebSocketTransport,
+        destination: SocketAddr,
+    ) -> Result<Arc<WebSocketConnection>> {
+        transport
+            .connect_to(destination, WebSocketAuthority::for_address(destination))
+            .await
+    }
+
+    #[test]
+    fn client_subprotocol_validation_is_fail_closed() {
+        assert!(!selected_subprotocol_is_exact(None, "sip"));
+        assert!(!selected_subprotocol_is_exact(Some("chat"), "sip"));
+        assert!(!selected_subprotocol_is_exact(Some("sips"), "sip"));
+        assert!(selected_subprotocol_is_exact(Some("sip"), "sip"));
+    }
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    use rvoip_sip_core::Method;
+    use rvoip_sip_core::types::headers::{HeaderName, HeaderValue, TypedHeader};
+    use rvoip_sip_core::{Method, Response, StatusCode};
     use tokio::time::Duration;
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_control_close_bypasses_saturated_message_lane() {
+        let (control_tx, mut control_rx) = mpsc::channel(8);
+        let (server, _server_events) = WebSocketTransport::bind_with_control_sender(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            Some(1),
+            control_tx,
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+
+        for cseq in 1..=3 {
+            let request =
+                SimpleRequestBuilder::new(Method::Options, "sip:service@localhost;transport=ws")
+                    .unwrap()
+                    .from("alice", "sip:alice@localhost", Some("tag"))
+                    .to("service", "sip:service@localhost", None)
+                    .call_id("saturated-live-ws")
+                    .cseq(cseq)
+                    .build();
+            let _ = client
+                .send_message(Message::Request(request), destination)
+                .await;
+        }
+
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(TransportEvent::ConnectionClosed {
+                    flow_id: Some(_), ..
+                }) = control_rx.recv().await
+                {
+                    break;
+                }
+            }
+        })
+        .await;
+        assert!(
+            closed.is_ok(),
+            "control close was blocked by saturated SIP data"
+        );
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "wss")]
+    #[tokio::test]
+    async fn exact_live_wss_flow_carries_structured_and_cached_raw_responses() {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+
+        let (_directory, cert_path, key_path) = write_wss_test_certificate();
+        let cert = cert_path.to_str().unwrap();
+        let key = key_path.to_str().unwrap();
+        let client_tls = TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            ..TlsClientConfig::default()
+        };
+        let (server, mut server_events) = WebSocketTransport::bind_with_client_tls(
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+            Some(cert),
+            Some(key),
+            None,
+            Some(client_tls.clone()),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, mut client_events) = WebSocketTransport::bind_with_client_tls(
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+            Some(cert),
+            Some(key),
+            None,
+            Some(client_tls),
+        )
+        .await
+        .unwrap();
+        let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+            .unwrap()
+            .from("alice", "sips:alice@localhost", Some("tag"))
+            .to("service", "sips:service@localhost", None)
+            .call_id("exact-live-wss")
+            .cseq(1)
+            .build();
+        client
+            .send_message_on_route(
+                Message::Request(request.clone()),
+                TransportRoute::new(destination)
+                    .with_transport_type(TransportType::Wss)
+                    .with_authority(TransportAuthority::dns("localhost").unwrap()),
+            )
+            .await
+            .unwrap();
+
+        let route = match tokio::time::timeout(Duration::from_secs(2), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                source,
+                flow_id: Some(flow_id),
+                ..
+            } => TransportRoute::new(source)
+                .with_transport_type(TransportType::Wss)
+                .with_flow_id(flow_id),
+            event => panic!("expected exact WSS ingress route, got {event:?}"),
+        };
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
+                .build();
+        server
+            .send_message_via(Message::Response(response.clone()), route.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+        server
+            .send_message_raw_via(
+                bytes::Bytes::from(Message::Response(response).to_bytes()),
+                route,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), client_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived {
+                message: Message::Response(_),
+                ..
+            }
+        ));
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
 
     #[cfg(feature = "ws")]
     #[tokio::test]
@@ -848,6 +1938,552 @@ mod tests {
         } else {
             assert!(result.is_err());
         }
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn typed_ws_and_wss_boundary_rejects_auth_before_connect() {
+        let (transport, _rx) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let mut request = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
+            .unwrap()
+            .build();
+        request.headers.push(TypedHeader::Other(
+            HeaderName::ProxyAuthorization,
+            HeaderValue::Raw(b"Digest safe\r\nX-Injected: websocket".to_vec()),
+        ));
+
+        let invalid_reason =
+            Response::new(StatusCode::Ok).with_reason("OK\r\nX-Injected: websocket-reason-secret");
+
+        for message in [Message::Request(request), Message::Response(invalid_reason)] {
+            let error = transport
+                .send_message(message, destination)
+                .await
+                .expect_err("typed WS/WSS send must reject unsafe fields");
+            assert!(matches!(error, Error::ProtocolError(_)));
+            assert!(!error.to_string().contains("X-Injected"));
+        }
+        transport.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn outbound_websocket_handshake_has_end_to_end_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        let (transport, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(Duration::from_millis(50), 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            connect_plain(&transport, destination).await,
+            Err(Error::ConnectionTimeout(address)) if address == destination
+        ));
+        transport.close().await.unwrap();
+        stalled.abort();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn close_cancels_and_joins_outbound_websocket_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let destination = listener.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let stalled = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let (transport, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(Duration::from_secs(30), 1),
+        )
+        .await
+        .unwrap();
+        let dialing_transport = transport.clone();
+        let dialing =
+            tokio::spawn(async move { connect_plain(&dialing_transport, destination).await });
+        accepted_rx.await.unwrap();
+        transport.close().await.unwrap();
+
+        assert!(matches!(
+            dialing.await.unwrap(),
+            Err(Error::TransportClosed)
+        ));
+        stalled.abort();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn concurrent_websocket_dials_to_one_destination_are_singleflight() {
+        let (server, _server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(Duration::from_secs(2), 8),
+        )
+        .await
+        .unwrap();
+
+        let (first, second) = tokio::join!(
+            connect_plain(&client, destination),
+            connect_plain(&client, destination)
+        );
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(client.inner.connections.lock().await.len(), 1);
+        assert_eq!(server.inner.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn same_address_different_websocket_authorities_never_share_connection() {
+        let (server, _server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let first_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("authority-a.example".into()),
+            port: destination.port(),
+        };
+        let second_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("authority-b.example".into()),
+            port: destination.port(),
+        };
+
+        let first = client
+            .connect_to(destination, first_authority)
+            .await
+            .unwrap();
+        let second = client
+            .connect_to(destination, second_authority)
+            .await
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(client.inner.connections.lock().await.len(), 2);
+        assert!(matches!(
+            client
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    destination,
+                )
+                .await,
+            Err(Error::InvalidState(_))
+        ));
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn response_requires_and_reuses_exact_authenticated_websocket_flow() {
+        let (server, _server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        client
+            .connect_to(
+                destination,
+                WebSocketAuthority {
+                    host: WebSocketAuthorityHost::Dns("sip.example.test".into()),
+                    port: destination.port(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            client
+                .send_message(
+                    Message::Response(Response::new(StatusCode::Ok)),
+                    destination,
+                )
+                .await,
+            Err(Error::InvalidState(_))
+        ));
+        let authority = TransportAuthority::dns("sip.example.test").unwrap();
+        let mut route = TransportRoute::new(destination)
+            .with_transport_type(TransportType::Ws)
+            .with_authority(authority);
+        route.flow_id = client.flow_id_for_route(&route);
+        assert!(route.flow_id.is_some());
+        client
+            .send_message_via(Message::Response(Response::new(StatusCode::Ok)), route)
+            .await
+            .unwrap();
+        assert_eq!(client.inner.connections.lock().await.len(), 1);
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn connection_closed_waits_for_bounded_event_capacity_without_being_dropped() {
+        let (server, mut server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, Some(1))
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+        let request = SimpleRequestBuilder::new(
+            Method::Options,
+            "sip:service@bounded-events.example;transport=ws",
+        )
+        .unwrap()
+        .from("alice", "sip:alice@example.test", Some("tag"))
+        .to("service", "sip:service@example.test", None)
+        .call_id("bounded-close-event")
+        .cseq(1)
+        .build();
+        client
+            .send_message(Message::Request(request), destination)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        client.close().await.unwrap();
+
+        let flow_id = match tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                flow_id: Some(flow_id),
+                ..
+            } => flow_id,
+            event => panic!("expected flow-bearing message, got {event:?}"),
+        };
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::ConnectionClosed {
+                flow_id: Some(closed_flow),
+                ..
+            } if closed_flow == flow_id
+        ));
+
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_pong_waits_for_bounded_event_capacity_without_being_dropped() {
+        let (server, mut server_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, Some(1))
+                .await
+                .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _client_events) =
+            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
+                .await
+                .unwrap();
+
+        let make_request = |cseq: u32| {
+            SimpleRequestBuilder::new(
+                Method::Options,
+                "sip:service@bounded-pong.example;transport=ws",
+            )
+            .unwrap()
+            .from("alice", "sip:alice@example.test", Some("tag"))
+            .to("service", "sip:service@example.test", None)
+            .call_id("bounded-pong-event")
+            .cseq(cseq)
+            .build()
+        };
+        client
+            .send_message(Message::Request(make_request(1)), destination)
+            .await
+            .unwrap();
+        let route = match tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            TransportEvent::MessageReceived {
+                source,
+                flow_id: Some(flow_id),
+                ..
+            } => TransportRoute::new(source)
+                .with_transport_type(TransportType::Ws)
+                .with_flow_id(flow_id),
+            event => panic!("expected flow-bearing message, got {event:?}"),
+        };
+
+        // Fill the only event slot, then provoke a native RFC 6455 Pong.
+        // The control event must wait behind the SIP event rather than being
+        // dropped by a best-effort `try_send`.
+        client
+            .send_message(Message::Request(make_request(2)), destination)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        server
+            .send_raw_via(route.clone(), bytes::Bytes::from_static(b"\r\n\r\n"))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::MessageReceived { .. }
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), server_events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            TransportEvent::KeepAlivePongReceived {
+                flow_id: Some(pong_flow),
+                ..
+            } if Some(pong_flow) == route.flow_id
+        ));
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_drain_deadline_does_not_multiply_by_connection_count() {
+        use tokio_tungstenite::tungstenite::protocol::Role;
+        use tokio_tungstenite::WebSocketStream;
+
+        let mut peers = Vec::new();
+        let mut sends = Vec::new();
+        let mut connections = Vec::new();
+        for index in 0..4u16 {
+            let (transport_side, blocked_peer) = tokio::io::duplex(1);
+            peers.push(blocked_peer);
+            let stream = WebSocketStream::from_raw_socket(
+                SipWsStream::Test(transport_side),
+                Role::Client,
+                Some(connection::sip_websocket_config()),
+            )
+            .await;
+            let (writer, _reader) = stream.split();
+            let remote_addr: SocketAddr = format!("127.0.0.1:{}", 5100 + index).parse().unwrap();
+            let connection = Arc::new(WebSocketConnection::from_writer_with_runtime(
+                writer,
+                remote_addr,
+                false,
+                "sip".into(),
+                None,
+                1,
+                Duration::from_millis(40),
+            ));
+            let sending_connection = connection.clone();
+            sends.push(tokio::spawn(async move {
+                sending_connection
+                    .send_raw_bytes(bytes::Bytes::from(vec![b'x'; 4_096]))
+                    .await
+            }));
+            connections.push((
+                WebSocketConnectionKey::outbound(
+                    remote_addr,
+                    WebSocketAuthority::for_address(remote_addr),
+                    1,
+                    false,
+                ),
+                WebSocketConnectionRecord {
+                    generation: u64::from(index),
+                    flow_id: TransportFlowId::for_test(u64::from(index) + 1),
+                    connection,
+                },
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let started = tokio::time::Instant::now();
+        close_websocket_connections(connections).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(130),
+            "connection drain was serialized: {:?}",
+            started.elapsed()
+        );
+        for send in sends {
+            assert!(send.await.unwrap().is_err());
+        }
+        drop(peers);
+    }
+
+    #[cfg(feature = "wss")]
+    #[test]
+    fn wss_http_host_and_sni_share_one_normalized_authority() {
+        let authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("sip.example.test".into()),
+            port: 7443,
+        };
+        assert_eq!(authority.http_authority(), "sip.example.test:7443");
+        let server_name = authority.server_name().unwrap();
+        assert!(matches!(
+            server_name,
+            tokio_rustls::rustls::pki_types::ServerName::DnsName(name)
+                if name.as_ref() == "sip.example.test"
+        ));
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_connection_registry_lock_is_inside_dial_deadline() {
+        let (client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            HandshakeAdmissionConfig::new(Duration::from_millis(40), 1),
+        )
+        .await
+        .unwrap();
+        let destination = "127.0.0.1:9".parse().unwrap();
+        let _registry_guard = client.inner.connections.lock().await;
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            connect_plain(&client, destination).await,
+            Err(Error::ConnectionTimeout(address)) if address == destination
+        ));
+        assert!(started.elapsed() < Duration::from_millis(250));
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn websocket_established_caps_hold_for_both_directions() {
+        let config = HandshakeAdmissionConfig::new(Duration::from_secs(1), 1);
+        let (server, _server_events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (first_client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+
+        connect_plain(&first_client, destination).await.unwrap();
+        let second_authority = WebSocketAuthority {
+            host: WebSocketAuthorityHost::Dns("second.example".into()),
+            port: destination.port(),
+        };
+        assert!(matches!(
+            first_client.connect_to(destination, second_authority).await,
+            Err(Error::ConnectionPoolExhausted)
+        ));
+
+        let (second_client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let _second_flow = connect_plain(&second_client, destination).await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(server.inner.connections.lock().await.len(), 1);
+
+        second_client.close().await.unwrap();
+        first_client.close().await.unwrap();
+        server.close().await.unwrap();
+    }
+
+    #[cfg(feature = "ws")]
+    #[tokio::test]
+    async fn idle_websocket_connections_are_evicted_and_release_permits() {
+        let config = HandshakeAdmissionConfig::new(Duration::from_millis(50), 2);
+        let (server, _server_events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+        let (client, _events) = WebSocketTransport::bind_with_handshake_config(
+            "127.0.0.1:0".parse().unwrap(),
+            false,
+            None,
+            None,
+            None,
+            config,
+        )
+        .await
+        .unwrap();
+        connect_plain(&client, destination).await.unwrap();
+        assert_eq!(client.inner.connections.lock().await.len(), 1);
+
+        tokio::time::sleep(Duration::from_millis(1_650)).await;
+        assert!(client.inner.connections.lock().await.is_empty());
+        assert!(server.inner.connections.lock().await.is_empty());
+
+        client.close().await.unwrap();
+        server.close().await.unwrap();
     }
 
     /// Phase 4 wired real cert/key loading into the WSS bind path, so

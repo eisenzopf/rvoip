@@ -26,7 +26,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::ConnectionAdapter;
+use rvoip_core::adapter::{ConnectionAdapter, EndReason};
 use rvoip_core::events::Event;
 use rvoip_core::ids::{ConnectionId, StreamId};
 use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
@@ -91,7 +91,7 @@ async fn dial_and_invite(
     cert: &rustls::pki_types::CertificateDer<'static>,
     sid: &str,
     participant: &str,
-) -> Arc<UctpQuicClient> {
+) -> (Arc<UctpQuicClient>, u16) {
     let client_cfg = dev_client_config_trusting(cert).expect("client cfg");
     let client = UctpQuicClient::connect(client_ep, server_addr, "localhost", Arc::new(client_cfg))
         .await
@@ -171,7 +171,51 @@ async fn dial_and_invite(
         signature: None,
     };
     client.send(env).await.expect("send invite");
+    let wire_connid = format!("conn_{participant}");
+    let wire_stream_id = format!("strm_{participant}");
     client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::json!({
+                    "by_participant": participant,
+                    "substrate": "quic",
+                    "capabilities": {},
+                    "streams_offered": [{
+                        "id": wire_stream_id,
+                        "kind": "audio",
+                        "direction": "sendrecv",
+                        "codec_preferences": ["opus"]
+                    }],
+                    "substrate_setup": null
+                }),
+            )
+            .with_sid(sid)
+            .with_connid(wire_connid.clone()),
+        )
+        .await
+        .expect("send connection.offer");
+    client
+        .send(
+            UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+                .with_sid(sid)
+                .with_connid(wire_connid),
+        )
+        .await
+        .expect("send connection.ready");
+
+    let stream_local_id = loop {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+            .await
+            .expect("stream.opened timeout")
+            .expect("inbound closed");
+        if envelope.msg_type == MessageType::StreamOpened {
+            let opened: rvoip_uctp::payloads::stream::StreamOpened =
+                envelope.decode_payload().expect("decode stream.opened");
+            break opened.stream.stream_local_id;
+        }
+    };
+    (client, stream_local_id)
 }
 
 #[tokio::test]
@@ -196,9 +240,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // --- Two clients ---
     let client_ep_a = client_endpoint();
     let client_ep_b = client_endpoint();
-    let client_a =
+    let (client_a, client_a_local_id) =
         dial_and_invite(&client_ep_a, server_addr, &cert_der, "sess_a", "part_alice").await;
-    let client_b =
+    let (client_b, client_b_local_id) =
         dial_and_invite(&client_ep_b, server_addr, &cert_der, "sess_b", "part_bob").await;
 
     // --- Wait for two InboundConnection events + paired ConnectionAuthenticated ---
@@ -208,8 +252,9 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     // assert pairing after the loop.
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
     let mut authenticated: Vec<(ConnectionId, String, String)> = Vec::new();
+    let mut principals = Vec::new();
     for _ in 0..60 {
-        if conn_ids.len() == 2 && authenticated.len() == 2 {
+        if conn_ids.len() == 2 && authenticated.len() == 2 && principals.len() == 2 {
             break;
         }
         match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
@@ -223,6 +268,13 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
                 ..
             })) => {
                 authenticated.push((connection_id, identity_id, participant_id));
+            }
+            Ok(Ok(Event::ConnectionPrincipalAuthenticated {
+                connection_id,
+                principal,
+                ..
+            })) => {
+                principals.push((connection_id, principal));
             }
             _ => continue,
         }
@@ -240,6 +292,26 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             conn_ids.contains(auth_connid),
             "ConnectionAuthenticated connection_id {:?} does not match any InboundConnection",
             auth_connid
+        );
+    }
+    assert_eq!(
+        principals.len(),
+        2,
+        "expected each UCTP connection to retain its complete principal"
+    );
+    for (connection_id, principal) in &principals {
+        let legacy_subject = authenticated
+            .iter()
+            .find(|(candidate, _, _)| candidate == connection_id)
+            .map(|(_, identity_id, _)| identity_id)
+            .expect("rich principal has matching legacy auth event");
+        assert_eq!(&principal.subject, legacy_subject);
+        assert_eq!(
+            orchestrator
+                .connection_principal(connection_id)
+                .expect("principal retained on orchestrator route")
+                .ownership_key(),
+            principal.ownership_key()
         );
     }
 
@@ -268,7 +340,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         StreamKind::Audio,
         codec.clone(),
         rvoip_core::connection::Direction::Outbound,
-        1, // matches server-side stream_local_id
+        client_a_local_id,
         client_a.connection.clone(),
     );
     let client_b_stream = QuicDatagramMediaStream::start(
@@ -276,7 +348,7 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
         StreamKind::Audio,
         codec,
         rvoip_core::connection::Direction::Inbound,
-        1,
+        client_b_local_id,
         client_b.connection.clone(),
     );
 
@@ -321,4 +393,54 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
             payload
         );
     }
+
+    // Core owns terminal dispatch. The adapter removes route ownership before
+    // wire teardown, then reports exactly one normalized terminal even if a
+    // late peer terminal races in afterwards.
+    let ended_connection = conn_ids[0].clone();
+    orchestrator
+        .end_connection(ended_connection.clone(), EndReason::Normal)
+        .await
+        .expect("core normal end");
+    assert!(!adapter.is_connection_live(&ended_connection));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Ok(Event::ConnectionEnded { connection_id, .. }) if connection_id == ended_connection
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("one normalized terminal event");
+
+    client_a
+        .send(
+            UctpEnvelope::new(
+                MessageType::SessionEnd,
+                serde_json::to_value(rvoip_uctp::payloads::session::SessionEnd {
+                    by: "part_alice".into(),
+                    reason_code: 0,
+                    reason: "late duplicate".into(),
+                })
+                .expect("serialize peer terminal"),
+            )
+            .with_sid("sess_a"),
+        )
+        .await
+        .expect("send late duplicate terminal");
+    let duplicate = tokio::time::timeout(Duration::from_millis(200), async {
+        loop {
+            if matches!(
+                events.recv().await,
+                Ok(Event::ConnectionEnded { connection_id, .. }) if connection_id == ended_connection
+            ) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(duplicate.is_err(), "late peer terminal must be suppressed");
 }

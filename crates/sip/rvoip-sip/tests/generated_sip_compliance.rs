@@ -509,9 +509,9 @@ async fn generated_sip_compliance_invite_407_without_credentials_fails_fast() {
 
     let (status, reason) = wait_for_call_failed(&mut events, &call_id).await;
     assert_eq!(status, 407);
-    assert!(
-        reason.contains("no credentials"),
-        "unexpected failure reason: {reason}"
+    assert_eq!(
+        reason, "INVITE authentication failed (class=missing-credentials)",
+        "failure reason must expose only the stable diagnostic class"
     );
     sleep(Duration::from_millis(250)).await;
     assert_eq!(
@@ -567,9 +567,9 @@ async fn generated_sip_compliance_invite_407_second_challenge_fails_fast() {
 
     let (status, reason) = wait_for_call_failed(&mut events, &call_id).await;
     assert_eq!(status, 407);
-    assert!(
-        reason.contains("retry limit"),
-        "unexpected failure reason: {reason}"
+    assert_eq!(
+        reason, "INVITE authentication failed (class=retry-limit)",
+        "failure reason must expose only the stable diagnostic class"
     );
     wait_for_count(&invite_count, 2, "initial INVITE plus one auth retry").await;
     sleep(Duration::from_millis(250)).await;

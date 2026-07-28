@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{CallHandler, CallbackPeer, ShutdownHandle};
 use rvoip_sip::api::events::{CallId, Event};
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
@@ -40,7 +40,15 @@ impl CallbackReceiver {
 /// INVITE. The returned `coord` is the underlying `UnifiedCoordinator`
 /// (use `coord.events()` to subscribe to bob's wire-trace stream).
 pub async fn boot_callback_receiver(port: u16, name: &str) -> CallbackReceiver {
-    let bob = CallbackPeer::new(AutoAccept, receiver_config(name, port))
+    boot_callback_receiver_with_handler(AutoAccept, port, name).await
+}
+
+pub async fn boot_callback_receiver_with_handler<H: CallHandler>(
+    handler: H,
+    port: u16,
+    name: &str,
+) -> CallbackReceiver {
+    let bob = CallbackPeer::new(handler, receiver_config(name, port))
         .await
         .expect("callback peer");
     let coord = bob.coordinator().clone();
@@ -132,7 +140,15 @@ impl EstablishedCall {
 ///
 /// `port_a` and `port_b` MUST be distinct and free.
 pub async fn establish_call(port_a: u16, port_b: u16) -> EstablishedCall {
-    let bob = boot_callback_receiver(port_b, "bob").await;
+    establish_call_with_handler(AutoAccept, port_a, port_b).await
+}
+
+pub async fn establish_call_with_handler<H: CallHandler>(
+    handler: H,
+    port_a: u16,
+    port_b: u16,
+) -> EstablishedCall {
+    let bob = boot_callback_receiver_with_handler(handler, port_b, "bob").await;
     let mut bob_events = bob.coord.events().await.expect("bob events");
 
     let alice = boot_unified_caller(port_a, "alice").await;

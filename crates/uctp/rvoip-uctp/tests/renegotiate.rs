@@ -37,6 +37,28 @@ async fn setup_connection(
     connid: &str,
     offered_codecs: Vec<String>,
 ) {
+    in_tx
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::SessionInvite,
+            id: format!("env_invite_{sid}"),
+            ts: Utc::now(),
+            cid: Some(format!("conv_{sid}")),
+            sid: Some(sid.into()),
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::json!({
+                "from": "part_test",
+                "to": ["part_remote"],
+                "medium": "voice",
+                "intent": "synchronous-engagement",
+                "capabilities_offer": {}
+            }),
+            signature: None,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let offer = UctpEnvelope {
         v: 1,
         msg_type: MessageType::ConnectionOffer,

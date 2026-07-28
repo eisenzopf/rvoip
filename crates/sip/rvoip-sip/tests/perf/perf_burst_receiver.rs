@@ -21,28 +21,28 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 #[path = "support/mod.rs"]
 mod support;
-use support::burst::{BurstScenario, BurstScenarioBook};
-use support::soak::{
-    admission_diagnostics, diagnostic_artifact_path, diagnostic_sample_path, endpoint_metric,
-    endpoint_retention_summary, in_process_resource_sampler_enabled, media_receive_diagnostics,
-    media_setup_raw_diagnostics, media_setup_timing_diagnostics, memory_diagnostic_interval,
-    memory_diagnostic_summary, read_required_u16_env, resource_sampling_diagnostics,
-    retention_drain_wait, round2, sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics,
-    sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler, MemoryDiagnosticSampler,
-    RssGrowthGate,
+use support::burst::{
+    validate_same_host_burst_port_layout, BurstScenario, BurstScenarioBook, BURST_ALICE_MEDIA_END,
+    BURST_ALICE_MEDIA_START, BURST_BOB_MEDIA_END, BURST_BOB_MEDIA_START,
 };
-use support::{LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
+use support::soak::{
+    admission_diagnostics, burst_retention_drain_wait, diagnostic_artifact_path,
+    diagnostic_sample_path, endpoint_metric, endpoint_retention_summary,
+    in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
+    media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
+    read_required_u16_env, resource_sampling_diagnostics, round2, sip_dialog_raw_diagnostics,
+    sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
+    MemoryDiagnosticSampler, RssGrowthGate, MIN_RETENTION_DRAIN_WAIT_SECS,
+};
+use support::{
+    CallSetupDiagnostics, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport,
+};
 
 const BOB_PORT_ENV: &str = "RVOIP_PERF_BURST_BOB_PORT";
 const ALICE_PORT_ENV: &str = "RVOIP_PERF_BURST_ALICE_PORT";
 const READY_FILE_ENV: &str = "RVOIP_PERF_BURST_READY_FILE";
 const STOP_FILE_ENV: &str = "RVOIP_PERF_BURST_STOP_FILE";
 const RUN_DIR_ENV: &str = "RVOIP_PERF_BURST_RUN_DIR";
-
-const BOB_MEDIA_START: u16 = 16_384;
-const BOB_MEDIA_END: u16 = 40_999;
-const ALICE_MEDIA_START: u16 = 51_000;
-const ALICE_MEDIA_END: u16 = 65_535;
 
 #[derive(Clone)]
 struct BurstAccept {
@@ -97,6 +97,13 @@ async fn perf_burst_receiver() {
     let scenario = load_scenario();
     let bob_port = read_required_u16_env(BOB_PORT_ENV);
     let alice_port = read_required_u16_env(ALICE_PORT_ENV);
+    validate_same_host_burst_port_layout(
+        bob_port,
+        alice_port,
+        scenario.alice_shards,
+        scenario.capacity,
+    )
+    .unwrap_or_else(|error| panic!("invalid same-host burst port topology: {error}"));
     let ready_file = PathBuf::from(
         std::env::var(READY_FILE_ENV)
             .unwrap_or_else(|_| panic!("{READY_FILE_ENV} must be set for burst receiver")),
@@ -111,19 +118,21 @@ async fn perf_burst_receiver() {
         bob_port,
         &scenario.server_profile,
         scenario.capacity,
-        BOB_MEDIA_START,
-        BOB_MEDIA_END,
+        Some(scenario.retained_lifecycle_capacity()),
+        BURST_BOB_MEDIA_START,
+        BURST_BOB_MEDIA_END,
     );
     let caller_cfg = burst_config(
         &format!("burst-alice-{}", scenario.name),
         alice_port,
         &scenario.client_profile,
         scenario.capacity.div_ceil(scenario.alice_shards).max(1),
-        ALICE_MEDIA_START,
-        ALICE_MEDIA_END,
+        None,
+        BURST_ALICE_MEDIA_START,
+        BURST_ALICE_MEDIA_END,
     );
     let rss_gate = RssGrowthGate::resolve(&caller_cfg, &receiver_cfg);
-    let retention_drain_wait = retention_drain_wait();
+    let retention_drain_wait = burst_retention_drain_wait();
 
     let received_frames = Arc::new(AtomicU64::new(0));
     let active_audio_receivers = Arc::new(AtomicU64::new(0));
@@ -153,7 +162,7 @@ async fn perf_burst_receiver() {
     let retention_sampler = EndpointRetentionSampler::start(
         "burst_receiver",
         receiver.coordinator.clone(),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler = MemoryDiagnosticSampler::start(
         "burst_receiver",
@@ -180,8 +189,21 @@ async fn perf_burst_receiver() {
     }
     let active_secs = started.elapsed().as_secs_f64();
 
-    tokio::time::sleep(retention_drain_wait).await;
+    let retention_snapshot_wait =
+        Duration::from_secs(MIN_RETENTION_DRAIN_WAIT_SECS.try_into().unwrap());
+    tokio::time::sleep(retention_snapshot_wait).await;
     let retention_series = retention_sampler.stop().await;
+    // Keep captured diagnostics allocated but quiescent during the final RSS
+    // tail. This measures the runtime after SIP retention expiry without
+    // measuring periodic diagnostic JSON construction.
+    tokio::time::sleep(retention_drain_wait.saturating_sub(retention_snapshot_wait)).await;
+    // End process sampling at the declared drain boundary. Retention capture
+    // and report construction allocate diagnostic data and are not part of
+    // the runtime-under-test RSS window.
+    let mut resources = match sampler {
+        Some(sampler) => sampler.stop().await,
+        None => ResourceSummary::empty(),
+    };
     let memory_series = match memory_sampler {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
@@ -195,14 +217,12 @@ async fn perf_burst_receiver() {
     let completed_audio_receivers = completed_audio_receivers.load(Ordering::Relaxed);
     let received_frames = received_frames.load(Ordering::Relaxed);
     let incoming_calls = incoming_calls.load(Ordering::Relaxed);
-    let mut resources = match sampler {
-        Some(sampler) => sampler.stop().await,
-        None => ResourceSummary::empty(),
-    };
     let rss = support::soak::rss_result_metrics(
         &resources,
         active_secs,
+        active_secs,
         retention_drain_wait.as_secs_f64(),
+        support::soak::RssGatePolicy::PostDrainOrTail,
     );
     let rss_gate_enforced =
         rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
@@ -264,6 +284,13 @@ async fn perf_burst_receiver() {
         .result("rss_gate_window", rss.gate_window)
         .result("rss_gate_enforced", rss_gate_enforced)
         .result("rss_gate_reason", rss_gate_reason)
+        .result(
+            "rss_acceptance_limit_mb_per_hr",
+            scenario
+                .acceptance
+                .max_rss_growth_mb_per_hr
+                .unwrap_or(rss_gate.effective_mb_per_hr),
+        )
         .result_block("rss_gate", rss_gate.to_json())
         .result("retained_objects_after_drain", retained_after_drain)
         .result(
@@ -497,6 +524,7 @@ fn burst_config(
     sip_port: u16,
     profile: &str,
     capacity: usize,
+    retained_lifecycle_capacity: Option<usize>,
     media_start: u16,
     media_end: u16,
 ) -> Config {
@@ -510,11 +538,16 @@ fn burst_config(
     {
         performance = performance.with_recipe_path(path);
     }
-    Config::local(name, sip_port)
+    let config = Config::local(name, sip_port)
         .try_with_performance_config(performance)
         .unwrap_or_else(|err| panic!("burst performance profile '{profile}' failed: {err}"))
         .with_media_port_capacity(media_start, media_capacity)
-        .with_media_session_capacity(capacity.min(media_capacity))
+        .with_media_session_capacity(capacity.min(media_capacity));
+    let config = CallSetupDiagnostics::from_env().configure(config);
+    match retained_lifecycle_capacity {
+        Some(retained) => config.with_server_retained_lifecycle_capacity(retained),
+        None => config,
+    }
 }
 
 fn config_snapshot(config: &Config) -> Value {
@@ -658,6 +691,10 @@ fn config_snapshot(config: &Config) -> Value {
     snapshot.insert(
         "server_call_capacity".to_string(),
         json!(config.server_call_capacity),
+    );
+    snapshot.insert(
+        "server_retained_lifecycle_capacity".to_string(),
+        json!(config.server_retained_lifecycle_capacity),
     );
     snapshot.insert(
         "server_call_admission_limit".to_string(),

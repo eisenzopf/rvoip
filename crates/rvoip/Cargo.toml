@@ -11,7 +11,7 @@ rust-version.workspace = true
 categories.workspace = true
 keywords.workspace = true
 
-description = "Universal real-time gateway library — SIP, WebRTC, UCTP (QUIC / WebTransport / WebSocket) plus AI voice harness and vCon container, behind one facade."
+description = "Universal real-time gateway library — SIP, WebRTC, UCTP, Vapi voice agents, AI harness, and vCon behind one facade."
 
 [lints]
 workspace = true
@@ -48,6 +48,9 @@ rvoip-vcon         = { workspace = true, optional = true }
 rvoip-identity     = { workspace = true, optional = true }
 rvoip-harness      = { workspace = true, optional = true }
 
+# Vapi bidirectional WebSocket agent adapter — `vapi` feature.
+rvoip-vapi         = { workspace = true, optional = true }
+
 # Client SDK — `client` feature.
 rvoip-client       = { workspace = true, optional = true }
 
@@ -70,6 +73,7 @@ default = ["sip"]
 sip      = ["dep:rvoip-sip"]
 webrtc   = ["dep:rvoip-webrtc"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
+vapi     = ["dep:rvoip-vapi"]
 
 # ── SIP media add-ons ──
 g729 = ["sip", "rvoip-sip/g729"]
@@ -77,7 +81,7 @@ g729 = ["sip", "rvoip-sip/g729"]
 # ── SIP add-on (requires SIP): RFC 8224 caller-ID attestation ──
 sip-stir-shaken = ["sip", "dep:rvoip-stir-shaken"]
 
-# ── Full rvoip-3 experience: every transport + the conversation-model extensions
+# ── rvoip-3 bundle: SIP/WebRTC/UCTP + the conversation-model extensions
 #    (vCon emission, identity backends, AI harness). vcon / identity / harness are
 #    reachable ONLY through this meta-feature, never as standalone features. ──
 voip-3 = ["sip", "webrtc", "uctp", "dep:rvoip-vcon", "dep:rvoip-identity", "dep:rvoip-harness"]
@@ -100,7 +104,7 @@ app = [
 ]
 
 # ── Everything ──
-full = ["voip-3", "sip-stir-shaken", "client", "app"]
+full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app"]
 
 [dev-dependencies]
 tokio              = { workspace = true }

@@ -14,4 +14,10 @@ pub use presence::{validate_notify_request, validate_publish_request, validate_s
 pub use generated::{
     validate_generated_message, validate_generated_request, validate_generated_response,
 };
-pub use wire::{validate_content_length, validate_wire_request, validate_wire_response};
+pub use wire::{
+    authorization_header_name, validate_authorization_header_value, validate_content_length,
+    validate_outbound_authorization_headers, validate_typed_outbound_message,
+    validate_wire_request, validate_wire_response, validated_authorization_header,
+    MAX_AUTHORIZATION_HEADER_VALUE_BYTES, MAX_RAW_HEADER_VALUE_BYTES, MAX_REQUEST_START_LINE_BYTES,
+    MAX_RESPONSE_REASON_PHRASE_BYTES, MAX_TYPED_HEADER_LINE_BYTES,
+};

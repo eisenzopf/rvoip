@@ -57,10 +57,10 @@
 #![allow(missing_docs)]
 
 use rvoip_core_traits::ids::{ConnectionId, ConversationId, MessageId, SessionId};
+use rvoip_core_traits::DataMessage;
 #[cfg(feature = "uctp")]
 use std::net::SocketAddr;
 use std::sync::Arc;
-use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 
 /// Per-protocol native client surface re-exports. Per
@@ -83,13 +83,35 @@ pub mod uctp {
 /// matches the `Credential` enum in `rvoip-core-traits::identity`,
 /// but is re-defined locally so the client crate doesn't depend on
 /// the orchestrator's identity model directly.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Credential {
     Bearer(String),
     OAuth2Dpop {
         access_token: String,
         dpop_proof: String,
     },
+}
+
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Bearer(token) => formatter
+                .debug_struct("Bearer")
+                .field("token_present", &!token.is_empty())
+                .field("token_len", &token.len())
+                .finish(),
+            Self::OAuth2Dpop {
+                access_token,
+                dpop_proof,
+            } => formatter
+                .debug_struct("OAuth2Dpop")
+                .field("access_token_present", &!access_token.is_empty())
+                .field("access_token_len", &access_token.len())
+                .field("dpop_proof_present", &!dpop_proof.is_empty())
+                .field("dpop_proof_len", &dpop_proof.len())
+                .finish(),
+        }
+    }
 }
 
 /// Options for `Client::connect_with_options`.
@@ -117,11 +139,25 @@ pub struct ClientOptions {
 /// substrate adapter by URL scheme: `Identity` and `Participant`
 /// route through UCTP; `Uri` accepts `sip:` / `tel:` and dispatches
 /// to the SIP interop adapter.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum CallTarget {
     Identity(String),
     Participant(String),
     Uri(String),
+}
+
+impl std::fmt::Debug for CallTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match self {
+            Self::Identity(_) => "identity",
+            Self::Participant(_) => "participant",
+            Self::Uri(_) => "uri",
+        };
+        formatter
+            .debug_struct("CallTarget")
+            .field("kind", &kind)
+            .finish()
+    }
 }
 
 /// Medium of a Session at start time. Mirror of
@@ -136,27 +172,54 @@ pub enum SessionMedium {
     ScreenShare,
 }
 
-#[derive(Debug, Error)]
 pub enum ClientError {
-    #[error("transport not enabled for scheme: {0}")]
     UnsupportedScheme(String),
-    #[error("connection failed: {0}")]
     ConnectFailed(String),
-    #[error("invalid uri: {0}")]
     InvalidUri(String),
-    #[error("protocol error: {0}")]
     Protocol(String),
-    #[error("session not found")]
     SessionNotFound,
-    #[error("not implemented: {0}")]
     NotImplemented(&'static str),
 }
+
+impl ClientError {
+    pub const fn diagnostic_class(&self) -> &'static str {
+        match self {
+            Self::UnsupportedScheme(_) => "unsupported-scheme",
+            Self::ConnectFailed(_) => "connect",
+            Self::InvalidUri(_) => "invalid-uri",
+            Self::Protocol(_) => "protocol",
+            Self::SessionNotFound => "session-not-found",
+            Self::NotImplemented(_) => "not-implemented",
+        }
+    }
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "client operation failed (class={})",
+            self.diagnostic_class()
+        )
+    }
+}
+
+impl std::fmt::Debug for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClientError")
+            .field("class", &self.diagnostic_class())
+            .finish()
+    }
+}
+
+impl std::error::Error for ClientError {}
 
 pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Inbound event from the connected substrate — consumer pumps
 /// `Client::incoming()` to receive these.
-#[derive(Debug)]
+#[non_exhaustive]
 pub enum InboundEvent {
     /// Peer is inviting us into a new Session. Consumer either
     /// `accept`s the returned handle to enter the call or `reject`s
@@ -169,6 +232,10 @@ pub enum InboundEvent {
         from: String,
         body: String,
     },
+    DataMessage {
+        connection_id: ConnectionId,
+        message: DataMessage,
+    },
     /// Our IdentityAssurance level changed on a Connection — usually
     /// because step-up auth completed (CONVERSATION_PROTOCOL.md §5.8).
     AssuranceChanged {
@@ -180,6 +247,27 @@ pub enum InboundEvent {
     },
 }
 
+impl std::fmt::Debug for InboundEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IncomingSession(_) => formatter.write_str("IncomingSession"),
+            Self::Message { body, .. } => formatter
+                .debug_struct("Message")
+                .field("body_bytes", &body.len())
+                .finish(),
+            Self::DataMessage { message, .. } => formatter
+                .debug_struct("DataMessage")
+                .field("body_bytes", &message.bytes.len())
+                .finish(),
+            Self::AssuranceChanged { .. } => formatter.write_str("AssuranceChanged"),
+            Self::Disconnected { reason } => formatter
+                .debug_struct("Disconnected")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+        }
+    }
+}
+
 /// Handle to a single Session — returned from `Client::call` and
 /// `InboundEvent::IncomingSession`. Carries the operations a single
 /// user app needs: accept / reject / end / hold / resume / mute /
@@ -187,6 +275,10 @@ pub enum InboundEvent {
 pub struct SessionHandle {
     session_id: SessionId,
     conversation_id: ConversationId,
+    /// UCTP wire Connection identifier established by an outbound
+    /// `connection.offer`. Inbound handles remain `None` until their accept
+    /// path establishes a concrete substrate Connection.
+    connection_id: Option<ConnectionId>,
     // `inner` holds per-substrate state. The dispatch lives behind a
     // dyn-trait so the SessionHandle's surface is substrate-agnostic.
     // For v1 this is a stub; concrete impls come from the per-
@@ -223,8 +315,12 @@ impl Default for SessionInner {
 impl std::fmt::Debug for SessionHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionHandle")
-            .field("session_id", &self.session_id)
-            .field("conversation_id", &self.conversation_id)
+            .field("session_present", &!self.session_id.as_str().is_empty())
+            .field(
+                "conversation_present",
+                &!self.conversation_id.as_str().is_empty(),
+            )
+            .field("connection_present", &self.connection_id.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -235,6 +331,9 @@ impl SessionHandle {
     }
     pub fn conversation_id(&self) -> &ConversationId {
         &self.conversation_id
+    }
+    pub fn connection_id(&self) -> Option<&ConnectionId> {
+        self.connection_id.as_ref()
     }
     pub async fn accept(self) -> Result<Self> {
         // v1 surface — per-substrate dispatch lands as consumers
@@ -279,6 +378,38 @@ impl SessionHandle {
     }
     pub async fn send_dtmf(&self, _digits: &str) -> Result<()> {
         Err(ClientError::NotImplemented("SessionHandle::send_dtmf"))
+    }
+
+    /// Send application data over this Session's established Connection.
+    ///
+    /// Outbound UCTP calls establish the wire Connection during
+    /// [`Client::call`], so callers do not have to manually coordinate
+    /// Conversation, Session, and Connection identifiers.
+    pub async fn send_data_message(&self, message: DataMessage) -> Result<MessageId> {
+        let connection_id = self
+            .connection_id
+            .as_ref()
+            .ok_or(ClientError::NotImplemented(
+                "SessionHandle::send_data_message requires an established Connection",
+            ))?;
+        let inner = self.inner.read().await;
+        match &inner.transport {
+            #[cfg(feature = "uctp")]
+            SessionTransport::UctpQuic { client } => {
+                send_uctp_data_message(
+                    client,
+                    &inner.participant_id,
+                    connection_id,
+                    &self.conversation_id,
+                    Some(&self.session_id),
+                    message,
+                )
+                .await
+            }
+            SessionTransport::Unsupported => Err(ClientError::NotImplemented(
+                "SessionHandle::send_data_message",
+            )),
+        }
     }
 }
 
@@ -424,6 +555,7 @@ impl Client {
                 };
                 let session_id = SessionId::new();
                 let conversation_id = ConversationId::new();
+                let connection_id = ConnectionId::new();
                 let payload = rvoip_uctp::payloads::session::SessionInvite {
                     from: participant_id.clone(),
                     to: vec![to],
@@ -442,9 +574,39 @@ impl Client {
                     .send(env)
                     .await
                     .map_err(|e| ClientError::ConnectFailed(e.to_string()))?;
+
+                // Establish a real UCTP Connection immediately after the
+                // invite. The two envelopes share one ordered signaling
+                // stream, so the remote coordinator observes the Session
+                // before binding this wire connid to its core Connection.
+                let offer = rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: participant_id.clone(),
+                    substrate: "quic".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: rvoip_core_traits::ids::StreamId::new().to_string(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                };
+                let offer = rvoip_uctp::envelope::UctpEnvelope::new(
+                    rvoip_uctp::types::MessageType::ConnectionOffer,
+                    serde_json::to_value(offer)
+                        .map_err(|error| ClientError::Protocol(error.to_string()))?,
+                )
+                .with_cid(conversation_id.to_string())
+                .with_sid(session_id.to_string())
+                .with_connid(connection_id.to_string());
+                client
+                    .send(offer)
+                    .await
+                    .map_err(|error| ClientError::ConnectFailed(error.to_string()))?;
                 Ok(SessionHandle {
                     session_id,
                     conversation_id,
+                    connection_id: Some(connection_id),
                     inner: Arc::new(RwLock::new(SessionInner {
                         held: false,
                         transport: SessionTransport::UctpQuic {
@@ -462,6 +624,36 @@ impl Client {
     /// substrate.
     pub async fn send_message(&self, _cid: ConversationId, _body: &str) -> Result<MessageId> {
         Err(ClientError::NotImplemented("Client::send_message"))
+    }
+
+    pub async fn send_data_message(
+        &self,
+        connection_id: ConnectionId,
+        conversation_id: ConversationId,
+        message: DataMessage,
+    ) -> Result<MessageId> {
+        match &self.inner {
+            #[cfg(feature = "uctp")]
+            ClientInner::UctpQuic {
+                client,
+                participant_id,
+                ..
+            } => {
+                send_uctp_data_message(
+                    client,
+                    participant_id,
+                    &connection_id,
+                    &conversation_id,
+                    None,
+                    message,
+                )
+                .await
+            }
+            #[cfg(not(feature = "uctp"))]
+            _ => Err(ClientError::NotImplemented(
+                "Client::send_data_message requires a data-capable substrate feature",
+            )),
+        }
     }
 
     /// Subscribe to inbound events. Consumer awaits on the returned
@@ -635,12 +827,47 @@ async fn wait_for_message(
             .map_err(|_| format!("timed out waiting for {msg_type:?}"))?
             .ok_or_else(|| format!("connection closed waiting for {msg_type:?}"))?;
         if env.msg_type == rvoip_uctp::types::MessageType::Error {
-            return Err(format!("server returned error: {:?}", env.payload));
+            return Err("server returned a protocol error".into());
         }
         if env.msg_type == msg_type {
             return Ok(env);
         }
     }
+}
+
+#[cfg(feature = "uctp")]
+async fn send_uctp_data_message(
+    client: &Arc<rvoip_quic::UctpQuicClient>,
+    participant_id: &str,
+    connection_id: &ConnectionId,
+    conversation_id: &ConversationId,
+    session_id: Option<&SessionId>,
+    message: DataMessage,
+) -> Result<MessageId> {
+    message
+        .validate()
+        .map_err(|error| ClientError::Protocol(format!("invalid data message: {error}")))?;
+    let message_id = message.message_id.clone();
+    let payload = rvoip_uctp::payloads::message::MessageSend::from_data_message(
+        &message,
+        participant_id,
+        serde_json::json!("all"),
+    )
+    .map_err(|error| ClientError::Protocol(error.to_string()))?;
+    let mut envelope = rvoip_uctp::envelope::UctpEnvelope::new(
+        rvoip_uctp::types::MessageType::MessageSend,
+        serde_json::to_value(payload).map_err(|error| ClientError::Protocol(error.to_string()))?,
+    )
+    .with_cid(conversation_id.to_string())
+    .with_connid(connection_id.to_string());
+    if let Some(session_id) = session_id {
+        envelope = envelope.with_sid(session_id.to_string());
+    }
+    client
+        .send(envelope)
+        .await
+        .map_err(|error| ClientError::ConnectFailed(error.to_string()))?;
+    Ok(message_id)
 }
 
 #[cfg(feature = "uctp")]
@@ -667,6 +894,7 @@ fn spawn_uctp_event_pump(
                     let handle = SessionHandle {
                         session_id,
                         conversation_id,
+                        connection_id: env.connid.clone().map(ConnectionId::from_string),
                         inner: Arc::new(RwLock::new(SessionInner {
                             held: false,
                             transport: SessionTransport::UctpQuic {
@@ -682,6 +910,25 @@ fn spawn_uctp_event_pump(
                     let _ = inbound_tx
                         .send(InboundEvent::Disconnected {
                             reason: "session ended".into(),
+                        })
+                        .await;
+                }
+                rvoip_uctp::types::MessageType::MessageSend => {
+                    let Ok(payload) =
+                        env.decode_payload::<rvoip_uctp::payloads::message::MessageSend>()
+                    else {
+                        continue;
+                    };
+                    let Ok(message) = payload.to_data_message() else {
+                        continue;
+                    };
+                    let Some(connection_id) = env.connid.map(ConnectionId::from_string) else {
+                        continue;
+                    };
+                    let _ = inbound_tx
+                        .send(InboundEvent::DataMessage {
+                            connection_id,
+                            message,
                         })
                         .await;
                 }
@@ -784,6 +1031,42 @@ mod tests {
         (client, events)
     }
 
+    #[cfg(feature = "uctp")]
+    async fn loopback_orchestrator_client() -> (Client, Arc<rvoip_core::Orchestrator>) {
+        install_crypto_provider();
+        let (server_ep, cert_der) = server_endpoint("127.0.0.1:0".parse().unwrap());
+        let server_addr = server_ep.local_addr().expect("local_addr");
+        let mut routes =
+            rvoip_uctp::substrate::dispatch_by_alpn(Arc::clone(&server_ep), &[ALPN_UCTP])
+                .expect("dispatcher");
+        let accept_rx = routes.take(ALPN_UCTP).expect("uctp/1 channel");
+        let adapter = rvoip_quic::UctpQuicAdapter::new(rvoip_quic::UctpQuicConfig::new(
+            server_ep,
+            accept_rx,
+            rvoip_auth_core::bearer_stub(),
+        ))
+        .await
+        .expect("adapter");
+        let orchestrator = rvoip_core::Orchestrator::new(rvoip_core::Config::default());
+        orchestrator.register(adapter).expect("register adapter");
+
+        let client_cfg =
+            rvoip_uctp::substrate::dev_client_config_trusting(&cert_der).expect("client cfg");
+        let client = Client::connect_with_options(
+            &format!("uctp+quic://{server_addr}"),
+            Credential::Bearer("test-token".into()),
+            ClientOptions {
+                quic_endpoint: Some(client_endpoint()),
+                quic_client_config: Some(Arc::new(client_cfg)),
+                server_name: Some("localhost".into()),
+                ..ClientOptions::default()
+            },
+        )
+        .await
+        .expect("connect");
+        (client, orchestrator)
+    }
+
     #[tokio::test]
     async fn connect_unknown_scheme_errors() {
         let result = Client::connect("ftp://example.com", Credential::Bearer("test".into())).await;
@@ -834,8 +1117,144 @@ mod tests {
                 break connection;
             }
         };
-        assert_eq!(inbound.session_id, *session.session_id());
+        let canonical_session_id = inbound.session_id.to_string();
+        let wire_session_id = session.session_id().to_string();
+        assert_ne!(canonical_session_id, wire_session_id);
+        assert!(canonical_session_id.ends_with(&format!(":{wire_session_id}")));
 
         session.end().await.expect("end");
+    }
+
+    #[cfg(feature = "uctp")]
+    #[tokio::test]
+    async fn data_message_api_preserves_binary_payload_and_rejects_unsupported_reliability() {
+        let (client, mut events) = loopback_client().await;
+        let session = client
+            .call(
+                CallTarget::Participant("part_bob".into()),
+                SessionMedium::Voice,
+            )
+            .await
+            .expect("call");
+        let wire_connection_id = session
+            .connection_id()
+            .expect("outbound UCTP call has a wire connid")
+            .clone();
+        let core_connection_id = loop {
+            let event = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+                .await
+                .expect("event timeout")
+                .expect("event channel closed");
+            if let rvoip_quic::AdapterEvent::InboundConnection { connection } = event {
+                break connection.id;
+            }
+        };
+        assert_ne!(core_connection_id, wire_connection_id);
+
+        let message = DataMessage::reliable(
+            "bridgefu.context.v1",
+            "application/octet-stream",
+            vec![0, 0xff, 7, 42],
+        );
+        let message_id = message.message_id.clone();
+        assert_eq!(
+            session
+                .send_data_message(message.clone())
+                .await
+                .expect("send data message"),
+            message_id
+        );
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.expect("adapter event channel closed");
+                if let rvoip_quic::AdapterEvent::DataMessage {
+                    connection_id: received_connection,
+                    message: received_message,
+                } = event
+                {
+                    if received_connection == core_connection_id {
+                        return received_message;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("data-message adapter event timeout");
+        assert_eq!(received, message);
+
+        let mut unsupported = DataMessage::reliable("chat", "text/plain", "hello");
+        unsupported.reliability = rvoip_core_traits::DataReliability::ReliableUnordered;
+        assert!(matches!(
+            session.send_data_message(unsupported).await,
+            Err(ClientError::Protocol(_))
+        ));
+    }
+
+    #[cfg(feature = "uctp")]
+    #[tokio::test]
+    async fn session_data_message_roundtrips_through_authenticated_orchestrator_route() {
+        let (client, orchestrator) = loopback_orchestrator_client().await;
+        let expected_subject = client.identity_id().to_string();
+        let mut events = orchestrator.subscribe_events();
+        let session = client
+            .call(
+                CallTarget::Participant("part_bob".into()),
+                SessionMedium::Voice,
+            )
+            .await
+            .expect("call");
+        let wire_connection_id = session
+            .connection_id()
+            .expect("outbound UCTP call has a wire connid")
+            .clone();
+
+        let core_connection_id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(rvoip_core::Event::ConnectionInbound { connection_id, .. }) =
+                    events.recv().await
+                {
+                    break connection_id;
+                }
+            }
+        })
+        .await
+        .expect("inbound core Connection timeout");
+        assert_ne!(core_connection_id, wire_connection_id);
+
+        let message = DataMessage::reliable(
+            "bridgefu.context.v1",
+            "application/octet-stream",
+            vec![0, 0xff, 7, 42],
+        );
+        session
+            .send_data_message(message.clone())
+            .await
+            .expect("session data message");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(rvoip_core::Event::DataMessageReceived {
+                    connection_id,
+                    message,
+                    ..
+                }) = events.recv().await
+                {
+                    if connection_id == core_connection_id {
+                        break message;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("orchestrator DataMessage timeout");
+        assert_eq!(received, message);
+        assert_eq!(
+            orchestrator
+                .connection_principal(&core_connection_id)
+                .expect("retained route principal")
+                .subject,
+            expected_subject
+        );
     }
 }

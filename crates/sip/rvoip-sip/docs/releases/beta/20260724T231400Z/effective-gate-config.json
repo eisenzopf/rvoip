@@ -1,0 +1,694 @@
+{
+  "binding_mode": "post-run-v1-backfill",
+  "mode": "full",
+  "policy_version": 1,
+  "schema": "rvoip-sip-effective-gate-config-v1",
+  "values": [
+    {
+      "key": "beta_aggregate_skip_gate",
+      "source": "policy-default",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_attestation_features",
+      "source": "derived-from-v1-attestation",
+      "type": "string-list",
+      "value": [
+        "generated-validation",
+        "dev-insecure-tls",
+        "perf-tests",
+        "g729"
+      ]
+    },
+    {
+      "key": "beta_attestation_target",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "rustc-host"
+    },
+    {
+      "key": "beta_burst_matrix",
+      "source": "environment-override",
+      "type": "string",
+      "value": "all"
+    },
+    {
+      "key": "beta_burst_scenario_file",
+      "source": "derived-from-v1-attestation",
+      "type": "path",
+      "value": "bundled config/perf-burst-scenarios.yaml"
+    },
+    {
+      "key": "beta_canonical_2k_run_dirs",
+      "source": "environment-override",
+      "type": "path-list",
+      "value": [
+        "<workspace>/target/perf-results/profiles/20260724T221956Z_clean_KRwxGm",
+        "<workspace>/target/perf-results/profiles/20260724T224300Z_clean_GbSiae",
+        "<workspace>/target/perf-results/profiles/20260724T225757Z_clean_p5XNXK"
+      ]
+    },
+    {
+      "key": "beta_deny_warnings",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_gate_artifact_dir",
+      "source": "environment-override",
+      "type": "path",
+      "value": "<source-report>"
+    },
+    {
+      "key": "beta_gate_mode",
+      "source": "derived-from-v1-attestation",
+      "type": "enum",
+      "value": "full"
+    },
+    {
+      "key": "beta_gate_require_external",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_pbx_api",
+      "source": "environment-override",
+      "type": "enum",
+      "value": "all"
+    },
+    {
+      "key": "beta_pbx_g729_profiles",
+      "source": "environment-override",
+      "type": "string-list",
+      "value": [
+        "g729a",
+        "g729ab"
+      ]
+    },
+    {
+      "key": "beta_pbx_provider",
+      "source": "environment-override",
+      "type": "enum",
+      "value": "both"
+    },
+    {
+      "key": "beta_pbx_scenario",
+      "source": "environment-override",
+      "type": "string",
+      "value": "all"
+    },
+    {
+      "key": "beta_perf_features",
+      "source": "derived-from-v1-attestation",
+      "type": "string-list",
+      "value": [
+        "perf-tests"
+      ]
+    },
+    {
+      "key": "beta_perf_high_density_burst_cps",
+      "source": "derived-from-v1-attestation",
+      "type": "integer",
+      "value": 160
+    },
+    {
+      "key": "beta_perf_high_density_min_asr",
+      "source": "derived-from-v1-attestation",
+      "type": "number",
+      "value": 0.995
+    },
+    {
+      "key": "beta_perf_high_density_rss_limit_mb_per_hr",
+      "source": "derived-from-v1-attestation",
+      "type": "number",
+      "value": 15.0
+    },
+    {
+      "key": "beta_perf_infra_memory_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_perf_media_churn_active_calls",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 30
+    },
+    {
+      "key": "beta_perf_media_churn_duration_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 120
+    },
+    {
+      "key": "beta_perf_media_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_perf_media_memory_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_perf_monolithic_soak_active_calls",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 30
+    },
+    {
+      "key": "beta_perf_monolithic_soak_duration_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 3600
+    },
+    {
+      "key": "beta_perf_regression_baseline_id",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "20260706T181609Z"
+    },
+    {
+      "key": "beta_perf_regression_baseline_manifest",
+      "source": "environment-override",
+      "type": "path",
+      "value": "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json"
+    },
+    {
+      "key": "beta_perf_regression_baseline_manifest_sha256",
+      "source": "derived-from-v1-attestation",
+      "type": "sha256",
+      "value": "739f35519904318db5e5d9e67755b573679530fc3dcdc290fc79e441f07eb6e9"
+    },
+    {
+      "key": "beta_perf_regression_baseline_root",
+      "source": "environment-override",
+      "type": "path",
+      "value": "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+    },
+    {
+      "key": "beta_perf_regression_fail",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_perf_rtp_memory_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_performance_recipe_file",
+      "source": "derived-from-v1-attestation",
+      "type": "path",
+      "value": "bundled config/performance-recipes.yaml"
+    },
+    {
+      "key": "beta_profile_matrix",
+      "source": "derived-from-v1-attestation",
+      "type": "profile-matrix",
+      "value": "endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000"
+    },
+    {
+      "key": "beta_report_dir",
+      "source": "environment-override",
+      "type": "path",
+      "value": "<source-report>"
+    },
+    {
+      "key": "beta_report_package",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_require_canonical_2k_evidence",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_require_clean_source",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_require_configured_state_table_evidence",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_restore_asterisk_up",
+      "source": "policy-default",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_restore_freeswitch_up",
+      "source": "policy-default",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_restore_local_pbx",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_burst_matrix",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_burst_smoke",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_fuzz_smoke",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_local_pbx",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_long_soak",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_pbx",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_run_perf_all",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_sipp",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_run_strict_ua",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "beta_sipp_cps",
+      "source": "environment-override",
+      "type": "integer-list",
+      "value": [
+        30,
+        100,
+        300,
+        1000,
+        2000
+      ]
+    },
+    {
+      "key": "beta_sipp_diagnostics",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "beta_state_table_fallback_reason",
+      "source": "derived-from-v1-attestation",
+      "type": "enum",
+      "value": "none"
+    },
+    {
+      "key": "beta_state_table_sha256",
+      "source": "derived-from-v1-attestation",
+      "type": "sha256",
+      "value": "a649a00aba17f6fe1390d24ada78a8936dce8b577c5e4e777714f0e70c89e3ed"
+    },
+    {
+      "key": "beta_state_table_source",
+      "source": "derived-from-v1-attestation",
+      "type": "enum",
+      "value": "embedded-default"
+    },
+    {
+      "key": "beta_test_log_filter",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "off"
+    },
+    {
+      "key": "cargo",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)"
+    },
+    {
+      "key": "cargo_metadata",
+      "source": "derived-from-v1-attestation",
+      "type": "path",
+      "value": "environment/cargo-metadata.json"
+    },
+    {
+      "key": "colima",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "time=\"2026-07-24T16:14:01-07:00\" level=info msg=\"colima is running using macOS Virtualization.Framework\""
+    },
+    {
+      "key": "docker",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "Client: Docker Engine - Community"
+    },
+    {
+      "key": "git_revision",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "8d44fb35"
+    },
+    {
+      "key": "git_status",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "clean"
+    },
+    {
+      "key": "host",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "Darwin Mac.lan 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:41 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6031 arm64"
+    },
+    {
+      "key": "rustc",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "rustc 1.95.0 (59807616e 2026-04-14)"
+    },
+    {
+      "key": "rvoip_perf_allocator_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_app_event_channel_capacity",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "Config default"
+    },
+    {
+      "key": "rvoip_perf_dhat",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_heap_snapshot_secs",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "auto"
+    },
+    {
+      "key": "rvoip_perf_heap_snapshots",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_leaks_snapshots",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_malloc_stack_logging",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_mass_teardown_calls",
+      "source": "derived-from-v1-attestation",
+      "type": "integer",
+      "value": 500
+    },
+    {
+      "key": "rvoip_perf_mass_teardown_setup_cps",
+      "source": "derived-from-v1-attestation",
+      "type": "integer",
+      "value": 30
+    },
+    {
+      "key": "rvoip_perf_max_rss_growth_mb_per_hr",
+      "source": "environment-override",
+      "type": "number",
+      "value": 15.0
+    },
+    {
+      "key": "rvoip_perf_memory_diag_interval_secs",
+      "source": "derived-from-v1-attestation",
+      "type": "integer",
+      "value": 5
+    },
+    {
+      "key": "rvoip_perf_memory_diagnostics",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_mimalloc_collect_at",
+      "source": "derived-from-v1-attestation",
+      "type": "string",
+      "value": "off"
+    },
+    {
+      "key": "rvoip_perf_retention_drain_wait_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 160
+    },
+    {
+      "key": "rvoip_perf_rss_tail_window_secs",
+      "source": "derived-from-v1-attestation",
+      "type": "integer",
+      "value": 60
+    },
+    {
+      "key": "rvoip_perf_skip_audio_frame_delivery",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_perf_soak_active_calls",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 500
+    },
+    {
+      "key": "rvoip_perf_soak_cps",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 0
+    },
+    {
+      "key": "rvoip_perf_soak_drain_cps",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 10
+    },
+    {
+      "key": "rvoip_perf_soak_duration_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 3600
+    },
+    {
+      "key": "rvoip_perf_soak_error_sample_limit",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 32
+    },
+    {
+      "key": "rvoip_perf_soak_max_hold_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 360
+    },
+    {
+      "key": "rvoip_perf_soak_min_hold_secs",
+      "source": "environment-override",
+      "type": "integer",
+      "value": 10
+    },
+    {
+      "key": "rvoip_perf_system_allocator",
+      "source": "derived-from-v1-attestation",
+      "type": "boolean",
+      "value": false
+    },
+    {
+      "key": "rvoip_require_api_tools",
+      "source": "environment-override",
+      "type": "boolean",
+      "value": true
+    },
+    {
+      "key": "rvoip_strict_ua_host_ip",
+      "source": "environment-override",
+      "type": "string",
+      "value": "192.168.1.3"
+    },
+    {
+      "key": "source_at_beta_end",
+      "source": "derived-from-v1-attestation",
+      "type": "path",
+      "value": "environment/source-at-beta-end.json"
+    },
+    {
+      "key": "source_at_beta_start",
+      "source": "derived-from-v1-attestation",
+      "type": "path",
+      "value": "environment/source-at-beta-start.json"
+    }
+  ],
+  "values_by_key": {
+    "beta_aggregate_skip_gate": false,
+    "beta_attestation_features": [
+      "generated-validation",
+      "dev-insecure-tls",
+      "perf-tests",
+      "g729"
+    ],
+    "beta_attestation_target": "rustc-host",
+    "beta_burst_matrix": "all",
+    "beta_burst_scenario_file": "bundled config/perf-burst-scenarios.yaml",
+    "beta_canonical_2k_run_dirs": [
+      "<workspace>/target/perf-results/profiles/20260724T221956Z_clean_KRwxGm",
+      "<workspace>/target/perf-results/profiles/20260724T224300Z_clean_GbSiae",
+      "<workspace>/target/perf-results/profiles/20260724T225757Z_clean_p5XNXK"
+    ],
+    "beta_deny_warnings": true,
+    "beta_gate_artifact_dir": "<source-report>",
+    "beta_gate_mode": "full",
+    "beta_gate_require_external": true,
+    "beta_pbx_api": "all",
+    "beta_pbx_g729_profiles": [
+      "g729a",
+      "g729ab"
+    ],
+    "beta_pbx_provider": "both",
+    "beta_pbx_scenario": "all",
+    "beta_perf_features": [
+      "perf-tests"
+    ],
+    "beta_perf_high_density_burst_cps": 160,
+    "beta_perf_high_density_min_asr": 0.995,
+    "beta_perf_high_density_rss_limit_mb_per_hr": 15.0,
+    "beta_perf_infra_memory_diagnostics": false,
+    "beta_perf_media_churn_active_calls": 30,
+    "beta_perf_media_churn_duration_secs": 120,
+    "beta_perf_media_diagnostics": false,
+    "beta_perf_media_memory_diagnostics": false,
+    "beta_perf_monolithic_soak_active_calls": 30,
+    "beta_perf_monolithic_soak_duration_secs": 3600,
+    "beta_perf_regression_baseline_id": "20260706T181609Z",
+    "beta_perf_regression_baseline_manifest": "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json",
+    "beta_perf_regression_baseline_manifest_sha256": "739f35519904318db5e5d9e67755b573679530fc3dcdc290fc79e441f07eb6e9",
+    "beta_perf_regression_baseline_root": "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z",
+    "beta_perf_regression_fail": true,
+    "beta_perf_rtp_memory_diagnostics": false,
+    "beta_performance_recipe_file": "bundled config/performance-recipes.yaml",
+    "beta_profile_matrix": "endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000",
+    "beta_report_dir": "<source-report>",
+    "beta_report_package": true,
+    "beta_require_canonical_2k_evidence": true,
+    "beta_require_clean_source": true,
+    "beta_require_configured_state_table_evidence": false,
+    "beta_restore_asterisk_up": false,
+    "beta_restore_freeswitch_up": false,
+    "beta_restore_local_pbx": true,
+    "beta_run_burst_matrix": true,
+    "beta_run_burst_smoke": true,
+    "beta_run_fuzz_smoke": true,
+    "beta_run_local_pbx": true,
+    "beta_run_long_soak": true,
+    "beta_run_pbx": false,
+    "beta_run_perf_all": true,
+    "beta_run_sipp": true,
+    "beta_run_strict_ua": true,
+    "beta_sipp_cps": [
+      30,
+      100,
+      300,
+      1000,
+      2000
+    ],
+    "beta_sipp_diagnostics": false,
+    "beta_state_table_fallback_reason": "none",
+    "beta_state_table_sha256": "a649a00aba17f6fe1390d24ada78a8936dce8b577c5e4e777714f0e70c89e3ed",
+    "beta_state_table_source": "embedded-default",
+    "beta_test_log_filter": "off",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "cargo_metadata": "environment/cargo-metadata.json",
+    "colima": "time=\"2026-07-24T16:14:01-07:00\" level=info msg=\"colima is running using macOS Virtualization.Framework\"",
+    "docker": "Client: Docker Engine - Community",
+    "git_revision": "8d44fb35",
+    "git_status": "clean",
+    "host": "Darwin Mac.lan 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:41 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T6031 arm64",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "rvoip_perf_allocator_diagnostics": false,
+    "rvoip_perf_app_event_channel_capacity": "Config default",
+    "rvoip_perf_dhat": false,
+    "rvoip_perf_heap_snapshot_secs": "auto",
+    "rvoip_perf_heap_snapshots": false,
+    "rvoip_perf_leaks_snapshots": false,
+    "rvoip_perf_malloc_stack_logging": false,
+    "rvoip_perf_mass_teardown_calls": 500,
+    "rvoip_perf_mass_teardown_setup_cps": 30,
+    "rvoip_perf_max_rss_growth_mb_per_hr": 15.0,
+    "rvoip_perf_memory_diag_interval_secs": 5,
+    "rvoip_perf_memory_diagnostics": false,
+    "rvoip_perf_mimalloc_collect_at": "off",
+    "rvoip_perf_retention_drain_wait_secs": 160,
+    "rvoip_perf_rss_tail_window_secs": 60,
+    "rvoip_perf_skip_audio_frame_delivery": false,
+    "rvoip_perf_soak_active_calls": 500,
+    "rvoip_perf_soak_cps": 0,
+    "rvoip_perf_soak_drain_cps": 10,
+    "rvoip_perf_soak_duration_secs": 3600,
+    "rvoip_perf_soak_error_sample_limit": 32,
+    "rvoip_perf_soak_max_hold_secs": 360,
+    "rvoip_perf_soak_min_hold_secs": 10,
+    "rvoip_perf_system_allocator": false,
+    "rvoip_require_api_tools": true,
+    "rvoip_strict_ua_host_ip": "192.168.1.3",
+    "source_at_beta_end": "environment/source-at-beta-end.json",
+    "source_at_beta_start": "environment/source-at-beta-start.json"
+  }
+}

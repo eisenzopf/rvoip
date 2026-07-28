@@ -6,7 +6,12 @@
 mod tests {
     use super::super::*;
     use crate::types::{DialogId, MediaDirection, MediaSessionId};
-    use rvoip_rtp_core::transport::AllocationStrategy;
+    use bytes::Bytes;
+    use rvoip_rtp_core::packet::RtpPacket;
+    use rvoip_rtp_core::session::RtpSessionEvent;
+    use rvoip_rtp_core::transport::{
+        AllocationStrategy, PairingStrategy, PortAllocator, PortAllocatorConfig,
+    };
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
     use std::sync::Arc;
@@ -39,6 +44,46 @@ mod tests {
         // Check session is removed
         let session_info = controller.get_session_info(&DialogId::new("dialog1")).await;
         assert!(session_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_start_releases_reserved_port_for_reuse() {
+        let allocator = Arc::new(PortAllocator::with_config(PortAllocatorConfig {
+            port_range_start: 15_500,
+            port_range_end: 15_500,
+            allocation_strategy: AllocationStrategy::Incremental,
+            pairing_strategy: PairingStrategy::Muxed,
+            prefer_port_reuse: false,
+            default_ip: IpAddr::V4(Ipv4Addr::LOCALHOST),
+            allocation_retries: 1,
+            validate_ports: false,
+            capacity_hint: 1,
+        }));
+        let session_id = "cancelled-dialog".to_string();
+        allocator
+            .allocate_port_pair(&session_id, Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .expect("reserve sole port");
+        assert_eq!(allocator.allocated_count().await, 1);
+
+        // Dropping this armed guard is the exact path taken when the
+        // start_media future is cancelled before map commit.
+        drop(MediaPortReservationGuard::new(
+            allocator.clone(),
+            session_id,
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while allocator.allocated_count().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancellation cleanup timeout");
+
+        allocator
+            .allocate_port_pair("replacement-dialog", Some(IpAddr::V4(Ipv4Addr::LOCALHOST)))
+            .await
+            .expect("released sole port should be reusable");
     }
 
     #[tokio::test]
@@ -108,6 +153,74 @@ mod tests {
             .await
             .expect("dtmf receiver should close");
         assert!(closed.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_dialog_cleanup_cannot_remove_rebound_session_mapping() {
+        let controller = MediaSessionController::new();
+        let old_dialog = DialogId::new("rebound-old-dialog");
+        let new_dialog = DialogId::new("rebound-new-dialog");
+        let session_id = "reused-session".to_string();
+        let old_media = MediaSessionId::from_dialog(&old_dialog);
+        let new_media = MediaSessionId::from_dialog(&new_dialog);
+
+        // Preserve the old reverse entry to model delayed cleanup while the
+        // application-facing forward key has already been rebound.
+        controller.store_session_mapping(session_id.clone(), old_media.clone());
+        controller.store_session_mapping(session_id.clone(), new_media.clone());
+        assert_eq!(
+            controller.get_media_id(&session_id),
+            Some(new_media.clone())
+        );
+        assert_eq!(
+            controller.get_session_id(&old_media),
+            Some(session_id.clone())
+        );
+
+        controller
+            .stop_media(&old_dialog)
+            .await
+            .expect("stale stop remains idempotent");
+
+        assert_eq!(
+            controller.get_media_id(&session_id),
+            Some(new_media.clone()),
+            "old dialog cleanup must not remove the newer forward binding"
+        );
+        assert_eq!(controller.get_session_id(&new_media), Some(session_id));
+        assert_eq!(controller.get_session_id(&old_media), None);
+    }
+
+    #[tokio::test]
+    async fn decoded_audio_callback_preserves_rtp_timestamp() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("rtp-timestamp-dialog");
+        let (audio_tx, mut audio_rx) = tokio::sync::mpsc::channel(1);
+        controller
+            .set_audio_frame_callback(dialog_id.clone(), audio_tx)
+            .await
+            .expect("set audio callback");
+
+        let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(1);
+        controller.spawn_rtp_event_handler(dialog_id, rtp_rx, 0);
+        let timestamp = 0xf123_4567;
+        rtp_tx
+            .send(RtpSessionEvent::PacketReceived(
+                RtpPacket::new_with_payload(
+                    0,
+                    7,
+                    timestamp,
+                    0x5256_4f49,
+                    Bytes::from(vec![0xff; 160]),
+                ),
+            ))
+            .expect("send RTP event");
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(1), audio_rx.recv())
+            .await
+            .expect("decoded frame timeout")
+            .expect("decoded frame");
+        assert_eq!(frame.timestamp, timestamp);
     }
 
     #[tokio::test]
@@ -198,6 +311,88 @@ mod tests {
         panic!("failed to find adjacent UDP ports for retry test");
     }
 
+    fn bind_contiguous_port_block(count: usize) -> (Vec<StdUdpSocket>, u16) {
+        assert!(count > 1);
+        for _ in 0..1_000 {
+            let first = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let base_port = first.local_addr().unwrap().port();
+            let Ok(last_offset) = u16::try_from(count - 1) else {
+                break;
+            };
+            if base_port.checked_add(last_offset).is_none() {
+                continue;
+            }
+
+            let mut sockets = vec![first];
+            let mut complete = true;
+            for offset in 1..count {
+                let port = base_port + u16::try_from(offset).unwrap();
+                match StdUdpSocket::bind((Ipv4Addr::LOCALHOST, port)) {
+                    Ok(socket) => sockets.push(socket),
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+            if complete {
+                return (sockets, base_port);
+            }
+        }
+
+        panic!("failed to find {count} contiguous UDP ports for retry test");
+    }
+
+    #[tokio::test]
+    async fn controllers_with_same_bind_domain_share_port_reservations() {
+        let (range_probe, base_port) = bind_adjacent_port_probe();
+        drop(range_probe);
+
+        let first_controller = MediaSessionController::with_port_range(base_port, base_port + 1);
+        let second_controller = MediaSessionController::with_port_range(base_port, base_port + 1);
+        let dialog_id = DialogId::new("same-dialog-id");
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+
+        first_controller
+            .start_media(dialog_id.clone(), config.clone())
+            .await
+            .expect("first controller media start");
+        second_controller
+            .start_media(dialog_id.clone(), config)
+            .await
+            .expect("second controller media start");
+
+        let first_port = first_controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("first session info")
+            .rtp_port;
+        let second_port = second_controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("second session info")
+            .rtp_port;
+        assert_ne!(first_port, second_port);
+
+        first_controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("stop first controller media");
+        assert!(second_controller
+            .get_session_info(&dialog_id)
+            .await
+            .is_some());
+        second_controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("stop second controller media");
+    }
+
     #[tokio::test]
     async fn test_start_media_retries_when_reserved_port_bind_fails() {
         let (_held_socket, occupied_port) = bind_adjacent_port_probe();
@@ -232,6 +427,50 @@ mod tests {
             .stop_media(&dialog_id)
             .await
             .expect("session should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn start_media_scans_beyond_eight_bind_collisions() {
+        const RANGE_LEN: usize = 12;
+        let (mut held_sockets, base_port) = bind_contiguous_port_block(RANGE_LEN);
+        let expected_port = base_port + u16::try_from(RANGE_LEN - 1).unwrap();
+        drop(held_sockets.pop());
+
+        let mut controller = MediaSessionController::new();
+        let mut port_config = PortAllocatorConfig::default();
+        port_config.port_range_start = base_port;
+        port_config.port_range_end = expected_port;
+        port_config.allocation_strategy = AllocationStrategy::Incremental;
+        port_config.pairing_strategy = PairingStrategy::Muxed;
+        port_config.prefer_port_reuse = false;
+        port_config.validate_ports = false;
+        controller.port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
+
+        let dialog_id = DialogId::new("full_range_bind_retry");
+        controller
+            .start_media(
+                dialog_id.clone(),
+                MediaConfig {
+                    local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    remote_addr: None,
+                    preferred_codec: None,
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .expect("one complete range scan should reach the free candidate");
+
+        let session_info = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("session after range scan");
+        assert_eq!(session_info.rtp_port, Some(expected_port));
+
+        controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("session should stop cleanly");
+        drop(held_sockets);
     }
 
     #[tokio::test]

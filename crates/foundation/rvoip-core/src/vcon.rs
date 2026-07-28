@@ -8,6 +8,7 @@ use crate::ids::{AttachmentId, ParticipantId, StreamId};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use uuid::Uuid;
 
 /// Opaque reference to a vCon document.
@@ -18,7 +19,7 @@ use uuid::Uuid;
 /// resolvable vCon URIs and is intentionally not constructed in v0 —
 /// the variant exists so the serde wire shape doesn't churn when
 /// `rvoip-vcon` introduces it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum VconRef {
     /// Local store reference; the uuid resolves through whatever
@@ -29,7 +30,16 @@ pub enum VconRef {
     Url { url: String },
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconRef {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Local { .. } => "VconRef::Local",
+            Self::Url { .. } => "VconRef::Url",
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct VconParty {
     pub participant_id: ParticipantId,
     pub display_name: Option<String>,
@@ -37,7 +47,18 @@ pub struct VconParty {
     pub validation: IdentityAssurance,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconParty {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconParty")
+            .field("display_name_present", &self.display_name.is_some())
+            .field("did_or_stir_present", &self.did_or_stir.is_some())
+            .field("validation_kind", &self.validation.kind())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct VconDialog {
     pub kind: VconDialogKind,
     pub stream_id: Option<StreamId>,
@@ -47,7 +68,21 @@ pub struct VconDialog {
     pub mimetype: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconDialog {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconDialog")
+            .field("kind", &self.kind)
+            .field("stream_id_present", &self.stream_id.is_some())
+            .field("started", &self.started)
+            .field("ended", &self.ended)
+            .field("party_count", &self.parties.len())
+            .field("mimetype_present", &self.mimetype.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub enum VconDialogKind {
     Audio,
     Video,
@@ -56,7 +91,19 @@ pub enum VconDialogKind {
     Other(String),
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconDialogKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Audio => "Audio",
+            Self::Video => "Video",
+            Self::Text => "Text",
+            Self::Transfer => "Transfer",
+            Self::Other(_) => "Other",
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct VconAnalysis {
     pub kind: VconAnalysisKind,
     pub vendor: Option<String>,
@@ -65,7 +112,20 @@ pub struct VconAnalysis {
     pub mimetype: String,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconAnalysis {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconAnalysis")
+            .field("kind", &self.kind)
+            .field("vendor_present", &self.vendor.is_some())
+            .field("product_present", &self.product.is_some())
+            .field("body_bytes", &self.body.len())
+            .field("mimetype_present", &!self.mimetype.is_empty())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub enum VconAnalysisKind {
     Transcript,
     Sentiment,
@@ -73,7 +133,18 @@ pub enum VconAnalysisKind {
     Other(String),
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconAnalysisKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Transcript => "Transcript",
+            Self::Sentiment => "Sentiment",
+            Self::Summary => "Summary",
+            Self::Other(_) => "Other",
+        })
+    }
+}
+
+#[derive(Clone)]
 pub struct VconAttachment {
     pub id: AttachmentId,
     pub mimetype: String,
@@ -81,12 +152,35 @@ pub struct VconAttachment {
     pub note: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+impl fmt::Debug for VconAttachment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconAttachment")
+            .field("mimetype_present", &!self.mimetype.is_empty())
+            .field("body_bytes", &self.body.len())
+            .field("note_present", &self.note.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct VconSnapshot {
     pub parties: Vec<VconParty>,
     pub dialogs: Vec<VconDialog>,
     pub analyses: Vec<VconAnalysis>,
     pub attachments: Vec<VconAttachment>,
+}
+
+impl fmt::Debug for VconSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VconSnapshot")
+            .field("party_count", &self.parties.len())
+            .field("dialog_count", &self.dialogs.len())
+            .field("analysis_count", &self.analyses.len())
+            .field("attachment_count", &self.attachments.len())
+            .finish()
+    }
 }
 
 /// Append-only handle exposed by an active [`crate::Session`] for the

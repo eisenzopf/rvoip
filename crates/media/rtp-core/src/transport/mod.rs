@@ -134,6 +134,7 @@ pub mod dtls_datagram_bridge;
 #[cfg(feature = "ice")]
 mod ice_bridge;
 pub mod security_transport;
+mod symmetric;
 mod tcp;
 mod udp;
 mod validation;
@@ -141,11 +142,12 @@ mod validation;
 // Re-export transport implementations
 pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
-    DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
+    PortAllocatorDiagnostics, DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 #[cfg(feature = "ice")]
 pub use ice_bridge::IceUdpSocketAdapter;
 pub use security_transport::SecurityRtpTransport;
+pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{
     classify_rtp_mux_packet, set_diagnostics as set_udp_diagnostics, RtpMuxPacketClass,

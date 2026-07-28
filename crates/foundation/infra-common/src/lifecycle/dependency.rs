@@ -1,5 +1,6 @@
 use crate::errors::types::{Error, Result};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use thiserror::Error;
 
 /// Errors related to dependency resolution
@@ -22,7 +23,7 @@ impl From<DependencyError> for Error {
 }
 
 /// A graph structure that manages dependencies between components
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct DependencyGraph {
     /// Map of component name to its dependencies
     dependencies: HashMap<String, HashSet<String>>,
@@ -180,38 +181,35 @@ impl DependencyGraph {
     pub fn resolve_order(&self) -> Result<Vec<String>> {
         let mut result = Vec::new();
         let mut in_degree = HashMap::new();
-        let mut queue = VecDeque::new();
+        let mut queue = BinaryHeap::new();
 
-        // Initialize in-degree for all nodes
-        for node in self.dependencies.keys() {
-            in_degree.insert(node.clone(), 0);
+        // A node becomes ready after all of its dependencies have been
+        // emitted. The previous implementation counted how many components
+        // depended on a node, which inverted every edge and made even a
+        // one-edge acyclic graph look cyclic.
+        for (node, dependencies) in &self.dependencies {
+            in_degree.insert(node.clone(), dependencies.len());
         }
 
-        // Calculate in-degree for each node
-        for (_, deps) in &self.dependencies {
-            for dep in deps {
-                *in_degree.entry(dep.clone()).or_insert(0) += 1;
-            }
-        }
-
-        // Add all nodes with in-degree 0 to the queue
+        // Use a heap so independent components have deterministic ordering.
         for (node, degree) in &in_degree {
             if *degree == 0 {
-                queue.push_back(node.clone());
+                queue.push(Reverse(node.clone()));
             }
         }
 
-        // Process queue
-        while let Some(node) = queue.pop_front() {
+        while let Some(Reverse(node)) = queue.pop() {
             result.push(node.clone());
 
             if let Some(dependents) = self.reverse_dependencies.get(&node) {
                 for dependent in dependents {
-                    let degree = in_degree.get_mut(dependent).unwrap();
+                    let degree = in_degree
+                        .get_mut(dependent)
+                        .expect("dependency graph contains every reverse edge endpoint");
                     *degree -= 1;
 
                     if *degree == 0 {
-                        queue.push_back(dependent.clone());
+                        queue.push(Reverse(dependent.clone()));
                     }
                 }
             }
@@ -226,5 +224,35 @@ impl DependencyGraph {
         }
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_order_places_every_dependency_before_its_dependents() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("metrics");
+        graph.add_dependency("api", "service").unwrap();
+        graph.add_dependency("service", "database").unwrap();
+
+        let order = graph.resolve_order().unwrap();
+        let position = |name: &str| order.iter().position(|node| node == name).unwrap();
+
+        assert!(position("database") < position("service"));
+        assert!(position("service") < position("api"));
+        assert!(order.contains(&"metrics".to_owned()));
+    }
+
+    #[test]
+    fn independent_nodes_have_deterministic_lexical_order() {
+        let mut graph = DependencyGraph::new();
+        graph.add_node("zeta");
+        graph.add_node("alpha");
+        graph.add_node("middle");
+
+        assert_eq!(graph.resolve_order().unwrap(), ["alpha", "middle", "zeta"]);
     }
 }

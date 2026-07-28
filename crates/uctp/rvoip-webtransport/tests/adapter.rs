@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
-use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter};
+use rvoip_core::adapter::{AdapterEvent, AdapterKind, ConnectionAdapter, EndReason};
 use rvoip_core::connection::Transport;
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
@@ -75,6 +75,11 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
 
     assert_eq!(adapter.transport(), Transport::WebTransport);
     assert_eq!(adapter.kind(), AdapterKind::Substrate);
+    let lifecycle = adapter.lifecycle_capabilities();
+    assert!(lifecycle.authoritative_liveness);
+    assert!(lifecycle.atomic_inbound_handoff);
+    assert!(lifecycle.terminal_fallback);
+    assert!(!lifecycle.staged_outbound_activation);
 
     let mut events = adapter.subscribe_events();
 
@@ -141,6 +146,10 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
         .expect("auth.session timeout")
         .expect("inbound closed");
     assert_eq!(session_reply.msg_type, MessageType::AuthSession);
+    let authenticated_participant = session_reply
+        .decode_payload::<auth::AuthSession>()
+        .expect("decode auth.session")
+        .participant_id;
 
     let payload = SessionInvite {
         from: "part_alice".into(),
@@ -176,36 +185,325 @@ async fn wt_adapter_emits_inbound_connection_on_session_invite() {
         break ev;
     };
 
-    match event {
+    let core_connection_id = match event {
         AdapterEvent::InboundConnection { connection } => {
             assert_eq!(connection.transport, Transport::WebTransport);
-            assert_eq!(connection.session_id.as_str(), "sess_wt_adapter_test");
-            assert_eq!(connection.participant_id.as_str(), "part_alice");
+            assert!(
+                connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_wt_adapter_test"),
+                "default resolver must retain the wire ID inside a peer-private namespace"
+            );
+            assert_ne!(connection.session_id.as_str(), "sess_wt_adapter_test");
+            assert_eq!(
+                connection.participant_id.as_str(),
+                authenticated_participant.as_str()
+            );
 
-            // SP-D: default audio stream is now populated at InboundInvite.
+            // Media is bound only after connection.offer/ready supplies the
+            // authenticated wire Stream ID and negotiated codec.
             assert_eq!(
                 connection.streams.len(),
-                1,
-                "expected one default audio stream populated at InboundInvite"
+                0,
+                "invite-time synthetic streams would race negotiated binding"
             );
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(connection.streams[0].stream().as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
-            let codec =
-                rvoip_core::stream::MediaStream::codec(connection.streams[0].stream().as_ref());
-            assert_eq!(codec.name, "opus");
 
             let via_adapter = adapter
                 .streams(connection.id.clone())
                 .await
                 .expect("streams ok");
-            assert_eq!(via_adapter.len(), 1);
-            assert_eq!(
-                rvoip_core::stream::MediaStream::kind(via_adapter[0].as_ref()),
-                rvoip_core::stream::StreamKind::Audio
-            );
+            assert!(via_adapter.is_empty());
+            connection.id
         }
         other => panic!("expected InboundConnection, got {:?}", other),
+    };
+
+    let wire_connection_id = "conn_wt_wire";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "webtransport".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_wt_data".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_wt_adapter_test")
+            .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send connection offer");
+    client
+        .send(
+            UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+                .with_sid("sess_wt_adapter_test")
+                .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send connection ready");
+
+    let bound_streams = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let streams = adapter
+                .streams(core_connection_id.clone())
+                .await
+                .expect("streams ok");
+            if !streams.is_empty() {
+                break streams;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("negotiated media binding timeout");
+    assert_eq!(bound_streams.len(), 1);
+    assert_eq!(bound_streams[0].id().as_str(), "strm_wt_data");
+    assert_eq!(
+        bound_streams[0].kind(),
+        rvoip_core::stream::StreamKind::Audio
+    );
+    assert_eq!(bound_streams[0].codec().name, "opus");
+
+    let opened = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let envelope = inbound.recv().await.expect("client inbound closed");
+            if envelope.msg_type == MessageType::StreamOpened {
+                break envelope
+                    .decode_payload::<rvoip_uctp::payloads::stream::StreamOpened>()
+                    .expect("decode stream.opened");
+            }
+        }
+    })
+    .await
+    .expect("stream.opened timeout");
+    assert_eq!(opened.stream.strm_id, "strm_wt_data");
+    assert_ne!(opened.stream.stream_local_id, 0);
+
+    let mut media_in = bound_streams[0]
+        .try_frames_in()
+        .expect("acquire negotiated media receiver");
+    let datagram = rvoip_uctp::substrate::pack_rtp_datagram(&rvoip_uctp::substrate::RtpDatagram {
+        flags: 0,
+        stream_local_id: opened.stream.stream_local_id,
+        seq: 9,
+        rtp: rvoip_uctp::substrate::RtpMediaPayload {
+            payload: bytes::Bytes::from_static(b"negotiated-opus-frame"),
+            payload_type: 111,
+            sequence_number: 17,
+            timestamp: 960,
+            ssrc: 0x1020_3040,
+        },
+    })
+    .expect("encode complete RTP datagram");
+    client
+        .session
+        .send_datagram(datagram)
+        .expect("send media datagram");
+    let media_frame = tokio::time::timeout(Duration::from_secs(5), media_in.recv())
+        .await
+        .expect("media frame timeout")
+        .expect("media receiver closed");
+    assert_eq!(media_frame.stream_id.as_str(), "strm_wt_data");
+    assert_eq!(media_frame.payload.as_ref(), b"negotiated-opus-frame");
+    assert_eq!(media_frame.payload_type, Some(111));
+    assert_eq!(media_frame.timestamp_rtp, 960);
+
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::MessageSend,
+                serde_json::json!({
+                    "msg_id": "msg_wt_data",
+                    "from": "part_alice",
+                    "to": "all",
+                    "content_type": "text/plain",
+                    "label": "bridgefu.context.v1",
+                    "body": "hello over WebTransport",
+                    "body_encoding": "utf8",
+                    "attachments": []
+                }),
+            )
+            .with_sid("sess_wt_adapter_test")
+            .with_connid(wire_connection_id),
+        )
+        .await
+        .expect("send data message");
+
+    let received_connection = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AdapterEvent::DataMessage {
+                connection_id,
+                message,
+            } = events.recv().await.expect("event channel closed")
+            {
+                assert_eq!(message.bytes.as_ref(), b"hello over WebTransport");
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("DataMessage timeout");
+    assert_eq!(received_connection, core_connection_id);
+    assert_ne!(received_connection.as_str(), wire_connection_id);
+
+    client
+        .send(UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::SessionInvite,
+            id: "env_inv_other".into(),
+            ts: Utc::now(),
+            cid: Some("conv_y".into()),
+            sid: Some("sess_wt_adapter_other".into()),
+            connid: None,
+            in_reply_to: None,
+            payload: serde_json::to_value(SessionInvite {
+                from: "part_alice".into(),
+                to: vec!["part_bob".into()],
+                medium: "voice".into(),
+                intent: "synchronous-engagement".into(),
+                capabilities_offer: serde_json::Value::Object(Default::default()),
+            })
+            .unwrap(),
+            signature: None,
+        })
+        .await
+        .expect("send second invite");
+    let second_core_connection_id = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let AdapterEvent::InboundConnection { connection } =
+                events.recv().await.expect("event channel closed")
+            {
+                if connection
+                    .session_id
+                    .as_str()
+                    .ends_with(":sess_wt_adapter_other")
+                {
+                    break connection.id;
+                }
+            }
+        }
+    })
+    .await
+    .expect("second inbound connection timeout");
+    assert_ne!(second_core_connection_id, core_connection_id);
+
+    let second_wire_connection_id = "conn_wt_wire_other";
+    client
+        .send(
+            UctpEnvelope::new(
+                MessageType::ConnectionOffer,
+                serde_json::to_value(rvoip_uctp::payloads::connection::ConnectionOffer {
+                    by_participant: "part_alice".into(),
+                    substrate: "webtransport".into(),
+                    capabilities: serde_json::Value::Object(Default::default()),
+                    streams_offered: vec![rvoip_uctp::payloads::connection::StreamOffer {
+                        id: "strm_wt_data_other".into(),
+                        kind: "audio".into(),
+                        direction: "sendrecv".into(),
+                        codec_preferences: vec!["opus".into()],
+                    }],
+                    substrate_setup: serde_json::Value::Null,
+                })
+                .unwrap(),
+            )
+            .with_sid("sess_wt_adapter_other")
+            .with_connid(second_wire_connection_id),
+        )
+        .await
+        .expect("bind second wire connection");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                events.recv().await.expect("event channel closed"),
+                AdapterEvent::Native { kind: "uctp.connection_bound", detail }
+                    if detail == second_wire_connection_id
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("second connection binding timeout");
+
+    adapter
+        .send_data_message(
+            core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "first route payload"),
+        )
+        .await
+        .expect("send first route data");
+    adapter
+        .send_data_message(
+            second_core_connection_id.clone(),
+            rvoip_core::DataMessage::reliable("route.test", "text/plain", "second route payload"),
+        )
+        .await
+        .expect("send second route data");
+
+    for (cid, sid, connid, body) in [
+        (
+            "conv_x",
+            "sess_wt_adapter_test",
+            wire_connection_id,
+            "first route payload",
+        ),
+        (
+            "conv_y",
+            "sess_wt_adapter_other",
+            second_wire_connection_id,
+            "second route payload",
+        ),
+    ] {
+        let envelope = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let envelope = inbound.recv().await.expect("client inbound closed");
+                if envelope.msg_type == MessageType::MessageSend {
+                    break envelope;
+                }
+            }
+        })
+        .await
+        .expect("outbound data timeout");
+        let payload = envelope
+            .decode_payload::<rvoip_uctp::payloads::message::MessageSend>()
+            .expect("decode outbound message");
+        assert_eq!(envelope.cid.as_deref(), Some(cid));
+        assert_eq!(envelope.sid.as_deref(), Some(sid));
+        assert_eq!(envelope.connid.as_deref(), Some(connid));
+        assert_eq!(payload.body, body);
     }
+
+    adapter
+        .end(core_connection_id.clone(), EndReason::Normal)
+        .await
+        .expect("local end");
+    assert!(!adapter.is_connection_live(&core_connection_id));
+    let terminal = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(AdapterEvent::Ended { connection_id, .. }) = events.recv().await {
+                break connection_id;
+            }
+        }
+    })
+    .await
+    .expect("terminal event");
+    assert_eq!(terminal, core_connection_id);
+    adapter
+        .end(core_connection_id, EndReason::Normal)
+        .await
+        .expect("repeated end is idempotent");
+    adapter
+        .end(second_core_connection_id, EndReason::Normal)
+        .await
+        .expect("end second route");
 }

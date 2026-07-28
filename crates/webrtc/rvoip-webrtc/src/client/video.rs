@@ -19,6 +19,7 @@
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::fmt;
 use std::time::Duration;
 
 use crate::errors::Result;
@@ -26,12 +27,24 @@ use crate::errors::Result;
 /// One raw I420 frame ready for encoding. Shared between the VP8 and
 /// H.264 video sources (`client-video-vp8` / `client-video-h264`) so a
 /// single camera capture worker can drive multiple codecs.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct YuvFrame {
     pub y: Bytes,
     pub u: Bytes,
     pub v: Bytes,
     pub capture_time: Duration,
+}
+
+impl fmt::Debug for YuvFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("YuvFrame")
+            .field("y_bytes", &self.y.len())
+            .field("u_bytes", &self.u.len())
+            .field("v_bytes", &self.v.len())
+            .field("capture_time", &self.capture_time)
+            .finish()
+    }
 }
 
 /// One outbound video frame.
@@ -45,7 +58,7 @@ pub struct YuvFrame {
 ///    packetized later in the pipeline. Today no shipped backend consumes
 ///    this variant; D3b/c will add `Vp8VideoSource` /
 ///    `H264VideoSource` that ingest `YuvI420` and yield `Encoded` packets.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum VideoFrame {
     /// One or more RTP packets carrying an encoded video payload.
     /// `rtp_packets` is the *full* RTP wire image (header + payload) per
@@ -66,6 +79,47 @@ pub enum VideoFrame {
         v: Bytes,
         capture_time: Duration,
     },
+}
+
+impl fmt::Debug for VideoFrame {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Encoded {
+                codec,
+                rtp_packets,
+                timestamp_rtp,
+                keyframe,
+            } => {
+                let rtp_bytes = rtp_packets
+                    .iter()
+                    .fold(0usize, |total, packet| total.saturating_add(packet.len()));
+                formatter
+                    .debug_struct("VideoFrame::Encoded")
+                    .field("codec", codec)
+                    .field("rtp_packet_count", &rtp_packets.len())
+                    .field("rtp_bytes", &rtp_bytes)
+                    .field("timestamp_rtp", timestamp_rtp)
+                    .field("keyframe", keyframe)
+                    .finish()
+            }
+            Self::YuvI420 {
+                width,
+                height,
+                y,
+                u,
+                v,
+                capture_time,
+            } => formatter
+                .debug_struct("VideoFrame::YuvI420")
+                .field("width", width)
+                .field("height", height)
+                .field("y_bytes", &y.len())
+                .field("u_bytes", &u.len())
+                .field("v_bytes", &v.len())
+                .field("capture_time", capture_time)
+                .finish(),
+        }
+    }
 }
 
 /// Video codec the encoded frames are using. The MIME type maps to the

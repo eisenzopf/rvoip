@@ -4,12 +4,14 @@
 //! audio transmission management for RTP sessions with support for multiple audio sources.
 
 use bytes::Bytes;
+use parking_lot::Mutex as ParkingMutex;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use tokio::time::{interval, interval_at, Instant as TokioInstant, MissedTickBehavior};
+use tokio::time::Instant as TokioInstant;
 use tracing::{debug, error, info, warn};
 
 use crate::diagnostics;
@@ -18,13 +20,17 @@ use rvoip_rtp_core::{RtpSendHandle, RtpSession};
 const AUDIO_TX_PHASE_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
 #[cfg(any(feature = "perf-diagnostics", test))]
 const DEFAULT_AUDIO_TX_PACING_TARGET_ACTIVE: u64 = 3_000;
-const DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE: usize = 256;
-const SHARED_AUDIO_TX_TICK: Duration = Duration::from_millis(1);
+// RFC 3551 §4.2 says RTP audio receivers should accept 0..=200 ms packets.
+// Generated-audio streams retain the ordinary 20 ms packetization below
+// this density and coalesce complete adjacent blocks above it. The divisor
+// cap bounds PCMU packets at 180 ms: 1,440 payload bytes and 1,480 bytes with
+// IPv4/UDP/RTP headers, preserving continuity and ordinary 1,500-byte MTUs.
+const DEFAULT_AUDIO_TX_PACKETIZATION_TARGET_ACTIVE: u64 = 500;
+const MAX_AUDIO_TX_PACKETIZATION_DIVISOR: u64 = 9;
 
 static AUDIO_TX_START_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUDIO_TX_PACING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static AUDIO_TX_ACTIVE_TASKS: AtomicU64 = AtomicU64::new(0);
-static SHARED_AUDIO_TX_SCHEDULER: OnceLock<SharedAudioTxScheduler> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 struct AudioTxPacingConfig {
@@ -60,263 +66,6 @@ impl Drop for AudioTxActiveGuard {
     }
 }
 
-struct SharedAudioTxScheduler {
-    slots: Arc<StdMutex<Vec<SharedAudioTxSlot>>>,
-    started: AtomicBool,
-}
-
-struct SharedAudioTxSlot {
-    entry: Arc<SharedAudioTxEntry>,
-    next_due: TokioInstant,
-}
-
-struct SharedAudioTxEntry {
-    rtp_session: Arc<Mutex<RtpSession>>,
-    send_handle: Option<RtpSendHandle>,
-    audio_generator: Arc<Mutex<AudioGenerator>>,
-    timestamp: Arc<Mutex<u32>>,
-    is_active: Arc<RwLock<bool>>,
-    active: AtomicBool,
-    interval: Duration,
-    samples_per_packet: usize,
-    pacing_config: Option<AudioTxPacingConfig>,
-    pacing_sequence: u64,
-    pacing_tick: AtomicU64,
-    pacing_consecutive_skips: AtomicU64,
-}
-
-struct SharedAudioTxRegistration {
-    entry: Arc<SharedAudioTxEntry>,
-}
-
-impl Drop for SharedAudioTxRegistration {
-    fn drop(&mut self) {
-        self.entry.active.store(false, Ordering::Release);
-    }
-}
-
-impl SharedAudioTxScheduler {
-    fn new() -> Self {
-        Self {
-            slots: Arc::new(StdMutex::new(Vec::new())),
-            started: AtomicBool::new(false),
-        }
-    }
-
-    fn register(
-        &self,
-        entry: Arc<SharedAudioTxEntry>,
-        initial_delay: Duration,
-    ) -> SharedAudioTxRegistration {
-        self.ensure_started();
-        let next_due = TokioInstant::now() + initial_delay;
-        {
-            let mut slots = self
-                .slots
-                .lock()
-                .expect("shared audio TX scheduler poisoned");
-            slots.push(SharedAudioTxSlot {
-                entry: entry.clone(),
-                next_due,
-            });
-        }
-        SharedAudioTxRegistration { entry }
-    }
-
-    fn ensure_started(&self) {
-        if self.started.swap(true, Ordering::AcqRel) {
-            return;
-        }
-
-        let slots = self.slots.clone();
-        let batch_size = shared_audio_tx_batch_size_from_env();
-        super::spawn_memory_tracked("media_core.shared_audio_tx_scheduler", async move {
-            run_shared_audio_tx_scheduler(slots, batch_size).await;
-        });
-    }
-}
-
-async fn run_shared_audio_tx_scheduler(
-    slots: Arc<StdMutex<Vec<SharedAudioTxSlot>>>,
-    batch_size: usize,
-) {
-    let mut tick = interval(SHARED_AUDIO_TX_TICK);
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut due_entries: Vec<Arc<SharedAudioTxEntry>> = Vec::new();
-
-    loop {
-        tick.tick().await;
-        due_entries.clear();
-
-        let now = TokioInstant::now();
-        let active_count = {
-            let mut slots = slots.lock().expect("shared audio TX scheduler poisoned");
-            slots.retain(|slot| slot.entry.active.load(Ordering::Acquire));
-            let active_count = slots.len() as u64;
-
-            for slot in slots.iter_mut() {
-                if slot.next_due <= now {
-                    due_entries.push(slot.entry.clone());
-                    while slot.next_due <= now {
-                        slot.next_due += slot.entry.interval;
-                    }
-                }
-            }
-
-            active_count
-        };
-
-        if due_entries.is_empty() {
-            continue;
-        }
-
-        let mut sent_count = 0_u64;
-        let mut skip_count = 0_u64;
-        let mut fail_count = 0_u64;
-        let mut pacing_evaluated_count = 0_u64;
-        let mut pacing_consecutive_skip_max = 0_u64;
-        let mut pacing_divisor_max = 1_u64;
-
-        for (index, entry) in due_entries.iter().enumerate() {
-            match entry.send_due(active_count).await {
-                SharedAudioTxOutcome::Sent { pacing_evaluated } => {
-                    sent_count = sent_count.saturating_add(1);
-                    if pacing_evaluated {
-                        pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
-                    }
-                }
-                SharedAudioTxOutcome::Skipped {
-                    divisor,
-                    consecutive_skips,
-                } => {
-                    skip_count = skip_count.saturating_add(1);
-                    pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
-                    pacing_divisor_max = pacing_divisor_max.max(divisor);
-                    pacing_consecutive_skip_max =
-                        pacing_consecutive_skip_max.max(consecutive_skips);
-                }
-                SharedAudioTxOutcome::Inactive => {}
-                SharedAudioTxOutcome::Failed => {
-                    fail_count = fail_count.saturating_add(1);
-                }
-            }
-
-            if (index + 1) % batch_size == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-
-        diagnostics::record_audio_tx_shared_batch(
-            due_entries.len() as u64,
-            sent_count,
-            skip_count,
-            fail_count,
-            active_count,
-        );
-        if pacing_evaluated_count > 0 {
-            diagnostics::record_audio_tx_pacing_batch(
-                pacing_evaluated_count,
-                skip_count,
-                active_count,
-                pacing_divisor_max,
-                pacing_consecutive_skip_max,
-            );
-        }
-    }
-}
-
-enum SharedAudioTxOutcome {
-    Sent {
-        pacing_evaluated: bool,
-    },
-    Skipped {
-        divisor: u64,
-        consecutive_skips: u64,
-    },
-    Inactive,
-    Failed,
-}
-
-impl SharedAudioTxEntry {
-    async fn send_due(&self, active_count: u64) -> SharedAudioTxOutcome {
-        if !self.active.load(Ordering::Acquire) {
-            return SharedAudioTxOutcome::Inactive;
-        }
-
-        if let Some(pacing) = self.pacing_config {
-            let divisor = pacing_divisor(active_count.max(1), pacing.target_active);
-            let pacing_tick = self.pacing_tick.fetch_add(1, Ordering::Relaxed);
-            let should_skip =
-                divisor > 1 && pacing_tick.wrapping_add(self.pacing_sequence) % divisor != 0;
-            if should_skip {
-                let consecutive_skips = self
-                    .pacing_consecutive_skips
-                    .fetch_add(1, Ordering::Relaxed)
-                    .saturating_add(1);
-                advance_rtp_timestamp(&self.timestamp, self.samples_per_packet).await;
-                return SharedAudioTxOutcome::Skipped {
-                    divisor,
-                    consecutive_skips,
-                };
-            }
-            self.pacing_consecutive_skips.store(0, Ordering::Relaxed);
-        }
-
-        let audio_samples = {
-            let mut generator = self.audio_generator.lock().await;
-            generator.generate_pcmu_samples(self.samples_per_packet)
-        };
-        record_transient_allocation("media_core.audio.tx.payload_vec", audio_samples.capacity());
-
-        if matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
-        {
-            return SharedAudioTxOutcome::Inactive;
-        }
-
-        if !self.active.load(Ordering::Acquire) {
-            return SharedAudioTxOutcome::Inactive;
-        }
-
-        let current_timestamp =
-            advance_rtp_timestamp(&self.timestamp, self.samples_per_packet).await;
-
-        if !self.active.load(Ordering::Acquire) {
-            return SharedAudioTxOutcome::Inactive;
-        }
-
-        let send_result = if let Some(handle) = &self.send_handle {
-            handle
-                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
-                .await
-        } else {
-            let session = self.rtp_session.lock().await;
-            session
-                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
-                .await
-        };
-
-        match send_result {
-            Ok(()) => SharedAudioTxOutcome::Sent {
-                pacing_evaluated: self.pacing_config.is_some(),
-            },
-            Err(e) => {
-                if !self.active.load(Ordering::Acquire) || !*self.is_active.read().await {
-                    debug!("Shared RTP audio send skipped after stop: {}", e);
-                    return SharedAudioTxOutcome::Inactive;
-                }
-                error!("Failed to send shared RTP audio packet: {}", e);
-                self.active.store(false, Ordering::Release);
-                *self.is_active.write().await = false;
-                SharedAudioTxOutcome::Failed
-            }
-        }
-    }
-}
-
-fn shared_audio_tx_scheduler() -> &'static SharedAudioTxScheduler {
-    SHARED_AUDIO_TX_SCHEDULER.get_or_init(SharedAudioTxScheduler::new)
-}
-
 #[cfg(feature = "memory-diagnostics")]
 fn record_transient_allocation(kind: &'static str, bytes: usize) {
     rvoip_infra_common::memory_diagnostics::record_transient_allocation(kind, bytes as u64);
@@ -346,19 +95,26 @@ pub struct AudioGenerator {
     source: AudioSource,
     /// Current position in custom samples (if using custom samples)
     sample_position: usize,
+    /// One exact encoded period for integral-frequency tones.
+    tone_waveform: Option<Vec<u8>>,
+    /// Immutable packet payloads keyed by (packet length, waveform offset).
+    tone_payload_cache: HashMap<(usize, usize), Bytes>,
 }
 
 impl AudioGenerator {
     /// Create a new audio generator with tone generation
     pub fn new(sample_rate: u32, frequency: f64, amplitude: f64) -> Self {
+        let source = AudioSource::Tone {
+            frequency,
+            amplitude,
+        };
         Self {
             sample_rate,
             phase: 0.0,
-            source: AudioSource::Tone {
-                frequency,
-                amplitude,
-            },
+            tone_waveform: encoded_integral_tone_period(sample_rate, &source),
+            source,
             sample_position: 0,
+            tone_payload_cache: HashMap::new(),
         }
     }
 
@@ -367,13 +123,58 @@ impl AudioGenerator {
         Self {
             sample_rate,
             phase: 0.0,
+            tone_waveform: encoded_integral_tone_period(sample_rate, &source),
             source,
             sample_position: 0,
+            tone_payload_cache: HashMap::new(),
         }
+    }
+
+    /// Generate one immutable PCMU payload for the RTP send path.
+    ///
+    /// Integral-frequency tones have an exact sample period at an integral
+    /// sample rate. Cache each packet phase once and share its backing storage
+    /// thereafter. Other sources retain the ordinary generator semantics.
+    pub fn generate_pcmu_payload(&mut self, num_samples: usize) -> Bytes {
+        if let Some(waveform) = self.tone_waveform.as_ref() {
+            if waveform.is_empty() || num_samples == 0 {
+                return Bytes::new();
+            }
+
+            let start = self.sample_position % waveform.len();
+            let cache_key = (num_samples, start);
+            let payload = if let Some(payload) = self.tone_payload_cache.get(&cache_key) {
+                payload.clone()
+            } else {
+                let mut samples = Vec::with_capacity(num_samples);
+                let mut remaining = num_samples;
+                let mut offset = start;
+                while remaining > 0 {
+                    let copy_len = remaining.min(waveform.len() - offset);
+                    samples.extend_from_slice(&waveform[offset..offset + copy_len]);
+                    remaining -= copy_len;
+                    offset = 0;
+                }
+                record_transient_allocation("media_core.audio.tx.payload_vec", samples.capacity());
+                let payload = Bytes::from(samples);
+                self.tone_payload_cache.insert(cache_key, payload.clone());
+                payload
+            };
+            self.sample_position = start.wrapping_add(num_samples) % waveform.len();
+            return payload;
+        }
+
+        let samples = self.generate_pcmu_samples_uncached(num_samples);
+        record_transient_allocation("media_core.audio.tx.payload_vec", samples.capacity());
+        Bytes::from(samples)
     }
 
     /// Generate audio samples for PCMU (G.711 μ-law) encoding
     pub fn generate_pcmu_samples(&mut self, num_samples: usize) -> Vec<u8> {
+        self.generate_pcmu_payload(num_samples).to_vec()
+    }
+
+    fn generate_pcmu_samples_uncached(&mut self, num_samples: usize) -> Vec<u8> {
         match self.source.clone() {
             AudioSource::Tone {
                 frequency,
@@ -484,9 +285,55 @@ impl AudioGenerator {
 
     /// Update the audio source
     pub fn set_source(&mut self, source: AudioSource) {
+        self.tone_waveform = encoded_integral_tone_period(self.sample_rate, &source);
+        self.tone_payload_cache.clear();
         self.source = source;
+        self.phase = 0.0;
         self.sample_position = 0; // Reset position for custom samples
     }
+}
+
+fn encoded_integral_tone_period(sample_rate: u32, source: &AudioSource) -> Option<Vec<u8>> {
+    let AudioSource::Tone {
+        frequency,
+        amplitude,
+    } = source
+    else {
+        return None;
+    };
+    if sample_rate == 0
+        || !frequency.is_finite()
+        || !amplitude.is_finite()
+        || *frequency < 0.0
+        || frequency.fract() != 0.0
+        || *frequency > u32::MAX as f64
+    {
+        return None;
+    }
+
+    let frequency_hz = *frequency as u32;
+    let period_samples = if frequency_hz == 0 {
+        1
+    } else {
+        sample_rate / greatest_common_divisor(sample_rate, frequency_hz)
+    } as usize;
+    let phase_increment = 2.0 * std::f64::consts::PI * *frequency / sample_rate as f64;
+    let mut waveform = Vec::with_capacity(period_samples);
+    for sample_index in 0..period_samples {
+        let phase = sample_index as f64 * phase_increment;
+        let sample = (phase.sin() * *amplitude * 32767.0) as i16;
+        waveform.push(AudioGenerator::linear_to_ulaw(sample));
+    }
+    Some(waveform)
+}
+
+fn greatest_common_divisor(mut left: u32, mut right: u32) -> u32 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left.max(1)
 }
 
 /// Audio transmission configuration
@@ -533,17 +380,13 @@ pub struct AudioTransmitter {
     /// always do — see `RtpSession::new`).
     send_handle: Option<RtpSendHandle>,
     /// Audio generator
-    audio_generator: Arc<Mutex<AudioGenerator>>,
+    audio_generator: Arc<ParkingMutex<AudioGenerator>>,
     /// Transmission configuration
     config: AudioTransmitterConfig,
-    /// Current RTP timestamp
-    timestamp: Arc<Mutex<u32>>,
     /// Whether transmission is active
-    is_active: Arc<RwLock<bool>>,
+    is_active: Arc<AtomicBool>,
     /// Background transmission task.
     tx_task: Option<JoinHandle<()>>,
-    /// Registration in the optional shared audio TX scheduler.
-    shared_tx_registration: Option<SharedAudioTxRegistration>,
 }
 
 impl AudioTransmitter {
@@ -588,24 +431,22 @@ impl AudioTransmitter {
         Self {
             rtp_session,
             send_handle,
-            audio_generator: Arc::new(Mutex::new(audio_generator)),
+            audio_generator: Arc::new(ParkingMutex::new(audio_generator)),
             config,
-            timestamp: Arc::new(Mutex::new(0)),
-            is_active: Arc::new(RwLock::new(false)),
+            is_active: Arc::new(AtomicBool::new(false)),
             tx_task: None,
-            shared_tx_registration: None,
         }
     }
 
     /// Start audio transmission
     pub async fn start(&mut self) {
-        if self.tx_task.is_some() || self.shared_tx_registration.is_some() {
+        if self.tx_task.is_some() {
             debug!("AudioTransmitter: transmission task already running");
             return;
         }
 
         if matches!(self.config.source, AudioSource::PassThrough) {
-            *self.is_active.write().await = false;
+            self.is_active.store(false, Ordering::Release);
             debug!("AudioTransmitter: pass-through source has no background TX task");
             return;
         }
@@ -618,7 +459,7 @@ impl AudioTransmitter {
             self.send_handle = session.send_handle();
         }
 
-        *self.is_active.write().await = true;
+        self.is_active.store(true, Ordering::Release);
 
         let source_desc = match &self.config.source {
             AudioSource::Tone {
@@ -647,39 +488,13 @@ impl AudioTransmitter {
         let send_handle = self.send_handle.clone();
         let is_active = self.is_active.clone();
         let audio_generator = self.audio_generator.clone();
-        let timestamp = self.timestamp.clone();
         let initial_delay = next_audio_tx_start_delay(self.config.interval);
         diagnostics::record_audio_tx_task_started(initial_delay);
         let pacing_config = audio_tx_pacing_config_from_env();
 
-        if shared_audio_tx_scheduler_enabled() {
-            let pacing_sequence = pacing_config
-                .map(|_| AUDIO_TX_PACING_SEQUENCE.fetch_add(1, Ordering::Relaxed))
-                .unwrap_or(0);
-            let entry = Arc::new(SharedAudioTxEntry {
-                rtp_session,
-                send_handle,
-                audio_generator,
-                timestamp,
-                is_active,
-                active: AtomicBool::new(true),
-                interval: self.config.interval,
-                samples_per_packet: self.config.samples_per_packet,
-                pacing_config,
-                pacing_sequence,
-                pacing_tick: AtomicU64::new(0),
-                pacing_consecutive_skips: AtomicU64::new(0),
-            });
-            self.shared_tx_registration =
-                Some(shared_audio_tx_scheduler().register(entry, initial_delay));
-            info!("🎵 Started shared audio transmission");
-            return;
-        }
-
         let collect_diagnostics = diagnostics::enabled();
-        let mut interval_timer =
-            interval_at(TokioInstant::now() + initial_delay, self.config.interval);
-        interval_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut next_tick_at = TokioInstant::now() + initial_delay;
+        let base_packet_interval = self.config.interval;
         let samples_per_packet = self.config.samples_per_packet;
         let pacing_sequence = pacing_config
             .map(|_| AUDIO_TX_PACING_SEQUENCE.fetch_add(1, Ordering::Relaxed))
@@ -688,7 +503,7 @@ impl AudioTransmitter {
         self.tx_task = Some(super::spawn_memory_tracked(
             "media_core.audio_transmitter_task",
             async move {
-                let active_guard = AudioTxActiveGuard::new(pacing_config.is_some());
+                let active_guard = AudioTxActiveGuard::new(true);
                 let mut last_tick_at: Option<TokioInstant> = None;
                 let mut tick_gap_count = 0_u64;
                 let mut tick_gap_total = Duration::ZERO;
@@ -704,9 +519,10 @@ impl AudioTransmitter {
                 let mut pacing_divisor_max = 1_u64;
                 let mut pacing_consecutive_skip_count = 0_u64;
                 let mut pacing_consecutive_skip_max = 0_u64;
+                let mut next_timestamp = 0_u32;
 
-                while *is_active.read().await {
-                    interval_timer.tick().await;
+                while is_active.load(Ordering::Acquire) {
+                    tokio::time::sleep_until(next_tick_at).await;
                     if collect_diagnostics {
                         let tick_at = TokioInstant::now();
                         if let Some(previous) = last_tick_at {
@@ -718,7 +534,11 @@ impl AudioTransmitter {
                         last_tick_at = Some(tick_at);
                     }
 
-                    if let Some(pacing) = pacing_config {
+                    let effective_samples_per_packet = if let Some(pacing) = pacing_config {
+                        next_tick_at = next_audio_tx_deadline(
+                            next_tick_at,
+                            config_interval_or_floor(base_packet_interval),
+                        );
                         pacing_evaluated_count = pacing_evaluated_count.saturating_add(1);
                         let active_count = active_guard.active_count();
                         pacing_active_max = pacing_active_max.max(active_count);
@@ -734,34 +554,38 @@ impl AudioTransmitter {
                                 pacing_consecutive_skip_count.saturating_add(1);
                             pacing_consecutive_skip_max =
                                 pacing_consecutive_skip_max.max(pacing_consecutive_skip_count);
-                            advance_rtp_timestamp(&timestamp, samples_per_packet).await;
+                            next_timestamp = next_timestamp.wrapping_add(samples_per_packet as u32);
                             continue;
                         }
                         pacing_consecutive_skip_count = 0;
-                    }
+                        samples_per_packet
+                    } else {
+                        let divisor = adaptive_packetization_divisor(active_guard.active_count());
+                        let packet_interval =
+                            adaptive_packetization_interval(base_packet_interval, divisor);
+                        next_tick_at = next_audio_tx_deadline(next_tick_at, packet_interval);
+                        samples_per_packet.saturating_mul(divisor as usize)
+                    };
 
                     // Generate audio samples
                     let audio_samples = {
-                        let mut generator = audio_generator.lock().await;
-                        generator.generate_pcmu_samples(samples_per_packet)
+                        let mut generator = audio_generator.lock();
+                        generator.generate_pcmu_payload(effective_samples_per_packet)
                     };
-                    record_transient_allocation(
-                        "media_core.audio.tx.payload_vec",
-                        audio_samples.capacity(),
-                    );
 
                     // Send RTP packet (only if not in pass-through mode)
-                    if !matches!(audio_samples.as_slice(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
+                    if !matches!(audio_samples.as_ref(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
                     {
-                        let current_timestamp =
-                            { advance_rtp_timestamp(&timestamp, samples_per_packet).await };
+                        let current_timestamp = next_timestamp;
+                        next_timestamp =
+                            next_timestamp.wrapping_add(effective_samples_per_packet as u32);
 
                         // Fast path: send through the lock-free handle —
                         // no `session.lock().await` per frame.
                         let send_started = collect_diagnostics.then(Instant::now);
                         let send_result = if let Some(handle) = &send_handle {
                             handle
-                                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                                .send_packet(current_timestamp, audio_samples, false)
                                 .await
                         } else {
                             // Fallback: session lock per frame. Only reached
@@ -769,7 +593,7 @@ impl AudioTransmitter {
                             // we tried to build the handle.
                             let session = rtp_session.lock().await;
                             session
-                                .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                                .send_packet(current_timestamp, audio_samples, false)
                                 .await
                         };
                         if let Some(send_started) = send_started {
@@ -784,12 +608,12 @@ impl AudioTransmitter {
 
                         if let Err(e) = send_result {
                             error!("Failed to send RTP audio packet: {}", e);
-                            *is_active.write().await = false;
+                            is_active.store(false, Ordering::Release);
                             break;
                         } else {
                             debug!(
                                 "📡 Sent RTP audio packet (timestamp: {}, {} samples)",
-                                current_timestamp, samples_per_packet
+                                current_timestamp, effective_samples_per_packet
                             );
                         }
                     }
@@ -825,8 +649,7 @@ impl AudioTransmitter {
 
     /// Stop audio transmission
     pub async fn stop(mut self) {
-        *self.is_active.write().await = false;
-        self.shared_tx_registration.take();
+        self.is_active.store(false, Ordering::Release);
         if let Some(task) = self.tx_task.take() {
             let mut task = task;
             tokio::select! {
@@ -842,12 +665,12 @@ impl AudioTransmitter {
 
     /// Check if transmission is active
     pub async fn is_active(&self) -> bool {
-        *self.is_active.read().await
+        self.is_active.load(Ordering::Acquire)
     }
 
     /// Update the audio source during transmission
     pub async fn set_audio_source(&self, source: AudioSource) {
-        let mut generator = self.audio_generator.lock().await;
+        let mut generator = self.audio_generator.lock();
         generator.set_source(source);
         info!("🔄 Updated audio source");
     }
@@ -885,13 +708,6 @@ fn next_audio_tx_start_delay(interval: Duration) -> Duration {
     Duration::from_nanos(offset)
 }
 
-async fn advance_rtp_timestamp(timestamp: &Arc<Mutex<u32>>, samples_per_packet: usize) -> u32 {
-    let mut ts = timestamp.lock().await;
-    let current = *ts;
-    *ts = ts.wrapping_add(samples_per_packet as u32);
-    current
-}
-
 #[cfg(any(feature = "perf-diagnostics", test))]
 fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
     if !env_flag_enabled("RVOIP_MEDIA_AUDIO_TX_PACING") {
@@ -910,30 +726,6 @@ fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
 #[cfg(not(any(feature = "perf-diagnostics", test)))]
 fn audio_tx_pacing_config_from_env() -> Option<AudioTxPacingConfig> {
     None
-}
-
-#[cfg(any(feature = "perf-diagnostics", test))]
-fn shared_audio_tx_scheduler_enabled() -> bool {
-    env_flag_enabled("RVOIP_MEDIA_AUDIO_TX_SHARED_SCHEDULER")
-}
-
-#[cfg(not(any(feature = "perf-diagnostics", test)))]
-fn shared_audio_tx_scheduler_enabled() -> bool {
-    false
-}
-
-#[cfg(any(feature = "perf-diagnostics", test))]
-fn shared_audio_tx_batch_size_from_env() -> usize {
-    std::env::var("RVOIP_MEDIA_AUDIO_TX_SHARED_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE)
-}
-
-#[cfg(not(any(feature = "perf-diagnostics", test)))]
-fn shared_audio_tx_batch_size_from_env() -> usize {
-    DEFAULT_SHARED_AUDIO_TX_BATCH_SIZE
 }
 
 #[cfg(any(feature = "perf-diagnostics", test))]
@@ -959,6 +751,33 @@ fn pacing_divisor(active_count: u64, target_active: u64) -> u64 {
     }
 }
 
+fn adaptive_packetization_divisor(active_count: u64) -> u64 {
+    pacing_divisor(active_count, DEFAULT_AUDIO_TX_PACKETIZATION_TARGET_ACTIVE)
+        .min(MAX_AUDIO_TX_PACKETIZATION_DIVISOR)
+}
+
+fn adaptive_packetization_interval(base: Duration, divisor: u64) -> Duration {
+    config_interval_or_floor(base).saturating_mul(u32::try_from(divisor.max(1)).unwrap_or(u32::MAX))
+}
+
+fn config_interval_or_floor(interval: Duration) -> Duration {
+    if interval.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        interval
+    }
+}
+
+fn next_audio_tx_deadline(previous: TokioInstant, interval: Duration) -> TokioInstant {
+    let scheduled = previous + interval;
+    let now = TokioInstant::now();
+    if scheduled <= now {
+        now + interval
+    } else {
+        scheduled
+    }
+}
+
 #[cfg(test)]
 fn audio_tx_start_delay_for_sequence(sequence: u64, interval: Duration) -> Duration {
     let interval_nanos = interval.as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -970,7 +789,6 @@ fn audio_tx_start_delay_for_sequence(sequence: u64, interval: Duration) -> Durat
 
 impl Drop for AudioTransmitter {
     fn drop(&mut self) {
-        self.shared_tx_registration.take();
         if let Some(task) = self.tx_task.take() {
             task.abort();
         }
@@ -979,7 +797,10 @@ impl Drop for AudioTransmitter {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_tx_start_delay_for_sequence, pacing_divisor, AudioGenerator, AudioSource};
+    use super::{
+        adaptive_packetization_divisor, adaptive_packetization_interval,
+        audio_tx_start_delay_for_sequence, pacing_divisor, AudioGenerator, AudioSource,
+    };
     use std::time::Duration;
 
     #[test]
@@ -988,6 +809,34 @@ mod tests {
         let output = generator.generate_pcmu_samples(160);
 
         assert_eq!(output.len(), 160);
+    }
+
+    #[test]
+    fn integral_tone_payload_cache_preserves_continuous_wire_samples() {
+        let mut cached = AudioGenerator::new(8000, 440.0, 0.5);
+        let mut baseline = AudioGenerator::new(8000, 440.0, 0.5);
+        baseline.tone_waveform = None;
+
+        for _ in 0..10 {
+            assert_eq!(
+                cached.generate_pcmu_payload(160).as_ref(),
+                baseline.generate_pcmu_samples_uncached(160).as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn integral_tone_reuses_immutable_packet_payloads() {
+        let mut generator = AudioGenerator::new(8000, 440.0, 0.5);
+        let first = generator.generate_pcmu_payload(160);
+        for _ in 0..4 {
+            generator.generate_pcmu_payload(160);
+        }
+        let repeated = generator.generate_pcmu_payload(160);
+
+        assert_eq!(first, repeated);
+        assert_eq!(first.as_ptr(), repeated.as_ptr());
+        assert_eq!(generator.tone_payload_cache.len(), 5);
     }
 
     #[test]
@@ -1026,5 +875,60 @@ mod tests {
         assert_eq!(pacing_divisor(6_000, 3_000), 2);
         assert_eq!(pacing_divisor(6_001, 3_000), 3);
         assert_eq!(pacing_divisor(6_001, 0), 1);
+    }
+
+    #[test]
+    fn adaptive_packetization_only_coalesces_above_target() {
+        assert_eq!(adaptive_packetization_divisor(499), 1);
+        assert_eq!(adaptive_packetization_divisor(500), 1);
+        assert_eq!(adaptive_packetization_divisor(501), 2);
+        assert_eq!(adaptive_packetization_divisor(2_001), 5);
+        assert_eq!(adaptive_packetization_divisor(4_800), 9);
+        assert_eq!(adaptive_packetization_divisor(u64::MAX), 9);
+    }
+
+    #[test]
+    fn adaptive_packetization_sleeps_for_the_encoded_audio_duration() {
+        let base = Duration::from_millis(20);
+        assert_eq!(
+            adaptive_packetization_interval(base, adaptive_packetization_divisor(500)),
+            Duration::from_millis(20)
+        );
+        assert_eq!(
+            adaptive_packetization_interval(base, adaptive_packetization_divisor(501)),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            adaptive_packetization_interval(base, adaptive_packetization_divisor(4_800)),
+            Duration::from_millis(180)
+        );
+        assert_eq!(
+            adaptive_packetization_interval(base, adaptive_packetization_divisor(12_500)),
+            Duration::from_millis(180)
+        );
+    }
+
+    #[test]
+    fn coalesced_tone_packets_preserve_continuous_audio() {
+        let mut ordinary = AudioGenerator::new(8000, 440.0, 0.5);
+        let mut coalesced = AudioGenerator::new(8000, 440.0, 0.5);
+        let ordinary_audio = [
+            ordinary.generate_pcmu_payload(160),
+            ordinary.generate_pcmu_payload(160),
+            ordinary.generate_pcmu_payload(160),
+            ordinary.generate_pcmu_payload(160),
+        ]
+        .concat();
+        let coalesced_audio = [
+            coalesced.generate_pcmu_payload(320),
+            coalesced.generate_pcmu_payload(320),
+        ]
+        .concat();
+
+        assert_eq!(coalesced_audio, ordinary_audio);
+        let sequence_numbers = [41_u16, 42_u16];
+        let timestamps = [10_000_u32, 10_320_u32];
+        assert_eq!(sequence_numbers[1], sequence_numbers[0].wrapping_add(1));
+        assert_eq!(timestamps[1], timestamps[0].wrapping_add(320));
     }
 }

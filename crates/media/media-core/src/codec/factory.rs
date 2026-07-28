@@ -7,6 +7,8 @@ use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::g711::G711Codec;
 #[cfg(feature = "g729")]
 use crate::codec::audio::g729::{G729Codec, G729Config};
+use crate::codec::audio::payload_type::PCM_S16LE;
+use crate::codec::audio::pcm::PcmS16LeCodec;
 use crate::error::{Error, Result};
 #[cfg(feature = "g729")]
 use crate::types::SampleRate;
@@ -21,7 +23,11 @@ impl CodecFactory {
         channels: Option<u16>,
     ) -> Result<Box<dyn AudioCodec>> {
         // Default values if not specified
-        let sample_rate = sample_rate.unwrap_or(8000);
+        let sample_rate = sample_rate.unwrap_or(if payload_type == PCM_S16LE {
+            16_000
+        } else {
+            8_000
+        });
         let channels = channels.unwrap_or(1);
 
         match payload_type {
@@ -32,6 +38,14 @@ impl CodecFactory {
                 SampleRate::Rate8000,
                 1,
                 G729Config::default(),
+            )?)),
+            PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
+                sample_rate,
+                u8::try_from(channels).map_err(|_| {
+                    Error::Codec(crate::error::CodecError::InvalidParameters {
+                        details: format!("Invalid channel count: {channels}"),
+                    })
+                })?,
             )?)),
             _ => Err(Error::unsupported_payload_type(payload_type)),
         }
@@ -80,5 +94,15 @@ mod tests {
         assert!(result.is_err());
         // Can't unwrap error because AudioCodec doesn't implement Debug
         // Just verify that creating codec with unsupported type fails
+    }
+
+    #[test]
+    fn test_create_internal_pcm_codec_defaults() {
+        let codec = CodecFactory::create_codec_default(PCM_S16LE).unwrap();
+        let info = codec.get_info();
+        assert_eq!(info.name, "pcm_s16le");
+        assert_eq!(info.sample_rate, 16_000);
+        assert_eq!(info.channels, 1);
+        assert_eq!(info.bitrate, 256_000);
     }
 }

@@ -8,6 +8,9 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
+use crate::session_registry::SessionRegistryHandle;
+
+use super::InDialogRequestAuthority;
 
 /// Outbound BYE builder. Reachable via
 /// [`UnifiedCoordinator::bye`](crate::api::unified::UnifiedCoordinator::bye).
@@ -16,6 +19,7 @@ pub struct ByeBuilder {
     session_id: CallId,
     reason: Option<String>,
     state: BuilderHeaderState,
+    authority: InDialogRequestAuthority,
 }
 
 impl ByeBuilder {
@@ -25,7 +29,18 @@ impl ByeBuilder {
             session_id,
             reason: None,
             state: BuilderHeaderState::default(),
+            authority: InDialogRequestAuthority::CaptureCurrent,
         }
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        session_id: CallId,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        let mut builder = Self::new(coord, session_id);
+        builder.authority = InDialogRequestAuthority::captured(lifecycle_handle);
+        builder
     }
 
     /// Attach an RFC 3326 `Reason:` header to the BYE.
@@ -57,21 +72,19 @@ impl ByeBuilder {
             reason: self.reason,
             extra_headers,
         });
-        self.coord
-            .stage_outbound_options(
-                &self.session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Bye(opts),
-            )
-            .await?;
-        self.coord
-            .dispatch_outbound(
-                &self.session_id,
-                crate::state_table::EventType::SendOutboundBye,
-            )
-            .await?;
-        self.coord
-            .finalize_local_bye(&self.session_id, "Local BYE")
-            .await?;
+        let slot = crate::state_machine::executor::PendingOptionsSlot::Bye(opts);
+        match self.authority.exact_handle(&self.session_id)? {
+            Some(handle) => {
+                self.coord
+                    .dispatch_confirmed_outbound_bye_exact(&handle, slot)
+                    .await?;
+            }
+            None => {
+                self.coord
+                    .dispatch_confirmed_outbound_bye(&self.session_id, slot)
+                    .await?;
+            }
+        }
         Ok(())
     }
 }

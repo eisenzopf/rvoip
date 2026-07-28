@@ -22,7 +22,7 @@ use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, StreamKind};
 
 use crate::errors::Result;
-use crate::media::pump::{silent_rtp_payload_for_ssrc, OPUS_PT_DEFAULT};
+use crate::media::pump::{silent_opus_payload, OPUS_PT_DEFAULT};
 
 /// Source of outbound audio frames. Implementations return one RTP-ready
 /// `MediaFrame` per call and pace themselves (the runner enforces the
@@ -99,16 +99,14 @@ pub fn run_audio(
 /// reference implementation of [`AudioSource`].
 pub struct FixtureAudioSource {
     stream_id: StreamId,
-    ssrc: u32,
     seq: u16,
     timestamp: u32,
 }
 
 impl FixtureAudioSource {
-    pub fn new(stream_id: StreamId, ssrc: u32) -> Self {
+    pub fn new(stream_id: StreamId, _ssrc: u32) -> Self {
         Self {
             stream_id,
-            ssrc,
             seq: 1,
             timestamp: 0,
         }
@@ -118,7 +116,7 @@ impl FixtureAudioSource {
 #[async_trait]
 impl AudioSource for FixtureAudioSource {
     async fn next_packet(&mut self) -> Result<Option<MediaFrame>> {
-        let payload = silent_rtp_payload_for_ssrc(self.ssrc, self.seq, self.timestamp);
+        let payload = silent_opus_payload();
         let frame = MediaFrame {
             stream_id: self.stream_id.clone(),
             kind: StreamKind::Audio,

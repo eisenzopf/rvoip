@@ -1328,7 +1328,7 @@ impl InDialogRequestBuilder {
                     builder = builder.header(TypedHeader::SubscriptionState(state_header));
                 }
                 Err(e) => {
-                    warn!("Failed to parse Subscription-State '{}': {}", sub_state, e);
+                    warn!(value_len=sub_state.len(), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to parse Subscription-State");
                     return Err(Error::Other(format!("Invalid Subscription-State: {}", e)));
                 }
             }

@@ -25,7 +25,6 @@
 //! - **CSeq Management**: Handles sequence number generation and validation
 //! - **Route Set Management**: Maintains dialog route sets from Record-Route headers
 //! - **In-Dialog Requests**: Creates properly formatted requests within established dialogs
-//! - **Recovery Handling**: Manages dialog recovery from network failures
 //! - **Session Integration**: Coordinates with session-core for high-level call management
 //!
 //! ## Quick Start - Server
@@ -116,7 +115,6 @@
 //! - **Phase 3 Integration**: Uses transaction-core helper functions for simplified SIP operations
 //! - **Global Events Pattern**: Recommended architecture for event-driven operation
 //! - **RFC 3261 Compliance**: Full compliance with SIP dialog specifications
-//! - **Recovery Support**: Built-in dialog recovery from network failures
 //! - **Clean API**: High-level `DialogClient` and `DialogServer` for easy integration
 
 // Core modules
@@ -127,8 +125,6 @@ pub mod events;
 pub mod manager;
 pub mod presence;
 pub mod protocol;
-pub mod recovery;
-pub mod routing;
 pub mod sdp;
 pub mod subscription;
 
@@ -152,6 +148,11 @@ pub use config::{ClientBehavior, DialogManagerConfig, HybridBehavior, ServerBeha
 
 // **NEW**: Re-export clean API types
 pub use api::config::{ClientConfig, ServerConfig};
+pub use api::unified::{
+    ExactResponseSendError, FinalResponseCompletionDisposition, InitialInviteDispatch,
+    InitialInviteDispatchCompletion, InitialInviteDispatchError, InitialInviteOwner,
+    InitialInviteWireOutcome, InstalledInitialInvite, PlannedInitialInvite,
+};
 pub use api::{ApiError, ApiResult, DialogStats};
 pub use api::{DialogClient, DialogServer, UnifiedDialogApi};
 

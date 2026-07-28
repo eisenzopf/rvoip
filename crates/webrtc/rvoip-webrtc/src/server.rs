@@ -21,16 +21,33 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::adapter::WebRtcAdapter;
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
 
+async fn end_all_routes(adapter: &WebRtcAdapter) {
+    let route_ids: Vec<_> = adapter
+        .routes()
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect();
+    for id in route_ids {
+        let _ = rvoip_core::adapter::ConnectionAdapter::end(
+            adapter,
+            id,
+            rvoip_core::adapter::EndReason::Normal,
+        )
+        .await;
+    }
+}
+
 /// Builder for [`WebRtcServer`].
 pub struct WebRtcServerBuilder {
     config: WebRtcConfig,
+    inbound_admission_confirmation_timeout: Option<Duration>,
     #[cfg(feature = "signaling-whip")]
     whip_bind: Option<String>,
     #[cfg(all(feature = "signaling-whip", feature = "tls-rustls"))]
@@ -42,6 +59,8 @@ pub struct WebRtcServerBuilder {
     /// G2 — optional Bearer auth hook for WHIP/WHEP.
     #[cfg(feature = "signaling-whip")]
     whip_auth: Option<Arc<dyn crate::signaling::auth::WhipAuthHook>>,
+    #[cfg(feature = "signaling-whip")]
+    whep_mode: crate::signaling::whip::WhepServerMode,
     /// G2 — optional auth hook enforced during WS upgrade.
     #[cfg(feature = "signaling-ws")]
     ws_auth: Option<Arc<dyn crate::signaling::auth::WsAuthHook>>,
@@ -51,6 +70,7 @@ impl WebRtcServerBuilder {
     pub fn new(config: WebRtcConfig) -> Self {
         Self {
             config,
+            inbound_admission_confirmation_timeout: None,
             #[cfg(feature = "signaling-whip")]
             whip_bind: None,
             #[cfg(all(feature = "signaling-whip", feature = "tls-rustls"))]
@@ -61,9 +81,23 @@ impl WebRtcServerBuilder {
             wss_bind: None,
             #[cfg(feature = "signaling-whip")]
             whip_auth: None,
+            #[cfg(feature = "signaling-whip")]
+            whep_mode: crate::signaling::whip::WhepServerMode::Draft04,
             #[cfg(feature = "signaling-ws")]
             ws_auth: None,
         }
+    }
+
+    /// Opt in to fail-closed inbound signaling admission.
+    ///
+    /// The adapter is configured before any listener is bound or spawned.
+    /// WHIP, canonical WHEP, and new inbound WebSocket offers then withhold their protocol
+    /// success response until an orchestrator admission gate confirms the
+    /// exact connection lifecycle. A zero timeout, or one above 30 seconds,
+    /// makes [`Self::build`] fail before listeners start.
+    pub fn with_inbound_admission_confirmation(mut self, timeout: Duration) -> Self {
+        self.inbound_admission_confirmation_timeout = Some(timeout);
+        self
     }
 
     /// Register a [`WhipAuthHook`](crate::signaling::auth::WhipAuthHook) for the
@@ -71,6 +105,15 @@ impl WebRtcServerBuilder {
     #[cfg(feature = "signaling-whip")]
     pub fn with_whip_auth(mut self, auth: Arc<dyn crate::signaling::auth::WhipAuthHook>) -> Self {
         self.whip_auth = Some(auth);
+        self
+    }
+
+    /// Select WHEP draft-04 response policy or explicitly enable the legacy
+    /// empty-POST/server-offer exchange. Draft-04 client-offer handling is the
+    /// default.
+    #[cfg(feature = "signaling-whip")]
+    pub fn with_whep_server_mode(mut self, mode: crate::signaling::whip::WhepServerMode) -> Self {
+        self.whep_mode = mode;
         self
     }
 
@@ -112,9 +155,14 @@ impl WebRtcServerBuilder {
 
     /// Spawn listeners and return a running [`WebRtcServer`].
     pub async fn build(self) -> Result<WebRtcServer> {
-        let adapter = WebRtcAdapter::new(self.config);
+        let adapter = match self.inbound_admission_confirmation_timeout {
+            Some(timeout) => {
+                WebRtcAdapter::new_with_inbound_admission_confirmation(self.config, timeout)?
+            }
+            None => WebRtcAdapter::new(self.config),
+        };
         let mut tasks = Vec::new();
-        let shutdown = Arc::new(Notify::new());
+        let (shutdown, _) = watch::channel(false);
 
         #[cfg(feature = "signaling-whip")]
         let mut whip_addr = None;
@@ -136,17 +184,23 @@ impl WebRtcServerBuilder {
                     .map_err(|e| WebRtcError::Signaling(format!("{e}")))?,
             );
             let whip_adapter = Arc::clone(&adapter);
-            let signal = Arc::clone(&shutdown);
+            let mut signal = shutdown.subscribe();
             let auth = self
                 .whip_auth
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
+            let whep_mode = self.whep_mode;
             tasks.push(spawn_signaling_task(async move {
-                let shutdown = async move { signal.notified().await };
-                crate::signaling::whip::serve_listener_with_auth_and_shutdown(
+                let shutdown = async move {
+                    if !*signal.borrow() {
+                        let _ = signal.changed().await;
+                    }
+                };
+                crate::signaling::whip::serve_listener_with_auth_mode_and_shutdown(
                     listener,
                     whip_adapter,
                     auth,
+                    whep_mode,
                     shutdown,
                 )
                 .await
@@ -170,13 +224,24 @@ impl WebRtcServerBuilder {
                 .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
             whips_addr = Some(resolved);
             let whip_adapter = Arc::clone(&adapter);
-            let signal = Arc::clone(&shutdown);
+            let mut signal = shutdown.subscribe();
+            let auth = self
+                .whip_auth
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
+            let whep_mode = self.whep_mode;
             tasks.push(spawn_signaling_task(async move {
-                let shutdown = async move { signal.notified().await };
-                crate::signaling::whip::serve_tls_with_shutdown(
+                let shutdown = async move {
+                    if !*signal.borrow() {
+                        let _ = signal.changed().await;
+                    }
+                };
+                crate::signaling::whip::serve_tls_with_auth_mode_and_shutdown(
                     std_listener,
                     tls,
                     whip_adapter,
+                    auth,
+                    whep_mode,
                     shutdown,
                 )
                 .await
@@ -194,18 +259,21 @@ impl WebRtcServerBuilder {
                     .map_err(|e| WebRtcError::Signaling(format!("{e}")))?,
             );
             let ws_adapter = Arc::clone(&adapter);
-            // WS server already loops accept(); honour shutdown via select! in
-            // a wrapper future.
-            let signal = Arc::clone(&shutdown);
+            let mut signal = shutdown.subscribe();
             let auth = self
                 .ws_auth
                 .clone()
                 .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
             tasks.push(spawn_signaling_task(async move {
-                tokio::select! {
-                    _ = signal.notified() => Ok(()),
-                    r = crate::signaling::websocket::serve_listener_with_auth(listener, ws_adapter, auth) => r,
-                }
+                let shutdown = async move {
+                    if !*signal.borrow() {
+                        let _ = signal.changed().await;
+                    }
+                };
+                crate::signaling::websocket::serve_listener_with_auth_and_shutdown(
+                    listener, ws_adapter, auth, shutdown,
+                )
+                .await
             }));
         }
 
@@ -220,12 +288,21 @@ impl WebRtcServerBuilder {
                     .map_err(|e| WebRtcError::Signaling(format!("{e}")))?,
             );
             let ws_adapter = Arc::clone(&adapter);
-            let signal = Arc::clone(&shutdown);
+            let mut signal = shutdown.subscribe();
+            let auth = self
+                .ws_auth
+                .clone()
+                .unwrap_or_else(|| Arc::new(crate::signaling::auth::AnonymousAuth));
             tasks.push(spawn_signaling_task(async move {
-                tokio::select! {
-                    _ = signal.notified() => Ok(()),
-                    r = crate::signaling::websocket::serve_tls_listener(listener, tls, ws_adapter) => r,
-                }
+                let shutdown = async move {
+                    if !*signal.borrow() {
+                        let _ = signal.changed().await;
+                    }
+                };
+                crate::signaling::websocket::serve_tls_listener_with_auth_and_shutdown(
+                    listener, tls, ws_adapter, auth, shutdown,
+                )
+                .await
             }));
         }
 
@@ -265,7 +342,7 @@ fn spawn_signaling_task(
 pub struct WebRtcServer {
     adapter: Arc<WebRtcAdapter>,
     tasks: Vec<JoinHandle<()>>,
-    shutdown: Arc<Notify>,
+    shutdown: watch::Sender<bool>,
     #[cfg(feature = "signaling-whip")]
     whip_addr: Option<SocketAddr>,
     #[cfg(feature = "signaling-ws")]
@@ -319,32 +396,78 @@ impl WebRtcServer {
     }
 
     pub async fn shutdown_with_deadline(self, deadline: Duration) {
-        self.shutdown.notify_waiters();
+        let deadline = tokio::time::Instant::now() + deadline;
+        self.shutdown.send_replace(true);
 
         // End active routes (let downstream consumers see `Ended`).
-        let route_ids: Vec<_> = self
+        end_all_routes(&self.adapter).await;
+
+        if !self
             .adapter
-            .routes()
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
-        for id in route_ids {
-            let _ = rvoip_core::adapter::ConnectionAdapter::end(
-                &*self.adapter,
-                id,
-                rvoip_core::adapter::EndReason::Normal,
+            .drain_outbound_signaling(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
             )
-            .await;
+            .await
+        {
+            tracing::warn!(
+                outbound_drivers = self.adapter.outbound_signaling_task_count(),
+                "WebRtcServer: outbound signaling drain required forced cancellation"
+            );
         }
 
-        // Drain background tasks with a deadline.
-        let drain = async {
-            for task in self.tasks {
+        while self.adapter.metrics().http_resource_tasks > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::task::yield_now().await;
+        }
+
+        // Drain listener tasks with one shared deadline. If an in-flight HTTP
+        // request or TLS connection ignores graceful shutdown, retain its
+        // JoinHandle, abort it, and join the cancellation instead of dropping
+        // a timed-out handle (which would detach the task).
+        let mut tasks = self.tasks;
+        let mut timed_out_at = None;
+        for (index, task) in tasks.iter_mut().enumerate() {
+            if tokio::time::timeout_at(deadline, task).await.is_err() {
+                timed_out_at = Some(index);
+                break;
+            }
+        }
+        if let Some(index) = timed_out_at {
+            tracing::warn!("WebRtcServer: graceful shutdown deadline exceeded; aborting");
+            for task in tasks.iter().skip(index) {
+                if !task.is_finished() {
+                    task.abort();
+                }
+            }
+            for task in tasks.into_iter().skip(index) {
                 let _ = task.await;
             }
-        };
-        if tokio::time::timeout(deadline, drain).await.is_err() {
-            tracing::warn!("WebRtcServer: graceful shutdown deadline exceeded; aborting");
+        }
+
+        // A request that was already in flight when shutdown began can publish
+        // a route after the first snapshot. Once every listener and accepted
+        // connection task has been joined or aborted, no new route can appear,
+        // so make one final deterministic cleanup pass for that race window.
+        end_all_routes(&self.adapter).await;
+
+        let remaining_routes = self.adapter.routes().len();
+
+        let metrics = self.adapter.metrics();
+        if remaining_routes > 0
+            || metrics.peer_session_tasks > 0
+            || metrics.media_tasks > 0
+            || metrics.inbound_ws_connection_tasks > 0
+            || metrics.http_resource_tasks > 0
+        {
+            tracing::warn!(
+                remaining_routes,
+                peer_session_tasks = metrics.peer_session_tasks,
+                media_tasks = metrics.media_tasks,
+                inbound_ws_connection_tasks = metrics.inbound_ws_connection_tasks,
+                http_resource_tasks = metrics.http_resource_tasks,
+                "WebRtcServer: supervised tasks remain after shutdown"
+            );
         }
     }
 }

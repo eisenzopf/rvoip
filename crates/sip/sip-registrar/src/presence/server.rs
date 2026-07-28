@@ -33,11 +33,23 @@ impl PresenceServer {
         // Notify subscribers
         let subscribers = self.subscriptions.get_subscribers(user_id).await?;
         for subscriber in subscribers {
-            debug!("Notifying {} of {}'s presence change", subscriber, user_id);
+            debug!(
+                stage = "presence-notify",
+                subscriber_present = !subscriber.is_empty(),
+                subscriber_bytes = subscriber.len(),
+                target_present = !user_id.is_empty(),
+                target_bytes = user_id.len(),
+                "Presence notification scheduled"
+            );
             // Notification would be sent through session-core
         }
 
-        info!("Updated presence for {}", user_id);
+        info!(
+            stage = "presence-update",
+            user_present = !user_id.is_empty(),
+            user_bytes = user_id.len(),
+            "Presence state updated"
+        );
         Ok(())
     }
 
@@ -65,5 +77,40 @@ impl PresenceServer {
         }
 
         Ok(buddies)
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_source_tests {
+    #[test]
+    fn presence_server_logs_only_structural_identity_metadata() {
+        let source = include_str!("server.rs");
+
+        for fragments in [
+            ["Notifying {}", " of {}'s presence change"],
+            ["Updated presence", " for {}"],
+        ] {
+            let forbidden = fragments.concat();
+            assert!(
+                !source.contains(&forbidden),
+                "presence server regained value-bearing diagnostic: {forbidden}"
+            );
+        }
+
+        for required in [
+            "stage = \"presence-notify\"",
+            "stage = \"presence-update\"",
+            "subscriber_present",
+            "subscriber_bytes",
+            "target_present",
+            "target_bytes",
+            "user_present",
+            "user_bytes",
+        ] {
+            assert!(
+                source.contains(required),
+                "presence diagnostic lost structural field: {required}"
+            );
+        }
     }
 }

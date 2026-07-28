@@ -2,25 +2,31 @@
 //! QUIC datagrams using the UCTP 8-byte header.
 //!
 //! Per design doc §4.5 / §3.6. Construction spawns two driver tasks: an
-//! **outbound pump** that drains `frames_out` → `substrate::datagram::pack`
+//! **outbound pump** that drains `frames_out` → checked UCTP/RTP packing
 //! → `quinn::Connection::send_datagram`, and an **inbound pump** the
-//! adapter feeds via [`QuicDatagramMediaStream::inbound_tx`] from its
-//! own `quinn::Connection::read_datagram` loop (which is per-Connection,
-//! not per-Stream).
+//! adapter feeds via [`QuicDatagramMediaStream::inbound_tx`] from the
+//! physical peer's sole `quinn::Connection::read_datagram` loop.
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::{collections::HashSet, num::NonZeroU16};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use chrono::Utc;
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
-use rvoip_core::error::Result as RvoipResult;
+use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
-use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
-use rvoip_uctp::substrate::datagram::{pack, MediaDatagram};
+use rvoip_core::stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+};
+use rvoip_uctp::substrate::{
+    pack_rtp_datagram, unpack_rtp_datagram, PeerMediaRegistration, PeerMediaRouteKey,
+    PeerMediaRouter, RtpDatagram, RtpMediaPayload,
+};
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace_span, warn};
 
 const FRAME_CAP: usize = 1024;
@@ -31,12 +37,14 @@ pub struct QuicDatagramMediaStream {
     codec: CodecInfo,
     direction: Direction,
     stream_local_id: u16,
-    in_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
+    in_rx: Arc<StdMutex<Option<mpsc::Receiver<MediaFrame>>>>,
     out_tx: mpsc::Sender<MediaFrame>,
-    /// Adapter feeds inbound `MediaFrame`s here from its per-Connection
-    /// datagram reader (one reader per connection serves many streams).
+    /// Adapter feeds inbound `MediaFrame`s here from its peer-level datagram
+    /// reader (one reader serves every logical Session and Stream).
     inbound_tx: mpsc::Sender<MediaFrame>,
     quality: parking_lot::RwLock<QualitySnapshot>,
+    cancel: CancellationToken,
+    outbound_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl QuicDatagramMediaStream {
@@ -52,15 +60,52 @@ impl QuicDatagramMediaStream {
         stream_local_id: u16,
         conn: quinn::Connection,
     ) -> Arc<Self> {
+        Self::start_with_cancel(
+            id,
+            kind,
+            codec,
+            direction,
+            stream_local_id,
+            conn,
+            CancellationToken::new(),
+        )
+    }
+
+    /// Construct a stream whose background media pump is coupled to the
+    /// owning peer session. Cancelling `peer_cancel` terminates the pump even
+    /// when application code still retains a `frames_out` sender.
+    pub fn start_with_cancel(
+        id: StreamId,
+        kind: StreamKind,
+        codec: CodecInfo,
+        direction: Direction,
+        stream_local_id: u16,
+        conn: quinn::Connection,
+        peer_cancel: CancellationToken,
+    ) -> Arc<Self> {
         let (in_tx, in_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
         let (out_tx, mut out_rx) = mpsc::channel::<MediaFrame>(FRAME_CAP);
+
+        let stream_cancel = peer_cancel.child_token();
+        let pump_cancel = stream_cancel.clone();
+        let session_cancel = peer_cancel.clone();
 
         // Outbound pump: frames_out → pack → quinn::Connection::send_datagram.
         let conn_for_pump = conn.clone();
         let stream_id_for_pump = id.clone();
-        tokio::spawn(async move {
+        let default_payload_type = rvoip_core::bridge::codec_to_pt(&codec.name).unwrap_or(111);
+        let ssrc = stable_ssrc(&id);
+        let outbound_task = tokio::spawn(async move {
             let mut seq: u32 = 0;
-            while let Some(frame) = out_rx.recv().await {
+            let mut rtp_seq: u16 = 0;
+            loop {
+                let frame = tokio::select! {
+                    _ = pump_cancel.cancelled() => break,
+                    frame = out_rx.recv() => match frame {
+                        Some(frame) => frame,
+                        None => break,
+                    },
+                };
                 let _span = trace_span!(
                     "uctp.stream.frame",
                     stream_local_id,
@@ -69,13 +114,32 @@ impl QuicDatagramMediaStream {
                     seq,
                 )
                 .entered();
-                let datagram = MediaDatagram {
+                let datagram = RtpDatagram {
                     flags: 0,
                     stream_local_id,
                     seq,
-                    payload: frame.payload,
+                    rtp: RtpMediaPayload {
+                        payload: frame.payload,
+                        payload_type: frame.payload_type.unwrap_or(default_payload_type),
+                        sequence_number: rtp_seq,
+                        timestamp: frame.timestamp_rtp,
+                        ssrc,
+                    },
                 };
-                let bytes = pack(&datagram);
+                let bytes = match pack_rtp_datagram(&datagram) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        metrics::counter!(
+                            "uctp_datagram_drops_total",
+                            "direction" => "out",
+                            "transport" => "quic",
+                            "reason" => "rtp-encode"
+                        )
+                        .increment(1);
+                        debug!(%error, "rvoip-quic: RTP encode failed");
+                        continue;
+                    }
+                };
                 if let Err(e) = conn_for_pump.send_datagram(bytes) {
                     // Backpressure policy §3.5: drop + counter, do NOT close.
                     metrics::counter!(
@@ -85,7 +149,11 @@ impl QuicDatagramMediaStream {
                         "reason" => "send-failed"
                     )
                     .increment(1);
-                    debug!(error = %e, stream = %stream_id_for_pump, "rvoip-quic: send_datagram failed");
+                    debug!(error = %e, stream = ?CorrelationIdDiagnostic::new(stream_id_for_pump.as_str()), "rvoip-quic: send_datagram failed");
+                    if matches!(e, quinn::SendDatagramError::ConnectionLost(_)) {
+                        session_cancel.cancel();
+                        break;
+                    }
                     continue;
                 }
                 metrics::counter!(
@@ -95,6 +163,7 @@ impl QuicDatagramMediaStream {
                 )
                 .increment(1);
                 seq = seq.wrapping_add(1);
+                rtp_seq = rtp_seq.wrapping_add(1);
             }
             debug!("rvoip-quic: outbound pump exiting");
         });
@@ -105,10 +174,12 @@ impl QuicDatagramMediaStream {
             codec,
             direction,
             stream_local_id,
-            in_rx: StdMutex::new(Some(in_rx)),
+            in_rx: Arc::new(StdMutex::new(Some(in_rx))),
             out_tx,
             inbound_tx: in_tx,
             quality: parking_lot::RwLock::new(QualitySnapshot::default()),
+            cancel: stream_cancel,
+            outbound_task: StdMutex::new(Some(outbound_task)),
         });
 
         stream
@@ -126,6 +197,10 @@ impl QuicDatagramMediaStream {
 
     pub fn update_quality(&self, q: QualitySnapshot) {
         *self.quality.write() = q;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 }
 
@@ -148,11 +223,30 @@ impl MediaStream for QuicDatagramMediaStream {
     }
 
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        let mut guard = self.in_rx.lock().expect("poisoned");
-        guard.take().unwrap_or_else(|| {
-            let (_tx, rx) = mpsc::channel(1);
-            rx
-        })
+        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+    }
+
+    fn try_frames_in(&self) -> RvoipResult<mpsc::Receiver<MediaFrame>> {
+        Ok(self.reserve_frames_in()?.commit())
+    }
+
+    fn reserve_frames_in(&self) -> RvoipResult<MediaReceiverReservation> {
+        let receiver = self
+            .in_rx
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("QUIC media receiver lock is poisoned"))?
+            .take()
+            .ok_or(RvoipError::InvalidState(
+                "QUIC media receiver has already been acquired",
+            ))?;
+        let slot = Arc::clone(&self.in_rx);
+        Ok(MediaReceiverReservation::new(receiver, move |receiver| {
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            debug_assert!(slot.is_none(), "reserved QUIC receiver slot was replaced");
+            if slot.is_none() {
+                *slot = Some(receiver);
+            }
+        }))
     }
 
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
@@ -164,63 +258,95 @@ impl MediaStream for QuicDatagramMediaStream {
     }
 
     async fn close(self: Arc<Self>) -> RvoipResult<()> {
+        self.cancel.cancel();
+        let task = self
+            .outbound_task
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("QUIC media task lock is poisoned"))?
+            .take();
+        if let Some(task) = task {
+            let _ = task.await;
+        }
         Ok(())
     }
 }
 
-/// Multi-party fanout context. When present on
-/// [`spawn_datagram_reader`], every successfully-routed inbound frame
-/// is also handed to `orchestrator.fanout_frame(...)` so subscribers
-/// in this Session see the publisher's media. See `Orchestrator::fanout_frame`
-/// (rvoip-core) for the routing-table lookup.
-#[derive(Clone)]
-pub struct FanoutContext {
-    pub orchestrator: Arc<rvoip_core::Orchestrator>,
-    pub sid: rvoip_core::ids::SessionId,
-    pub publisher_connid: rvoip_core::ids::ConnectionId,
-}
-
-/// Per-`quinn::Connection` datagram reader. One reader serves all
-/// `QuicDatagramMediaStream`s on this connection; the reader looks up
-/// the matching stream by `stream_local_id` in the supplied router and
-/// forwards the unpacked `MediaFrame` to its `inbound_tx`.
-///
-/// When `fanout` is `Some`, after the local route succeeds the reader
-/// also calls `Orchestrator::fanout_frame(...)` to deliver the frame to
-/// every subscriber registered against this publisher's `(sid, connid,
-/// strm_id)`. Fanout is best-effort: a slow subscriber doesn't block
-/// the publisher's local path.
+/// Compatibility wrapper for alpha callers that supplied a concrete stream
+/// vector. Production peers use [`spawn_datagram_reader_with_cancel`] with a
+/// single authenticated [`PeerMediaRouter`].
+#[doc(hidden)]
 pub fn spawn_datagram_reader(
     conn: quinn::Connection,
     router: Arc<parking_lot::RwLock<Vec<Arc<QuicDatagramMediaStream>>>>,
-    fanout: Option<FanoutContext>,
+    _legacy_fanout: Option<()>,
 ) {
+    let peer_router = legacy_peer_router(&router.read());
+    std::mem::drop(spawn_datagram_reader_with_cancel(
+        conn,
+        peer_router,
+        None,
+        CancellationToken::new(),
+    ));
+}
+
+/// Spawn the sole datagram reader for one authenticated physical peer.
+///
+/// Each datagram resolves through the peer-global local-ID namespace. The
+/// selected binding supplies its own ingress channel and optional fanout key,
+/// so simultaneous Sessions on one QUIC connection cannot alias or inherit the
+/// first Session's fanout context.
+pub fn spawn_datagram_reader_with_cancel(
+    conn: quinn::Connection,
+    router: Arc<PeerMediaRouter>,
+    orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    peer_cancel: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            match conn.read_datagram().await {
+            let received = tokio::select! {
+                _ = peer_cancel.cancelled() => return,
+                received = conn.read_datagram() => received,
+            };
+            match received {
                 Ok(bytes) => {
-                    let datagram = match rvoip_uctp::substrate::datagram::unpack(&bytes) {
+                    let datagram = match unpack_rtp_datagram(&bytes) {
                         Ok(d) => d,
                         Err(_) => {
                             metrics::counter!(
                                 "uctp_datagram_drops_total",
                                 "direction" => "in",
                                 "transport" => "quic",
-                                "reason" => "unpack-error"
+                                "reason" => "invalid-uctp-rtp"
                             )
                             .increment(1);
                             continue;
                         }
                     };
-                    let target = {
-                        let guard = router.read();
-                        guard
-                            .iter()
-                            .find(|s| s.stream_local_id() == datagram.stream_local_id)
-                            .cloned()
+                    let Some(local_id) = NonZeroU16::new(datagram.stream_local_id) else {
+                        metrics::counter!(
+                            "uctp_datagram_drops_total",
+                            "direction" => "in",
+                            "transport" => "quic",
+                            "reason" => "zero-stream"
+                        )
+                        .increment(1);
+                        continue;
                     };
-                    match target {
-                        Some(stream) => {
+                    match router.lookup(local_id) {
+                        Some(binding) => {
+                            if binding.is_cancelled() {
+                                continue;
+                            }
+                            if !accepts_peer_datagrams(binding.stream().direction()) {
+                                metrics::counter!(
+                                    "uctp_datagram_drops_total",
+                                    "direction" => "in",
+                                    "transport" => "quic",
+                                    "reason" => "receive-only-stream"
+                                )
+                                .increment(1);
+                                continue;
+                            }
                             // Build the frame and do the local route
                             // inside a tight scope so the non-Send
                             // tracing span guard is dropped before we
@@ -235,14 +361,14 @@ pub fn spawn_datagram_reader(
                                 )
                                 .entered();
                                 let frame = MediaFrame {
-                                    stream_id: stream.id(),
-                                    kind: stream.kind(),
-                                    payload: datagram.payload,
-                                    timestamp_rtp: 0,
+                                    stream_id: binding.route().stream_id.clone(),
+                                    kind: binding.stream().kind(),
+                                    payload: datagram.rtp.payload,
+                                    timestamp_rtp: datagram.rtp.timestamp,
                                     captured_at: Utc::now(),
-                                    payload_type: None,
+                                    payload_type: Some(datagram.rtp.payload_type),
                                 };
-                                match stream.inbound_tx().try_send(frame.clone()) {
+                                match binding.ingress().try_send(frame.clone()) {
                                     Ok(_) => {
                                         metrics::counter!(
                                             "uctp_datagrams_total",
@@ -263,22 +389,14 @@ pub fn spawn_datagram_reader(
                                 }
                                 frame
                             };
-                            // MP3b — best-effort fanout to multi-party
-                            // subscribers. Local route already succeeded
-                            // above; this fans the same frame out to
-                            // subscribers in `(sid, publisher_connid,
-                            // strm_id)`. A wedged subscriber must not
-                            // block the publisher's path — we await but
-                            // any backpressure on the subscriber's
-                            // frames_out is local to that subscriber's
-                            // adapter.
-                            if let Some(ref ctx) = fanout {
-                                let _ = ctx
-                                    .orchestrator
+                            if let (Some(orchestrator), Some(fanout)) =
+                                (orchestrator.as_ref(), binding.fanout())
+                            {
+                                let _ = orchestrator
                                     .fanout_frame(
-                                        &ctx.sid,
-                                        &ctx.publisher_connid,
-                                        &stream.id(),
+                                        &fanout.session_id,
+                                        &fanout.publisher_connection_id,
+                                        &fanout.stream_id,
                                         frame,
                                     )
                                     .await;
@@ -298,13 +416,119 @@ pub fn spawn_datagram_reader(
                 Err(quinn::ConnectionError::ApplicationClosed(_))
                 | Err(quinn::ConnectionError::LocallyClosed) => {
                     debug!("rvoip-quic: datagram reader exiting on close");
+                    peer_cancel.cancel();
                     return;
                 }
                 Err(e) => {
-                    warn!(error = %e, "rvoip-quic: datagram reader error; continuing");
-                    let _ = Bytes::new();
+                    warn!(error = %e, "rvoip-quic: datagram reader exiting on connection error");
+                    peer_cancel.cancel();
+                    return;
                 }
             }
         }
-    });
+    })
+}
+
+fn accepts_peer_datagrams(direction: Direction) -> bool {
+    direction == Direction::Inbound
+}
+
+/// Build a peer router for legacy direct-stream tests. The production server
+/// never uses this path; it creates authenticated route bindings from
+/// coordinator events.
+fn legacy_peer_router(streams: &[Arc<QuicDatagramMediaStream>]) -> Arc<PeerMediaRouter> {
+    let router = PeerMediaRouter::new();
+    let owner = rvoip_core::identity::PrincipalOwnershipKey {
+        issuer: None,
+        tenant: None,
+        subject: "legacy-quic-reader".into(),
+    };
+    let session_id = rvoip_core::ids::SessionId::from_string("legacy-quic-session");
+    let connection_id = rvoip_core::ids::ConnectionId::from_string("legacy-quic-connection");
+    let mut ordered = streams.to_vec();
+    ordered.sort_unstable_by_key(|stream| stream.stream_local_id());
+    let mut registered = HashSet::new();
+
+    for stream in ordered {
+        let Some(target) = NonZeroU16::new(stream.stream_local_id()) else {
+            continue;
+        };
+        if !registered.insert(target) {
+            continue;
+        }
+        let reservation = loop {
+            let Ok(candidate) = router.reserve() else {
+                return router;
+            };
+            if candidate.local_id() == target {
+                break candidate;
+            }
+            if candidate.local_id() > target {
+                return router;
+            }
+            drop(candidate);
+        };
+        let stream_dyn: Arc<dyn MediaStream> = stream.clone();
+        let route = PeerMediaRouteKey::new(session_id.clone(), connection_id.clone(), stream.id());
+        let registration =
+            PeerMediaRegistration::new(owner.clone(), route, stream_dyn, stream.inbound_tx());
+        if reservation.commit(registration).is_err() {
+            return router;
+        }
+    }
+    router
+}
+
+fn stable_ssrc(stream_id: &StreamId) -> u32 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    stream_id.hash(&mut hasher);
+    hasher.finish() as u32
+}
+
+#[cfg(test)]
+mod receiver_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn second_receiver_acquisition_is_a_typed_error() {
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (out_tx, _out_rx) = mpsc::channel(1);
+        let stream = QuicDatagramMediaStream {
+            id: StreamId::new(),
+            kind: StreamKind::Audio,
+            codec: CodecInfo {
+                name: "opus".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            },
+            direction: Direction::Inbound,
+            stream_local_id: 1,
+            in_rx: Arc::new(StdMutex::new(Some(inbound_rx))),
+            out_tx,
+            inbound_tx,
+            quality: parking_lot::RwLock::new(QualitySnapshot::default()),
+            cancel: CancellationToken::new(),
+            outbound_task: StdMutex::new(None),
+        };
+
+        let reservation = stream.reserve_frames_in().expect("reserve receiver");
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
+        drop(reservation);
+        assert!(stream.try_frames_in().is_ok());
+        assert!(matches!(
+            stream.try_frames_in(),
+            Err(RvoipError::InvalidState(_))
+        ));
+    }
+
+    #[test]
+    fn peer_datagrams_are_refused_for_receive_only_streams() {
+        assert!(accepts_peer_datagrams(Direction::Inbound));
+        assert!(!accepts_peer_datagrams(Direction::Outbound));
+    }
 }

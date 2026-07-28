@@ -21,6 +21,32 @@ use rvoip_sip::api::trace_redactor::{
 };
 use rvoip_sip_core::types::header::HeaderName;
 
+fn wire_headers(raw_message: &str) -> impl Iterator<Item = (&str, &str)> {
+    raw_message
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name, value.trim()))
+}
+
+fn wire_header_values<'a>(raw_message: &'a str, expected_name: &str) -> Vec<&'a str> {
+    wire_headers(raw_message)
+        .filter_map(|(name, value)| name.eq_ignore_ascii_case(expected_name).then_some(value))
+        .collect()
+}
+
+fn assert_verbatim_packet(trace: &rvoip_sip::SipTrace) {
+    assert!(
+        !trace.redacted,
+        "wire-contract assertions require explicit development trace passthrough"
+    );
+    assert!(
+        !trace.truncated,
+        "wire-contract assertions require a complete SIP packet"
+    );
+}
+
 /// §10 #1 — outbound INVITE smoke. Closed by
 /// `outbound_request_builders_integration::invite_builder_extras_reach_the_wire`.
 #[test]
@@ -98,11 +124,12 @@ async fn in_dialog_update_smoke() {
     let trace = wait_for_inbound_method(&mut call.bob_events, "UPDATE", Duration::from_secs(10))
         .await
         .expect("bob did not see inbound UPDATE trace");
-    assert!(
-        trace.raw_message.contains(SMOKE_HEADER_NAME)
-            && trace.raw_message.contains(SMOKE_HEADER_VALUE),
-        "UPDATE must carry the staged smoke header; wire =\n{}",
-        trace.raw_message
+    assert_verbatim_packet(&trace);
+    assert_eq!(
+        wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME),
+        vec![SMOKE_HEADER_VALUE],
+        "UPDATE must carry exactly one staged smoke header; wire =\n{}",
+        trace.raw_message,
     );
 
     call.teardown().await;
@@ -112,51 +139,61 @@ async fn in_dialog_update_smoke() {
 /// (equivalently `session.reinvite()`) against an established call
 /// and asserts the staged `X-Test: smoke` header reaches the wire on
 /// the mid-dialog INVITE.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn in_dialog_reinvite_smoke() {
-    use std::time::Duration;
+#[test]
+fn in_dialog_reinvite_smoke() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("re-INVITE qualification runtime");
+    runtime.block_on(async {
+        use std::time::Duration;
 
-    use rvoip_sip::api::headers::SipRequestOptions;
+        use rvoip_sip::api::headers::SipRequestOptions;
 
-    use support_for_section_10::{
-        establish_call, wait_for_inbound_method, SMOKE_HEADER_NAME, SMOKE_HEADER_VALUE,
-    };
+        use support_for_section_10::{
+            establish_call, wait_for_inbound_method, SMOKE_HEADER_NAME, SMOKE_HEADER_VALUE,
+        };
 
-    let _ = tracing_subscriber::fmt::try_init();
-    let mut call = establish_call(16720, 16730).await;
+        let _ = tracing_subscriber::fmt::try_init();
+        let mut call = establish_call(16720, 16730).await;
 
-    // Minimal SDP suffices — the re-INVITE builder rejects empty bodies
-    // since RFC 3261 requires SDP for session modification.
-    const SDP_OFFER: &str = "v=0\r\n\
+        // Minimal SDP suffices — the re-INVITE builder rejects empty bodies
+        // since RFC 3261 requires SDP for session modification.
+        const SDP_OFFER: &str = "v=0\r\n\
 o=alice 0 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 c=IN IP4 127.0.0.1\r\n\
 t=0 0\r\n\
 m=audio 17000 RTP/AVP 0\r\n";
 
-    call.alice
-        .reinvite(&call.call_id)
-        .with_sdp(SDP_OFFER)
-        .with_raw_header(
-            rvoip_sip::HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
-            SMOKE_HEADER_VALUE,
-        )
-        .expect("with_raw_header on re-INVITE builder")
-        .send()
-        .await
-        .expect("reinvite().send()");
+        call.alice
+            .reinvite(&call.call_id)
+            .with_sdp(SDP_OFFER)
+            .with_raw_header(
+                rvoip_sip::HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+                SMOKE_HEADER_VALUE,
+            )
+            .expect("with_raw_header on re-INVITE builder")
+            .send()
+            .await
+            .expect("reinvite().send()");
 
-    let trace = wait_for_inbound_method(&mut call.bob_events, "INVITE", Duration::from_secs(10))
-        .await
-        .expect("bob did not see inbound re-INVITE trace");
-    assert!(
-        trace.raw_message.contains(SMOKE_HEADER_NAME)
-            && trace.raw_message.contains(SMOKE_HEADER_VALUE),
-        "re-INVITE must carry the staged smoke header; wire =\n{}",
-        trace.raw_message
-    );
+        let trace =
+            wait_for_inbound_method(&mut call.bob_events, "INVITE", Duration::from_secs(10))
+                .await
+                .expect("bob did not see inbound re-INVITE trace");
+        assert_verbatim_packet(&trace);
+        assert_eq!(
+            wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME),
+            vec![SMOKE_HEADER_VALUE],
+            "re-INVITE must carry exactly one staged smoke header; wire =\n{}",
+            trace.raw_message,
+        );
 
-    call.teardown().await;
+        call.teardown().await;
+    });
 }
 
 /// §10 #29 — Cancel-safety: dropping `.send().await` at various
@@ -343,8 +380,10 @@ fn header_policy_outbound_validation() {
     }
 
     // Strict-mode INVITE builder rejects stack-managed CSeq.
-    let mut state = BuilderHeaderState::default();
-    state.strictness = BuilderStrictness::Strict;
+    let state = BuilderHeaderState {
+        strictness: BuilderStrictness::Strict,
+        ..Default::default()
+    };
     let builder = DummyBuilder {
         state,
         method: Method::Invite,
@@ -387,75 +426,83 @@ fn outbound_proxy_per_method_routing() {}
 /// CANCEL). The UDP UAS gives us exact control over the timing so the
 /// `hangup` arrives in `Initiating` (before the 180) and the CANCEL is
 /// then triggered by the 180 transition.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn auto_emit_cancel_carries_headers() {
-    use std::time::Duration;
+#[test]
+fn auto_emit_cancel_carries_headers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("CANCEL qualification runtime");
+    runtime.block_on(async {
+        use std::time::Duration;
 
-    use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
-    use rvoip_sip::HeaderName;
-    use rvoip_sip_core::types::headers::HeaderValue;
-    use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+        use rvoip_sip::HeaderName;
+        use rvoip_sip_core::types::headers::HeaderValue;
+        use rvoip_sip_core::types::TypedHeader;
 
-    use support_for_section_10::{boot_ringing_uas, SMOKE_HEADER_NAME};
+        use support_for_section_10::{boot_ringing_uas, SMOKE_HEADER_NAME};
 
-    const AUTO_EMIT_VALUE: &str = "cancel-auto";
-    const UAS_PORT: u16 = 35280;
-    const UAC_PORT: u16 = 35281;
+        const AUTO_EMIT_VALUE: &str = "cancel-auto";
+        const UAS_PORT: u16 = 35280;
+        const UAC_PORT: u16 = 35281;
 
-    let _ = tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt::try_init();
 
-    // Ringing-only UAS — 180 arrives after a 250ms delay, giving the
-    // UAC time to call hangup() while still in Initiating.
-    let uas = boot_ringing_uas(UAS_PORT, Duration::from_millis(250)).await;
+        // Ringing-only UAS — 180 arrives after a 250ms delay, giving the
+        // UAC time to call hangup() while still in Initiating.
+        let uas = boot_ringing_uas(UAS_PORT, Duration::from_millis(250)).await;
 
-    let mut cfg = Config::local("alice-cancel-auto", UAC_PORT);
-    cfg.sip_trace = rvoip_sip::SipTraceConfig {
-        enabled: true,
-        redact_sensitive_headers: false,
-        include_body: true,
-        ..rvoip_sip::SipTraceConfig::default()
-    };
-    cfg.auto_emit_extra_headers = vec![TypedHeader::Other(
-        HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
-        HeaderValue::Raw(AUTO_EMIT_VALUE.as_bytes().to_vec()),
-    )];
+        let mut cfg = Config::local("alice-cancel-auto", UAC_PORT);
+        cfg.sip_trace = rvoip_sip::SipTraceConfig {
+            enabled: true,
+            redact_sensitive_headers: false,
+            include_body: true,
+            ..rvoip_sip::SipTraceConfig::default()
+        };
+        cfg.auto_emit_extra_headers = vec![TypedHeader::Other(
+            HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+            HeaderValue::Raw(AUTO_EMIT_VALUE.as_bytes().to_vec()),
+        )];
 
-    let coord = UnifiedCoordinator::new(cfg).await.expect("UAC coordinator");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        let coord = UnifiedCoordinator::new(cfg).await.expect("UAC coordinator");
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let target = format!("sip:bob@127.0.0.1:{UAS_PORT}");
-    let call_id = coord
-        .invite(Some(format!("sip:alice@127.0.0.1:{UAC_PORT}")), target)
-        .send()
-        .await
-        .expect("invite().send()");
+        let target = format!("sip:bob@127.0.0.1:{UAS_PORT}");
+        let call_id = coord
+            .invite(Some(format!("sip:alice@127.0.0.1:{UAC_PORT}")), target)
+            .send()
+            .await
+            .expect("invite().send()");
 
-    // Call hangup() BEFORE the 180 arrives. The state machine routes:
-    //   Initiating + HangupCall → CancelPending (no stash)
-    // and the subsequent 180 then fires SendCANCELWithOptions with an
-    // empty stash → auto_emit_extra_headers kicks in.
-    tokio::time::sleep(Duration::from_millis(80)).await;
-    let _ = coord.hangup(&call_id).await;
+        // Call hangup() BEFORE the 180 arrives. The state machine routes:
+        //   Initiating + HangupCall → CancelPending (no stash)
+        // and the subsequent 180 then fires SendCANCELWithOptions with an
+        // empty stash → auto_emit_extra_headers kicks in.
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let _ = coord.hangup(&call_id).await;
 
-    // Wait for a CANCEL on the UAS.
-    let captured = uas
-        .wait_for(|r| r.method == "CANCEL", Duration::from_secs(5))
-        .await
-        .expect("UAS never saw inbound CANCEL");
+        // Wait for a CANCEL on the UAS.
+        let captured = uas
+            .wait_for(|r| r.method == "CANCEL", Duration::from_secs(5))
+            .await
+            .expect("UAS never saw inbound CANCEL");
 
-    assert!(
-        captured.raw.contains(SMOKE_HEADER_NAME),
-        "CANCEL must carry the auto-emit header name `{SMOKE_HEADER_NAME}`; wire =\n{}",
-        captured.raw
-    );
-    assert!(
-        captured.raw.contains(AUTO_EMIT_VALUE),
-        "CANCEL must carry the auto-emit header value `{AUTO_EMIT_VALUE}`; wire =\n{}",
-        captured.raw
-    );
+        assert!(
+            captured.raw.contains(SMOKE_HEADER_NAME),
+            "CANCEL must carry the auto-emit header name `{SMOKE_HEADER_NAME}`; wire =\n{}",
+            captured.raw
+        );
+        assert!(
+            captured.raw.contains(AUTO_EMIT_VALUE),
+            "CANCEL must carry the auto-emit header value `{AUTO_EMIT_VALUE}`; wire =\n{}",
+            captured.raw
+        );
 
-    uas.shutdown();
-    tokio::time::sleep(Duration::from_millis(150)).await;
+        uas.shutdown();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    });
 }
 
 /// §10 #17 — Auto-emit headers stamp internally-emitted NOTIFY.
@@ -513,6 +560,10 @@ async fn auto_emit_notify_carries_headers() {
         include_body: true,
         ..rvoip_sip::SipTraceConfig::default()
     };
+    // This loopback-only test treats the inbound trace as a packet capture.
+    // Production traces retain the default redactor unless this explicit
+    // development-only opt-in is applied.
+    let bob_cfg = bob_cfg.trace_passthrough_for_development();
     let bob_peer = CallbackPeer::new(AutoAccept, bob_cfg)
         .await
         .expect("bob callback peer");
@@ -551,15 +602,12 @@ async fn auto_emit_notify_carries_headers() {
         .await
         .expect("bob did not see inbound NOTIFY trace");
 
-    assert!(
-        trace.raw_message.contains(SMOKE_HEADER_NAME),
-        "NOTIFY must carry auto-emit header name `{SMOKE_HEADER_NAME}`; wire =\n{}",
-        trace.raw_message
-    );
-    assert!(
-        trace.raw_message.contains(AUTO_EMIT_VALUE),
-        "NOTIFY must carry auto-emit header value `{AUTO_EMIT_VALUE}`; wire =\n{}",
-        trace.raw_message
+    assert_verbatim_packet(&trace);
+    assert_eq!(
+        wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME),
+        vec![AUTO_EMIT_VALUE],
+        "NOTIFY must carry exactly one auto-emit header; wire =\n{}",
+        trace.raw_message,
     );
 
     bob_shutdown.shutdown();
@@ -620,6 +668,10 @@ async fn bye_stash_wins_over_auto_emit() {
         include_body: true,
         ..rvoip_sip::SipTraceConfig::default()
     };
+    // This loopback-only test treats the inbound trace as a packet capture.
+    // Production traces retain the default redactor unless this explicit
+    // development-only opt-in is applied.
+    let bob_cfg = bob_cfg.trace_passthrough_for_development();
     let bob_peer = CallbackPeer::new(AutoAccept, bob_cfg)
         .await
         .expect("bob callback peer");
@@ -661,15 +713,12 @@ async fn bye_stash_wins_over_auto_emit() {
     let trace = wait_for_inbound_method(&mut bob_events, "BYE", Duration::from_secs(10))
         .await
         .expect("bob did not see inbound BYE trace");
-    assert!(
-        trace.raw_message.contains(STASH_VALUE),
-        "BYE must carry the stash value `{STASH_VALUE}`; wire =\n{}",
-        trace.raw_message
-    );
-    assert!(
-        !trace.raw_message.contains(AUTO_EMIT_VALUE),
-        "BYE must NOT carry the auto-emit value `{AUTO_EMIT_VALUE}` when stash is set; wire =\n{}",
-        trace.raw_message
+    assert_verbatim_packet(&trace);
+    assert_eq!(
+        wire_header_values(&trace.raw_message, SMOKE_HEADER_NAME),
+        vec![STASH_VALUE],
+        "BYE must carry only the stash value and omit `{AUTO_EMIT_VALUE}`; wire =\n{}",
+        trace.raw_message,
     );
 
     bob_shutdown.shutdown();
@@ -718,16 +767,13 @@ async fn notify_subscription_id_routing() {
     let trace = wait_for_inbound_method(&mut call.bob_events, "NOTIFY", Duration::from_secs(10))
         .await
         .expect("bob did not see inbound NOTIFY trace");
-    assert!(
-        trace.raw_message.contains("Event:") && trace.raw_message.contains("presence"),
-        "NOTIFY must carry Event: presence; wire =\n{}",
-        trace.raw_message
-    );
-    assert!(
-        trace.raw_message.contains("id=presence-7"),
-        "NOTIFY must carry the subscription id parameter `id=presence-7` so dialog-core's \
+    assert_verbatim_packet(&trace);
+    assert_eq!(
+        wire_header_values(&trace.raw_message, "Event"),
+        vec!["presence;id=presence-7"],
+        "NOTIFY must carry the exact Event package and subscription id so dialog-core's \
          multi-subscription routing can disambiguate; wire =\n{}",
-        trace.raw_message
+        trace.raw_message,
     );
 
     call.teardown().await;

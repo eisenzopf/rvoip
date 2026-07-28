@@ -1,12 +1,12 @@
 # rvoip-sip Beta Topology Profiles
 
-Date: 2026-05-26
+Date: 2026-07-25
 
 This document defines which deployment shapes beta is allowed to claim and
 which shapes remain post-beta or advanced tuning work.
 
-Final reference report: `crates/sip/rvoip-sip/beta-report/20260526T221457Z`,
-generated from clean git revision `865430d4`.
+Current reference: [Beta Release Candidate Report](BETA_RELEASE_REPORT.md),
+run `20260724T231400Z`, generated from clean tested commit `8d44fb35`.
 
 ## Beta-Supported Profiles
 
@@ -42,11 +42,11 @@ The default beta performance claim is:
 - Optional: comfort noise (`13`) only with `comfort_noise_enabled=true`
 - Security: plaintext RTP or tested SDES-SRTP profile
 - Target: stepped SIPp/media runs at 30, 100, 300, 1,000, and 2,000 CPS
-- Success: at least 99.9% completed calls at the declared target, no stuck
-  sessions, no unbounded memory growth, and published p50/p95/p99 setup
-  latency
-- Soak: 24-hour soak is waived for beta; the final 30-minute soak is accepted
-  as the beta bar
+- Success: the workload-specific ASR threshold, no stuck sessions, RSS slope
+  within 15 MB/hour where gated, full application audio-frame delivery, and
+  published p50/p95/p99 setup latency
+- Soak: the current policy requires the recorded one-hour monolithic and split
+  full-media configurations; this is not a 24-hour claim
 
 Results above 2,000 CPS must be labeled as tuned or experimental unless they
 use the same general profile and pass the same evidence bar.

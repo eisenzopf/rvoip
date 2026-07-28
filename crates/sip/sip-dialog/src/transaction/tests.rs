@@ -1,13 +1,15 @@
 use super::*;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
-use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender};
 use crate::transaction::logic::TransactionLogic;
-use rvoip_sip_transport::{Transport, Error as TransportError};
+use crate::transaction::runner::{
+    AsRefKey, AsRefState, HasCommandSender, HasTransactionEvents, HasTransport,
+};
+use rvoip_sip_transport::{Error as TransportError, Transport};
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_graceful_shutdown_when_receiver_dropped() {
@@ -31,7 +33,7 @@ async fn test_graceful_shutdown_when_receiver_dropped() {
     let data = Arc::new(MockData {
         state,
         key,
-        events_tx: event_tx,
+        events_tx: crate::transaction::event_sender::TransactionEventSender::new(event_tx),
         transport: mock_transport,
         cmd_tx: cmd_tx.clone(),
         shutdown_handled: Arc::new(AtomicBool::new(false)),
@@ -61,16 +63,24 @@ async fn test_graceful_shutdown_when_receiver_dropped() {
         });
 
         // Send a state transition command to trigger shutdown handling
-        cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Trying)).await.unwrap();
+        cmd_tx
+            .send(InternalTransactionCommand::TransitionTo(
+                TransactionState::Trying,
+            ))
+            .await
+            .unwrap();
 
         // Wait for runner to exit
-        tokio::time::timeout(Duration::from_secs(1), runner_task).await
+        tokio::time::timeout(Duration::from_secs(1), runner_task)
+            .await
             .expect("Transaction runner should exit within 1 second")
             .expect("Transaction runner should exit cleanly");
 
         // Check that shutdown was handled gracefully
-        assert!(data.shutdown_handled.load(Ordering::SeqCst),
-            "The transaction should have handled shutdown gracefully without RVOIP_TEST set");
+        assert!(
+            data.shutdown_handled.load(Ordering::SeqCst),
+            "The transaction should have handled shutdown gracefully without RVOIP_TEST set"
+        );
     }
 
     // Second test: With RVOIP_TEST environment variable set
@@ -86,7 +96,7 @@ async fn test_graceful_shutdown_when_receiver_dropped() {
         let test_data = Arc::new(MockData {
             state: Arc::new(AtomicTransactionState::new()),
             key: key.clone(),
-            events_tx: new_event_tx,
+            events_tx: crate::transaction::event_sender::TransactionEventSender::new(new_event_tx),
             transport: mock_transport.clone(),
             cmd_tx: new_cmd_tx.clone(),
             shutdown_handled: Arc::new(AtomicBool::new(false)),
@@ -106,20 +116,36 @@ async fn test_graceful_shutdown_when_receiver_dropped() {
         });
 
         // Send a command to trigger the processing of a dropped channel
-        new_cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Trying)).await.unwrap();
+        new_cmd_tx
+            .send(InternalTransactionCommand::TransitionTo(
+                TransactionState::Trying,
+            ))
+            .await
+            .unwrap();
 
         // Wait a bit to ensure command is processed
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Send another command - this should still work if runner didn't terminate
-        let send_result = new_cmd_tx.send(InternalTransactionCommand::TransitionTo(TransactionState::Proceeding)).await;
-        assert!(send_result.is_ok(), "Should be able to send commands with RVOIP_TEST set even with closed event channel");
+        let send_result = new_cmd_tx
+            .send(InternalTransactionCommand::TransitionTo(
+                TransactionState::Proceeding,
+            ))
+            .await;
+        assert!(
+            send_result.is_ok(),
+            "Should be able to send commands with RVOIP_TEST set even with closed event channel"
+        );
 
         // Send a terminate command to end the test
-        new_cmd_tx.send(InternalTransactionCommand::Terminate).await.unwrap();
+        new_cmd_tx
+            .send(InternalTransactionCommand::Terminate)
+            .await
+            .unwrap();
 
         // Wait for the runner to exit
-        tokio::time::timeout(Duration::from_secs(1), runner_task).await
+        tokio::time::timeout(Duration::from_secs(1), runner_task)
+            .await
             .expect("Transaction runner should exit within 1 second")
             .expect("Transaction runner should exit cleanly");
 
@@ -133,7 +159,7 @@ async fn test_graceful_shutdown_when_receiver_dropped() {
 struct MockData {
     state: Arc<AtomicTransactionState>,
     key: TransactionKey,
-    events_tx: mpsc::Sender<TransactionEvent>,
+    events_tx: crate::transaction::event_sender::TransactionEventSender,
     transport: Arc<MockTransport>,
     cmd_tx: mpsc::Sender<InternalTransactionCommand>,
     shutdown_handled: Arc<AtomicBool>,
@@ -152,7 +178,7 @@ impl AsRefKey for MockData {
 }
 
 impl HasTransactionEvents for MockData {
-    fn get_tu_event_sender(&self) -> mpsc::Sender<TransactionEvent> {
+    fn get_tu_event_sender(&self) -> crate::transaction::event_sender::TransactionEventSender {
         self.events_tx.clone()
     }
 }
@@ -188,7 +214,11 @@ impl Transport for MockTransport {
         Ok(SocketAddr::from_str("127.0.0.1:5060").unwrap())
     }
 
-    async fn send_message(&self, _message: rvoip_sip_core::Message, _destination: SocketAddr) -> std::result::Result<(), TransportError> {
+    async fn send_message(
+        &self,
+        _message: rvoip_sip_core::Message,
+        _destination: SocketAddr,
+    ) -> std::result::Result<(), TransportError> {
         Ok(())
     }
 
@@ -204,7 +234,7 @@ impl Transport for MockTransport {
 
 // Simple empty implementation of timer handle for tests
 #[derive(Debug, Default)]
-struct MockTimerHandles { }
+struct MockTimerHandles {}
 
 // Simple transaction logic implementation
 #[derive(Debug)]
@@ -226,11 +256,22 @@ impl TransactionLogic<MockData, MockTimerHandles> for MockLogic {
         TransactionKind::ClientInvite
     }
 
-    async fn process_message(&self, _data: &MockData, _message: Message, _current_state: TransactionState) -> super::Result<Option<TransactionState>> {
+    async fn process_message(
+        &self,
+        _data: &MockData,
+        _message: Message,
+        _current_state: TransactionState,
+    ) -> super::Result<Option<TransactionState>> {
         Ok(None)
     }
 
-    async fn handle_timer(&self, _data: &MockData, _timer_name: &str, _current_state: TransactionState, _timer_handles: &mut MockTimerHandles) -> super::Result<Option<TransactionState>> {
+    async fn handle_timer(
+        &self,
+        _data: &MockData,
+        _timer_name: &str,
+        _current_state: TransactionState,
+        _timer_handles: &mut MockTimerHandles,
+    ) -> super::Result<Option<TransactionState>> {
         Ok(None)
     }
 

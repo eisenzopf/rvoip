@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     let registrar =
         UnifiedCoordinator::new(Config::local("users-core-registrar", REGISTRAR_PORT)).await?;
-    let mut registrar_events = registrar.events().await?;
+    let mut registrar_events = registrar.events_with_control().await?;
     let registrar_task = {
         let auth = auth.clone();
         tokio::spawn(async move {

@@ -7,6 +7,7 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
 /// RID Direction
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -18,7 +19,7 @@ pub enum RidDirection {
 }
 
 /// RID Attribute
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RidAttribute {
     /// RID identifier string
     pub id: String,
@@ -28,6 +29,18 @@ pub struct RidAttribute {
     pub formats: Vec<String>,
     /// Key-value parameter restrictions
     pub restrictions: HashMap<String, String>,
+}
+
+impl fmt::Debug for RidAttribute {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RidAttribute")
+            .field("id_bytes", &self.id.len())
+            .field("direction", &self.direction)
+            .field("format_count", &self.formats.len())
+            .field("restriction_count", &self.restrictions.len())
+            .finish()
+    }
 }
 
 /// Parse a RID (Restriction IDentifier) attribute as defined in RFC 8851.
@@ -500,5 +513,29 @@ mod tests {
             parse_rid(non_compliant2).is_ok(),
             "Parser should handle missing semicolon for compatibility"
         );
+    }
+
+    #[test]
+    fn rid_debug_does_not_reflect_identifier_or_restriction_values() {
+        const RID: &str = "rid-direct-debug-canary";
+        const RESTRICTION: &str = "rid-restriction-direct-debug-canary";
+        let value = RidAttribute {
+            id: RID.into(),
+            direction: RidDirection::Send,
+            formats: vec![RESTRICTION.into()],
+            restrictions: HashMap::from([(RESTRICTION.into(), RESTRICTION.into())]),
+        };
+        let debug = format!("{value:?}");
+        assert!(!debug.contains(RID));
+        assert!(!debug.contains(RESTRICTION));
+        assert!(serde_json::to_string(&value).unwrap().contains(RID));
+    }
+
+    #[test]
+    fn rid_attribute_cannot_regain_derived_debug() {
+        let source = include_str!("rid.rs");
+        let declaration = source.find("pub struct RidAttribute").unwrap();
+        let derive = source[..declaration].rfind("#[derive(").unwrap();
+        assert!(!source[derive..declaration].contains("Debug"));
     }
 }

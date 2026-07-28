@@ -385,7 +385,7 @@ async fn test_unified_api_client_operations() -> Result<(), Box<dyn std::error::
     let result = api
         .make_call(
             "sip:alice@example.com",
-            "sip:bob@example.com",
+            "sip:bob@127.0.0.1:5061",
             Some("SDP offer".to_string()),
         )
         .await;
@@ -393,7 +393,7 @@ async fn test_unified_api_client_operations() -> Result<(), Box<dyn std::error::
 
     // Test create_dialog operation (should succeed in client mode)
     let result = api
-        .create_dialog("sip:alice@example.com", "sip:carol@example.com")
+        .create_dialog("sip:alice@example.com", "sip:carol@127.0.0.1:5061")
         .await;
     assert!(result.is_ok());
 
@@ -454,12 +454,12 @@ async fn test_unified_api_hybrid_operations() -> Result<(), Box<dyn std::error::
 
     // Test both outgoing operations (should succeed in hybrid mode)
     let outgoing_call = api
-        .make_call("sip:pbx@company.com", "sip:external@provider.com", None)
+        .make_call("sip:pbx@company.com", "sip:external@127.0.0.1:5061", None)
         .await;
     assert!(outgoing_call.is_ok());
 
     let outgoing_dialog = api
-        .create_dialog("sip:pbx@company.com", "sip:user@company.com")
+        .create_dialog("sip:pbx@company.com", "sip:user@127.0.0.1:5061")
         .await;
     assert!(outgoing_dialog.is_ok());
 
@@ -686,7 +686,7 @@ async fn test_concurrent_mode_operations() -> Result<(), Box<dyn std::error::Err
     let api_clone = api.clone();
     let outgoing_task = tokio::spawn(async move {
         api_clone
-            .make_call("sip:pbx@example.com", "sip:external@provider.com", None)
+            .make_call("sip:pbx@example.com", "sip:external@127.0.0.1:5061", None)
             .await
     });
 
@@ -700,9 +700,14 @@ async fn test_concurrent_mode_operations() -> Result<(), Box<dyn std::error::Err
     // Wait for both operations
     let (outgoing_result, dialog_result) = tokio::join!(outgoing_task, dialog_task);
 
-    // Both should succeed
-    assert!(outgoing_result.is_ok());
-    assert!(dialog_result.is_ok());
+    // Both operations, not merely their task joins, must succeed. Keep this
+    // concurrency test independent of external DNS and network state.
+    outgoing_result
+        .expect("outgoing task join")
+        .expect("outgoing call");
+    dialog_result
+        .expect("dialog task join")
+        .expect("dialog creation");
 
     api.stop().await?;
     Ok(())

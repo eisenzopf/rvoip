@@ -14,7 +14,7 @@ use clap::{Parser, ValueEnum};
 use rvoip_sip::{
     EndpointAccountConfig, EndpointConfig, EndpointMediaConfig, EndpointNetworkConfig,
     EndpointProfileName, EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode,
-    EndpointTransport, SipTraceConfig,
+    EndpointTransport,
 };
 
 #[derive(Parser, Debug)]
@@ -307,10 +307,7 @@ fn apply_sip_trace_overrides(
         anyhow::bail!("--sip-trace-capacity must be greater than zero");
     }
 
-    let mut trace = config
-        .sip_trace
-        .clone()
-        .unwrap_or_else(SipTraceConfig::default);
+    let mut trace = config.sip_trace.clone().unwrap_or_default();
     if cli.sip_trace || cli.sip_trace_file.is_some() {
         trace.enabled = true;
     }

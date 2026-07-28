@@ -1,6 +1,5 @@
 use crate::error::{Error, Result};
 use chrono::{DateTime, FixedOffset};
-use log::debug;
 use nom::combinator::all_consuming;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
@@ -96,7 +95,7 @@ use crate::parser::headers::session_expires::parse_session_expires;
 /// assert!(header_str.contains("Call-ID"));
 /// assert!(header_str.contains("f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum TypedHeader {
     // Core Headers (Examples)
     Via(Via),                     // Use types::Via
@@ -177,6 +176,58 @@ pub enum TypedHeader {
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
+}
+
+impl fmt::Debug for TypedHeader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let canonical_name = self.name().canonical_wire_name();
+        let (name, extension_name_bytes) = match &canonical_name {
+            HeaderName::Other(value) if canonical_name.is_valid_wire_name() => {
+                ("extension", value.len())
+            }
+            HeaderName::Other(value) => ("[invalid header name]", value.len()),
+            known => (known.as_str(), 0),
+        };
+        let mut debug = formatter.debug_struct("TypedHeader");
+        debug.field("name", &name);
+        if extension_name_bytes != 0 {
+            debug.field("extension_name_bytes", &extension_name_bytes);
+        }
+
+        match self {
+            Self::Authorization(_) | Self::ProxyAuthorization(_) => {
+                debug.field("credentials_present", &true);
+            }
+            Self::WwwAuthenticate(value) => {
+                debug.field("value", value);
+            }
+            Self::ProxyAuthenticate(value) => {
+                debug.field("value", value);
+            }
+            Self::AuthenticationInfo(value) => {
+                debug.field("value", value);
+            }
+            Self::Warning(values) => {
+                debug.field("item_count", &values.len());
+            }
+            Self::Server(values) | Self::UserAgent(values) => {
+                debug.field("item_count", &values.len());
+                debug.field("item_bytes", &values.iter().map(String::len).sum::<usize>());
+            }
+            Self::Other(_, HeaderValue::Raw(value)) => {
+                debug.field("value_kind", &"raw");
+                debug.field("value_present", &!value.is_empty());
+                debug.field("value_bytes", &value.len());
+            }
+            Self::Other(_, _) => {
+                debug.field("value_kind", &"structured");
+                debug.field("value_present", &true);
+            }
+            _ => {}
+        }
+
+        debug.finish()
+    }
 }
 
 impl TypedHeader {
@@ -537,7 +588,7 @@ impl fmt::Display for TypedHeader {
                 write!(f, "{}: {}", HeaderName::AlertInfo, alert_info)
             }
             TypedHeader::CallInfo(call_info) => {
-                write!(f, "{}", call_info)
+                write!(f, "{}: {}", HeaderName::CallInfo, call_info)
             }
             TypedHeader::Event(event_data) => write!(f, "{}: {}", HeaderName::Event, event_data),
             TypedHeader::SubscriptionState(state) => {
@@ -884,7 +935,7 @@ impl TryFrom<&Header> for TypedHeader {
         };
 
         // Use all_consuming to ensure the specific parser consumes the entire value
-        let parse_result = match &header.name {
+        let parse_result = (|| match &header.name {
             // Address Headers
             HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
                 .map_err(Error::from)
@@ -932,7 +983,6 @@ impl TryFrom<&Header> for TypedHeader {
                             Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
                             Err(e) => {
                                 // For Call-ID, we'll be lenient - create it directly from bytes
-                                debug!("Warning: CallId parse error: {:?}, using raw value", e);
                                 match String::from_utf8(value_bytes.to_vec()) {
                                     Ok(s) => Ok(TypedHeader::CallId(CallId(s.trim().to_string()))),
                                     Err(_) => Err(Error::from(e.to_owned())),
@@ -977,7 +1027,6 @@ impl TryFrom<&Header> for TypedHeader {
                     })
             }
             HeaderName::ContentDisposition => {
-                debug!("ContentDisposition header: {:?}", header);
                 match all_consuming(parser::headers::content_disposition::parse_content_disposition)(
                     value_bytes,
                 ) {
@@ -1021,14 +1070,6 @@ impl TryFrom<&Header> for TypedHeader {
                                 _ => {} // Skip other parameter types
                             }
                         }
-
-                        debug!(
-                            "Created ContentDisposition: {:?}",
-                            ContentDisposition {
-                                disposition_type: disposition_type.clone(),
-                                params: params.clone(),
-                            }
-                        );
 
                         Ok(TypedHeader::ContentDisposition(ContentDisposition {
                             disposition_type,
@@ -1584,9 +1625,61 @@ impl TryFrom<&Header> for TypedHeader {
                 header.name.clone(),
                 HeaderValue::Raw(value_bytes.to_vec()),
             )),
-        };
+        })();
 
-        parse_result
+        parse_result.map_err(|error| redact_typed_header_conversion_error(error, value_bytes.len()))
+    }
+}
+
+/// Preserve the parser's public error taxonomy while preventing raw header
+/// values from crossing the typed-conversion boundary in diagnostics.
+fn redact_typed_header_conversion_error(error: Error, value_bytes: usize) -> Error {
+    let detail = |class: &str| {
+        format!("SIP typed-header conversion failed (class={class}, value_bytes={value_bytes})")
+    };
+
+    match error {
+        Error::InvalidMethod => Error::InvalidMethod,
+        Error::InvalidHeader(_) => Error::InvalidHeader(detail("invalid-header")),
+        Error::InvalidUri(_) => Error::InvalidUri(detail("invalid-uri")),
+        Error::InvalidVersion => Error::InvalidVersion,
+        Error::InvalidStatusCode(status) => Error::InvalidStatusCode(status),
+        Error::InvalidFormat(_) => Error::InvalidFormat(detail("invalid-format")),
+        Error::ParserWithLocation { line, column, .. } => Error::ParserWithLocation {
+            line,
+            column,
+            message: detail("parser-with-location"),
+        },
+        Error::Parser(_) => Error::Parser(detail("parser")),
+        Error::ParseError(_) => Error::ParseError(detail("parse-error")),
+        Error::ContentLengthMismatch { expected, actual } => {
+            Error::ContentLengthMismatch { expected, actual }
+        }
+        Error::MissingHeader(_) => Error::MissingHeader(detail("missing-header")),
+        Error::UnsupportedMediaType(_) => {
+            Error::UnsupportedMediaType(detail("unsupported-media-type"))
+        }
+        Error::MalformedUriComponent { .. } => Error::MalformedUriComponent {
+            component: "typed-header-value".to_string(),
+            message: detail("malformed-uri-component"),
+        },
+        Error::SdpError(_) => Error::SdpError(detail("sdp-error")),
+        Error::SdpParsingError(_) => Error::SdpParsingError(detail("sdp-parsing-error")),
+        Error::SdpValidationError(_) => Error::SdpValidationError(detail("sdp-validation-error")),
+        Error::ValidationError(_) => Error::ValidationError(detail("validation-error")),
+        Error::Transport(_) => Error::Transport(detail("transport")),
+        Error::IncompleteParse(_) => Error::IncompleteParse(detail("incomplete-parse")),
+        Error::IoError(_) => Error::IoError(detail("io-error")),
+        Error::LineTooLong(length) => Error::LineTooLong(length),
+        Error::TooManyHeaders(count) => Error::TooManyHeaders(count),
+        Error::BodyTooLarge(length) => Error::BodyTooLarge(length),
+        Error::Other(_) => Error::Other(detail("other")),
+        Error::InvalidInput(_) => Error::InvalidInput(detail("invalid-input")),
+        Error::SdpFormatError(_) => Error::SdpFormatError(detail("sdp-format-error")),
+        // Utf8Error carries offsets only, never the rejected input bytes.
+        Error::Utf8Error(error) => Error::Utf8Error(error),
+        Error::InternalError(_) => Error::InternalError(detail("internal-error")),
+        Error::BuilderError(_) => Error::BuilderError(detail("builder-error")),
     }
 }
 
@@ -1601,5 +1694,259 @@ mod tests {
 
         // Check that the name is correct
         assert_eq!(header.name(), HeaderName::CallId);
+    }
+
+    #[test]
+    fn raw_authorization_debug_is_redacted_without_changing_wire_bytes() {
+        const SECRET: &str = "Bearer raw-debug-secret";
+        for name in [
+            HeaderName::Authorization,
+            HeaderName::ProxyAuthorization,
+            HeaderName::Other("AUTHORIZATION".into()),
+            HeaderName::Other("proxy-Authorization".into()),
+        ] {
+            let header = TypedHeader::Other(name, HeaderValue::Raw(SECRET.as_bytes().to_vec()));
+            let debug = format!("{header:?}");
+            assert!(!debug.contains(SECRET));
+            assert!(debug.contains("value_bytes"));
+            assert!(header.to_string().contains(SECRET));
+        }
+    }
+
+    #[test]
+    fn unrelated_raw_header_debug_is_metadata_only() {
+        const VALUE: &str = "ordinary-debug-value";
+        let header = TypedHeader::Other(
+            HeaderName::Other("X-Diagnostic".into()),
+            HeaderValue::Raw(VALUE.as_bytes().to_vec()),
+        );
+        let debug = format!("{header:?}");
+        assert!(!debug.contains(VALUE));
+        assert!(!debug.contains("X-Diagnostic"));
+        assert!(debug.contains("extension_name_bytes"));
+        assert!(header.to_string().contains(VALUE));
+    }
+
+    #[test]
+    fn challenge_and_authentication_info_debug_are_safe_directly_and_when_enclosed() {
+        use crate::types::auth::{Algorithm, AuthenticationInfoParam, Challenge, DigestParam, Qop};
+
+        const REALM: &str = "realm-direct-debug-canary";
+        const NONCE: &str = "nonce-direct-debug-canary";
+        const ALGORITHM: &str = "algorithm-direct-debug-canary";
+        const NEXT_NONCE: &str = "next-nonce-direct-debug-canary";
+        const RESPONSE_AUTH: &str = "response-auth-direct-debug-canary";
+        const CLIENT_NONCE: &str = "client-nonce-direct-debug-canary";
+        const BEARER_SCOPE: &str = "bearer-scope-direct-debug-canary";
+        const OTHER_SCHEME: &str = "other-scheme-direct-debug-canary";
+
+        let challenge = Challenge::Digest {
+            params: vec![
+                DigestParam::Realm(REALM.into()),
+                DigestParam::Nonce(NONCE.into()),
+                DigestParam::Algorithm(Algorithm::Other(ALGORITHM.into())),
+            ],
+        };
+        let www = WwwAuthenticate(vec![challenge.clone()]);
+        let proxy = ProxyAuthenticate(vec![challenge]);
+        let bearer = Challenge::Bearer {
+            realm: REALM.into(),
+            scope: Some(BEARER_SCOPE.into()),
+            error: Some("bearer-error-direct-debug-canary".into()),
+            error_description: Some("bearer-description-direct-debug-canary".into()),
+        };
+        let other = Challenge::Other {
+            scheme: OTHER_SCHEME.into(),
+            params: vec![crate::types::auth::AuthParam {
+                name: "other-param-name-direct-debug-canary".into(),
+                value: "other-param-value-direct-debug-canary".into(),
+            }],
+        };
+        let info = AuthenticationInfo(vec![
+            AuthenticationInfoParam::NextNonce(NEXT_NONCE.into()),
+            AuthenticationInfoParam::ResponseAuth(RESPONSE_AUTH.into()),
+            AuthenticationInfoParam::Cnonce(CLIENT_NONCE.into()),
+            AuthenticationInfoParam::Qop(Qop::Other("qop-direct-debug-canary".into())),
+        ]);
+
+        for debug in [
+            format!("{:?}", &www.0[0]),
+            format!("{bearer:?}"),
+            format!("{other:?}"),
+            format!("{www:?}"),
+            format!("{proxy:?}"),
+            format!("{info:?}"),
+            format!("{:?}", TypedHeader::WwwAuthenticate(www.clone())),
+            format!("{:?}", TypedHeader::ProxyAuthenticate(proxy.clone())),
+            format!("{:?}", TypedHeader::AuthenticationInfo(info.clone())),
+        ] {
+            for secret in [
+                REALM,
+                NONCE,
+                ALGORITHM,
+                NEXT_NONCE,
+                RESPONSE_AUTH,
+                CLIENT_NONCE,
+                "qop-direct-debug-canary",
+                BEARER_SCOPE,
+                "bearer-error-direct-debug-canary",
+                "bearer-description-direct-debug-canary",
+                OTHER_SCHEME,
+                "other-param-name-direct-debug-canary",
+                "other-param-value-direct-debug-canary",
+            ] {
+                assert!(!debug.contains(secret), "debug reflected {secret}: {debug}");
+            }
+        }
+
+        assert!(www.to_string().contains(REALM));
+        assert!(proxy.to_string().contains(NONCE));
+        assert!(info.to_string().contains(RESPONSE_AUTH));
+        assert!(bearer.to_string().contains(BEARER_SCOPE));
+        assert!(other.to_string().contains(OTHER_SCHEME));
+        assert!(serde_json::to_string(&www).unwrap().contains(REALM));
+    }
+
+    #[test]
+    fn typed_header_debug_never_uses_wire_rendering() {
+        let source = include_str!("typed_header.rs");
+        let debug_start = source.find("impl fmt::Debug for TypedHeader").unwrap();
+        let debug_end = source[debug_start..]
+            .find("impl TypedHeader")
+            .map(|offset| debug_start + offset)
+            .unwrap();
+        let debug_source = &source[debug_start..debug_end];
+        for forbidden in ["format_args!", ".to_string()", "write!(", "Display"] {
+            assert!(
+                !debug_source.contains(forbidden),
+                "TypedHeader Debug regained wire rendering through {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_challenge_containers_cannot_regain_derived_debug() {
+        for (source, declaration) in [
+            (include_str!("../auth/challenge.rs"), "pub enum Challenge"),
+            (
+                include_str!("../auth/www_authenticate.rs"),
+                "pub struct WwwAuthenticate",
+            ),
+            (
+                include_str!("../auth/proxy_authenticate.rs"),
+                "pub struct ProxyAuthenticate",
+            ),
+            (
+                include_str!("../auth/authentication_info.rs"),
+                "pub struct AuthenticationInfo",
+            ),
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            let derive = &source[derive_offset..declaration_offset];
+            assert!(
+                !derive.contains("Debug"),
+                "{declaration} regained raw derived Debug: {derive}"
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_source_never_logs_header_values_or_parser_input() {
+        let source = include_str!("typed_header.rs");
+        for fragments in [
+            ["CallId parse error", ": {:?}"],
+            ["ContentDisposition header", ": {:?}"],
+            ["Created ContentDisposition", ": {:?}"],
+        ] {
+            assert!(!source.contains(&fragments.concat()));
+        }
+    }
+
+    #[test]
+    fn malformed_parser_headers_preserve_parse_error_and_redact_values() {
+        for (name, value, secret) in [
+            (
+                HeaderName::Authorization,
+                b"Digest username=authorization-secret, response=\"unterminated".as_slice(),
+                "authorization-secret",
+            ),
+            (
+                HeaderName::ProxyAuthorization,
+                b"Digest username=proxy-authorization-secret, response=\"unterminated".as_slice(),
+                "proxy-authorization-secret",
+            ),
+            (
+                HeaderName::Path,
+                b"<sip:path-secret@example.com".as_slice(),
+                "path-secret",
+            ),
+            (
+                HeaderName::ServiceRoute,
+                b"<sip:service-route-secret@example.com".as_slice(),
+                "service-route-secret",
+            ),
+            (
+                HeaderName::Accept,
+                b"application/accept-secret;=invalid".as_slice(),
+                "accept-secret",
+            ),
+        ] {
+            let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
+            let error = TypedHeader::try_from(header)
+                .expect_err("malformed sensitive header must fail typed conversion");
+            assert!(matches!(
+                &error,
+                Error::ParseError(detail)
+                    if detail.contains("class=parse-error")
+                        && detail.contains(&format!("value_bytes={}", value.len()))
+            ));
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(secret));
+            assert!(rendered.contains("class=parse"));
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_path_headers_preserve_invalid_header_and_redact_values() {
+        for (name, value, secret) in [
+            (
+                HeaderName::Path,
+                b"\xffpath-invalid-header-secret".as_slice(),
+                "path-invalid-header-secret",
+            ),
+            (
+                HeaderName::ServiceRoute,
+                b"\xffservice-route-invalid-header-secret".as_slice(),
+                "service-route-invalid-header-secret",
+            ),
+        ] {
+            let header = Header::new(name, HeaderValue::Raw(value.to_vec()));
+            let error = TypedHeader::try_from(header)
+                .expect_err("invalid UTF-8 route header must fail typed conversion");
+            assert!(matches!(
+                &error,
+                Error::InvalidHeader(detail)
+                    if detail.contains("class=invalid-header")
+                        && detail.contains(&format!("value_bytes={}", value.len()))
+            ));
+            let rendered = format!("{error:?} {error}");
+            assert!(!rendered.contains(secret));
+            assert!(rendered.contains("class=invalid-header"));
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_accept_preserves_utf8_error_without_exposing_input() {
+        const SECRET: &str = "accept-utf8-secret";
+        let value = [b"\xff".as_slice(), SECRET.as_bytes()].concat();
+        let header = Header::new(HeaderName::Accept, HeaderValue::Raw(value));
+        let error = TypedHeader::try_from(header)
+            .expect_err("invalid UTF-8 Accept must fail typed conversion");
+
+        assert!(matches!(error, Error::Utf8Error(_)));
+        let rendered = format!("{error:?} {error}");
+        assert!(!rendered.contains(SECRET));
+        assert!(rendered.contains("class=utf8"));
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-sip"
-version.workspace = true  # 0.2.2 — beta-tier; inherits from [workspace.package]
+version.workspace = true  # 0.3.2 — beta-tier
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -380,10 +380,13 @@ rvoip-core-traits.workspace = true
 # connectivity checks), same as `rvoip_rtp_core::dtls_srtp` is used
 # directly for DTLS identity generation.
 rvoip-nat-core = { workspace = true, optional = true, features = ["ice"] }
+ipnet = "2.12"
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.22"
 rvoip-auth-core.workspace = true
 rvoip-sip-registrar.workspace = true
+sha2.workspace = true
+zeroize.workspace = true
 
 # State management
 lazy_static = "1.4"
@@ -408,6 +411,7 @@ rand = "0.8"
 strum = { version = "0.26", features = ["derive"] }
 
 [dev-dependencies]
+tokio = { version = "1.40", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 rvoip-sip-transport.workspace = true
@@ -485,6 +489,10 @@ dtls-srtp = ["rvoip-media-core/dtls-srtp", "rvoip-rtp-core/dtls-webrtc"]
 # SDP handling and a live webrtc-ice agent bridged over the shared RTP
 # socket. Orthogonal to `dtls-srtp` — combine freely. Off by default.
 ice = ["rvoip-media-core/ice", "rvoip-rtp-core/ice", "dep:rvoip-nat-core"]
+# Optional native Opus media support for negotiated SIP legs. Bridgefu enables
+# this so SIP Opus is represented as Opus codec payload in MediaFrame rather
+# than being mis-decoded as G.711.
+opus = ["rvoip-media-core/opus"]
 # Heap profiling for `examples/profiling/dhat_*.rs`. Pulls in the dhat
 # global allocator and turns the gated examples into compilable
 # binaries. Off by default so `cargo build` / `cargo test` never see

@@ -14,9 +14,12 @@
 //!   Alice's auto-PRACK (Phase C.1.2) round-trips underneath, Bob accepts,
 //!   and Alice exits 0 on `CallAnswered`.
 
-use std::env;
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const NEG_ALICE_PORT: u16 = 35063;
 const NEG_BOB_PORT: u16 = 35064;
@@ -31,13 +34,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // Build both peers before launch, then execute them directly. Keeping
+    // nested `cargo run` processes alive serializes the second peer behind
+    // Cargo's artifact lock, so Alice can time out before she ever starts.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -46,23 +47,6 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e));
     ChildGuard(child)
-}
-
-fn build_examples() {
-    let build_status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_prack_alice",
-            "--example",
-            "regression_prack_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(build_status.success(), "cargo build failed");
 }
 
 fn run_scenario(
@@ -116,13 +100,13 @@ fn run_scenario(
 
 #[test]
 fn prack_policy_mismatch_returns_420() {
-    build_examples();
+    build_examples(&["regression_prack_alice", "regression_prack_bob"]);
     run_scenario(NEG_ALICE_PORT, NEG_BOB_PORT, "negative", 8, 20);
 }
 
 #[test]
 fn prack_positive_reliable_183_flow() {
-    build_examples();
+    build_examples(&["regression_prack_alice", "regression_prack_bob"]);
     // Positive path: Bob sends reliable 183, Alice auto-PRACKs, Bob 200s.
     // Alice exits 0 on CallAnswered. Give generous margin for the
     // multi-step dance on a loaded CI box.

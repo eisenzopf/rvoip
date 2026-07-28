@@ -74,8 +74,18 @@ use uuid::Uuid;
 /// let id_str = call_id.as_str();
 /// assert_eq!(id_str, "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CallId(pub String);
+
+impl fmt::Debug for CallId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CallId")
+            .field("present", &!self.0.is_empty())
+            .field("bytes", &self.0.len())
+            .finish()
+    }
+}
 
 impl Deref for CallId {
     type Target = String;
@@ -305,3 +315,19 @@ impl TypedHeaderTrait for CallId {
 }
 
 // TODO: Implement methods (e.g., new_random)
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn debug_is_metadata_only_while_wire_and_serde_remain_exact() {
+        const CANARY: &str = "call-id-direct-diagnostic-secret-canary@example.test";
+        let call_id = CallId::new(CANARY);
+        let debug = format!("{call_id:?}");
+        assert!(!debug.contains(CANARY));
+        assert!(debug.contains(&format!("bytes: {}", CANARY.len())));
+        assert_eq!(call_id.to_string(), CANARY);
+        assert!(serde_json::to_string(&call_id).unwrap().contains(CANARY));
+    }
+}

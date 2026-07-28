@@ -1,0 +1,41 @@
+[package]
+name = "rvoip-vapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Vapi bidirectional WebSocket voice-agent adapter for rvoip"
+
+[dependencies]
+rvoip-core.workspace = true
+
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+futures.workspace = true
+metrics.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+axum = { workspace = true, features = ["ws"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

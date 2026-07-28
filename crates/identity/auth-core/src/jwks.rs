@@ -19,8 +19,9 @@
 //! refresh handles rotation without thundering-herd refetches.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
@@ -31,7 +32,10 @@ use serde::Deserialize;
 use tracing::{debug, warn};
 use url::Url;
 
-use crate::bearer::{BearerAuthError, BearerValidator};
+use crate::bearer::{
+    unix_time_from_seconds, validate_optional_token_id, AuthenticatedPrincipal,
+    AuthenticationMethod, BearerAuthError, BearerValidator, ValidatedBearer,
+};
 use crate::providers::{
     CredentialAuthError, TokenRevocationChecker, TokenRevocationContext, TokenRevocationStatus,
 };
@@ -46,12 +50,21 @@ pub const DEFAULT_JWKS_CACHE_TTL: Duration = Duration::from_secs(3600);
 /// without paying for an unbounded cache.
 const JWKS_CACHE_MAX_CAPACITY: u64 = 64;
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct JwksDocument {
     keys: Vec<JwksKey>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for JwksDocument {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwksDocument")
+            .field("key_count", &self.keys.len())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct JwksKey {
     kty: String,
     kid: Option<String>,
@@ -65,7 +78,46 @@ struct JwksKey {
     y: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for JwksKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("JwksKey")
+            .field("key_type_class", &jwk_key_type_class(&self.kty))
+            .field("key_id_present", &self.kid.is_some())
+            .field("key_id_bytes", &self.kid.as_ref().map_or(0, String::len))
+            .field("rsa_modulus_present", &self.n.is_some())
+            .field("rsa_modulus_bytes", &self.n.as_ref().map_or(0, String::len))
+            .field("rsa_exponent_present", &self.e.is_some())
+            .field(
+                "rsa_exponent_bytes",
+                &self.e.as_ref().map_or(0, String::len),
+            )
+            .field("curve_present", &self.crv.is_some())
+            .field("curve_bytes", &self.crv.as_ref().map_or(0, String::len))
+            .field("x_coordinate_present", &self.x.is_some())
+            .field(
+                "x_coordinate_bytes",
+                &self.x.as_ref().map_or(0, String::len),
+            )
+            .field("y_coordinate_present", &self.y.is_some())
+            .field(
+                "y_coordinate_bytes",
+                &self.y.as_ref().map_or(0, String::len),
+            )
+            .finish()
+    }
+}
+
+fn jwk_key_type_class(key_type: &str) -> &'static str {
+    match key_type {
+        "RSA" => "rsa",
+        "EC" => "ec",
+        "oct" => "symmetric",
+        _ => "other",
+    }
+}
+
+#[derive(Deserialize)]
 struct TokenClaims {
     sub: String,
     #[serde(default)]
@@ -86,12 +138,49 @@ struct TokenClaims {
     realm_access: Option<RoleAccess>,
     #[serde(default)]
     resource_access: Option<HashMap<String, RoleAccess>>,
+    #[serde(default, alias = "tenant", alias = "tid")]
+    tenant_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for TokenClaims {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TokenClaims")
+            .field("subject_present", &!self.sub.is_empty())
+            .field("issuer_present", &self.iss.is_some())
+            .field("issued_at_present", &self.iat.is_some())
+            .field("expires_at_present", &self.exp.is_some())
+            .field("token_id_present", &self.jti.is_some())
+            .field("scope_present", &self.scope.is_some())
+            .field("scope_bytes", &self.scope.as_ref().map_or(0, String::len))
+            .field(
+                "scope_list_count",
+                &self.scopes.as_ref().map_or(0, Vec::len),
+            )
+            .field("role_count", &self.roles.as_ref().map_or(0, Vec::len))
+            .field("realm_access_present", &self.realm_access.is_some())
+            .field(
+                "resource_access_count",
+                &self.resource_access.as_ref().map_or(0, HashMap::len),
+            )
+            .field("tenant_present", &self.tenant_id.is_some())
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 struct RoleAccess {
     #[serde(default)]
     roles: Vec<String>,
+}
+
+impl fmt::Debug for RoleAccess {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RoleAccess")
+            .field("role_count", &self.roles.len())
+            .finish()
+    }
 }
 
 /// Bearer validator that resolves signing keys from a remote JWKS
@@ -108,6 +197,7 @@ struct Inner {
     cache: Cache<String, DecodingKey>,
     validation: Validation,
     revocation_checker: Option<Arc<dyn TokenRevocationChecker>>,
+    require_jti: bool,
 }
 
 impl JwksJwtValidator {
@@ -141,6 +231,7 @@ impl JwksJwtValidator {
                     .build(),
                 validation,
                 revocation_checker: None,
+                require_jti: false,
             }),
         }
     }
@@ -160,6 +251,7 @@ impl JwksJwtValidator {
                 cache: new_cache,
                 validation: inner.validation.clone(),
                 revocation_checker: inner.revocation_checker.clone(),
+                require_jti: inner.require_jti,
             }),
         }
     }
@@ -185,6 +277,7 @@ impl JwksJwtValidator {
                 cache: inner.cache.clone(),
                 validation,
                 revocation_checker: inner.revocation_checker.clone(),
+                require_jti: inner.require_jti,
             }),
         }
     }
@@ -210,6 +303,7 @@ impl JwksJwtValidator {
                 cache: inner.cache.clone(),
                 validation,
                 revocation_checker: inner.revocation_checker.clone(),
+                require_jti: inner.require_jti,
             }),
         }
     }
@@ -226,6 +320,7 @@ impl JwksJwtValidator {
                 cache: inner.cache.clone(),
                 validation,
                 revocation_checker: inner.revocation_checker.clone(),
+                require_jti: inner.require_jti,
             }),
         }
     }
@@ -243,6 +338,26 @@ impl JwksJwtValidator {
                 cache: inner.cache.clone(),
                 validation: inner.validation.clone(),
                 revocation_checker: Some(checker),
+                require_jti: inner.require_jti,
+            }),
+        }
+    }
+
+    /// Require a non-empty, bounded JWT `jti` even without a revocation store.
+    ///
+    /// Production deployments that use token IDs for replay, lease, or audit
+    /// correlation should enable this policy. Configuring a revocation checker
+    /// already requires `jti` regardless of this setting.
+    pub fn with_required_jti(self) -> Self {
+        let inner = &*self.inner;
+        Self {
+            inner: Arc::new(Inner {
+                jwks_url: inner.jwks_url.clone(),
+                client: inner.client.clone(),
+                cache: inner.cache.clone(),
+                validation: inner.validation.clone(),
+                revocation_checker: inner.revocation_checker.clone(),
+                require_jti: true,
             }),
         }
     }
@@ -263,7 +378,10 @@ impl JwksJwtValidator {
         }
         // Cache miss — fetch JWKS, populate every parseable key, then
         // re-check the cache for the kid we want.
-        debug!(kid = %kid, "jwks: cache miss, refetching");
+        debug!(
+            key_id_present = !kid.is_empty(),
+            "jwks: cache miss, refetching"
+        );
         let doc = self.fetch_jwks().await?;
         for jwk in doc.keys {
             let Some(jwk_kid) = jwk.kid.clone() else {
@@ -275,10 +393,10 @@ impl JwksJwtValidator {
                 Ok(key) => {
                     self.inner.cache.insert(jwk_kid, key).await;
                 }
-                Err(e) => {
+                Err(_) => {
                     warn!(
-                        kid = %jwk_kid,
-                        error = %e,
+                        key_id_present = !jwk_kid.is_empty(),
+                        error_class = "invalid-jwk",
                         "jwks: skipping unparseable key"
                     );
                 }
@@ -359,6 +477,17 @@ fn decoding_key_from_jwk(jwk: &JwksKey) -> Result<DecodingKey, BearerAuthError> 
 #[async_trait]
 impl BearerValidator for JwksJwtValidator {
     async fn validate(&self, token: &str) -> Result<IdentityAssurance, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal.assurance)
+    }
+
+    async fn validate_principal(
+        &self,
+        token: &str,
+    ) -> Result<AuthenticatedPrincipal, BearerAuthError> {
+        Ok(self.validate_credential(token).await?.principal)
+    }
+
+    async fn validate_credential(&self, token: &str) -> Result<ValidatedBearer, BearerAuthError> {
         if token.is_empty() {
             return Err(BearerAuthError::Empty);
         }
@@ -378,15 +507,37 @@ impl BearerValidator for JwksJwtValidator {
         let data = decode::<TokenClaims>(token, &key, &self.inner.validation)
             .map_err(|e| BearerAuthError::Invalid(e.to_string()))?;
         let claims = data.claims;
-        let revocation_context = revocation_context_from_claims(&claims);
+        let token_id = validate_optional_token_id(claims.jti.clone())?;
+        if self.inner.require_jti && token_id.is_none() {
+            return Err(BearerAuthError::Invalid(
+                "token missing required jti".into(),
+            ));
+        }
+        let issued_at = claims
+            .iat
+            .map(|iat| unix_time_from_seconds(iat, "iat"))
+            .transpose()?;
+        let expires_at_system = claims
+            .exp
+            .map(|exp| unix_time_from_seconds(exp, "exp"))
+            .transpose()?;
+        let revocation_context = revocation_context_from_claims(
+            &claims,
+            token_id.as_deref(),
+            issued_at,
+            expires_at_system,
+        );
         check_revocation(
             self.inner.revocation_checker.as_ref(),
             revocation_context.as_ref(),
         )
         .await?;
 
-        // 4. Map claims to IdentityAssurance::UserAuthorized.
-        let identity = IdentityId::from_string(claims.sub);
+        // 4. Preserve the authorization claims alongside the legacy
+        // IdentityAssurance projection.
+        let subject = claims.sub.clone();
+        let expires_at = claims.exp.map(expiration_from_unix).transpose()?;
+        let identity = IdentityId::from_string(subject.clone());
         let scopes = scopes_from_claims(
             claims.scope,
             claims.scopes,
@@ -394,12 +545,32 @@ impl BearerValidator for JwksJwtValidator {
             claims.realm_access,
             claims.resource_access,
         );
-        Ok(IdentityAssurance::UserAuthorized {
+        let assurance = IdentityAssurance::UserAuthorized {
             identity: identity.clone(),
             user_id: identity,
-            scopes,
-        })
+            scopes: scopes.clone(),
+        };
+        ValidatedBearer::new(
+            AuthenticatedPrincipal {
+                subject,
+                tenant: claims.tenant_id,
+                scopes,
+                issuer: claims.iss,
+                expires_at,
+                method: AuthenticationMethod::Oidc,
+                assurance,
+            },
+            token_id,
+            issued_at,
+        )
     }
+}
+
+fn expiration_from_unix(seconds: u64) -> Result<chrono::DateTime<chrono::Utc>, BearerAuthError> {
+    i64::try_from(seconds)
+        .ok()
+        .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+        .ok_or_else(|| BearerAuthError::Invalid("token exp is outside the supported range".into()))
 }
 
 async fn check_revocation(
@@ -424,21 +595,18 @@ async fn check_revocation(
     }
 }
 
-fn revocation_context_from_claims(claims: &TokenClaims) -> Option<TokenRevocationContext> {
-    let token_id = claims.jti.clone()?;
-    let mut context = TokenRevocationContext::new(token_id).with_subject(claims.sub.clone());
+fn revocation_context_from_claims(
+    claims: &TokenClaims,
+    token_id: Option<&str>,
+    issued_at: Option<SystemTime>,
+    expires_at: Option<SystemTime>,
+) -> Option<TokenRevocationContext> {
+    let mut context = TokenRevocationContext::new(token_id?).with_subject(claims.sub.clone());
     if let Some(issuer) = claims.iss.clone() {
         context = context.with_issuer(issuer);
     }
-    context = context.with_times(
-        claims.iat.and_then(unix_seconds_to_system_time),
-        claims.exp.and_then(unix_seconds_to_system_time),
-    );
+    context = context.with_times(issued_at, expires_at);
     Some(context)
-}
-
-fn unix_seconds_to_system_time(seconds: u64) -> Option<SystemTime> {
-    UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
 fn scopes_from_claims(
@@ -480,5 +648,91 @@ fn scopes_from_claims(
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.contains(&value) {
         values.push(value);
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    const CANARY: &str = "jwks-claims-malicious-canary\r\nAuthorization: exposed";
+
+    #[test]
+    fn decoded_jwks_keys_keep_exact_values_out_of_debug() {
+        let document: JwksDocument = serde_json::from_value(serde_json::json!({
+            "keys": [{
+                "kty": CANARY,
+                "kid": CANARY,
+                "n": CANARY,
+                "e": CANARY,
+                "crv": CANARY,
+                "x": CANARY,
+                "y": CANARY,
+            }]
+        }))
+        .unwrap();
+
+        let key = &document.keys[0];
+        for rendered in [format!("{document:?}"), format!("{key:?}")] {
+            assert!(!rendered.contains(CANARY), "JWKS value leaked: {rendered}");
+        }
+        assert_eq!(key.kty, CANARY);
+        assert_eq!(key.kid.as_deref(), Some(CANARY));
+        assert_eq!(key.n.as_deref(), Some(CANARY));
+        assert_eq!(key.e.as_deref(), Some(CANARY));
+        assert_eq!(key.crv.as_deref(), Some(CANARY));
+        assert_eq!(key.x.as_deref(), Some(CANARY));
+        assert_eq!(key.y.as_deref(), Some(CANARY));
+        assert_eq!(jwk_key_type_class(&key.kty), "other");
+    }
+
+    #[test]
+    fn decoded_claims_keep_values_out_of_debug() {
+        let claims: TokenClaims = serde_json::from_value(serde_json::json!({
+            "sub": CANARY,
+            "iss": CANARY,
+            "iat": 1,
+            "exp": 2,
+            "jti": CANARY,
+            "scope": CANARY,
+            "scopes": [CANARY],
+            "roles": [CANARY],
+            "realm_access": { "roles": [CANARY] },
+            "resource_access": { (CANARY): { "roles": [CANARY] } },
+            "tenant_id": CANARY,
+        }))
+        .unwrap();
+
+        for rendered in [
+            format!("{claims:?}"),
+            format!("{:?}", claims.realm_access.as_ref().unwrap()),
+            format!(
+                "{:?}",
+                claims
+                    .resource_access
+                    .as_ref()
+                    .unwrap()
+                    .get(CANARY)
+                    .unwrap()
+            ),
+        ] {
+            assert!(!rendered.contains(CANARY), "claim leaked: {rendered}");
+        }
+
+        assert_eq!(claims.sub, CANARY);
+        assert_eq!(claims.iss.as_deref(), Some(CANARY));
+        assert_eq!(claims.jti.as_deref(), Some(CANARY));
+        assert_eq!(claims.scope.as_deref(), Some(CANARY));
+        assert_eq!(claims.scopes.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.roles.as_deref(), Some(&[CANARY.to_string()][..]));
+        assert_eq!(claims.tenant_id.as_deref(), Some(CANARY));
+        assert_eq!(
+            claims.realm_access.as_ref().unwrap().roles,
+            [CANARY.to_string()]
+        );
+        assert_eq!(
+            claims.resource_access.as_ref().unwrap()[CANARY].roles,
+            [CANARY.to_string()]
+        );
     }
 }

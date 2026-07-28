@@ -61,8 +61,7 @@
 //!     let tx_mgr = Arc::new(TransactionManager::new_sync(transport));
 //!     let config = ServerConfig::new("0.0.0.0:5060".parse()?)
 //!         .with_domain("sip.company.com")
-//!         .with_auto_options()
-//!         .with_auto_register();
+//!         .with_auto_options();
 //!
 //!     // Create and configure server
 //!     let server = DialogServer::with_dependencies(tx_mgr, config).await?;
@@ -272,8 +271,7 @@
 //!
 //! let config = ServerConfig::new("0.0.0.0:5060".parse().unwrap())
 //!     .with_domain("sip.production.com")
-//!     .with_auto_options()
-//!     .with_auto_register();
+//!     .with_auto_options();
 //!
 //! // Customize for high-load production
 //! let mut prod_config = config;
@@ -493,7 +491,7 @@
 //! ## Best Practices
 //!
 //! 1. **Use Session Coordination**: Always set up session event handling for robust call management
-//! 2. **Configure Auto-Responses**: Enable auto-OPTIONS and auto-REGISTER for standard compliance
+//! 2. **Configure Ownership**: Auto-answer OPTIONS, but install an authoritative registrar before accepting REGISTER
 //! 3. **Implement Proper Error Handling**: Use specific error types and appropriate SIP status codes
 //! 4. **Monitor Server Health**: Track statistics and implement alerting for high loads
 //! 5. **Scale Horizontally**: Use load balancing and capacity limits for production deployments

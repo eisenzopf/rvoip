@@ -38,7 +38,6 @@ pub mod builders;
 ///
 /// Client transactions are typically created and managed by the `TransactionManager`, which routes
 /// incoming messages to the appropriate transaction and exposes a clean API for the TU.
-mod common;
 mod data;
 mod invite;
 mod non_invite;

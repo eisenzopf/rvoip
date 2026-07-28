@@ -21,12 +21,22 @@ use std::fmt;
 /// let header = Header::integer(HeaderName::ContentLength, 123);
 /// assert_eq!(header.to_wire_format(), "Content-Length: 123");
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Header {
     /// Header name
     pub name: HeaderName,
     /// Header value
     pub value: HeaderValue,
+}
+
+impl fmt::Debug for Header {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Header")
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .finish()
+    }
 }
 
 impl Header {
@@ -127,5 +137,32 @@ mod tests {
             h.to_wire_format(),
             "Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds"
         );
+    }
+
+    #[test]
+    fn low_level_header_debug_is_metadata_only_without_changing_wire_rendering() {
+        const NAME: &str = "X-Header-Name-Direct-Debug-Canary";
+        const VALUE: &str = "header-value-direct-debug-canary";
+        let header = Header::text(HeaderName::Other(NAME.into()), VALUE);
+
+        let debug = format!("{header:?}");
+        assert!(!debug.contains(NAME));
+        assert!(!debug.contains(VALUE));
+        assert!(debug.contains("name_bytes"));
+        assert!(debug.contains("value_bytes"));
+        assert_eq!(header.to_wire_format(), format!("{NAME}: {VALUE}"));
+    }
+
+    #[test]
+    fn low_level_header_types_cannot_regain_derived_debug() {
+        for (source, declaration) in [
+            (include_str!("header.rs"), "pub struct Header"),
+            (include_str!("header_name.rs"), "pub enum HeaderName"),
+            (include_str!("header_value.rs"), "pub enum HeaderValue"),
+        ] {
+            let declaration_offset = source.find(declaration).unwrap();
+            let derive_offset = source[..declaration_offset].rfind("#[derive(").unwrap();
+            assert!(!source[derive_offset..declaration_offset].contains("Debug"));
+        }
     }
 }

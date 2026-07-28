@@ -34,6 +34,8 @@ members = [
     "crates/sip/sip-registrar",
 
     # webrtc/ — WebRTC interop product.
+    "crates/webrtc/rvoip-rtc",
+    "crates/webrtc/rvoip-webrtc-stack",
     "crates/webrtc/rvoip-webrtc",
     "crates/webrtc/rvoip-amazon-connect",
 
@@ -42,6 +44,12 @@ members = [
     "crates/uctp/rvoip-quic",
     "crates/uctp/rvoip-webtransport",
     "crates/uctp/rvoip-websocket",
+
+    # moq/ — standards-based Media over QUIC broadcast adapter.
+    "crates/moq/rvoip-moq-transport",
+    "crates/moq/rvoip-moq-native",
+    "crates/moq/rvoip-moq-relay",
+    "crates/moq/rvoip-moq",
 
     # identity/ — auth validators, user store, identity provider backends.
     "crates/identity/auth-core",
@@ -52,6 +60,7 @@ members = [
     "crates/extensions/rvoip-vcon",
     "crates/extensions/rvoip-vcon-postgres",
     "crates/extensions/rvoip-harness",
+    "crates/extensions/rvoip-vapi",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
     "crates/extensions/rvoip-redis",
@@ -96,12 +105,11 @@ default-members = [
     "crates/webrtc/rvoip-amazon-connect",
 ]
 
-# ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
+# WORKSPACE PACKAGE INHERITANCE - Define common metadata once.
 [workspace.package]
-# Numeric maturity tiers (no -alpha/-beta suffixes): 0.1.x = alpha,
-# 0.2.x = beta, 1.0 = stable. Beta-tier crates inherit this 0.2.2;
-# Alpha-tier crates override in their own [package] with version = "0.1.0".
-version = "0.2.5"
+# Every publishable workspace crate ships at this one version. Feature-level
+# maturity and non-claims remain documented independently of package SemVer.
+version = "0.3.2"
 edition = "2021"
 license = "MIT"
 homepage = "https://github.com/eisenzopf/rvoip"
@@ -204,50 +212,58 @@ collapsible_else_if = "allow"
 #
 # Package names are unchanged on crates.io (rvoip-sip-core, etc.) — only
 # the in-repo directory changed. See the grouped [workspace] members above.
-# Beta-tier crates (publish to crates.io as 0.2.2).
-rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.2.5" }
-rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.2.5" }
-rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.2.5" }
-rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.2.5" }
-rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.2.5" }
-rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.2.5" }
-rvoip-media-core    = { path = "crates/media/media-core", version = "0.2.5" }
-rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.2.5" }
-rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.2.5" }
-rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.2.5" }
-rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.2.5" }
-rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.2.5" }
-rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.2.5" }
-rvoip-users-core    = { path = "crates/identity/users-core", version = "0.1.3" }
+# All publishable workspace crates and internal registry requirements move
+# together in one dependency-ordered release.
+rvoip-sip-core      = { path = "crates/sip/sip-core", version = "0.3.2" }
+rvoip-sip-transport = { path = "crates/sip/sip-transport", version = "0.3.2" }
+rvoip-sip-dialog    = { path = "crates/sip/sip-dialog", version = "0.3.2" }
+rvoip-sip-proxy     = { path = "crates/sip/sip-proxy", version = "0.3.2" }
+rvoip-sip-registrar = { path = "crates/sip/sip-registrar", version = "0.3.2" }
+rvoip-rtp-core      = { path = "crates/media/rtp-core", version = "0.3.2" }
+rvoip-media-core    = { path = "crates/media/media-core", version = "0.3.2" }
+rvoip-sip           = { path = "crates/sip/rvoip-sip", version = "0.3.2" }
+rvoip-core          = { path = "crates/foundation/rvoip-core", version = "0.3.2" }
+rvoip-codec-core    = { path = "crates/media/codec-core", version = "0.3.2" }
+rvoip-infra-common  = { path = "crates/foundation/infra-common", version = "0.3.2" }
+rvoip-auth-core     = { path = "crates/identity/auth-core", version = "0.3.2" }
+rvoip-core-traits   = { path = "crates/foundation/rvoip-core-traits", version = "0.3.2" }
+rvoip-users-core    = { path = "crates/identity/users-core", version = "0.3.2" }
 
-# Remaining internal crates — alpha-tier (0.1.0) except `rvoip` (the 0.2.2
-# beta facade). All publishable now. rvoip-core lists rvoip-vcon / rvoip-harness
-# as optional runtime deps, so their versions must resolve on crates.io
-# regardless of feature activation.
-rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.1.3" }
-rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.1.3" }
-rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.1.3" }
-rvoip               = { path = "crates/rvoip", version = "0.2.5" }
-rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.1.3" }
-rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.1.3" }
-rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.1.3" }
-rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.1.3" }
-rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.1.3" }
-rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.1.3" }
-rvoip-client        = { path = "crates/rvoip-client", version = "0.1.3" }
-rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.1.3" }
+# Optional and top-of-stack crates are part of the same release. Facade and
+# core packages list extension crates such as rvoip-vcon, rvoip-harness, and
+# rvoip-vapi as optional runtime dependencies, so their versions must resolve
+# on crates.io regardless of feature activation.
+rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.3.2" }
+rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.3.2" }
+rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.3.2" }
+rvoip-vapi          = { path = "crates/extensions/rvoip-vapi", version = "0.3.2" }
+rvoip               = { path = "crates/rvoip", version = "0.3.2" }
+rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.3.2" }
+rvoip-quic          = { path = "crates/uctp/rvoip-quic", version = "0.3.2" }
+rvoip-webtransport  = { path = "crates/uctp/rvoip-webtransport", version = "0.3.2" }
+rvoip-websocket     = { path = "crates/uctp/rvoip-websocket", version = "0.3.2" }
+rvoip-moq-transport = { path = "crates/moq/rvoip-moq-transport", version = "0.3.2" }
+rvoip-moq-native    = { path = "crates/moq/rvoip-moq-native", version = "0.3.2" }
+rvoip-moq-relay     = { path = "crates/moq/rvoip-moq-relay", version = "0.3.2", default-features = false }
+rvoip-moq           = { path = "crates/moq/rvoip-moq", version = "0.3.2" }
+rvoip-rtc           = { path = "crates/webrtc/rvoip-rtc", version = "0.3.2" }
+rvoip-webrtc-stack  = { path = "crates/webrtc/rvoip-webrtc-stack", version = "0.3.2" }
 rvoip-nat-core      = { path = "crates/media/nat-core", version = "0.1.0" }
-rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.1.3" }
-rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.1.3" }
-rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.1.3" }
-rvoip-audit         = { path = "crates/extensions/rvoip-audit", version = "0.1.3" }
-rvoip-oidc          = { path = "crates/extensions/rvoip-oidc", version = "0.1.3" }
-rvoip-ldap          = { path = "crates/extensions/rvoip-ldap", version = "0.1.3" }
-rvoip-scim          = { path = "crates/extensions/rvoip-scim", version = "0.1.3" }
-rvoip-saml          = { path = "crates/extensions/rvoip-saml", version = "0.1.3" }
-rvoip-webauthn      = { path = "crates/extensions/rvoip-webauthn", version = "0.1.3" }
-rvoip-ims-aka       = { path = "crates/extensions/rvoip-ims-aka", version = "0.1.3" }
-rtc = "=0.20.0-alpha.1"
+rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.3.2" }
+rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.3.2" }
+rvoip-client        = { path = "crates/rvoip-client", version = "0.3.2" }
+rvoip-audio-device  = { path = "crates/media/rvoip-audio-device", version = "0.3.2" }
+rvoip-stir-shaken   = { path = "crates/extensions/rvoip-stir-shaken", version = "0.3.2" }
+rvoip-keycloak      = { path = "crates/extensions/rvoip-keycloak", version = "0.3.2" }
+rvoip-redis         = { path = "crates/extensions/rvoip-redis", version = "0.3.2" }
+rvoip-audit         = { path = "crates/extensions/rvoip-audit", version = "0.3.2" }
+rvoip-oidc          = { path = "crates/extensions/rvoip-oidc", version = "0.3.2" }
+rvoip-ldap          = { path = "crates/extensions/rvoip-ldap", version = "0.3.2" }
+rvoip-scim          = { path = "crates/extensions/rvoip-scim", version = "0.3.2" }
+rvoip-saml          = { path = "crates/extensions/rvoip-saml", version = "0.3.2" }
+rvoip-webauthn      = { path = "crates/extensions/rvoip-webauthn", version = "0.3.2" }
+rvoip-ims-aka       = { path = "crates/extensions/rvoip-ims-aka", version = "0.3.2" }
+rtc = { package = "rvoip-rtc", path = "crates/webrtc/rvoip-rtc", version = "0.3.2" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }
@@ -286,6 +302,7 @@ mio = { version = "0.8", features = ["os-poll", "net"] }
 # We standardize on `ring`. "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
+url = "2"
 # Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -295,6 +312,7 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 # feature isn't selected.
 chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
 sha2 = "0.10"
+zeroize = "1.9"
 hmac = "0.12"
 aes = "0.8"
 md-5 = "0.10"
@@ -313,14 +331,20 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # so the process has exactly ONE rustls CryptoProvider — otherwise rustls
 # can't auto-select one and TLS/WSS paths panic at runtime.
 web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
+web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.23"
+# Qualified, attributed MOQT draft-19 forks. Package aliases retain the
+# upstream Rust crate names while the registry identities remain rvoip-owned.
+moq-transport = { package = "rvoip-moq-transport", path = "crates/moq/rvoip-moq-transport", version = "0.3.2" }
+moq-native-ietf = { package = "rvoip-moq-native", path = "crates/moq/rvoip-moq-native", version = "0.3.2" }
+moq-relay-ietf = { package = "rvoip-moq-relay", path = "crates/moq/rvoip-moq-relay", version = "0.3.2", default-features = false }
 # rvoip-websocket signaling + media. tokio-tungstenite for the WebSocket
 # transport, webrtc for the co-located PeerConnection media plane.
 # webrtc is pre-1.0 and API-volatile — pinned strictly. Bumping requires
 # verifying the WebRtcMediaBridge still compiles.
 tokio-tungstenite = "0.29"
-webrtc = "=0.20.0-alpha.1"
+webrtc = { package = "rvoip-webrtc-stack", path = "crates/webrtc/rvoip-webrtc-stack", version = "0.3.2" }
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
 tracing-appender = "0.2"
 env_logger = "0.11"

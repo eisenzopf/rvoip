@@ -43,16 +43,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
     let server_task = tokio::spawn(async move {
-        loop {
-            match tokio::time::timeout(Duration::from_secs(300), server.wait_for_incoming()).await {
-                Ok(Ok(incoming)) => {
-                    if let Ok(h) = incoming.accept().await {
-                        tokio::spawn(async move {
-                            let _ = h.wait_for_end(Some(Duration::from_secs(600))).await;
-                        });
-                    }
-                }
-                _ => break,
+        while let Ok(Ok(incoming)) =
+            tokio::time::timeout(Duration::from_secs(300), server.wait_for_incoming()).await
+        {
+            if let Ok(h) = incoming.accept().await {
+                tokio::spawn(async move {
+                    let _ = h.wait_for_end(Some(Duration::from_secs(600))).await;
+                });
             }
         }
     });

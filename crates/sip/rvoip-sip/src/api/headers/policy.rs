@@ -17,9 +17,12 @@
 
 #![allow(missing_docs)] // policy module is internal infrastructure
 
+use std::fmt;
+
 use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::Method;
 
+use super::options::{HeaderNameDiagnostic, MethodDiagnostic};
 use super::ViolationReason;
 
 /// Role assigned to a header for a given SIP method.
@@ -39,19 +42,31 @@ pub enum HeaderRole {
 
 /// Validate-outbound result: the requested header is required for this
 /// method but missing from the staged set.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MissingRequiredHeader {
     pub method: Method,
     pub name: HeaderName,
     pub reason: &'static str,
 }
 
+impl fmt::Debug for MissingRequiredHeader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("MissingRequiredHeader")
+            .field("method", &MethodDiagnostic(&self.method))
+            .field("name", &HeaderNameDiagnostic(&self.name))
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
 /// Classify a header for a given method. See module-level docs.
 pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
-    if is_always_stack_managed(name) {
+    let canonical_name = name.canonical_wire_name();
+    if is_always_stack_managed(&canonical_name) {
         return HeaderRole::StackManaged;
     }
-    if matches!(name, HeaderName::Route) {
+    if matches!(&canonical_name, HeaderName::Route) {
         // Route is stack-managed by the dialog route-set logic on every
         // outbound request. Applications use `with_outbound_proxy` /
         // `without_outbound_proxy` instead.
@@ -59,7 +74,7 @@ pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
     }
 
     // Method-shaped overrides.
-    if let Some(setter) = method_shaped_setter(method, name) {
+    if let Some(setter) = method_shaped_setter(method, &canonical_name) {
         return HeaderRole::MethodShaped { setter };
     }
 
@@ -71,7 +86,8 @@ pub fn classify(method: Method, name: &HeaderName) -> HeaderRole {
 /// always filtered; method-shaped names go through the normal policy
 /// check on the destination builder.
 pub fn forbidden_for_carry_through(name: &HeaderName) -> bool {
-    is_always_stack_managed(name) || matches!(name, HeaderName::Route)
+    let canonical_name = name.canonical_wire_name();
+    is_always_stack_managed(&canonical_name) || matches!(canonical_name, HeaderName::Route)
 }
 
 /// SIP_API_DESIGN_2 §5.4 — the load-bearing safety check at the
@@ -126,19 +142,15 @@ fn method_shaped_setter(method: Method, name: &HeaderName) -> Option<&'static st
     use HeaderName as H;
     use Method as M;
 
+    if matches!(name, H::Authorization | H::ProxyAuthorization) {
+        return Some("with_credentials");
+    }
+
     match (method, name) {
         // Contact: shaped on initial INVITE / REGISTER; SUBSCRIBE init.
         // (In-dialog re-INVITE / BYE / NOTIFY get Contact stack-managed,
         // but the builder-side classification only sees fresh requests.)
         (M::Invite | M::Register | M::Subscribe, H::Contact) => Some("with_contact_uri"),
-
-        // Authorization: shaped on every UAC request that accepts
-        // `with_credentials` or `with_auth`. The Bye/Cancel path doesn't expose creds
-        // (stack-managed on in-dialog) but is harmless to flag here.
-        (
-            M::Invite | M::Register | M::Subscribe | M::Message | M::Options | M::Refer,
-            H::Authorization,
-        ) => Some("with_credentials"),
 
         // Expires: shaped on REGISTER and SUBSCRIBE only.
         (M::Register | M::Subscribe, H::Expires) => Some("with_expires"),
@@ -162,5 +174,63 @@ pub fn role_to_violation(role: &HeaderRole) -> Option<ViolationReason> {
         HeaderRole::StackManaged => Some(ViolationReason::StackManaged),
         HeaderRole::MethodShaped { setter } => Some(ViolationReason::UseDedicatedSetter(setter)),
         HeaderRole::ApplicationControlled => None,
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+
+    #[test]
+    fn missing_required_header_debug_redacts_extension_spellings() {
+        const METHOD_CANARY: &str = "CUSTOM\r\nX-Method-Canary: exposed";
+        const HEADER_CANARY: &str = "X-Header-Canary\r\nInjected";
+        let violation = MissingRequiredHeader {
+            method: Method::Extension(METHOD_CANARY.to_string()),
+            name: HeaderName::Other(HEADER_CANARY.to_string()),
+            reason: "fixed-policy-class",
+        };
+
+        let rendered = format!("{violation:?}");
+        assert!(rendered.starts_with("MissingRequiredHeader"));
+        assert!(rendered.contains(&format!("value_len: {}", METHOD_CANARY.len())));
+        assert!(rendered.contains(&format!("name_len: {}", HEADER_CANARY.len())));
+        assert!(!rendered.contains(METHOD_CANARY));
+        assert!(!rendered.contains(HEADER_CANARY));
+        assert_eq!(
+            violation.method,
+            Method::Extension(METHOD_CANARY.to_string())
+        );
+        assert_eq!(violation.name, HeaderName::Other(HEADER_CANARY.to_string()));
+    }
+
+    #[test]
+    fn structural_other_aliases_cannot_bypass_stack_ownership() {
+        for alias in [
+            "call-ID",
+            "I",
+            "cSeQ",
+            "V",
+            "MAX-forwards",
+            "L",
+            "ROUTE",
+            "record-ROUTE",
+        ] {
+            let name = HeaderName::Other(alias.into());
+            assert_eq!(classify(Method::Invite, &name), HeaderRole::StackManaged);
+            assert!(forbidden_for_carry_through(&name));
+        }
+    }
+
+    #[test]
+    fn credential_other_aliases_require_the_dedicated_setter() {
+        for alias in ["AUTHORIZATION", "proxy-AUTHORIZATION"] {
+            assert_eq!(
+                classify(Method::Invite, &HeaderName::Other(alias.into())),
+                HeaderRole::MethodShaped {
+                    setter: "with_credentials"
+                }
+            );
+        }
     }
 }

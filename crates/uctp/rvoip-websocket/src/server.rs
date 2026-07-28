@@ -7,12 +7,15 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
 use rvoip_auth_core::BearerValidator;
-use rvoip_core::adapter::{AdapterEvent, EndReason};
+use rvoip_core::adapter::{
+    AdapterEvent, AdapterLifecycleSinkSlot, EndReason, OrchestratorAdapterEvent, TerminalDelivery,
+};
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::state::{UctpCoordinator, UctpSessionEvent, ENVELOPE_CHANNEL_CAP};
+use rvoip_uctp::CorrelationIdDiagnostic;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -26,11 +29,12 @@ impl UctpWsServer {
     pub(crate) fn start(
         listener: TcpListener,
         bearer: Arc<dyn BearerValidator>,
-        events_tx: mpsc::Sender<AdapterEvent>,
+        events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+        lifecycle_sink: AdapterLifecycleSinkSlot,
         by_connection: Arc<DashMap<ConnectionId, String>>,
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
-        _max_concurrent: usize,
+        max_concurrent: usize,
         coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
         sig9421: Option<rvoip_uctp::state::Sig9421Config>,
         #[cfg(feature = "wss")] tls: Option<Arc<rustls::ServerConfig>>,
@@ -39,6 +43,7 @@ impl UctpWsServer {
         let tls_acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
 
         tokio::spawn(async move {
+            let connection_slots = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
             loop {
                 let (tcp, peer_addr) = match listener.accept().await {
                     Ok(v) => v,
@@ -47,8 +52,22 @@ impl UctpWsServer {
                         continue;
                     }
                 };
+                let permit = match Arc::clone(&connection_slots).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        metrics::counter!(
+                            "uctp_connections_rejected_total",
+                            "transport" => "websocket",
+                            "reason" => "capacity"
+                        )
+                        .increment(1);
+                        drop(tcp);
+                        continue;
+                    }
+                };
                 let bearer = bearer.clone();
                 let events_tx = events_tx.clone();
+                let lifecycle_sink = lifecycle_sink.clone();
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
@@ -57,28 +76,51 @@ impl UctpWsServer {
                 #[cfg(feature = "wss")]
                 let tls_acceptor = tls_acceptor.clone();
                 tokio::spawn(async move {
+                    let _permit = permit;
+                    let authentication_deadline = caps.authentication_deadline;
                     #[cfg(feature = "wss")]
                     {
                         if let Some(acceptor) = tls_acceptor {
-                            let tls_stream = match acceptor.accept(tcp).await {
-                                Ok(s) => s,
-                                Err(e) => {
-                                    warn!(error = %e, %peer_addr, "rvoip-websocket: TLS handshake failed");
+                            let tls_stream = match tokio::time::timeout(
+                                authentication_deadline,
+                                acceptor.accept(tcp),
+                            )
+                            .await
+                            {
+                                Ok(Ok(stream)) => stream,
+                                Ok(Err(_)) => {
+                                    warn!(error_class = "tls-handshake", %peer_addr, "rvoip-websocket: TLS handshake failed");
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(%peer_addr, "rvoip-websocket: TLS handshake timed out");
                                     return;
                                 }
                             };
-                            let ws = match tokio_tungstenite::accept_async(tls_stream).await {
-                                Ok(ws) => ws,
-                                Err(e) => {
-                                    warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed (wss)");
+                            let ws = match tokio::time::timeout(
+                                authentication_deadline,
+                                tokio_tungstenite::accept_async(tls_stream),
+                            )
+                            .await
+                            {
+                                Ok(Ok(ws)) => ws,
+                                Ok(Err(_)) => {
+                                    warn!(error_class = "websocket-upgrade", %peer_addr, "rvoip-websocket: handshake failed (wss)");
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(%peer_addr, "rvoip-websocket: WSS upgrade timed out");
                                     return;
                                 }
                             };
                             info!(%peer_addr, "rvoip-websocket: peer connected over TLS");
+                            metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                                .increment(1.0);
                             spawn_peer_session(
                                 ws,
                                 bearer,
                                 events_tx,
+                                lifecycle_sink,
                                 by_connection,
                                 by_uctp_sid,
                                 routes,
@@ -87,22 +129,36 @@ impl UctpWsServer {
                             )
                             .await;
                             info!(%peer_addr, "rvoip-websocket: peer disconnected (wss)");
+                            metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                                .decrement(1.0);
                             return;
                         }
                     }
 
-                    let ws = match tokio_tungstenite::accept_async(tcp).await {
-                        Ok(ws) => ws,
-                        Err(e) => {
+                    let ws = match tokio::time::timeout(
+                        authentication_deadline,
+                        tokio_tungstenite::accept_async(tcp),
+                    )
+                    .await
+                    {
+                        Ok(Ok(ws)) => ws,
+                        Ok(Err(e)) => {
                             warn!(error = %e, %peer_addr, "rvoip-websocket: handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            warn!(%peer_addr, "rvoip-websocket: WebSocket upgrade timed out");
                             return;
                         }
                     };
                     info!(%peer_addr, "rvoip-websocket: peer connected");
+                    metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                        .increment(1.0);
                     spawn_peer_session(
                         ws,
                         bearer,
                         events_tx,
+                        lifecycle_sink,
                         by_connection,
                         by_uctp_sid,
                         routes,
@@ -111,6 +167,8 @@ impl UctpWsServer {
                     )
                     .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
+                    metrics::gauge!("uctp_active_connections", "transport" => "websocket")
+                        .decrement(1.0);
                 });
             }
         });
@@ -145,7 +203,8 @@ fn build_connection(sid: SessionId, from: String) -> (ConnectionId, Connection) 
 async fn spawn_peer_session<S>(
     ws: tokio_tungstenite::WebSocketStream<S>,
     bearer: Arc<dyn BearerValidator>,
-    events_tx: mpsc::Sender<AdapterEvent>,
+    events_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+    lifecycle_sink: AdapterLifecycleSinkSlot,
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
@@ -154,6 +213,10 @@ async fn spawn_peer_session<S>(
 ) where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
+    // Keep peer-supplied Session IDs in this authenticated peer's namespace.
+    let _adapter_global_sid_index = by_uctp_sid;
+    let by_uctp_sid: Arc<DashMap<String, ConnectionId>> = Arc::new(DashMap::new());
+    let authentication_deadline = coordinator_caps.authentication_deadline;
     let (mut sink, mut stream) = ws.split();
 
     let (in_tx, in_rx) = mpsc::channel::<UctpEnvelope>(ENVELOPE_CHANNEL_CAP);
@@ -163,7 +226,13 @@ async fn spawn_peer_session<S>(
 
     let route_out_tx = out_tx.clone();
 
-    let _coord = if let Some(sig9421) = sig9421 {
+    let drain_grace = coordinator_caps.signaling_send_timeout;
+    let subscription_handler: Arc<dyn rvoip_uctp::state::SubscriptionHandler> =
+        rvoip_uctp::state::NamespacedSubscriptionHandler::new(
+            ConnectionId::new().to_string(),
+            rvoip_uctp::state::rejecting_handler(),
+        );
+    let coord = if let Some(sig9421) = sig9421 {
         UctpCoordinator::start_full_with_sig9421(
             "websocket",
             in_rx,
@@ -173,7 +242,7 @@ async fn spawn_peer_session<S>(
             sig9421.verifier,
             sig9421.policy,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            rvoip_uctp::state::rejecting_handler(),
+            subscription_handler.clone(),
             coordinator_caps,
         )
     } else {
@@ -184,14 +253,16 @@ async fn spawn_peer_session<S>(
             coord_events_tx,
             bearer,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
-            rvoip_uctp::state::rejecting_handler(),
+            subscription_handler,
             coordinator_caps,
         )
     };
     // Gap plan §4.2 v1 punch list — capture the coordinator's
     // `Pending` correlator so per-Route adapter code can await
     // typed responses.
-    let pending = _coord.pending();
+    let pending = coord.pending();
+    let auth_guard =
+        rvoip_uctp::state::spawn_auth_lifecycle_guard(Arc::clone(&coord), authentication_deadline);
 
     // Inbound: WS text frames → coordinator.
     //
@@ -250,6 +321,7 @@ async fn spawn_peer_session<S>(
             }
         }
     });
+    drop(in_tx);
 
     // Outbound: coordinator → WS text frames.
     //
@@ -291,12 +363,19 @@ async fn spawn_peer_session<S>(
         let by_uctp_sid = Arc::clone(&by_uctp_sid);
         let routes = Arc::clone(&routes);
         let route_out_tx = route_out_tx.clone();
+        let coord_for_translator = Arc::clone(&coord);
+        let lifecycle_for_translator = lifecycle_sink.clone();
         tokio::spawn(async move {
             // Per-peer auth state; consumed by InboundInvite to emit a
             // synthetic `AdapterEvent::Authenticated` follow-up. Plan
             // §7 G1 / A3.
-            let mut latest_auth: Option<(String, String, rvoip_core::identity::IdentityAssurance)> =
-                None;
+            let mut latest_auth: Option<(
+                String,
+                String,
+                rvoip_core::identity::IdentityAssurance,
+                Option<rvoip_core::identity::AuthenticatedPrincipal>,
+            )> = None;
+            let mut wire_to_core = std::collections::HashMap::<ConnectionId, ConnectionId>::new();
 
             while let Some(event) = coord_events_rx.recv().await {
                 let adapter_event: Option<AdapterEvent> = match event {
@@ -305,13 +384,54 @@ async fn spawn_peer_session<S>(
                         participant_id,
                         assurance,
                     } => {
-                        latest_auth = Some((identity_id, participant_id, assurance));
+                        let Some(principal) = coord_for_translator.authenticated_principal() else {
+                            warn!("websocket authenticated event missing retained principal");
+                            break;
+                        };
+                        let refresh_targets = routes
+                            .iter()
+                            .filter(|entry| {
+                                entry.value().out_tx.same_channel(&route_out_tx)
+                                    && entry.value().binding.is_owned_by(&principal)
+                            })
+                            .map(|entry| entry.key().clone())
+                            .collect::<Vec<_>>();
+                        let mut refresh_delivery_failed = false;
+                        for connection_id in refresh_targets {
+                            if !rvoip_uctp::state::try_deliver_orchestrator_event(
+                                &events_tx,
+                                OrchestratorAdapterEvent::Public(
+                                    AdapterEvent::PrincipalAuthenticated {
+                                        connection_id,
+                                        participant_id: participant_id.clone(),
+                                        principal: principal.clone(),
+                                    },
+                                ),
+                                "websocket",
+                            ) {
+                                refresh_delivery_failed = true;
+                                break;
+                            }
+                        }
+                        if refresh_delivery_failed {
+                            break;
+                        }
+                        latest_auth =
+                            Some((identity_id, participant_id, assurance, Some(principal)));
                         Some(AdapterEvent::Native {
                             kind: "uctp.authenticated",
                             detail: "bearer".into(),
                         })
                     }
-                    UctpSessionEvent::InboundInvite { sid, from, .. } => {
+                    UctpSessionEvent::InboundInvite { cid, sid, from, .. } => {
+                        let Some(principal) = coord_for_translator.authenticated_principal() else {
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing retained principal; refusing route");
+                            continue;
+                        };
+                        let Some((_, participant_id, _, Some(_))) = latest_auth.clone() else {
+                            warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "authenticated invite missing atomic handoff identity; refusing route");
+                            continue;
+                        };
                         let (id, connection) = build_connection(sid.clone(), from);
                         by_connection.insert(id.clone(), sid.to_string());
                         by_uctp_sid.insert(sid.to_string(), id.clone());
@@ -322,6 +442,7 @@ async fn spawn_peer_session<S>(
                         // can't `.await` `WebRtcMediaBridge::new_answerer()`
                         // inline because that would stall envelope dispatch.
                         let route_streams = Arc::new(DashMap::new());
+                        let route_cancel = tokio_util::sync::CancellationToken::new();
                         #[cfg(feature = "media-webrtc")]
                         let bridge_slot: Arc<
                             parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>,
@@ -333,10 +454,17 @@ async fn spawn_peer_session<S>(
                             >,
                         > = Arc::new(parking_lot::Mutex::new(None));
                         let route = Route {
+                            cid,
                             sid: sid.to_string(),
+                            binding:
+                                rvoip_uctp::adapter_helpers::AuthenticatedConnectionBinding::new(
+                                    &principal,
+                                ),
                             out_tx: route_out_tx.clone(),
                             pending: Arc::clone(&pending),
                             streams: Arc::clone(&route_streams),
+                            coordinator: Arc::clone(&coord_for_translator),
+                            route_cancel: route_cancel.clone(),
                             #[cfg(feature = "media-webrtc")]
                             bridge: Arc::clone(&bridge_slot),
                             #[cfg(feature = "media-webrtc")]
@@ -363,21 +491,36 @@ async fn spawn_peer_session<S>(
                             route_out_tx.clone(),
                             sid.to_string(),
                             id.to_string(),
+                            route_cancel,
                         );
 
-                        let _ = events_tx
-                            .send(AdapterEvent::InboundConnection { connection })
-                            .await;
-                        if let Some((identity_id, participant_id, assurance)) = latest_auth.clone()
-                        {
-                            let _ = events_tx
-                                .send(AdapterEvent::Authenticated {
-                                    connection_id: id,
-                                    identity_id,
-                                    participant_id,
-                                    assurance,
-                                })
-                                .await;
+                        if !rvoip_uctp::state::try_deliver_orchestrator_event(
+                            &events_tx,
+                            OrchestratorAdapterEvent::AuthenticatedInboundConnection {
+                                connection,
+                                participant_id,
+                                principal,
+                            },
+                            "websocket",
+                        ) {
+                            if let Some((_, route)) = routes.remove(&id) {
+                                route.route_cancel.cancel();
+                                #[cfg(feature = "media-webrtc")]
+                                {
+                                    let bridge = route.bridge.lock().clone();
+                                    if let Some(bridge) = bridge {
+                                        let _ = bridge.close().await;
+                                    }
+                                }
+                            }
+                            by_connection.remove(&id);
+                            if by_uctp_sid
+                                .get(sid.as_str())
+                                .is_some_and(|mapped| *mapped == id)
+                            {
+                                by_uctp_sid.remove(sid.as_str());
+                            }
+                            break;
                         }
                         None
                     }
@@ -390,21 +533,106 @@ async fn spawn_peer_session<S>(
                             }),
                         }
                     }
-                    UctpSessionEvent::ConnectionConnected { connid, .. } => {
-                        Some(AdapterEvent::Connected {
-                            connection_id: connid,
-                        })
-                    }
+                    UctpSessionEvent::ConnectionConnected { connid, .. } => wire_to_core
+                        .get(&connid)
+                        .cloned()
+                        .map(|connection_id| AdapterEvent::Connected { connection_id })
+                        .or_else(|| {
+                            Some(AdapterEvent::Native {
+                                kind: "uctp.connection_connected_orphan",
+                                detail: connid.to_string(),
+                            })
+                        }),
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        Some(AdapterEvent::Ended {
-                            connection_id: connid,
-                            reason: EndReason::Failed { detail: reason },
-                        })
+                        match wire_to_core.get(&connid).cloned() {
+                            Some(connection_id) => {
+                                let has_sibling = wire_to_core
+                                    .iter()
+                                    .any(|(wire, core)| wire != &connid && core == &connection_id);
+                                if has_sibling {
+                                    wire_to_core.remove(&connid);
+                                    Some(AdapterEvent::Native {
+                                        kind: "uctp.connection_ended",
+                                        detail: format!("connid={connid} reason={reason}"),
+                                    })
+                                } else {
+                                    let terminal = AdapterEvent::Ended {
+                                        connection_id: connection_id.clone(),
+                                        reason: EndReason::Failed { detail: reason },
+                                    };
+                                    let removed_route = routes.remove(&connection_id);
+                                    if let Some((_, route)) = removed_route.as_ref() {
+                                        route.route_cancel.cancel();
+                                    }
+                                    wire_to_core.remove(&connid);
+                                    let sid = by_connection
+                                        .get(&connection_id)
+                                        .map(|entry| entry.clone());
+                                    by_connection.remove(&connection_id);
+                                    if let Some(sid) = sid {
+                                        if by_uctp_sid
+                                            .get(&sid)
+                                            .is_some_and(|mapped| *mapped == connection_id)
+                                        {
+                                            by_uctp_sid.remove(&sid);
+                                        }
+                                    }
+                                    if removed_route.is_some() {
+                                        let _ = lifecycle_for_translator
+                                            .queue_or_deliver_orchestrator_terminal(
+                                                &events_tx, terminal,
+                                            )
+                                            .await;
+                                    }
+                                    #[cfg(feature = "media-webrtc")]
+                                    {
+                                        let bridge =
+                                            removed_route.as_ref().and_then(|(_, route)| {
+                                                let guard = route.bridge.lock();
+                                                guard.clone()
+                                            });
+                                        if let Some(bridge) = bridge {
+                                            let _ = tokio::time::timeout(
+                                                std::time::Duration::from_secs(2),
+                                                bridge.close(),
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                    None
+                                }
+                            }
+                            None => Some(AdapterEvent::Native {
+                                kind: "uctp.connection_ended_orphan",
+                                detail: connid.to_string(),
+                            }),
+                        }
                     }
                     UctpSessionEvent::SessionEnded { sid, reason } => {
-                        match by_uctp_sid.remove(sid.as_str()) {
-                            Some((_, connection_id)) => {
+                        match by_uctp_sid.get(sid.as_str()).map(|entry| entry.clone()) {
+                            Some(connection_id) => {
+                                let terminal = AdapterEvent::Ended {
+                                    connection_id: connection_id.clone(),
+                                    reason: if reason == "cancelled" {
+                                        EndReason::Cancelled
+                                    } else {
+                                        EndReason::Normal
+                                    },
+                                };
+                                let removed_route = routes.remove(&connection_id);
+                                if let Some((_, route)) = removed_route.as_ref() {
+                                    route.route_cancel.cancel();
+                                }
+                                wire_to_core.retain(|_, core| core != &connection_id);
                                 by_connection.remove(&connection_id);
+                                by_uctp_sid.remove(sid.as_str());
+                                if removed_route.is_some() {
+                                    let _ = lifecycle_for_translator
+                                        .queue_or_deliver_orchestrator_terminal(
+                                            &events_tx, terminal,
+                                        )
+                                        .await;
+                                }
                                 // Close + drop the per-Connection bridge
                                 // before dropping the Route. Removing the
                                 // Route drops the bridge Arc, but proactive
@@ -413,33 +641,77 @@ async fn spawn_peer_session<S>(
                                 // waiting on Drop.
                                 #[cfg(feature = "media-webrtc")]
                                 {
-                                    let removed = routes.remove(&connection_id);
-                                    let bridge_opt = removed.and_then(|(_, route)| {
-                                        let guard = route.bridge.lock();
-                                        guard.clone()
-                                    });
+                                    let bridge_opt =
+                                        removed_route.as_ref().and_then(|(_, route)| {
+                                            let guard = route.bridge.lock();
+                                            guard.clone()
+                                        });
                                     if let Some(bridge) = bridge_opt {
                                         tokio::spawn(async move {
                                             let _ = bridge.close().await;
                                         });
                                     }
                                 }
-                                #[cfg(not(feature = "media-webrtc"))]
-                                {
-                                    routes.remove(&connection_id);
-                                }
-                                Some(AdapterEvent::Ended {
-                                    connection_id,
-                                    reason: if reason == "cancelled" {
-                                        EndReason::Cancelled
-                                    } else {
-                                        EndReason::Normal
-                                    },
-                                })
+                                None
                             }
                             None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_ended_orphan",
                                 detail: format!("sid={} reason={}", sid, reason),
+                            }),
+                        }
+                    }
+                    UctpSessionEvent::ConnectionOpened { sid, connid, .. } => {
+                        let core_connection_id =
+                            by_uctp_sid.get(sid.as_str()).map(|entry| entry.clone());
+                        let principal = coord_for_translator.authenticated_principal();
+                        match (core_connection_id, principal) {
+                            (Some(core_connection_id), Some(principal)) => {
+                                let binding = routes
+                                    .get(&core_connection_id)
+                                    .map(|route| route.binding.clone());
+                                match binding {
+                                    Some(binding) => match wire_to_core.get(&connid) {
+                                        Some(existing) if existing != &core_connection_id => {
+                                            warn!(
+                                                wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()),
+                                                existing_core = ?CorrelationIdDiagnostic::new(existing.as_str()),
+                                                attempted_core = ?CorrelationIdDiagnostic::new(core_connection_id.as_str()),
+                                                "wire connection ID already belongs to another route"
+                                            );
+                                            Some(AdapterEvent::Native {
+                                                kind: "uctp.connection_binding_rejected",
+                                                detail: connid.to_string(),
+                                            })
+                                        }
+                                        _ => match binding
+                                            .bind_wire_connection(&principal, connid.clone())
+                                        {
+                                            Ok(()) => {
+                                                wire_to_core
+                                                    .insert(connid.clone(), core_connection_id);
+                                                Some(AdapterEvent::Native {
+                                                    kind: "uctp.connection_bound",
+                                                    detail: connid.to_string(),
+                                                })
+                                            }
+                                            Err(error) => {
+                                                warn!(wire_connid = ?CorrelationIdDiagnostic::new(connid.as_str()), error = %error, "refusing UCTP connection binding");
+                                                Some(AdapterEvent::Native {
+                                                    kind: "uctp.connection_binding_rejected",
+                                                    detail: connid.to_string(),
+                                                })
+                                            }
+                                        },
+                                    },
+                                    None => Some(AdapterEvent::Native {
+                                        kind: "uctp.connection_opened_orphan",
+                                        detail: connid.to_string(),
+                                    }),
+                                }
+                            }
+                            _ => Some(AdapterEvent::Native {
+                                kind: "uctp.connection_opened_orphan",
+                                detail: connid.to_string(),
                             }),
                         }
                     }
@@ -448,45 +720,127 @@ async fn spawn_peer_session<S>(
                         digits,
                         duration_ms,
                         method: _,
-                    } => Some(AdapterEvent::Dtmf {
-                        connection_id: connid,
-                        digits,
-                        duration_ms,
-                    }),
+                    } => {
+                        wire_to_core
+                            .get(&connid)
+                            .cloned()
+                            .map(|connection_id| AdapterEvent::Dtmf {
+                                connection_id,
+                                digits,
+                                duration_ms,
+                            })
+                    }
+                    UctpSessionEvent::DataMessage { connid, message } => wire_to_core
+                        .get(&connid)
+                        .cloned()
+                        .map(|connection_id| AdapterEvent::DataMessage {
+                            connection_id,
+                            message,
+                        }),
                     UctpSessionEvent::Quality {
                         connid,
                         strm_id: _,
                         snapshot,
                         rtt_ms: _,
                         bitrate_bps: _,
-                    } => Some(AdapterEvent::Quality {
-                        connection_id: connid,
-                        snapshot,
+                    } => wire_to_core.get(&connid).cloned().map(|connection_id| {
+                        AdapterEvent::Quality {
+                            connection_id,
+                            snapshot,
+                        }
                     }),
                     UctpSessionEvent::StepUpResponse {
                         connid,
                         method,
                         credential,
-                    } => connid.map(|c| AdapterEvent::StepUpResponse {
-                        connection_id: c,
-                        method,
-                        credential,
+                    } => connid.and_then(|wire_connection_id| {
+                        wire_to_core
+                            .get(&wire_connection_id)
+                            .cloned()
+                            .map(|connection_id| AdapterEvent::StepUpResponse {
+                                connection_id,
+                                method,
+                                credential,
+                            })
                     }),
-                    other => Some(AdapterEvent::Native {
+                    _ => Some(AdapterEvent::Native {
                         kind: "uctp.internal",
-                        detail: format!("{:?}", other),
+                        detail: "unmapped UCTP session event".into(),
                     }),
                 };
                 if let Some(ev) = adapter_event {
-                    let _ = events_tx.send(ev).await;
+                    if !rvoip_uctp::state::try_deliver_orchestrator_event(
+                        &events_tx,
+                        OrchestratorAdapterEvent::Public(ev),
+                        "websocket",
+                    ) {
+                        break;
+                    }
                 }
             }
         })
     };
 
-    let _ = inbound_pump.await;
-    let _ = outbound_pump.await;
-    let _ = event_pump.await;
+    let _ = rvoip_uctp::state::supervise_peer_tasks(
+        Arc::clone(&coord),
+        vec![inbound_pump, outbound_pump, event_pump, auth_guard],
+        drain_grace,
+    )
+    .await;
+    let stale_routes = routes
+        .iter()
+        .filter(|entry| entry.value().out_tx.same_channel(&route_out_tx))
+        .map(|entry| (entry.key().clone(), entry.value().sid.clone()))
+        .collect::<Vec<_>>();
+    for (connection_id, sid) in stale_routes {
+        let terminal = AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Failed {
+                detail: "websocket transport closed".into(),
+            },
+        };
+        let Some((_, route)) = routes.remove(&connection_id) else {
+            continue;
+        };
+        route.route_cancel.cancel();
+        #[cfg(feature = "media-webrtc")]
+        let bridge = {
+            let guard = route.bridge.lock();
+            guard.clone()
+        };
+        by_connection.remove(&connection_id);
+        if by_uctp_sid
+            .get(&sid)
+            .is_some_and(|mapped| *mapped == connection_id)
+        {
+            by_uctp_sid.remove(&sid);
+        }
+        let delivery = lifecycle_sink
+            .queue_or_deliver_orchestrator_terminal(&events_tx, terminal)
+            .await;
+        metrics::counter!(
+            "uctp_terminal_delivery_total",
+            "transport" => "websocket",
+            "outcome" => match delivery {
+                TerminalDelivery::Queued => "queued",
+                TerminalDelivery::Fallback => "fallback",
+                TerminalDelivery::Undeliverable => "undeliverable",
+            }
+        )
+        .increment(1);
+        if delivery == TerminalDelivery::Undeliverable {
+            warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "terminal event undeliverable before adapter registration");
+        }
+        #[cfg(feature = "media-webrtc")]
+        if let Some(bridge) = bridge {
+            if tokio::time::timeout(drain_grace, bridge.close())
+                .await
+                .is_err()
+            {
+                warn!(connection_id = ?CorrelationIdDiagnostic::new(connection_id.as_str()), "timed out closing WebRTC media bridge during peer drain");
+            }
+        }
+    }
 }
 
 /// Spawn the per-Connection WebRTC answerer-bridge setup task.
@@ -535,7 +889,7 @@ async fn intercept_connection_offer(
         // queue isn't reachable from here without a route lookup, so
         // we just drop the interception path; the bridge_for variant
         // still works for tests that need precise timing.
-        warn!(sid = %sid, "rvoip-websocket: connection.offer arrived before route was registered");
+        warn!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: connection.offer arrived before route was registered");
         return;
     };
     let Some(route) = routes.get(&connid).map(|r| r.clone()) else {
@@ -567,7 +921,7 @@ async fn intercept_connection_offer(
         }
     } else {
         *route.pending_offer.lock() = Some(setup);
-        debug!(sid = %sid, "rvoip-websocket: queued connection.offer SDP; bridge not ready");
+        debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: queued connection.offer SDP; bridge not ready");
     }
 
     // Autonomously emit a connection.answer. The payload's
@@ -661,6 +1015,7 @@ fn spawn_bridge_setup(
     route_out_tx: mpsc::Sender<UctpEnvelope>,
     sid: String,
     connid: String,
+    route_cancel: tokio_util::sync::CancellationToken,
 ) {
     use std::time::Duration;
     tokio::spawn(async move {
@@ -671,6 +1026,10 @@ fn spawn_bridge_setup(
                 return;
             }
         };
+        if route_cancel.is_cancelled() {
+            let _ = bridge.close().await;
+            return;
+        }
         *bridge_slot.lock() = Some(Arc::clone(&bridge));
 
         // Gap plan §4.1 v1 punch-list — outbound trickle ICE pump.
@@ -680,11 +1039,12 @@ fn spawn_bridge_setup(
         // non-trickle mode or bridge teardown). Emit the empty-string
         // end-of-candidates marker on exit so the remote knows
         // gathering finished.
-        spawn_trickle_ice_pump(
+        spawn_trickle_ice_pump_with_cancel(
             Arc::clone(&bridge),
             route_out_tx.clone(),
             sid.clone(),
             connid.clone(),
+            route_cancel.clone(),
         );
 
         // Gap plan §2.4 — drain any pending `connection.offer` SDP that
@@ -700,12 +1060,17 @@ fn spawn_bridge_setup(
 
         // Ready-watcher: wait_connected and surface the media stream.
         let bridge_for_watcher = Arc::clone(&bridge);
+        let watcher_cancel = route_cancel.clone();
         tokio::spawn(async move {
-            if let Err(e) = bridge_for_watcher
-                .wait_connected(Duration::from_secs(30))
-                .await
-            {
+            let connected = tokio::select! {
+                _ = watcher_cancel.cancelled() => return,
+                result = bridge_for_watcher.wait_connected(Duration::from_secs(30)) => result,
+            };
+            if let Err(e) = connected {
                 debug!(error = %e, "rvoip-websocket: bridge wait_connected timed out / failed");
+                return;
+            }
+            if watcher_cancel.is_cancelled() {
                 return;
             }
             if let Some(stream) = bridge_for_watcher.media_stream() {
@@ -739,9 +1104,30 @@ pub fn spawn_trickle_ice_pump(
     sid: String,
     connid: String,
 ) {
+    spawn_trickle_ice_pump_with_cancel(
+        bridge,
+        out_tx,
+        sid,
+        connid,
+        tokio_util::sync::CancellationToken::new(),
+    );
+}
+
+#[cfg(feature = "media-webrtc")]
+fn spawn_trickle_ice_pump_with_cancel(
+    bridge: Arc<crate::media_bridge::WebRtcMediaBridge>,
+    out_tx: mpsc::Sender<UctpEnvelope>,
+    sid: String,
+    connid: String,
+    route_cancel: tokio_util::sync::CancellationToken,
+) {
     tokio::spawn(async move {
         loop {
-            match bridge.next_local_ice_candidate().await {
+            let candidate = tokio::select! {
+                _ = route_cancel.cancelled() => return,
+                candidate = bridge.next_local_ice_candidate() => candidate,
+            };
+            match candidate {
                 Some(init) => {
                     let payload = match serde_json::to_value(&init) {
                         Ok(v) => v,
@@ -756,8 +1142,12 @@ pub fn spawn_trickle_ice_pump(
                     )
                     .with_sid(sid.clone())
                     .with_connid(connid.clone());
-                    if out_tx.send(env).await.is_err() {
-                        debug!(sid = %sid, "rvoip-websocket: trickle ICE: outbound closed; exiting pump");
+                    let sent = tokio::select! {
+                        _ = route_cancel.cancelled() => return,
+                        result = out_tx.send(env) => result,
+                    };
+                    if sent.is_err() {
+                        debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: trickle ICE: outbound closed; exiting pump");
                         return;
                     }
                 }
@@ -777,8 +1167,11 @@ pub fn spawn_trickle_ice_pump(
                     )
                     .with_sid(sid.clone())
                     .with_connid(connid.clone());
-                    let _ = out_tx.send(env).await;
-                    debug!(sid = %sid, "rvoip-websocket: trickle ICE: gathering complete; pump exiting");
+                    let _ = tokio::select! {
+                        _ = route_cancel.cancelled() => return,
+                        result = out_tx.send(env) => result,
+                    };
+                    debug!(sid = ?CorrelationIdDiagnostic::new(sid.as_str()), "rvoip-websocket: trickle ICE: gathering complete; pump exiting");
                     return;
                 }
             }

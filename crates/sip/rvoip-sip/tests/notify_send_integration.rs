@@ -14,9 +14,12 @@
 //! 4. session-core's event handler dispatches that to a public
 //!    `Event::NotifyReceived` on the session event stream.
 
-use std::env;
+mod support;
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+use support::{build_examples, example_binary};
 
 const ALICE_PORT: u16 = 35091;
 const BOB_PORT: u16 = 35092;
@@ -29,13 +32,11 @@ impl Drop for ChildGuard {
     }
 }
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
-
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
-    let mut cmd = Command::new(cargo_bin());
-    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
+    // The examples are materialized by `build_examples`. Direct execution
+    // lets both protocol peers run concurrently without competing for Cargo's
+    // artifact lock.
+    let mut cmd = Command::new(example_binary(name));
     for (k, v) in envs {
         cmd.env(k, v);
     }
@@ -45,26 +46,9 @@ fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
         .unwrap_or_else(|e| panic!("failed to spawn {}: {}", name, e))
 }
 
-fn build_examples() {
-    let status = Command::new(cargo_bin())
-        .args([
-            "build",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "regression_notify_send_alice",
-            "--example",
-            "regression_notify_send_bob",
-        ])
-        .status()
-        .expect("failed to invoke cargo build");
-    assert!(status.success(), "cargo build failed");
-}
-
 #[test]
 fn send_notify_surfaces_as_notify_received_on_peer() {
-    build_examples();
+    build_examples(&["regression_notify_send_alice", "regression_notify_send_bob"]);
 
     let envs: Vec<(&str, String)> = vec![
         ("ALICE_PORT", ALICE_PORT.to_string()),

@@ -20,7 +20,7 @@
 
 use super::core::DialogManager;
 use crate::dialog::DialogId;
-use crate::errors::DialogResult;
+use crate::errors::{DialogError, DialogResult};
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::Request;
 
@@ -49,6 +49,9 @@ impl MessageRouter for DialogManager {
 
 impl DialogMatcher for DialogManager {
     fn match_transaction(&self, transaction_id: &TransactionKey) -> DialogResult<DialogId> {
-        self.find_dialog_for_transaction(transaction_id)
+        self.transaction_to_dialog
+            .get(transaction_id)
+            .map(|entry| entry.clone())
+            .ok_or_else(|| DialogError::dialog_not_found("transaction"))
     }
 }

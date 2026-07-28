@@ -235,7 +235,10 @@ mod tests {
             STANDARD.encode(vec![0u8; 30]),
         );
         let result = offerer.accept_answer(&bogus);
-        assert!(matches!(&result, Err(e) if format!("{:?}", e).contains("was not offered")));
+        assert!(matches!(
+            &result,
+            Err(SessionError::SDPNegotiationFailed(detail)) if detail.contains("was not offered")
+        ));
     }
 
     #[test]
@@ -248,7 +251,10 @@ mod tests {
             STANDARD.encode(vec![0u8; 30]),
         );
         let result = offerer.accept_answer(&mismatch);
-        assert!(matches!(&result, Err(e) if format!("{:?}", e).contains("does not match")));
+        assert!(matches!(
+            &result,
+            Err(SessionError::SDPNegotiationFailed(detail)) if detail.contains("does not match")
+        ));
     }
 
     #[test]

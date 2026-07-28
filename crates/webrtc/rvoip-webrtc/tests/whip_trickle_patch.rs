@@ -54,28 +54,78 @@ async fn whip_patch_trickle_sdpfrag_accepts_candidate() {
         .to_str()
         .expect("location ascii")
         .to_owned();
+    let initial_etag = resp
+        .headers()
+        .get("etag")
+        .expect("etag header")
+        .to_str()
+        .expect("etag ascii")
+        .to_owned();
     // Drain the answer body.
     let _ = resp.text().await;
 
     // Send a trickle PATCH with a host candidate fragment.
     let sdpfrag = "a=mid:0\r\na=candidate:1 1 udp 2130706431 127.0.0.1 50001 typ host\r\n";
-    let patch_resp = http
-        .patch(format!("http://{addr}{location}"))
+    let resource_url = format!("http://{addr}{location}");
+    let wrong_resource_kind = http
+        .patch(format!(
+            "http://{addr}{}",
+            location.replacen("/whip/", "/whep/", 1)
+        ))
         .header("content-type", "application/trickle-ice-sdpfrag")
+        .header("if-match", &initial_etag)
         .body(sdpfrag)
         .send()
         .await
-        .expect("patch trickle");
-    assert_eq!(
-        patch_resp.status(),
-        reqwest::StatusCode::NO_CONTENT,
-        "valid trickle PATCH should return 204"
-    );
+        .expect("cross-protocol resource mutation");
+    assert_eq!(wrong_resource_kind.status(), reqwest::StatusCode::NOT_FOUND);
+    for inexact in ["*".to_owned(), format!("W/{initial_etag}")] {
+        let rejected = http
+            .patch(&resource_url)
+            .header("content-type", "application/trickle-ice-sdpfrag")
+            .header("if-match", inexact)
+            .body(sdpfrag)
+            .send()
+            .await
+            .expect("patch with inexact precondition");
+        assert_eq!(rejected.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    }
+    let patch = |client: reqwest::Client| {
+        let resource_url = resource_url.clone();
+        let initial_etag = initial_etag.clone();
+        async move {
+            client
+                .patch(resource_url)
+                .header("content-type", "application/trickle-ice-sdpfrag")
+                .header("if-match", initial_etag)
+                .body(sdpfrag)
+                .send()
+                .await
+                .expect("patch trickle")
+        }
+    };
+    let (first, second) = tokio::join!(patch(http.clone()), patch(http.clone()));
+    let (winner, stale) = if first.status() == reqwest::StatusCode::NO_CONTENT {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    assert_eq!(winner.status(), reqwest::StatusCode::NO_CONTENT);
+    assert_eq!(stale.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+    let current_etag = winner
+        .headers()
+        .get("etag")
+        .expect("rotated etag")
+        .to_str()
+        .expect("etag ascii")
+        .to_owned();
+    assert_ne!(current_etag, initial_etag);
 
     // Empty trickle body → 400.
     let bad = http
-        .patch(format!("http://{addr}{location}"))
+        .patch(resource_url)
         .header("content-type", "application/trickle-ice-sdpfrag")
+        .header("if-match", &current_etag)
         .body("")
         .send()
         .await
@@ -86,11 +136,36 @@ async fn whip_patch_trickle_sdpfrag_accepts_candidate() {
     let bogus = http
         .patch(format!("http://{addr}/whip/does-not-exist"))
         .header("content-type", "application/trickle-ice-sdpfrag")
+        .header("if-match", "\"unknown\"")
         .body(sdpfrag)
         .send()
         .await
         .expect("patch unknown");
     assert_eq!(bogus.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let missing = http
+        .delete(format!("http://{addr}{location}"))
+        .send()
+        .await
+        .expect("delete without precondition");
+    assert_eq!(missing.status(), reqwest::StatusCode::PRECONDITION_REQUIRED);
+    let stale_delete = http
+        .delete(format!("http://{addr}{location}"))
+        .header("if-match", initial_etag)
+        .send()
+        .await
+        .expect("delete with stale tag");
+    assert_eq!(
+        stale_delete.status(),
+        reqwest::StatusCode::PRECONDITION_FAILED
+    );
+    let deleted = http
+        .delete(format!("http://{addr}{location}"))
+        .header("if-match", current_etag)
+        .send()
+        .await
+        .expect("delete with current tag");
+    assert_eq!(deleted.status(), reqwest::StatusCode::OK);
 
     server.abort();
 }

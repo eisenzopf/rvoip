@@ -3,24 +3,17 @@
 //! The example itself performs the tone analysis. This test gives it isolated
 //! SIP/media ports and asserts both verification lines are printed.
 
-use std::env;
+mod support;
+
 use std::process::Command;
 
-fn cargo_bin() -> String {
-    env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
-}
+use support::{build_examples, example_binary};
 
 #[test]
 fn endpoint_audio_roundtrip_verifies_tones() {
-    let output = Command::new(cargo_bin())
-        .args([
-            "run",
-            "--quiet",
-            "-p",
-            "rvoip-sip",
-            "--example",
-            "endpoint_audio_roundtrip",
-        ])
+    build_examples(&["endpoint_audio_roundtrip"]);
+
+    let output = Command::new(example_binary("endpoint_audio_roundtrip"))
         .env("ALICE_SIP_PORT", "35420")
         .env("BOB_SIP_PORT", "35421")
         .env("ALICE_MEDIA_PORT_START", "35440")

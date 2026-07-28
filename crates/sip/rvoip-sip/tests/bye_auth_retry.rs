@@ -40,11 +40,14 @@ use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
 const UAS_PORT: u16 = 35240;
 const UAC_PORT: u16 = 35241;
+const LEGACY_UAS_PORT: u16 = 35242;
+const LEGACY_UAC_PORT: u16 = 35243;
 const TRACE_HEADER_NAME: &str = "X-Trace";
 const TRACE_HEADER_VALUE: &str = "trace-bye-cafe";
+const CONTACT_USER: &str = "current-target";
 
-/// Per-BYE capture: (has_x_trace, x_trace_value, has_authorization).
-type ByeCapture = (bool, Option<String>, bool);
+/// Per-BYE capture: application extra, auth, and exact request-line target.
+type ByeCapture = (bool, Option<String>, bool, String, Option<String>);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bye_extras_survive_401_driven_auth_retry() {
@@ -94,7 +97,9 @@ async fn bye_extras_survive_401_driven_auth_retry() {
                     // Echo a Contact so ACK / BYE route back to us.
                     resp.headers.push(TypedHeader::Other(
                         HeaderName::Contact,
-                        HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
+                        HeaderValue::Raw(
+                            format!("<sip:{CONTACT_USER}@127.0.0.1:{UAS_PORT}>").into_bytes(),
+                        ),
                     ));
                     let bytes = Message::Response(resp).to_bytes();
                     let _ = sock_task.send_to(&bytes, from).await;
@@ -110,10 +115,14 @@ async fn bye_extras_survive_401_driven_auth_retry() {
                     let has_authorization = request
                         .raw_header_value(&HeaderName::Authorization)
                         .is_some();
-                    captured_task
-                        .lock()
-                        .await
-                        .push((has_x_trace, x_trace_val, has_authorization));
+                    let authorization = request.raw_header_value(&HeaderName::Authorization);
+                    captured_task.lock().await.push((
+                        has_x_trace,
+                        x_trace_val,
+                        has_authorization,
+                        request.uri().to_string(),
+                        authorization,
+                    ));
 
                     if count == 0 {
                         // 401 with WWW-Authenticate on the first BYE.
@@ -215,7 +224,7 @@ async fn bye_extras_survive_401_driven_auth_retry() {
     );
 
     // INITIAL BYE: X-Trace present, no Authorization.
-    let (init_has_trace, init_trace, init_has_auth) = &captured[0];
+    let (init_has_trace, init_trace, init_has_auth, init_uri, init_authorization) = &captured[0];
     assert!(
         *init_has_trace,
         "initial BYE must carry X-Trace; captured: {:?}",
@@ -227,9 +236,11 @@ async fn bye_extras_survive_401_driven_auth_retry() {
         "initial BYE X-Trace must echo the staged value"
     );
     assert!(!*init_has_auth, "initial BYE must NOT carry Authorization");
+    assert!(init_authorization.is_none());
 
     // RETRY BYE: X-Trace still present, Authorization now stamped.
-    let (retry_has_trace, retry_trace, retry_has_auth) = &captured[1];
+    let (retry_has_trace, retry_trace, retry_has_auth, retry_uri, retry_authorization) =
+        &captured[1];
     assert!(
         *retry_has_trace,
         "auth retry BYE must still carry X-Trace; captured: {:?}",
@@ -244,6 +255,150 @@ async fn bye_extras_survive_401_driven_auth_retry() {
         *retry_has_auth,
         "auth retry BYE must carry Authorization (credentialed)"
     );
+
+    // Contact intentionally differs from the INVITE To URI. Both BYEs and
+    // Digest's `uri=` value must use the exact current dialog target rather
+    // than rebuilding HA2 from the original session remote URI.
+    let contact_uri = format!("sip:{CONTACT_USER}@127.0.0.1:{UAS_PORT}");
+    assert_eq!(init_uri, &contact_uri);
+    assert_eq!(retry_uri, &contact_uri);
+    assert!(
+        retry_authorization
+            .as_deref()
+            .is_some_and(|value| value.contains(&format!("uri=\"{contact_uri}\""))),
+        "retry Authorization must authenticate the exact Contact target: {retry_authorization:?}"
+    );
+
+    uas_handle.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn legacy_hangup_retries_bye_after_401_from_terminating() {
+    let uas_addr = format!("127.0.0.1:{LEGACY_UAS_PORT}");
+    let sock = Arc::new(UdpSocket::bind(&uas_addr).await.expect("legacy UAS bind"));
+    let captures: Arc<Mutex<Vec<(bool, String, Option<String>)>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
+    let sock_task = Arc::clone(&sock);
+    let captures_task = Arc::clone(&captures);
+    let uas_handle = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let (n, from) = match sock_task.recv_from(&mut buf).await {
+                Ok(value) => value,
+                Err(_) => return,
+            };
+            let request = match parse_message(&buf[..n]) {
+                Ok(Message::Request(request)) => request,
+                _ => continue,
+            };
+            match request.method() {
+                Method::Invite => {
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    for header in &mut response.headers {
+                        if let TypedHeader::To(to) = header {
+                            if to.tag().is_none() {
+                                to.set_tag("legacy-uas-tag");
+                            }
+                            break;
+                        }
+                    }
+                    response.headers.push(TypedHeader::Other(
+                        HeaderName::Contact,
+                        HeaderValue::Raw(
+                            format!("<sip:legacy-target@127.0.0.1:{LEGACY_UAS_PORT}>").into_bytes(),
+                        ),
+                    ));
+                    let _ = sock_task
+                        .send_to(&Message::Response(response).to_bytes(), from)
+                        .await;
+                }
+                Method::Ack => {}
+                Method::Bye => {
+                    let authorization = request.raw_header_value(&HeaderName::Authorization);
+                    let mut captures = captures_task.lock().await;
+                    let first = captures.is_empty();
+                    captures.push((
+                        authorization.is_some(),
+                        request.uri().to_string(),
+                        authorization,
+                    ));
+                    drop(captures);
+
+                    let mut response = create_response(
+                        &request,
+                        if first {
+                            StatusCode::Unauthorized
+                        } else {
+                            StatusCode::Ok
+                        },
+                    );
+                    if first {
+                        response.headers.push(TypedHeader::Other(
+                            HeaderName::WwwAuthenticate,
+                            HeaderValue::Raw(
+                                br#"Digest realm="testrealm", nonce="legacy-bye-nonce", algorithm=MD5, qop="auth""#
+                                    .to_vec(),
+                            ),
+                        ));
+                    }
+                    let _ = sock_task
+                        .send_to(&Message::Response(response).to_bytes(), from)
+                        .await;
+                }
+                _ => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    let _ = sock_task
+                        .send_to(&Message::Response(response).to_bytes(), from)
+                        .await;
+                }
+            }
+        }
+    });
+
+    let coord = UnifiedCoordinator::new(Config::local("alice", LEGACY_UAC_PORT))
+        .await
+        .expect("legacy UAC coordinator");
+    sleep(Duration::from_millis(150)).await;
+    let call_id = coord
+        .invite(
+            Some(format!("sip:alice@127.0.0.1:{LEGACY_UAC_PORT}")),
+            format!("sip:bob@127.0.0.1:{LEGACY_UAS_PORT}"),
+        )
+        .with_credentials(Credentials::new("alice", "password").with_realm("testrealm"))
+        .send()
+        .await
+        .expect("legacy invite.send()");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(state) = coord.get_state(&call_id).await {
+                if state == CallState::Active {
+                    break;
+                }
+            }
+            sleep(Duration::from_millis(40)).await;
+        }
+    })
+    .await
+    .expect("legacy call never reached Active");
+
+    timeout(Duration::from_secs(8), coord.hangup(&call_id))
+        .await
+        .expect("legacy hangup timed out")
+        .expect("legacy hangup failed");
+
+    let captured = captures.lock().await;
+    assert_eq!(captured.len(), 2, "expected challenged BYE plus retry");
+    assert!(!captured[0].0, "initial legacy BYE must be unauthenticated");
+    assert!(captured[1].0, "legacy retry BYE must be authenticated");
+    let target = format!("sip:legacy-target@127.0.0.1:{LEGACY_UAS_PORT}");
+    assert_eq!(captured[0].1, target);
+    assert_eq!(captured[1].1, target);
+    assert!(captured[1]
+        .2
+        .as_deref()
+        .is_some_and(|value| value.contains(&format!("uri=\"{target}\""))));
 
     uas_handle.abort();
 }

@@ -13,6 +13,82 @@ const DEFAULT_SCENARIO_FILE: &str = concat!(
     "/config/perf-burst-scenarios.yaml"
 );
 
+/// Same-host burst media topology.
+///
+/// The two media pools are deliberately disjoint. The gap from 26000 through
+/// 26999 is reserved for the receiver SIP socket and every sharded caller SIP
+/// socket used by the canonical matrix. Keeping the upper media pool below
+/// 49152 also avoids the default IANA dynamic/private port range. A real bind
+/// remains authoritative, so unrelated processes occupying a candidate are
+/// handled by allocator quarantine and retry.
+pub const BURST_BOB_MEDIA_START: u16 = 4_000;
+pub const BURST_BOB_MEDIA_END: u16 = 25_999;
+pub const BURST_ALICE_MEDIA_START: u16 = 27_000;
+pub const BURST_ALICE_MEDIA_END: u16 = 49_151;
+
+pub fn validate_same_host_burst_port_layout(
+    bob_sip_port: u16,
+    alice_base_sip_port: u16,
+    alice_shards: usize,
+    required_media_sessions: usize,
+) -> Result<(), String> {
+    if alice_shards == 0 {
+        return Err("Alice shard count must be greater than zero".to_string());
+    }
+
+    let bob_capacity = media_port_range_capacity(BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END);
+    if bob_capacity < required_media_sessions {
+        return Err(format!(
+            "Bob media range {}-{} has capacity {}, below the required {} sessions",
+            BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END, bob_capacity, required_media_sessions
+        ));
+    }
+
+    let alice_capacity = media_port_range_capacity(BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END);
+    if alice_capacity < required_media_sessions {
+        return Err(format!(
+            "Alice media range {}-{} has capacity {}, below the required {} sessions",
+            BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END, alice_capacity, required_media_sessions
+        ));
+    }
+
+    let mut signaling_ports = Vec::with_capacity(alice_shards + 1);
+    signaling_ports.push(("Bob", bob_sip_port));
+    for shard in 0..alice_shards {
+        let offset = u16::try_from(shard)
+            .map_err(|_| format!("Alice shard index {shard} does not fit in a UDP port"))?
+            .checked_mul(2)
+            .ok_or_else(|| format!("Alice shard index {shard} overflows its SIP port offset"))?;
+        let port = alice_base_sip_port.checked_add(offset).ok_or_else(|| {
+            format!(
+                "Alice SIP port range overflows u16 for base {} and shard {}",
+                alice_base_sip_port, shard
+            )
+        })?;
+        signaling_ports.push(("Alice", port));
+    }
+
+    for (role, port) in signaling_ports {
+        if port_in_range(port, BURST_BOB_MEDIA_START, BURST_BOB_MEDIA_END)
+            || port_in_range(port, BURST_ALICE_MEDIA_START, BURST_ALICE_MEDIA_END)
+        {
+            return Err(format!(
+                "{role} SIP port {port} overlaps a same-host RTP media range"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn media_port_range_capacity(start: u16, end: u16) -> usize {
+    usize::from(end.saturating_sub(start)) + 1
+}
+
+fn port_in_range(port: u16, start: u16, end: u16) -> bool {
+    (start..=end).contains(&port)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BurstScenarioBook {
@@ -139,6 +215,30 @@ impl BurstScenario {
         );
         self.answer_delay.validate(&self.name);
         self.acceptance.validate(&self.name);
+        if self.acceptance.min_recovery_asr.is_some() {
+            let recovery = self
+                .phases
+                .iter()
+                .rev()
+                .find(|phase| phase.label.to_ascii_lowercase().contains("recovery"))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "burst scenario '{}' acceptance.minRecoveryAsr requires a recovery phase",
+                        self.name
+                    )
+                });
+            let recovery_budget = self.acceptance.max_recovery_secs.unwrap_or_else(|| {
+                panic!(
+                    "burst scenario '{}' acceptance.minRecoveryAsr requires maxRecoverySecs",
+                    self.name
+                )
+            });
+            assert!(
+                recovery_budget < recovery.duration_secs,
+                "burst scenario '{}' maxRecoverySecs must leave a non-empty stable recovery window",
+                self.name
+            );
+        }
     }
 
     pub fn duration_secs(&self) -> u64 {
@@ -147,6 +247,19 @@ impl BurstScenario {
 
     pub fn total_offered_calls(&self) -> u64 {
         self.phases.iter().map(|phase| phase.expected_calls()).sum()
+    }
+
+    /// Bound the exact-lifecycle authority for this finite burst workload.
+    ///
+    /// Active call admission and retained SIP anti-reuse fences are separate
+    /// dimensions. A short-call scenario can retire far more identifiers than
+    /// its active-call limit during the 64-second anti-reuse horizon. Covering
+    /// the active limit plus every offered call is deliberately conservative,
+    /// independent of answer rate, and avoids turning retained fence pressure
+    /// into a false live-call overload signal during recovery.
+    pub fn retained_lifecycle_capacity(&self) -> usize {
+        let offered = usize::try_from(self.total_offered_calls()).unwrap_or(usize::MAX);
+        self.capacity.saturating_add(offered)
     }
 
     pub fn phase_start_secs(&self, phase_index: usize) -> u64 {
@@ -250,22 +363,13 @@ impl HoldBucket {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AnswerDelay {
     #[serde(default)]
     pub min_millis: u64,
     #[serde(default)]
     pub max_millis: u64,
-}
-
-impl Default for AnswerDelay {
-    fn default() -> Self {
-        Self {
-            min_millis: 0,
-            max_millis: 0,
-        }
-    }
 }
 
 impl AnswerDelay {
@@ -308,6 +412,8 @@ pub struct BurstAcceptance {
     pub min_rss_gate_window_secs: f64,
     #[serde(default)]
     pub max_recovery_secs: Option<u64>,
+    #[serde(default)]
+    pub min_recovery_asr: Option<f64>,
 }
 
 impl Default for BurstAcceptance {
@@ -322,6 +428,7 @@ impl Default for BurstAcceptance {
             max_rss_growth_mb_per_hr: None,
             min_rss_gate_window_secs: default_min_rss_gate_window_secs(),
             max_recovery_secs: None,
+            min_recovery_asr: None,
         }
     }
 }
@@ -342,6 +449,20 @@ impl BurstAcceptance {
             self.min_rss_gate_window_secs.is_finite() && self.min_rss_gate_window_secs >= 0.0,
             "burst scenario '{scenario}' acceptance.minRssGateWindowSecs must be >= 0"
         );
+        if let Some(min_recovery_asr) = self.min_recovery_asr {
+            assert!(
+                min_recovery_asr.is_finite() && (0.0..=1.0).contains(&min_recovery_asr),
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr must be between 0 and 1"
+            );
+            assert!(
+                self.allow_overload_rejections,
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr requires allowOverloadRejections"
+            );
+            assert!(
+                self.max_recovery_secs.is_some(),
+                "burst scenario '{scenario}' acceptance.minRecoveryAsr requires maxRecoverySecs"
+            );
+        }
     }
 }
 
@@ -378,6 +499,31 @@ fn default_server_profile() -> String {
 
 fn default_client_profile() -> String {
     "endpoint".to_string()
+}
+
+#[cfg(test)]
+mod port_layout_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_same_host_layout_covers_high_density_without_sip_overlap() {
+        validate_same_host_burst_port_layout(26_060, 26_062, 16, 12_500)
+            .expect("canonical burst layout");
+    }
+
+    #[test]
+    fn same_host_layout_rejects_runtime_sip_port_inside_media_pool() {
+        let error = validate_same_host_burst_port_layout(BURST_BOB_MEDIA_START, 26_062, 16, 12_500)
+            .expect_err("overlap must fail closed");
+        assert!(error.contains("overlaps"));
+    }
+
+    #[test]
+    fn same_host_layout_rejects_insufficient_media_capacity() {
+        let error = validate_same_host_burst_port_layout(26_060, 26_062, 16, 30_000)
+            .expect_err("capacity must fail closed");
+        assert!(error.contains("below the required"));
+    }
 }
 
 fn default_capacity() -> usize {

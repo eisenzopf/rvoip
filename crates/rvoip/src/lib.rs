@@ -8,9 +8,10 @@
 //!
 //! ## Maturity tiers
 //!
-//! Versions are plain numeric (no `-alpha`/`-beta` suffixes): **`0.1.x` = alpha,
-//! `0.2.x` = beta, `1.0` = stable**. The `sip` surface is beta; the other
-//! surfaces (`webrtc`, `uctp`, the `voip-3` extensions, `client`) are alpha.
+//! All workspace crates are aligned at **`0.3.2`**. Maturity is
+//! product-specific rather than encoded in the version number: the `sip`
+//! surface is beta-qualified, while `webrtc`, `uctp`, the `voip-3`
+//! extensions, and `client` are available as developer previews.
 //!
 //! See `docs/PRD.md`, `INTERFACE_DESIGN.md`, and `CONVERSATION_PROTOCOL.md`
 //! for the architectural context.
@@ -40,13 +41,14 @@
 //! | Feature | Default | Pulls in |
 //! |---|:---:|---|
 //! | `sip` | ✅ | SIP interop adapter (`rvoip::sip`) — **beta** |
-//! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — alpha |
-//! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — alpha |
-//! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — alpha |
-//! | `voip-3` | | The full experience: every transport **+** vCon / identity / AI-harness extensions — alpha |
-//! | `client` | | Cross-transport client SDK (`rvoip::client`) — alpha |
-//! | `app` | | High-level gateway builder (`rvoip::app`) — alpha |
-//! | `full` | | `voip-3` + `sip-stir-shaken` + `client` + `app` |
+//! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — developer preview |
+//! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — developer preview |
+//! | `vapi` | | Vapi bidirectional WebSocket agent adapter (`rvoip::vapi`) — developer preview |
+//! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — developer preview |
+//! | `voip-3` | | SIP + WebRTC + UCTP **+** vCon / identity / AI-harness extensions — developer preview |
+//! | `client` | | Cross-transport client SDK (`rvoip::client`) — developer preview |
+//! | `app` | | High-level gateway builder (`rvoip::app`) — developer preview |
+//! | `full` | | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
 //!
 //! The `vcon`, `identity`, and `harness` conversation-model extensions are
 //! transport-agnostic and reachable **only** through the `voip-3` feature.
@@ -57,7 +59,7 @@
 //! `rvoip::core_traits`; the `Orchestrator` + `Config` at the root directly.
 //! Each transport/extension lives under its own feature-gated module
 //! (`rvoip::sip`, `rvoip::webrtc`, `rvoip::uctp`, `rvoip::app`,
-//! `rvoip::client`, …).
+//! `rvoip::vapi`, `rvoip::client`, …).
 
 #![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
@@ -94,7 +96,7 @@ pub mod stir_shaken {
 }
 
 // ---------------------------------------------------------------------------
-// WebRTC (alpha)
+// WebRTC (developer preview)
 // ---------------------------------------------------------------------------
 
 /// WebRTC interop adapter — bridges DTLS-SRTP / ICE peers into the voip-3
@@ -105,7 +107,7 @@ pub mod webrtc {
 }
 
 // ---------------------------------------------------------------------------
-// UCTP substrates (alpha)
+// UCTP substrates (developer preview)
 // ---------------------------------------------------------------------------
 
 /// UCTP substrate adapters and protocol primitives. Per
@@ -125,7 +127,19 @@ pub mod uctp {
 }
 
 // ---------------------------------------------------------------------------
-// voip-3 conversation-model extensions (alpha) — reachable only via `voip-3`
+// Vapi agent transport (developer preview)
+// ---------------------------------------------------------------------------
+
+/// Vapi bidirectional WebSocket agent adapter. It lets rvoip retain ownership
+/// of a SIP or WebRTC caller leg while Vapi runs the remote voice-AI pipeline.
+/// Off by default; enable the `vapi` feature.
+#[cfg(feature = "vapi")]
+pub mod vapi {
+    pub use rvoip_vapi::*;
+}
+
+// ---------------------------------------------------------------------------
+// voip-3 conversation-model extensions (developer preview) — reachable only via `voip-3`
 // ---------------------------------------------------------------------------
 
 /// vCon (IETF Virtualized Conversations) container builder, signer, and store —
@@ -150,7 +164,7 @@ pub mod harness {
 }
 
 // ---------------------------------------------------------------------------
-// Client SDK (alpha)
+// Client SDK (developer preview)
 // ---------------------------------------------------------------------------
 
 /// Client-side API for mobile / web / desktop / embedded apps, wrapping the
@@ -161,7 +175,7 @@ pub mod client {
 }
 
 // ---------------------------------------------------------------------------
-// High-level app/gateway API (alpha)
+// High-level app/gateway API (developer preview)
 // ---------------------------------------------------------------------------
 
 /// High-level server/gateway API for building practical cross-transport VoIP

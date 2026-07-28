@@ -100,8 +100,7 @@ fn each_phase_c_deprecated_item_is_annotated() {
             // attributes like `#[allow]`, `#[doc]`, etc.; those are
             // fine).
             let mut intervening = false;
-            for idx in (dep_idx + 1)..decl_idx {
-                let line = lines[idx];
+            for line in &lines[(dep_idx + 1)..decl_idx] {
                 if line.contains(" fn ") && !line.contains("//") && !line.contains(decl) {
                     intervening = true;
                     break;

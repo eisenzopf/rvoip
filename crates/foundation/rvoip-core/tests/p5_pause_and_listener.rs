@@ -7,18 +7,24 @@ use rvoip_core::adapter::{
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, CodecInfo, NegotiatedCodecs};
-use rvoip_core::commands::{InboundAction, ListenerSink, ListenerTarget, RecordingTarget};
+use rvoip_core::commands::{
+    AttachmentRef, InboundAction, ListenerSink, ListenerTarget, RecordingTarget,
+};
 use rvoip_core::config::Config;
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::conversation::ConversationPolicy;
 use rvoip_core::error::{Result as RvResult, RvoipError};
+use rvoip_core::events::Event;
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, StreamId, TenantId};
 use rvoip_core::message::Message;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::session::SessionMedium;
 use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
-use rvoip_harness::VecRecordingSink;
+use rvoip_harness::{
+    ListenOnlyDialog, NoOpAsrProvider, NoOpTtsProvider, RecordingArtifact, RecordingSink,
+    VecRecordingSink,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -72,10 +78,34 @@ impl MediaStream for TestStream {
 struct OneStreamAdapter {
     inbound: Mutex<Option<mpsc::Receiver<AdapterEvent>>>,
     stream: Arc<TestStream>,
+    stream_gate: Option<Arc<StreamGate>>,
+}
+
+#[derive(Default)]
+struct StreamGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 impl OneStreamAdapter {
     fn new() -> (Arc<Self>, mpsc::Sender<AdapterEvent>, Arc<TestStream>) {
+        Self::with_gate(None)
+    }
+
+    fn new_gated() -> (
+        Arc<Self>,
+        mpsc::Sender<AdapterEvent>,
+        Arc<TestStream>,
+        Arc<StreamGate>,
+    ) {
+        let gate = Arc::new(StreamGate::default());
+        let (adapter, events, stream) = Self::with_gate(Some(Arc::clone(&gate)));
+        (adapter, events, stream, gate)
+    }
+
+    fn with_gate(
+        stream_gate: Option<Arc<StreamGate>>,
+    ) -> (Arc<Self>, mpsc::Sender<AdapterEvent>, Arc<TestStream>) {
         let (tx, rx) = mpsc::channel(16);
         let (in_tx, in_rx) = mpsc::channel(64);
         let (out_tx, out_rx) = mpsc::channel(64);
@@ -90,6 +120,7 @@ impl OneStreamAdapter {
             Arc::new(Self {
                 inbound: Mutex::new(Some(rx)),
                 stream: stream.clone(),
+                stream_gate,
             }),
             tx,
             stream,
@@ -127,6 +158,10 @@ impl ConnectionAdapter for OneStreamAdapter {
         Ok(())
     }
     async fn streams(&self, _: ConnectionId) -> RvResult<Vec<Arc<dyn MediaStream>>> {
+        if let Some(gate) = &self.stream_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
         Ok(vec![self.stream.clone() as Arc<dyn MediaStream>])
     }
     async fn send_message(&self, _: ConnectionId, _: Message) -> RvResult<()> {
@@ -163,8 +198,21 @@ async fn setup() -> (
     Arc<TestStream>,
     ConnectionId,
 ) {
-    let orch = Orchestrator::new(Config::default());
     let (adapter, tx, stream) = OneStreamAdapter::new();
+    setup_with_adapter(adapter, tx, stream).await
+}
+
+async fn setup_with_adapter(
+    adapter: Arc<OneStreamAdapter>,
+    tx: mpsc::Sender<AdapterEvent>,
+    stream: Arc<TestStream>,
+) -> (
+    Arc<Orchestrator>,
+    mpsc::Sender<AdapterEvent>,
+    Arc<TestStream>,
+    ConnectionId,
+) {
+    let orch = Orchestrator::new(Config::default());
     orch.register(adapter).unwrap();
     let cid = orch
         .open_conversation(
@@ -219,6 +267,24 @@ fn frame(stream_id: StreamId, byte: u8) -> MediaFrame {
         timestamp_rtp: 0,
         captured_at: Utc::now(),
         payload_type: Some(111),
+    }
+}
+
+struct FailingRecordingSink;
+
+#[async_trait::async_trait]
+impl RecordingSink for FailingRecordingSink {
+    async fn write(&self, _frame: MediaFrame) -> RvResult<()> {
+        Err(RvoipError::InvalidState("synthetic recording failure"))
+    }
+
+    async fn close(&self) -> RvResult<RecordingArtifact> {
+        Ok(RecordingArtifact {
+            url: "memory:rec/failed".into(),
+            bytes_written: 0,
+            duration_ms: 0,
+            content_hash: String::new(),
+        })
     }
 }
 
@@ -312,4 +378,298 @@ async fn attach_listener_channel_forwards_frames() {
         }
     }
     assert_eq!(got, 3, "listener channel must forward all 3 frames");
+}
+
+#[tokio::test]
+async fn terminal_recording_route_removes_registry_owner() {
+    let (orch, _events, stream, connid) = setup().await;
+    orch.register_recording_sink("fail", Arc::new(FailingRecordingSink));
+    let mut normalized = orch.subscribe_events();
+    let recording_id = orch
+        .start_recording(RecordingTarget::Connection(connid), "fail")
+        .await
+        .expect("recording starts");
+
+    for value in 0..8 {
+        stream
+            .inbound_tx
+            .send(frame(stream.id.clone(), value))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match normalized.recv().await {
+                Ok(Event::RecordingStopped {
+                    recording_id: id, ..
+                }) if id == recording_id => return,
+                Ok(_) => continue,
+                Err(error) => panic!("event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal media route did not remove recording owner");
+    assert!(orch.stop_recording(recording_id).await.is_err());
+}
+
+#[tokio::test]
+async fn closed_listener_consumer_removes_listener_owner() {
+    let (orch, _events, stream, connid) = setup().await;
+    let mut normalized = orch.subscribe_events();
+    let listener_id = orch
+        .attach_listener(ListenerTarget::Connection(connid), ListenerSink::Channel)
+        .expect("listener");
+    let listener = orch
+        .listener_channel(&listener_id)
+        .expect("listener channel");
+    drop(listener);
+
+    for value in 0..8 {
+        stream
+            .inbound_tx
+            .send(frame(stream.id.clone(), value))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match normalized.recv().await {
+                Ok(Event::ListenerDetached {
+                    listener_id: id, ..
+                }) if id == listener_id => return,
+                Ok(_) => continue,
+                Err(error) => panic!("event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal listener route did not remove owner");
+    assert!(orch.listener_channel(&listener_id).is_none());
+}
+
+#[tokio::test]
+async fn terminal_ai_route_removes_attachment_owner() {
+    let (orch, _events, stream, connid) = setup().await;
+    orch.register_asr_provider("terminal-ai", Arc::new(NoOpAsrProvider));
+    orch.register_tts_provider("terminal-ai", Arc::new(NoOpTtsProvider));
+    orch.register_dialog_manager("terminal-ai", Arc::new(ListenOnlyDialog));
+    let mut normalized = orch.subscribe_events();
+    let attachment_id = orch
+        .attach_ai(connid, "terminal-ai", HashMap::new())
+        .await
+        .expect("AI attachment");
+
+    for value in 0..8 {
+        stream
+            .inbound_tx
+            .send(frame(stream.id.clone(), value))
+            .await
+            .unwrap();
+        tokio::task::yield_now().await;
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match normalized.recv().await {
+                Ok(Event::AiDetached {
+                    attachment_id: id, ..
+                }) if id == attachment_id => return,
+                Ok(_) => continue,
+                Err(error) => panic!("event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("terminal media route did not remove AI owner");
+    assert!(orch.detach(AttachmentRef::Ai(attachment_id)).await.is_err());
+}
+
+#[tokio::test]
+async fn abrupt_connection_end_removes_every_observer_registry_entry() {
+    let (orch, events, _stream, connid) = setup().await;
+    orch.register_recording_sink(
+        "cleanup",
+        Arc::new(VecRecordingSink::new("memory:rec/cleanup")),
+    );
+    orch.register_asr_provider("cleanup", Arc::new(NoOpAsrProvider));
+    orch.register_tts_provider("cleanup", Arc::new(NoOpTtsProvider));
+    orch.register_dialog_manager("cleanup", Arc::new(ListenOnlyDialog));
+
+    let recording_id = orch
+        .start_recording(RecordingTarget::Connection(connid.clone()), "cleanup")
+        .await
+        .expect("recording");
+    let transcription_id = orch
+        .start_transcription(RecordingTarget::Connection(connid.clone()), "cleanup")
+        .await
+        .expect("transcription");
+    let ai_id = orch
+        .attach_ai(connid.clone(), "cleanup", HashMap::new())
+        .await
+        .expect("AI");
+    let listener_id = orch
+        .attach_listener(
+            ListenerTarget::Connection(connid.clone()),
+            ListenerSink::Channel,
+        )
+        .expect("listener");
+    let mut listener = orch
+        .listener_channel(&listener_id)
+        .expect("listener channel");
+    let graph = orch
+        .media_graph_for_connection(connid.clone())
+        .await
+        .expect("graph");
+
+    events
+        .send(AdapterEvent::Ended {
+            connection_id: connid,
+            reason: EndReason::Normal,
+        })
+        .await
+        .expect("end event");
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if graph.latest_snapshot().source_state
+                == rvoip_core::media_graph::MediaGraphSourceState::Shutdown
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("graph shutdown");
+
+    assert!(orch.stop_recording(recording_id).await.is_err());
+    assert!(orch.stop_transcription(transcription_id).await.is_err());
+    assert!(orch.detach(AttachmentRef::Ai(ai_id)).await.is_err());
+    assert!(orch.listener_channel(&listener_id).is_none());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), listener.recv()).await,
+        Ok(None)
+    ));
+}
+
+#[tokio::test]
+async fn disconnect_during_stream_lookup_cannot_install_a_stale_recording() {
+    let (adapter, adapter_events, stream, gate) = OneStreamAdapter::new_gated();
+    let (orch, adapter_events, _stream, connid) =
+        setup_with_adapter(adapter, adapter_events, stream).await;
+    orch.register_recording_sink("race", Arc::new(VecRecordingSink::new("memory:rec/race")));
+    let mut normalized_events = orch.subscribe_events();
+
+    let recording = {
+        let orch = Arc::clone(&orch);
+        let connid = connid.clone();
+        tokio::spawn(async move {
+            orch.start_recording(RecordingTarget::Connection(connid), "race")
+                .await
+        })
+    };
+    gate.entered.notified().await;
+
+    adapter_events
+        .send(AdapterEvent::Ended {
+            connection_id: connid.clone(),
+            reason: EndReason::Normal,
+        })
+        .await
+        .expect("end event");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match normalized_events.recv().await {
+                Ok(rvoip_core::events::Event::ConnectionEnded { connection_id, .. })
+                    if connection_id == connid =>
+                {
+                    return
+                }
+                Ok(_) => continue,
+                Err(error) => panic!("normalized event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("connection teardown");
+
+    gate.release.notify_one();
+    assert!(matches!(
+        recording.await.expect("recording task"),
+        Err(RvoipError::ConnectionNotFound(id)) if id == connid
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                match normalized_events.recv().await {
+                    Ok(Event::RecordingStarted { .. }) => return true,
+                    Ok(_) => continue,
+                    Err(_) => return false,
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "a stale RecordingStarted event followed ConnectionEnded"
+    );
+}
+
+#[tokio::test]
+async fn disconnect_during_ai_setup_cannot_install_or_emit_stale_attachment() {
+    let (adapter, adapter_events, stream, gate) = OneStreamAdapter::new_gated();
+    let (orch, adapter_events, _stream, connid) =
+        setup_with_adapter(adapter, adapter_events, stream).await;
+    orch.register_asr_provider("race-ai", Arc::new(NoOpAsrProvider));
+    orch.register_tts_provider("race-ai", Arc::new(NoOpTtsProvider));
+    orch.register_dialog_manager("race-ai", Arc::new(ListenOnlyDialog));
+    let mut normalized_events = orch.subscribe_events();
+
+    let attachment = {
+        let orch = Arc::clone(&orch);
+        let connid = connid.clone();
+        tokio::spawn(async move { orch.attach_ai(connid, "race-ai", HashMap::new()).await })
+    };
+    gate.entered.notified().await;
+    adapter_events
+        .send(AdapterEvent::Ended {
+            connection_id: connid.clone(),
+            reason: EndReason::Normal,
+        })
+        .await
+        .expect("end event");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match normalized_events.recv().await {
+                Ok(Event::ConnectionEnded { connection_id, .. }) if connection_id == connid => {
+                    return
+                }
+                Ok(_) => continue,
+                Err(error) => panic!("normalized event stream closed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("connection teardown");
+
+    gate.release.notify_one();
+    assert!(matches!(
+        attachment.await.expect("AI setup task"),
+        Err(RvoipError::ConnectionNotFound(id)) if id == connid
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                match normalized_events.recv().await {
+                    Ok(Event::AiAttached { .. }) => return true,
+                    Ok(_) => continue,
+                    Err(_) => return false,
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "a stale AiAttached event followed ConnectionEnded"
+    );
 }

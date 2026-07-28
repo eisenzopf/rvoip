@@ -65,23 +65,23 @@ pub fn validate_response_matches_transaction(
             if let Some(branch) = via_header.branch() {
                 if branch != tx_id.branch.as_str() {
                     warn!(
-                        id=%tx_id,
-                        received_branch=?via_header.branch(),
-                        expected_branch=%tx_id.branch,
+                        id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+                        received_branch_len=branch.len(),
+                        expected_branch_len=tx_id.branch.len(),
                         "Received response with mismatched Via branch"
                     );
                     return Err(Error::Other("Mismatched Via branch parameter".to_string()));
                 }
             } else {
-                warn!(id=%tx_id, "Received response Via without branch parameter");
+                warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received response Via without branch parameter");
                 return Err(Error::Other("Missing Via branch parameter".to_string()));
             }
         } else {
-            warn!(id=%tx_id, "Received response with empty Via header value");
+            warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received response with empty Via header value");
             return Err(Error::Other("Empty Via header value".to_string()));
         }
     } else {
-        warn!(id=%tx_id, "Received response without Via header");
+        warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received response without Via header");
         return Err(Error::Other("Missing Via header".to_string()));
     }
 
@@ -89,20 +89,20 @@ pub fn validate_response_matches_transaction(
     if let Some(TypedHeader::CSeq(cseq_header)) = response.header(&HeaderName::CSeq) {
         if &cseq_header.method != original_method {
             warn!(
-                id=%tx_id,
-                received_cseq_method=?cseq_header.method,
-                expected_method=?original_method,
+                id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id),
+                received_cseq_method=%crate::transaction::safe_diagnostics::SafeMethod::new(&cseq_header.method),
+                expected_method=%crate::transaction::safe_diagnostics::SafeMethod::new(original_method),
                 "Received response with mismatched CSeq method"
             );
             return Err(Error::Other("Mismatched CSeq method".to_string()));
         }
     } else {
-        warn!(id=%tx_id, "Received response without CSeq header");
+        warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Received response without CSeq header");
         return Err(Error::Other("Missing CSeq header".to_string()));
     }
 
     // All checks passed
-    trace!(id=%tx_id, "Response passed transaction validation checks");
+    trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Response passed transaction validation checks");
     Ok(())
 }
 
@@ -128,7 +128,7 @@ pub fn extract_response(message: &Message, tx_id: &TransactionKey) -> Result<Res
     match message {
         Message::Response(r) => Ok(r.clone()),
         Message::Request(_) => {
-            warn!(id=%tx_id, "Client transaction received a Request, ignoring");
+            warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Client transaction received a Request, ignoring");
             Err(Error::Other(
                 "Client transaction received a Request".to_string(),
             ))

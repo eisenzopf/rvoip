@@ -1,6 +1,7 @@
 //! Architectural guard: the REGISTER send path stays flat.
 //!
-//! `DialogAdapter::send_register` once dispatched its own follow-up events
+//! `DialogAdapter::send_register_attempt` returns one typed wire outcome and
+//! never dispatches its own follow-up events
 //! back into the state machine, which made registration retries recurse
 //! through `StateMachine::process_event` and obscured failure attribution.
 //! The send path is now expected to return a typed outcome to its caller; the
@@ -18,26 +19,26 @@ fn register_send_path_does_not_reenter_state_machine() {
     let adapter_path = format!("{manifest_dir}/src/adapters/dialog_adapter.rs");
     let adapter = std::fs::read_to_string(&adapter_path).expect("dialog adapter source");
     let send_register_body = adapter
-        .split("async fn send_register")
+        .split("async fn send_register_attempt")
         .nth(1)
-        .expect("send_register function should exist")
+        .expect("send_register_attempt function should exist")
         .split("pub async fn send_subscribe")
         .next()
         .expect("send_subscribe should follow send_register");
 
     assert!(
         !send_register_body.contains("process_event("),
-        "DialogAdapter::send_register must return a typed outcome instead of dispatching state-machine events inline"
+        "DialogAdapter::send_register_attempt must return a typed outcome instead of dispatching state-machine events inline"
     );
     assert!(
-        !send_register_body.contains("self.send_register("),
-        "DialogAdapter::send_register must not recursively retry itself"
+        !send_register_body.contains("self.send_register_attempt("),
+        "DialogAdapter::send_register_attempt must not recursively retry itself"
     );
 
     let executor_path = format!("{manifest_dir}/src/state_machine/executor.rs");
     let executor = std::fs::read_to_string(&executor_path).expect("executor source");
     assert!(
-        !executor.contains("Box::pin(self.process_event"),
+        !executor.contains("Box::pin(self.process_event("),
         "StateMachine::process_event should drain queued internal events instead of recursively boxing itself"
     );
 }

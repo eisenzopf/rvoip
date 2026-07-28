@@ -25,7 +25,8 @@ pub struct UctpQuicClient {
 impl UctpQuicClient {
     /// Dial the given server address.
     ///
-    /// `client_config` MUST include ALPN `b"uctp/1"` in `alpn_protocols`.
+    /// `client_config` MUST include the current UCTP raw-QUIC ALPN in
+    /// `alpn_protocols`.
     pub async fn connect(
         endpoint: &quinn::Endpoint,
         server: SocketAddr,
@@ -34,7 +35,7 @@ impl UctpQuicClient {
     ) -> Result<Arc<Self>> {
         let mut tls = (*client_config).clone();
         if tls.alpn_protocols.is_empty() {
-            tls.alpn_protocols = vec![b"uctp/1".to_vec()];
+            tls.alpn_protocols = vec![rvoip_uctp::UCTP_RAW_QUIC_ALPN_BYTES.to_vec()];
         }
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(|e| {
             rvoip_uctp::errors::SubstrateError::Tls(rustls::Error::General(e.to_string()))

@@ -26,6 +26,9 @@ pub trait Surface: Send + Sync + 'static {
 
     /// Convert a coordinator-level `CallId` into the surface's typed
     /// session ref.
+    // This is a source-compatible trait API; renaming it would break every
+    // downstream surface implementation.
+    #[allow(clippy::wrong_self_convention)]
     fn into_session_ref(&self, id: CallId) -> Self::SessionRef;
 
     /// Pre-populate `from` from the surface's local URI when the

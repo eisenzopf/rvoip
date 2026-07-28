@@ -9,15 +9,27 @@ use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use rvoip_auth_core::{CredentialAuthError, PasswordVerifier};
 use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
-use thiserror::Error;
+use std::fmt;
 
 /// LDAP verifier construction/configuration error.
-#[derive(Debug, Error)]
 pub enum LdapVerifierError {
     /// Required config was missing.
-    #[error("LDAP configuration error: {0}")]
     Config(String),
 }
+
+impl fmt::Display for LdapVerifierError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("LDAP verifier failed (class=configuration)")
+    }
+}
+
+impl fmt::Debug for LdapVerifierError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for LdapVerifierError {}
 
 /// Known LDAP directory filter presets.
 ///
@@ -59,7 +71,7 @@ impl LdapDirectoryPreset {
 }
 
 /// LDAP password verifier configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LdapPasswordVerifierConfig {
     /// LDAP URL, for example `ldap://127.0.0.1:1389` or `ldaps://...`.
     pub url: String,
@@ -74,6 +86,25 @@ pub struct LdapPasswordVerifierConfig {
     pub user_filter_template: String,
     /// Scopes returned in `IdentityAssurance::UserAuthorized` on success.
     pub scopes: Vec<String>,
+}
+
+impl fmt::Debug for LdapPasswordVerifierConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LdapPasswordVerifierConfig")
+            .field("url_present", &!self.url.is_empty())
+            .field("bind_dn_present", &self.bind_dn.is_some())
+            .field("bind_dn_len", &self.bind_dn.as_deref().map(str::len))
+            .field("bind_password_present", &self.bind_password.is_some())
+            .field(
+                "bind_password_len",
+                &self.bind_password.as_deref().map(str::len),
+            )
+            .field("user_base_dn_present", &!self.user_base_dn.is_empty())
+            .field("user_filter_template_len", &self.user_filter_template.len())
+            .field("scope_count", &self.scopes.len())
+            .finish()
+    }
 }
 
 impl LdapPasswordVerifierConfig {
@@ -152,9 +183,18 @@ impl LdapPasswordVerifierConfig {
 }
 
 /// LDAP-backed password verifier.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LdapPasswordVerifier {
     config: LdapPasswordVerifierConfig,
+}
+
+impl fmt::Debug for LdapPasswordVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LdapPasswordVerifier")
+            .field("config", &self.config)
+            .finish()
+    }
 }
 
 impl LdapPasswordVerifier {
@@ -325,7 +365,13 @@ mod tests {
             )
         })
         .expect_err("partial bind credentials should fail");
-        assert!(error.to_string().contains("configured together"));
+        assert_eq!(
+            error.to_string(),
+            "LDAP verifier failed (class=configuration)"
+        );
+        match error {
+            LdapVerifierError::Config(detail) => assert!(detail.contains("configured together")),
+        }
     }
 
     #[test]
@@ -361,6 +407,29 @@ mod tests {
             );
             assert_eq!(config.user_filter_template, filter);
             assert!(config.scopes.iter().any(|configured| configured == scope));
+        }
+    }
+
+    #[test]
+    fn bind_config_verifier_and_errors_redact_credentials() {
+        const CANARY: &str = "ldap-bind-credential-canary\r\nAuthorization: exposed";
+        let config = LdapPasswordVerifierConfig::new(CANARY, CANARY)
+            .with_bind_credentials(CANARY, CANARY)
+            .with_user_filter_template(CANARY)
+            .with_scopes([CANARY]);
+        let verifier = LdapPasswordVerifier::new(config.clone()).unwrap();
+        let error = LdapVerifierError::Config(CANARY.into());
+
+        for rendered in [
+            format!("{config:?}"),
+            format!("{verifier:?}"),
+            format!("{error} {error:?}"),
+        ] {
+            assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        }
+        assert_eq!(config.bind_password.as_deref(), Some(CANARY));
+        match error {
+            LdapVerifierError::Config(value) => assert_eq!(value, CANARY),
         }
     }
 

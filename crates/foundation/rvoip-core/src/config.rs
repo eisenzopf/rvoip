@@ -22,6 +22,14 @@ pub struct TenantQuotas {
 #[derive(Clone)]
 pub struct Config {
     pub max_concurrent_setups: usize,
+    /// Maximum number of distinct direct-media subscriber Connections
+    /// admitted by this Orchestrator across every UCTP ingress substrate.
+    ///
+    /// A subscriber with several stream routes consumes one slot. The slot is
+    /// released only after its final route is removed, its Connection closes,
+    /// or its Session is dropped. Relay-backed broadcast fanout is accounted
+    /// separately by the relay implementation.
+    pub max_direct_subscribers: usize,
     pub conversation_store: Arc<dyn ConversationStore>,
     pub vcon_store: Arc<dyn VconStore>,
     /// P4 — message log + history pager. Default in-memory.
@@ -40,6 +48,16 @@ pub struct Config {
     /// realistic mobile network jitter without holding admission for
     /// pathologically dead peers.
     pub bridge_stream_deadline: Duration,
+    /// Maximum time an outbound route may remain prepared or activating
+    /// without winning its final commit acknowledgement.
+    ///
+    /// A prepared route is deliberately invisible to Sessions and event
+    /// consumers while an application durably records its Connection ID.
+    /// Core aborts and closes the provisional adapter route when this
+    /// deadline expires. The same deadline fences a hung staged activation.
+    /// A finite default prevents abandoned durable-bind attempts or adapter
+    /// activation futures from retaining route capacity indefinitely.
+    pub outbound_preparation_timeout: Duration,
     /// P6 — `Event::CapacityReport` emit cadence. None disables the
     /// scheduler entirely.
     pub capacity_report_interval: Option<Duration>,
@@ -52,10 +70,12 @@ impl Default for Config {
             .unwrap_or(1);
         Self {
             max_concurrent_setups: 256 * cpus,
+            max_direct_subscribers: 1_000,
             conversation_store: Arc::new(MemoryConversationStore::new()),
             vcon_store: Arc::new(MemoryVconStore::new()),
             message_store: Arc::new(MemoryMessageStore::new()),
             bridge_stream_deadline: Duration::from_secs(5),
+            outbound_preparation_timeout: Duration::from_secs(30),
             capacity_report_interval: Some(Duration::from_secs(30)),
         }
     }

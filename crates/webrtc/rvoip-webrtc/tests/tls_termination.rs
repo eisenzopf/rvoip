@@ -14,6 +14,7 @@ use std::time::Duration;
 use futures::{SinkExt, StreamExt};
 use rcgen::generate_simple_self_signed;
 use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
+use rvoip_webrtc::signaling::auth::BearerStaticTokenAuth;
 use rvoip_webrtc::tls::TlsConfig;
 use rvoip_webrtc::{WebRtcConfig, WebRtcServerBuilder};
 
@@ -97,15 +98,12 @@ async fn wss_offer_round_trip_completes() {
 
     // Build a tokio-tungstenite client with custom rustls connector that
     // accepts the self-signed cert.
-    let mut roots = rustls::RootCertStore::empty();
     // Skip cert verification entirely (self-signed test).
     let config = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
         .with_no_client_auth();
     let connector = tokio_tungstenite::Connector::Rustls(Arc::new(config));
-    let _ = roots; // suppress unused
-
     let url = format!("wss://{addr}");
     let req = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(&*url)
         .expect("request");
@@ -137,6 +135,51 @@ async fn wss_offer_round_trip_completes() {
     let parsed: serde_json::Value = serde_json::from_str(&text).expect("json");
     assert_eq!(parsed["type"], "answer");
     assert!(parsed["sdp"].as_str().expect("sdp").contains("m=audio"));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn wss_auth_rejection_is_http_401_before_upgrade() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (cert_pem, key_pem) = self_signed_pem();
+    let tls = TlsConfig::from_pem_bytes(&cert_pem, &key_pem)
+        .await
+        .expect("tls config");
+    let server = WebRtcServerBuilder::new(WebRtcConfig::loopback())
+        .with_wss("127.0.0.1:0", tls)
+        .with_ws_auth(Arc::new(BearerStaticTokenAuth::new("secret")))
+        .build()
+        .await
+        .expect("server");
+    let addr = server.wss_addr().expect("wss addr");
+
+    let config = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
+        .with_no_client_auth();
+    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(config));
+    let request = tokio_tungstenite::tungstenite::client::IntoClientRequest::into_client_request(
+        format!("wss://{addr}"),
+    )
+    .expect("request");
+    let error =
+        tokio_tungstenite::connect_async_tls_with_config(request, None, false, Some(connector))
+            .await
+            .expect_err("missing token must not receive HTTP 101");
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), 401);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|value| value.to_str().ok()),
+                Some("Bearer realm=\"rvoip\"")
+            );
+        }
+        other => panic!("expected pre-upgrade WSS HTTP 401, got {other:?}"),
+    }
 
     server.shutdown().await;
 }

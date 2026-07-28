@@ -87,12 +87,17 @@ use rvoip_sip_core::prelude::*;
 use self::error::Result;
 
 // Core submodules
+mod authorization;
 pub mod common_logic;
+mod completion;
 pub mod error;
 pub mod event;
+pub mod event_sender;
 pub mod key;
+mod lifecycle_scheduler;
 pub mod logic;
 pub mod runner;
+pub mod safe_diagnostics;
 pub mod state;
 pub mod timer_utils;
 pub mod validators;
@@ -109,6 +114,9 @@ pub mod transport;
 pub mod utils;
 
 // Re-export core types
+pub use completion::{
+    ClientTransactionCompletionHandle, ClientTransactionFailure, ClientTransactionOutcome,
+};
 pub use error::{Error as TransactionError, Result as TransactionResult};
 pub use event::*;
 pub use key::*;
@@ -124,7 +132,14 @@ pub use state::*;
 pub const DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize = 32;
 
 // Re-export manager
-pub use manager::{TransactionManager, MAX_TRANSACTION_DISPATCH_WORKERS};
+pub use authorization::{
+    SipRequestAuthorization, SipRequestIngressAuthorizer, SipRequestIngressContext,
+    SipRequestRejection,
+};
+pub use manager::{
+    TransactionManager, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+    DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MAX_TRANSACTION_DISPATCH_WORKERS,
+};
 
 /// Defines the core traits, types, and machinery for SIP transactions.
 ///
@@ -181,7 +196,7 @@ impl fmt::Display for TransactionKind {
 /// typically by the `TransactionManager` or the transaction itself (e.g., for timer events).
 ///
 /// These commands drive the transaction's state machine and interactions.
-#[derive(Debug, Clone)] // Clone is useful if commands need to be resent or duplicated.
+#[derive(Clone)] // Clone is useful if commands need to be resent or duplicated.
 pub enum InternalTransactionCommand {
     /// Instructs the transaction to transition to a specified `TransactionState`.
     /// This should be used carefully, respecting the valid state transitions for the transaction kind.
@@ -189,6 +204,11 @@ pub enum InternalTransactionCommand {
     /// Delivers an incoming SIP `Message` (Request or Response) to the transaction for processing.
     /// The transaction will determine how this message affects its state based on its kind and current state.
     ProcessMessage(Message),
+    /// Transfers ownership of an outbound server response to the existing
+    /// transaction runner. The runner performs the transport write and owns
+    /// the resulting transition without self-enqueuing another command.
+    #[doc(hidden)]
+    SupervisedServerResponse(std::sync::Arc<server::SupervisedServerResponse>),
     /// Signals that a specific transaction timer has fired.
     /// The `String` typically identifies the timer (e.g., "Timer_A", "Timer_F").
     Timer(String),
@@ -198,11 +218,22 @@ pub enum InternalTransactionCommand {
     /// Instructs the transaction to terminate immediately, cleaning up its resources.
     /// This might be used for forceful shutdown or after a critical error.
     Terminate,
+    /// Retire a completed non-INVITE runner after the manager has atomically
+    /// installed its compact UDP Timer J/K tombstone. Unlike `Terminate`, the
+    /// due scheduler owns the later TimerTriggered/StateChanged/Terminated
+    /// observations, so the runner exits without publishing them twice.
+    CompactRetire,
     /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
     /// This is sent when the TU sends any provisional response, making the automatic 100 Trying unnecessary.
     /// RFC 3261 Section 17.2.1: "If the TU does not send a provisional response within 200ms,
     /// the server transaction MUST send a 100 Trying response."
     CancelTimer100,
+}
+
+impl fmt::Debug for InternalTransactionCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self::safe_diagnostics::SafeTransactionCommand::new(self).fmt(f)
+    }
 }
 
 /// A common, object-safe trait providing synchronous access to core properties of a SIP transaction.
@@ -345,22 +376,6 @@ impl Default for TimerConfig {
     }
 }
 
-/// Creates a minimal, empty SIP INVITE request for placeholder or default usage.
-/// This is `pub(crate)` and intended for internal use within the `transaction-core` crate,
-/// for example, when a transaction needs a `Request` object before one is available,
-/// or for default initialization in tests or certain internal states.
-///
-/// The created request uses `Method::Register` and a dummy URI `sip:example.com`.
-/// This might need to be `Method::Invite` or more generic if its use implies an INVITE.
-/// Currently uses `Method::Register`. Let's assume it's generic enough or update if specific to INVITE.
-#[allow(dead_code)]
-pub(crate) fn create_empty_request() -> Request {
-    let uri = Uri::sip("example.com"); // Creates sip:example.com
-                                       // Corrected: Request::new in sip-core only takes method and uri.
-                                       // Version, headers, body are set via builder or other means if needed.
-    Request::new(Method::Register, uri)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -377,12 +392,13 @@ mod tests {
     #[test]
     fn internal_transaction_command_creation() {
         let _cmd1 = InternalTransactionCommand::TransitionTo(TransactionState::Completed);
-        let _cmd2 =
-            InternalTransactionCommand::ProcessMessage(Message::Request(create_empty_request()));
+        let request = Request::new(Method::Register, Uri::sip("example.com"));
+        let _cmd2 = InternalTransactionCommand::ProcessMessage(Message::Request(request));
         let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
         let _cmd4 = InternalTransactionCommand::TransportError;
         let _cmd5 = InternalTransactionCommand::Terminate;
-        let _cmd6 = InternalTransactionCommand::CancelTimer100;
+        let _cmd6 = InternalTransactionCommand::CompactRetire;
+        let _cmd7 = InternalTransactionCommand::CancelTimer100;
     }
 
     #[test]
@@ -401,12 +417,5 @@ mod tests {
 
         assert_eq!(config1.t1, config2.t1);
         assert_eq!(config1.t1, config3.t1);
-    }
-
-    #[test]
-    fn create_empty_request_works() {
-        let req = create_empty_request();
-        assert_eq!(req.method(), Method::Register); // As per current implementation
-        assert_eq!(req.uri().to_string(), "sip:example.com");
     }
 }

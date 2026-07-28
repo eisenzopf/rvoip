@@ -3,4 +3,7 @@
 pub mod chime;
 pub mod proto;
 
-pub use chime::{ChimeJoin, ChimeSession, ChimeSignalingClient};
+pub use chime::{
+    ChimeCloseOutcome, ChimeJoin, ChimeSession, ChimeSessionHealth, ChimeSignalingClient,
+    ChimeTerminalCause,
+};

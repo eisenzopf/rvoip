@@ -1,5 +1,6 @@
 //! Configuration for the Amazon Connect adapter.
 
+use std::fmt;
 use std::time::Duration;
 
 use crate::mapping::AttributeMapping;
@@ -9,7 +10,7 @@ use crate::mapping::AttributeMapping;
 /// The AWS instance/flow identifiers and region drive the
 /// `StartWebRTCContact` control-plane call; the timeouts and
 /// [`AttributeMapping`] govern the per-contact behaviour.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ConnectConfig {
     /// Amazon Connect instance id (the UUID in the instance ARN).
     pub instance_id: String,
@@ -35,6 +36,26 @@ pub struct ConnectConfig {
     /// Reap routes whose peer connection has been `Failed` for at least this
     /// long. Zero disables the reaper.
     pub session_idle_ttl: Duration,
+}
+
+impl fmt::Debug for ConnectConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectConfig")
+            .field("instance_id_present", &!self.instance_id.is_empty())
+            .field("contact_flow_id_present", &!self.contact_flow_id.is_empty())
+            .field("region_present", &self.region.is_some())
+            .field(
+                "default_display_name_present",
+                &!self.default_display_name.is_empty(),
+            )
+            .field("attribute_mapping", &self.attribute_mapping)
+            .field("signaling_timeout", &self.signaling_timeout)
+            .field("media_connect_timeout", &self.media_connect_timeout)
+            .field("keepalive_interval", &self.keepalive_interval)
+            .field("session_idle_ttl", &self.session_idle_ttl)
+            .finish()
+    }
 }
 
 impl Default for ConnectConfig {
@@ -74,5 +95,29 @@ impl ConnectConfig {
     pub fn with_attribute_mapping(mut self, mapping: AttributeMapping) -> Self {
         self.attribute_mapping = mapping;
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configuration_diagnostics_redact_targets_and_mapping_names() {
+        let config = ConnectConfig::new("instance-secret", "flow-secret")
+            .with_region("region-secret")
+            .with_attribute_mapping(
+                AttributeMapping::default().rename("header-secret", "attribute-secret"),
+            );
+        let diagnostic = format!("{config:?}");
+        for secret in [
+            "instance-secret",
+            "flow-secret",
+            "region-secret",
+            "header-secret",
+            "attribute-secret",
+        ] {
+            assert!(!diagnostic.contains(secret), "leaked {secret}");
+        }
     }
 }

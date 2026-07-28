@@ -27,6 +27,7 @@ async fn verify_request_signature_returns_dtls_fingerprint_after_handshake_sdp()
             direction: Direction::Outbound,
             capabilities: adapter_a.capabilities(),
             transport: None,
+            context: Default::default(),
         })
         .await
         .expect("originate");

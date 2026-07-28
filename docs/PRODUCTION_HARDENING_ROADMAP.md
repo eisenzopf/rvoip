@@ -1,7 +1,7 @@
 # rvoip Production-Hardening Roadmap
 
 **Status:** P0 + P1 implemented (2026-07-01); P2/P3 open. Target: open-internet / hostile-network exposure for `rtp-core`.
-**Scope:** `rvoip-sip` (beta-ready within its documented envelope) and `rtp-core` (media transport). Both beta-tier (0.2.x).
+**Scope:** `rvoip-sip` (beta-ready within its documented envelope) and `rtp-core` (media transport). Both ship at `0.3.2`; SIP is beta-qualified by product scope rather than by a version suffix.
 
 ## Implementation status (2026-07-01)
 

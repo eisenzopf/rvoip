@@ -177,37 +177,6 @@ pub fn create_cancel_request(invite_request: &Request, local_addr: &SocketAddr) 
     Ok(cancel_request)
 }
 
-/// Helper to create a Via header with the specified branch parameter
-///
-/// Creates a properly formatted Via header with the given branch parameter
-/// according to RFC 3261 Section 8.1.1.7.
-///
-/// # Arguments
-/// * `local_addr` - Local address to use in the sent-by field
-/// * `branch` - Branch parameter value (should start with z9hG4bK)
-///
-/// # Returns
-/// * `Result<TypedHeader>` - A Via header or an error
-///
-/// Retained for the upcoming explicit-Via construction path; today
-/// the CANCEL builder uses an inline Via assembly.
-#[allow(dead_code)]
-fn via_header_with_branch(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
-    use rvoip_sip_core::types::via::Via;
-
-    // Create a Via header with the provided branch parameter
-    let params = vec![rvoip_sip_core::types::Param::branch(branch.to_string())];
-
-    // Split the address into host and port
-    let host = local_addr.ip().to_string();
-    let port = Some(local_addr.port());
-
-    // Create the Via header
-    let via = Via::new("SIP", "2.0", "UDP", &host, port, params)?;
-
-    Ok(TypedHeader::Via(via))
-}
-
 /// Finds the matching INVITE transaction for a CANCEL request
 ///
 /// According to RFC 3261 Section 9.1 and 9.2, a CANCEL request matches an INVITE if:

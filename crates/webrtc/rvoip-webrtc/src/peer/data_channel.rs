@@ -4,6 +4,7 @@
 //! Phase G1 of the gap implementation plan; G-tail closeout adds a
 //! background pump + broadcast subscription for `OnBufferedAmountLow`.
 
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
@@ -27,7 +28,7 @@ use crate::errors::{Result, WebRtcError};
 /// (W3C `RTCDataChannelInit` §); setting both returns
 /// [`WebRtcError::InvalidArgument`] from
 /// [`RvoipPeerConnection::create_data_channel`](crate::peer::RvoipPeerConnection::create_data_channel).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DataChannelOptions {
     /// `true` (default) = ordered delivery; `false` = unordered.
     pub ordered: bool,
@@ -41,6 +42,20 @@ pub struct DataChannelOptions {
     /// and the application is responsible for opening a matching channel
     /// on the remote peer.
     pub negotiated_id: Option<u16>,
+}
+
+impl fmt::Debug for DataChannelOptions {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DataChannelOptions")
+            .field("ordered", &self.ordered)
+            .field("max_retransmits", &self.max_retransmits)
+            .field("max_packet_lifetime_ms", &self.max_packet_lifetime_ms)
+            .field("protocol_present", &self.protocol.is_some())
+            .field("protocol_bytes", &self.protocol.as_deref().map(str::len))
+            .field("negotiated_id", &self.negotiated_id)
+            .finish()
+    }
 }
 
 impl Default for DataChannelOptions {

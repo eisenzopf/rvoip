@@ -7,9 +7,10 @@
 //! - Subscription management
 //! - Complex operations that need multiple coordinated steps
 
-use super::StateMachine;
+use super::{executor::ResponseStateInput, StateMachine};
 use crate::{
     errors::{Result, SessionError},
+    session_registry::SessionRegistryHandle,
     state_table::types::{EventType, Role},
     types::{CallState, SessionId, SessionInfo},
 };
@@ -17,20 +18,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type SessionSubscriber = Box<dyn Fn(SessionEvent) + Send + Sync>;
+type SessionSubscribers = Arc<RwLock<HashMap<SessionId, Vec<SessionSubscriber>>>>;
+
 /// Extended state machine with helper methods
 pub struct StateMachineHelpers {
     /// Core state machine
     pub state_machine: Arc<StateMachine>,
 
-    /// Active session tracking (for queries)
-    active_sessions: Arc<RwLock<HashMap<SessionId, SessionInfo>>>,
-
     /// Event subscribers
-    subscribers: Arc<RwLock<HashMap<SessionId, Vec<Box<dyn Fn(SessionEvent) + Send + Sync>>>>>,
+    subscribers: SessionSubscribers,
 }
 
 /// Events for subscribers
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum SessionEvent {
     StateChanged { from: CallState, to: CallState },
     CallEstablished,
@@ -39,11 +40,32 @@ pub enum SessionEvent {
     IncomingCall { from: String },
 }
 
+impl std::fmt::Debug for SessionEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::StateChanged { from, to } => formatter
+                .debug_struct("StateChanged")
+                .field("from", from)
+                .field("to", to)
+                .finish(),
+            Self::CallEstablished => formatter.write_str("CallEstablished"),
+            Self::CallTerminated { reason } => formatter
+                .debug_struct("CallTerminated")
+                .field("reason_bytes", &reason.len())
+                .finish(),
+            Self::MediaReady => formatter.write_str("MediaReady"),
+            Self::IncomingCall { from } => formatter
+                .debug_struct("IncomingCall")
+                .field("from_bytes", &from.len())
+                .finish(),
+        }
+    }
+}
+
 impl StateMachineHelpers {
     pub fn new(state_machine: Arc<StateMachine>) -> Self {
         Self {
             state_machine,
-            active_sessions: Arc::new(RwLock::new(HashMap::new())),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -59,35 +81,20 @@ impl StateMachineHelpers {
         to: String,
         role: Role,
     ) -> Result<()> {
-        // Create session in the store
-        let session = self
-            .state_machine
+        // Publish the exact lifetime only after its initial addressing fields
+        // are complete; no create-then-replace snapshot is exposed.
+        self.state_machine
             .store
-            .create_session(
+            .create_session_initialized(
                 session_id.clone(),
                 role,
                 true, // with history
+                |session| {
+                    session.local_uri = Some(from.clone());
+                    session.remote_uri = Some(to.clone());
+                },
             )
             .await?;
-
-        // Set initial data
-        let mut session = session;
-        session.local_uri = Some(from.clone());
-        session.remote_uri = Some(to.clone());
-
-        // Store it
-        self.state_machine.store.update_session(session).await?;
-
-        // Track in active sessions
-        let info = SessionInfo {
-            session_id: session_id.clone(),
-            from,
-            to,
-            state: CallState::Idle,
-            start_time: std::time::SystemTime::now(),
-            media_active: false,
-        };
-        self.active_sessions.write().await.insert(session_id, info);
 
         Ok(())
     }
@@ -111,8 +118,9 @@ impl StateMachineHelpers {
     /// state machine. That ordering closes the race where
     /// `Dialog180Ringing` (or a fast `Dialog200OK` on loopback) could
     /// fire between this helper returning and the caller setting the
-    /// linkage — the `SendTransferNotify*` actions no-op when linkage is
-    /// absent, so early progress NOTIFYs would otherwise be lost.
+    /// linkage. The shared `SendTransferNotify*` actions intentionally have
+    /// no transfer projection for an ordinary call, but fail closed when any
+    /// transfer marker is present without its exact transferor lifetime.
     ///
     /// The b2bua wrapper crate will call this as its primary
     /// REFER-forwarding entry point.
@@ -135,18 +143,17 @@ impl StateMachineHelpers {
 
     /// Lower-level primitive: retroactively link an existing leg to a
     /// transferor session. Callers must accept the race — any dialog
-    /// event that fires before this call is silently dropped by the
-    /// no-op-on-`None` `SendTransferNotify*` actions. Prefer
+    /// event that fires before this call has no transfer projection because
+    /// the leg is still an ordinary call at that instant. Prefer
     /// [`make_transfer_leg`](Self::make_transfer_leg) for freshly-created legs.
     pub async fn set_transferor_session(
         &self,
         leg_session_id: &SessionId,
         transferor_session_id: &SessionId,
     ) -> Result<()> {
-        let mut session = self.state_machine.store.get_session(leg_session_id).await?;
-        session.transferor_session_id = Some(transferor_session_id.clone());
-        session.is_transfer_call = true;
-        self.state_machine.store.update_session(session).await?;
+        self.state_machine
+            .set_transferor_session(leg_session_id, transferor_session_id.clone())
+            .await?;
         Ok(())
     }
 
@@ -159,6 +166,15 @@ impl StateMachineHelpers {
         pai_uri: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<SessionId> {
+        let transferor_lifecycle_handle = match transferor_session_id.as_ref() {
+            Some(transferor) => Some(
+                self.state_machine
+                    .store
+                    .lifecycle_handle(transferor)
+                    .ok_or_else(|| SessionError::SessionNotFound(transferor.to_string()))?,
+            ),
+            None => None,
+        };
         let session_id = SessionId::new();
 
         self.create_session(
@@ -169,39 +185,20 @@ impl StateMachineHelpers {
         )
         .await?;
 
-        // Fold any caller-supplied state (credentials, transfer linkage, PAI,
-        // extra headers) into `SessionState` *before* the `MakeCall` event
-        // enters the state machine — otherwise a fast loopback
-        // `Dialog180Ringing` arriving mid-dispatch can beat the update and
-        // the state machine sees stale state.
-        if credentials.is_some()
-            || transferor_session_id.is_some()
-            || pai_uri.is_some()
-            || !extra_headers.is_empty()
-        {
-            let mut session = self.state_machine.store.get_session(&session_id).await?;
-            if let Some(creds) = credentials {
-                session.credentials = Some(creds);
-            }
-            if let Some(referor) = transferor_session_id {
-                session.transferor_session_id = Some(referor);
-                session.is_transfer_call = true;
-            }
-            if let Some(pai) = pai_uri {
-                session.pai_uri = Some(pai);
-            }
-            if !extra_headers.is_empty() {
-                session.extra_headers = extra_headers;
-            }
-            self.state_machine.store.update_session(session).await?;
-        }
-
         self.state_machine
-            .process_event(
+            .process_event_with_outbound_session_input(
                 &session_id,
                 EventType::MakeCall {
                     target: to.to_string(),
                 },
+                super::executor::OutboundSessionStateInput::new(
+                    credentials,
+                    None,
+                    pai_uri,
+                    transferor_session_id,
+                    transferor_lifecycle_handle,
+                    extra_headers,
+                ),
             )
             .await?;
 
@@ -216,19 +213,63 @@ impl StateMachineHelpers {
         Ok(())
     }
 
+    /// Exact-lifetime counterpart of [`Self::accept_call`].
+    pub(crate) async fn accept_call_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
+        self.state_machine
+            .process_event_exact(handle, EventType::AcceptCall)
+            .await?;
+        Ok(())
+    }
+
     /// Accept an incoming call with a caller-supplied SDP answer, bypassing
     /// local negotiation. Intended for b2bua scenarios where the answer comes
-    /// from the outbound leg's 200 OK. Writes the SDP into `session.local_sdp`
-    /// and flips `sdp_negotiated = true` before dispatching `AcceptCall`, so
-    /// the `GenerateLocalSDP`/`NegotiateSDPAsUAS` actions become no-ops.
+    /// from the outbound leg's 200 OK. Applies the SDP and
+    /// `sdp_negotiated = true` only after acquiring the exact session lane, so
+    /// the `GenerateLocalSDP`/`NegotiateSDPAsUAS` actions become no-ops without
+    /// exposing a pre-transition store write.
     pub async fn accept_call_with_sdp(&self, session_id: &SessionId, sdp: String) -> Result<()> {
-        let mut session = self.state_machine.store.get_session(session_id).await?;
-        session.local_sdp = Some(sdp);
-        session.sdp_negotiated = true;
-        self.state_machine.store.update_session(session).await?;
-
         self.state_machine
-            .process_event(session_id, EventType::AcceptCall)
+            .process_event_with_local_sdp(session_id, EventType::AcceptCall, sdp)
+            .await?;
+        Ok(())
+    }
+
+    /// Exact-lifetime counterpart of [`Self::accept_call_with_sdp`].
+    pub(crate) async fn accept_call_with_sdp_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        sdp: String,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_with_response_input_exact(
+                handle,
+                EventType::AcceptCall,
+                ResponseStateInput::accept(Some(sdp), Vec::new()),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Accept with one application-authored response envelope captured for an
+    /// exact incoming-call lifetime.
+    pub(crate) async fn accept_call_with_response(
+        &self,
+        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
+        sdp: Option<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        if handle.session_id() != session_id {
+            return Err(SessionError::InvalidInput(
+                "response lifecycle handle does not match its session".to_string(),
+            ));
+        }
+        self.state_machine
+            .process_event_with_response_input_exact(
+                handle,
+                EventType::AcceptCall,
+                ResponseStateInput::accept(sdp, extras),
+            )
             .await?;
         Ok(())
     }
@@ -243,6 +284,44 @@ impl StateMachineHelpers {
     ) -> Result<()> {
         self.state_machine
             .process_event(session_id, EventType::SendEarlyMedia { sdp })
+            .await?;
+        Ok(())
+    }
+
+    /// Exact-lifetime counterpart of [`Self::send_early_media`].
+    pub(crate) async fn send_early_media_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_exact(handle, EventType::SendEarlyMedia { sdp })
+            .await?;
+        Ok(())
+    }
+
+    /// Send an application-authored provisional response through the retained
+    /// YAML early-media transition. The status override lets the public
+    /// builder request an arbitrary 1xx without adding a public event variant.
+    pub(crate) async fn send_provisional_with_response(
+        &self,
+        session_id: &SessionId,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        sdp: Option<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        if handle.session_id() != session_id {
+            return Err(SessionError::InvalidInput(
+                "response lifecycle handle does not match its session".to_string(),
+            ));
+        }
+        self.state_machine
+            .process_event_with_response_input_exact(
+                handle,
+                EventType::SendEarlyMedia { sdp },
+                ResponseStateInput::provisional(status, extras),
+            )
             .await?;
         Ok(())
     }
@@ -266,6 +345,46 @@ impl StateMachineHelpers {
         Ok(())
     }
 
+    /// Exact-lifetime counterpart of [`Self::reject_call`].
+    pub(crate) async fn reject_call_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_exact(
+                handle,
+                EventType::RejectCall {
+                    status,
+                    reason: reason.to_string(),
+                },
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Exact-lifetime rejection with application-authored response headers.
+    pub(crate) async fn reject_call_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        reason: &str,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_with_response_input_exact(
+                handle,
+                EventType::RejectCall {
+                    status,
+                    reason: reason.to_string(),
+                },
+                ResponseStateInput::headers(extras),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Redirect an incoming call (send a 3xx response with `Contact:` headers
     /// per RFC 3261 §8.1.3.4 / §21.3). Valid from `Ringing` and `EarlyMedia`
     /// on the UAS role. `status` should be 300-399; `contacts` must be
@@ -282,6 +401,38 @@ impl StateMachineHelpers {
         Ok(())
     }
 
+    /// Exact-lifetime counterpart of [`Self::redirect_call`].
+    pub(crate) async fn redirect_call_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_exact(handle, EventType::RedirectCall { status, contacts })
+            .await?;
+        Ok(())
+    }
+
+    /// Redirect with application-authored headers through the same exact lane
+    /// and YAML transition as the redirect lifecycle decision.
+    pub(crate) async fn redirect_call_with_extras_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        status: u16,
+        contacts: Vec<String>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_with_response_input_exact(
+                handle,
+                EventType::RedirectCall { status, contacts },
+                ResponseStateInput::headers(extras),
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Hangup a call
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
         // Skip the state-machine dispatch if the session is already gone —
@@ -289,17 +440,18 @@ impl StateMachineHelpers {
         // a typed `SessionNotFound` here lets fire-and-forget callers
         // recognize it via `SessionError::is_session_gone()` while avoiding
         // the general-purpose ERROR log in executor::process_event.
-        if self
+        let handle = self
             .state_machine
             .store
-            .get_session(session_id)
-            .await
-            .is_err()
-        {
-            return Err(SessionError::SessionNotFound(session_id.to_string()));
-        }
+            .lifecycle_handle(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
+        self.hangup_exact(&handle).await
+    }
+
+    /// Hang up only the exact session lifetime captured by the caller.
+    pub(crate) async fn hangup_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
         self.state_machine
-            .process_event(session_id, EventType::HangupCall)
+            .process_event_exact(handle, EventType::HangupCall)
             .await?;
         Ok(())
     }
@@ -339,12 +491,20 @@ impl StateMachineHelpers {
 
     /// Get session information
     pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
-        self.active_sessions
-            .read()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))
+        let session = self
+            .state_machine
+            .store
+            .with_session(session_id, Clone::clone)?;
+        Ok(session_info_from_state(session))
+    }
+
+    /// Inspect one captured session lifetime without raw-ID re-resolution.
+    pub(crate) async fn get_session_info_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<SessionInfo> {
+        let session = self.state_machine.store.get_session_exact(handle).await?;
+        Ok(session_info_from_state(session))
     }
 
     /// List all active sessions
@@ -353,23 +513,13 @@ impl StateMachineHelpers {
         // those created by auto-transfer which bypass helpers.create_session()
         let sessions = self.state_machine.store.get_all_sessions().await;
 
-        sessions
-            .into_iter()
-            .map(|s| SessionInfo {
-                session_id: s.session_id.clone(),
-                from: s.local_uri.unwrap_or_default(),
-                to: s.remote_uri.unwrap_or_default(),
-                state: s.call_state,
-                start_time: std::time::SystemTime::now(), // Approximation - SessionState uses Instant
-                media_active: s.media_session_id.is_some(),
-            })
-            .collect()
+        sessions.into_iter().map(session_info_from_state).collect()
     }
 
     /// Feature-gated retained-object counts for perf leak investigations.
     #[cfg(feature = "perf-tests")]
     pub async fn perf_diagnostic_counts(&self) -> serde_json::Value {
-        let active_sessions = self.active_sessions.read().await.len();
+        let active_sessions = self.state_machine.store.get_all_sessions().await.len();
         let subscribers = self.subscribers.read().await.len();
         serde_json::json!({
             "active_sessions": active_sessions,
@@ -379,8 +529,49 @@ impl StateMachineHelpers {
 
     /// Get current state of a session
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
-        let session = self.state_machine.store.get_session(session_id).await?;
-        Ok(session.call_state)
+        Ok(self
+            .state_machine
+            .store
+            .with_session(session_id, |session| session.call_state.clone())?)
+    }
+
+    /// Read call state only from the captured exact lifetime.
+    pub(crate) async fn get_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<CallState> {
+        Ok(self
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)?
+            .call_state
+            .clone())
+    }
+
+    /// Return the codec negotiated for one exact live session.
+    ///
+    /// Media adapters use this retained session-state value instead of
+    /// guessing PCMU before SDP negotiation has completed. A session whose
+    /// SDP was supplied by the application without an anchored media
+    /// negotiation cannot back a [`SipMediaStream`](crate::media_stream::SipMediaStream),
+    /// so fail that case instead of leaving stream binding pending forever.
+    pub(crate) async fn negotiated_media_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<crate::session_store::state::NegotiatedConfig>> {
+        let (negotiated_config, sdp_negotiated) = self
+            .state_machine
+            .store
+            .with_session(session_id, |session| {
+                (session.negotiated_config.clone(), session.sdp_negotiated)
+            })?;
+        match negotiated_config {
+            Some(config) => Ok(Some(config)),
+            None if sdp_negotiated => Err(crate::errors::SessionError::MediaError(
+                "SDP was supplied without an anchored negotiated media configuration".to_string(),
+            )),
+            None => Ok(None),
+        }
     }
 
     /// Check if a session is in conference
@@ -415,7 +606,6 @@ impl StateMachineHelpers {
     // ========== Internal Helpers ==========
 
     /// Notify subscribers of an event
-    #[allow(dead_code)]
     pub(crate) async fn notify_subscribers(&self, session_id: &SessionId, event: SessionEvent) {
         if let Some(callbacks) = self.subscribers.read().await.get(session_id) {
             for callback in callbacks {
@@ -425,10 +615,22 @@ impl StateMachineHelpers {
     }
 
     /// Clean up terminated session
-    #[allow(dead_code)]
     pub(crate) async fn cleanup_session(&self, session_id: &SessionId) {
-        self.active_sessions.write().await.remove(session_id);
         self.subscribers.write().await.remove(session_id);
+    }
+}
+
+fn session_info_from_state(session: crate::session_store::SessionState) -> SessionInfo {
+    let start_time = std::time::SystemTime::now()
+        .checked_sub(session.session_duration())
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    SessionInfo {
+        session_id: session.session_id,
+        from: session.local_uri.unwrap_or_default(),
+        to: session.remote_uri.unwrap_or_default(),
+        state: session.call_state,
+        start_time,
+        media_active: session.media_session_id.is_some(),
     }
 }
 
@@ -446,3 +648,37 @@ impl StateMachineHelpers {
 //
 // Everything else (call control, media operations, etc.) is done through
 // the state machine by sending events and executing actions.
+
+#[cfg(test)]
+mod single_session_view_tests {
+    use super::*;
+
+    #[test]
+    fn session_info_is_projected_from_the_canonical_session_state() {
+        let session_id = SessionId::new();
+        let mut session = crate::session_store::SessionState::new(session_id.clone(), Role::UAC);
+        session.local_uri = Some("sip:alice@example.test".to_string());
+        session.remote_uri = Some("sip:bob@example.test".to_string());
+        session.call_state = CallState::Active;
+        session.media_session_id = Some(crate::types::MediaSessionId::new("media-exact"));
+
+        let info = session_info_from_state(session);
+
+        assert_eq!(info.session_id, session_id);
+        assert_eq!(info.from, "sip:alice@example.test");
+        assert_eq!(info.to, "sip:bob@example.test");
+        assert_eq!(info.state, CallState::Active);
+        assert!(info.media_active);
+    }
+
+    #[test]
+    fn helpers_have_no_second_mutable_active_session_view() {
+        let production = include_str!("helpers.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production helper source");
+        assert!(!production.contains("active_sessions:"));
+        assert!(!production.contains("self.active_sessions"));
+        assert!(production.contains("with_session(session_id, Clone::clone)"));
+    }
+}

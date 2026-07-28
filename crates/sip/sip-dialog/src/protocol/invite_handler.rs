@@ -22,17 +22,18 @@ use std::net::SocketAddr;
 use tracing::{debug, info, warn};
 
 use crate::api::config::RelUsage;
-use crate::dialog::{DialogId, DialogState};
+use crate::diagnostics::safe_log::SafeTransactionKey;
+use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use crate::manager::transaction_integration::detect_peer_100rel_support;
-use crate::manager::{DialogLookup, DialogManager, SessionCoordinator};
+use crate::manager::{DialogLookup, DialogManager};
 use crate::transaction::utils::response_builders;
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::min_se::MinSE;
 use rvoip_sip_core::types::unsupported::Unsupported;
 use rvoip_sip_core::types::TypedHeader;
-use rvoip_sip_core::{HeaderName, Method, Request, StatusCode};
+use rvoip_sip_core::{HeaderName, Request, StatusCode};
 
 /// INVITE-specific handling operations
 pub trait InviteHandler {
@@ -44,12 +45,32 @@ pub trait InviteHandler {
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InviteCausalOwner {
+    AcknowledgedSession,
+    DirectApi,
+}
+
 /// Implementation of INVITE handling for DialogManager
 impl InviteHandler for DialogManager {
     /// Handle INVITE requests according to RFC 3261 Section 14
     ///
     /// Supports both initial INVITE (dialog-creating) and re-INVITE (session modification).
     async fn handle_invite_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+        self.handle_invite_for_owner(request, source, InviteCausalOwner::AcknowledgedSession)
+            .await
+            .map(|_| ())
+    }
+}
+
+/// INVITE-specific helper methods for DialogManager
+impl DialogManager {
+    async fn handle_invite_for_owner(
+        &self,
+        request: Request,
+        source: SocketAddr,
+        owner: InviteCausalOwner,
+    ) -> DialogResult<Option<DialogId>> {
         debug!("Processing INVITE request from {}", source);
 
         // Create server transaction using transaction-core
@@ -57,29 +78,69 @@ impl InviteHandler for DialogManager {
             .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
-            .map_err(|e| DialogError::TransactionError {
-                message: format!("Failed to create server transaction for INVITE: {}", e),
+            .map_err(|_error| DialogError::TransactionError {
+                message: "Failed to create server transaction for INVITE".to_string(),
             })?;
 
         let transaction_id = server_transaction.id().clone();
+        let dialog_setup_lock = self
+            .transaction_manager
+            .server_invite_dialog_setup_lock(&transaction_id)
+            .ok_or_else(|| DialogError::TransactionError {
+                message: "INVITE server transaction had no dialog setup owner".to_string(),
+            })?;
+        let _dialog_setup_guard = dialog_setup_lock.lock().await;
+
+        // An exact server transaction may be returned again for a duplicate
+        // manual delivery or transport retransmission. Its existing dialog
+        // binding is authoritative; do not re-run dialog matching, sequence
+        // mutation, causal delivery, or response selection for that wire
+        // generation.
+        if let Ok(dialog_id) = self.find_dialog_for_transaction(&transaction_id) {
+            return Ok(Some(dialog_id));
+        }
 
         // Check if this is an initial INVITE or re-INVITE
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             // This is a re-INVITE within existing dialog
-            self.handle_reinvite(transaction_id, request, dialog_id)
+            self.handle_reinvite_for_owner(transaction_id, request, dialog_id, owner)
                 .await
         } else {
+            if request.to().and_then(|to| to.tag()).is_some() {
+                let response = response_builders::create_response(
+                    &request,
+                    StatusCode::CallOrTransactionDoesNotExist,
+                );
+                self.send_unowned_final_response_classified(&transaction_id, response)
+                    .await?;
+                return Ok(None);
+            }
             // This is an initial INVITE — `handle_initial_invite` does the
             // 100rel policy check and may short-circuit with 420 before
             // creating a dialog.
-            self.handle_initial_invite(transaction_id, request, source)
+            self.handle_initial_invite_for_owner(transaction_id, request, source, owner)
                 .await
         }
     }
-}
 
-/// INVITE-specific helper methods for DialogManager
-impl DialogManager {
+    /// Process a manually supplied INVITE with the API caller as its direct
+    /// causal owner. This reuses the protocol ingress mechanics and returns
+    /// the exact dialog created or matched by the exact server transaction;
+    /// it never manufactures a session event or an EventHub fallback.
+    pub(crate) async fn handle_direct_invite(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> DialogResult<DialogId> {
+        self.handle_invite_for_owner(request, source, InviteCausalOwner::DirectApi)
+            .await?
+            .ok_or_else(|| {
+                DialogError::routing_error(
+                    "manually supplied INVITE did not produce an owned dialog",
+                )
+            })
+    }
+
     /// Handle initial INVITE (dialog-creating)
     pub async fn handle_initial_invite(
         &self,
@@ -87,6 +148,33 @@ impl DialogManager {
         request: Request,
         source: SocketAddr,
     ) -> DialogResult<()> {
+        let dialog_setup_lock = self
+            .transaction_manager
+            .server_invite_dialog_setup_lock(&transaction_id)
+            .ok_or_else(|| DialogError::TransactionError {
+                message: "INVITE server transaction had no dialog setup owner".to_string(),
+            })?;
+        let _dialog_setup_guard = dialog_setup_lock.lock().await;
+        if self.find_dialog_for_transaction(&transaction_id).is_ok() {
+            return Ok(());
+        }
+        self.handle_initial_invite_for_owner(
+            transaction_id,
+            request,
+            source,
+            InviteCausalOwner::AcknowledgedSession,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn handle_initial_invite_for_owner(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        source: SocketAddr,
+        owner: InviteCausalOwner,
+    ) -> DialogResult<Option<DialogId>> {
         let setup_started =
             crate::diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
         tracing::debug!(
@@ -118,11 +206,9 @@ impl DialogManager {
                 .push(TypedHeader::Unsupported(Unsupported::with_tags(vec![
                     "100rel".to_string(),
                 ])));
-            let _ = self
-                .transaction_manager
-                .send_response(&transaction_id, response)
-                .await;
-            return Ok(());
+            self.send_unowned_final_response_classified(&transaction_id, response)
+                .await?;
+            return Ok(None);
         }
 
         // RFC 4028 §6: If the peer's `Min-SE:` exceeds our configured
@@ -150,11 +236,9 @@ impl DialogManager {
                     response
                         .headers
                         .push(TypedHeader::MinSE(MinSE::new(our_min_se)));
-                    let _ = self
-                        .transaction_manager
-                        .send_response(&transaction_id, response)
-                        .await;
-                    return Ok(());
+                    self.send_unowned_final_response_classified(&transaction_id, response)
+                        .await?;
+                    return Ok(None);
                 }
             }
         }
@@ -207,30 +291,46 @@ impl DialogManager {
         // Associate transaction with dialog
         self.associate_transaction_with_dialog(&transaction_id, &dialog_id);
         tracing::debug!(
-            "🔍 INVITE HANDLER: Associated transaction {} with dialog {}",
-            transaction_id,
+            "🔍 INVITE HANDLER: Associated transaction {:?} with dialog {}",
+            SafeTransactionKey(&transaction_id),
             dialog_id
         );
 
-        // Send session coordination event
-        let event = SessionCoordinationEvent::IncomingCall {
-            dialog_id: dialog_id.clone(),
-            transaction_id: transaction_id.clone(),
-            request: request.clone(),
-            source,
-        };
+        if owner == InviteCausalOwner::AcknowledgedSession {
+            let event = SessionCoordinationEvent::IncomingCall {
+                dialog_id: dialog_id.clone(),
+                transaction_id: transaction_id.clone(),
+                request: request.clone(),
+                source,
+            };
 
-        tracing::debug!(
-            "🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog {}",
-            dialog_id
-        );
-        self.notify_session_layer(event).await?;
-        tracing::debug!("🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
+            tracing::debug!(
+                "🔍 INVITE HANDLER: About to send SessionCoordinationEvent::IncomingCall for dialog {}",
+                dialog_id
+            );
+            match self.try_emit_session_coordination_event(event).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let mut response = response_builders::create_response(
+                        &request,
+                        StatusCode::ServiceUnavailable,
+                    );
+                    self.stamp_initial_invite_response_tag(&dialog_id, &mut response)?;
+                    self.send_unowned_final_response_classified(&transaction_id, response)
+                        .await?;
+                    self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+                    self.remove_dialog_storage(&dialog_id);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+            tracing::debug!("🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
+        }
         if let Some(started) = setup_started {
             crate::diagnostics::record_dialog_initial_invite_setup(started.elapsed());
         }
         info!("Initial INVITE processed, created dialog {}", dialog_id);
-        Ok(())
+        Ok(Some(dialog_id))
     }
 
     /// Handle re-INVITE (session modification)
@@ -240,6 +340,33 @@ impl DialogManager {
         request: Request,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
+        let dialog_setup_lock = self
+            .transaction_manager
+            .server_invite_dialog_setup_lock(&transaction_id)
+            .ok_or_else(|| DialogError::TransactionError {
+                message: "INVITE server transaction had no dialog setup owner".to_string(),
+            })?;
+        let _dialog_setup_guard = dialog_setup_lock.lock().await;
+        if self.find_dialog_for_transaction(&transaction_id).is_ok() {
+            return Ok(());
+        }
+        self.handle_reinvite_for_owner(
+            transaction_id,
+            request,
+            dialog_id,
+            InviteCausalOwner::AcknowledgedSession,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn handle_reinvite_for_owner(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+        dialog_id: DialogId,
+        owner: InviteCausalOwner,
+    ) -> DialogResult<Option<DialogId>> {
         debug!("Processing re-INVITE for dialog {}", dialog_id);
 
         // Associate transaction with dialog
@@ -251,16 +378,30 @@ impl DialogManager {
             dialog.update_remote_sequence(&request)?;
         }
 
-        // Send session coordination event
-        let event = SessionCoordinationEvent::ReInvite {
-            dialog_id: dialog_id.clone(),
-            transaction_id: transaction_id.clone(),
-            request: request.clone(),
-        };
+        if owner == InviteCausalOwner::AcknowledgedSession {
+            let event = SessionCoordinationEvent::ReInvite {
+                dialog_id: dialog_id.clone(),
+                transaction_id: transaction_id.clone(),
+                request: request.clone(),
+            };
 
-        self.notify_session_layer(event).await?;
+            match self.try_emit_session_coordination_event(event).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let response = response_builders::create_response(
+                        &request,
+                        StatusCode::ServiceUnavailable,
+                    );
+                    self.send_unowned_final_response_classified(&transaction_id, response)
+                        .await?;
+                    self.retire_unowned_response_indexes(&dialog_id, &transaction_id);
+                    return Ok(None);
+                }
+                Err(error) => return Err(error),
+            }
+        }
         info!("Re-INVITE processed for dialog {}", dialog_id);
-        Ok(())
+        Ok(Some(dialog_id))
     }
 
     /// Process ACK within a dialog (related to INVITE processing)
@@ -269,72 +410,268 @@ impl DialogManager {
         request: Request,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
-        info!(
-            "✅ RFC 3261: ACK received for dialog {} - time to start media (UAS side)",
-            dialog_id
-        );
+        let transaction_id = self
+            .transaction_manager
+            .find_server_invite_for_ack(&request)
+            .ok_or_else(|| {
+                DialogError::routing_error("ACK has no exact matching server INVITE transaction")
+            })?;
 
-        // Update dialog state if in Early state
-        {
-            let mut dialog = self.get_dialog_mut(&dialog_id)?;
+        // Keep this public compatibility facade thin. The transaction-event
+        // path and direct protocol path share the exact same ACK owner, which
+        // validates the transaction-to-dialog binding before causal delivery.
+        self.handle_ack_received_event(&dialog_id, &transaction_id, request)
+            .await
+    }
+}
 
-            if dialog.state == DialogState::Early {
-                // Extract local tag from ACK
-                if let Some(to_tag) = request.to().and_then(|to| to.tag()) {
-                    dialog.confirm_with_tag(to_tag.to_string());
-                    debug!("Confirmed dialog {} with ACK", dialog_id);
-                }
-            }
+#[cfg(test)]
+mod exact_invite_response_tests {
+    use super::*;
+    use async_trait::async_trait;
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::{Message, Method};
+    use rvoip_sip_transport::error::Result as TransportResult;
+    use rvoip_sip_transport::{Transport, TransportEvent};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex};
 
-            dialog.update_remote_sequence(&request)?;
-        }
+    use crate::transaction::TransactionManager;
 
-        // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
-        let negotiated_sdp = if !request.body().is_empty() {
-            let sdp = self.extract_body_string(&request);
-            debug!("ACK contains SDP body: {}", sdp);
-            Some(sdp)
-        } else {
-            debug!("ACK has no SDP body (normal for 2xx ACK)");
-            None
-        };
-
-        // RFC 3261 COMPLIANT: Send AckReceived event for UAS side media creation
-        let event = SessionCoordinationEvent::AckReceived {
-            dialog_id: dialog_id.clone(),
-            transaction_id: TransactionKey::new(format!("ack-{}", dialog_id), Method::Ack, false), // Dummy transaction ID for ACK
-            negotiated_sdp,
-        };
-
-        self.notify_session_layer(event).await?;
-        debug!("🚀 RFC 3261: Emitted AckReceived event for UAS side media creation");
-
-        // RFC 4028: dialog is now fully confirmed on the UAS side. Start
-        // the refresh task if a session timer was negotiated and we're
-        // the designated refresher. No-op when `is_session_refresher`
-        // is false (the UAC refreshes for us).
-        if let Ok(dlg) = self.get_dialog(&dialog_id) {
-            if let Some(secs) = dlg.session_expires_secs {
-                let is_refresher = dlg.is_session_refresher;
-                drop(dlg);
-                crate::manager::session_timer::spawn_refresh_task(
-                    self.clone(),
-                    dialog_id.clone(),
-                    secs,
-                    is_refresher,
-                );
-            }
-        }
-
-        Ok(())
+    #[derive(Debug)]
+    struct RecordingTransport {
+        local_addr: SocketAddr,
+        closed: AtomicBool,
+        sent: Mutex<Vec<Message>>,
     }
 
-    /// Extract body as string helper for INVITE/ACK processing
-    fn extract_body_string(&self, request: &Request) -> String {
-        if request.body().is_empty() {
-            String::new()
-        } else {
-            String::from_utf8_lossy(request.body()).to_string()
+    #[derive(Clone)]
+    struct FailingSessionHandler {
+        attempts: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl rvoip_infra_common::events::coordinator::CrossCrateEventHandler for FailingSessionHandler {
+        async fn handle(
+            &self,
+            _event: Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>,
+        ) -> anyhow::Result<()> {
+            self.attempts.fetch_add(1, Ordering::AcqRel);
+            Err(anyhow::anyhow!("injected authoritative handler failure"))
         }
+    }
+
+    impl RecordingTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                closed: AtomicBool::new(false),
+                sent: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Transport for RecordingTransport {
+        fn local_addr(&self) -> TransportResult<SocketAddr> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: Message,
+            _destination: SocketAddr,
+        ) -> TransportResult<()> {
+            self.sent.lock().await.push(message);
+            Ok(())
+        }
+
+        async fn close(&self) -> TransportResult<()> {
+            self.closed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::Acquire)
+        }
+    }
+
+    fn initial_invite(call_id: &str, branch: &str) -> Request {
+        SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5061", None)
+            .call_id(call_id)
+            .cseq(1)
+            .via("127.0.0.1:5061", "UDP", Some(branch))
+            .max_forwards(70)
+            .build()
+    }
+
+    async fn recording_manager() -> (DialogManager, Arc<RecordingTransport>) {
+        let transport = RecordingTransport::new();
+        let transaction_transport: Arc<dyn Transport> = transport.clone();
+        let (_transport_tx, transport_rx) = mpsc::channel::<TransportEvent>(8);
+        let (transaction_manager, _events) =
+            TransactionManager::new(transaction_transport, transport_rx, Some(8))
+                .await
+                .expect("transaction manager");
+        let manager = DialogManager::new(
+            Arc::new(transaction_manager),
+            "127.0.0.1:5060".parse().unwrap(),
+        )
+        .await
+        .expect("dialog manager");
+        (manager, transport)
+    }
+
+    #[test]
+    fn initial_and_reinvite_failure_responses_are_transaction_classified() {
+        let source = include_str!("invite_handler.rs");
+        let entry = source
+            .split("async fn handle_invite_for_owner")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Process a manually supplied INVITE").next())
+            .expect("INVITE entry source");
+        assert!(entry.contains("StatusCode::CallOrTransactionDoesNotExist"));
+        assert!(entry.contains("send_unowned_final_response_classified"));
+
+        let initial = source
+            .split("pub async fn handle_initial_invite")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Handle re-INVITE").next())
+            .expect("initial INVITE source");
+        assert!(initial.contains("StatusCode::ServiceUnavailable"));
+        assert!(initial.contains("retire_unowned_response_indexes"));
+        assert!(initial.contains("remove_dialog_storage"));
+
+        let reinvite = source
+            .split("pub async fn handle_reinvite")
+            .nth(1)
+            .and_then(|tail| tail.split("/// Process ACK").next())
+            .expect("re-INVITE source");
+        assert!(reinvite.contains("StatusCode::ServiceUnavailable"));
+        assert!(reinvite.contains("send_unowned_final_response_classified"));
+        assert!(reinvite.contains("retire_unowned_response_indexes"));
+    }
+
+    #[tokio::test]
+    async fn direct_api_owns_one_exact_dialog_without_automatic_response() {
+        let (manager, transport) = recording_manager().await;
+        let request = initial_invite("direct-api-owned-invite", "z9hG4bK-direct-api-owned");
+
+        let source = "127.0.0.1:5061".parse().unwrap();
+        let first = manager.handle_direct_invite(request.clone(), source);
+        let second = manager.handle_direct_invite(request.clone(), source);
+        let (dialog_id, duplicate_dialog_id) = tokio::join!(first, second);
+        let dialog_id = dialog_id.expect("direct API INVITE");
+        let duplicate_dialog_id = duplicate_dialog_id.expect("duplicate direct API INVITE");
+
+        assert_eq!(duplicate_dialog_id, dialog_id);
+        assert_eq!(manager.dialog_count(), 1);
+        assert_eq!(
+            manager.find_dialog_for_request(&request).await,
+            Some(dialog_id.clone())
+        );
+        let transactions = manager.server_transactions_for_dialog(&dialog_id);
+        assert_eq!(
+            transactions.len(),
+            1,
+            "one exact server transaction owns the dialog"
+        );
+        assert_eq!(
+            manager
+                .find_dialog_for_transaction(&transactions[0])
+                .expect("transaction dialog owner"),
+            dialog_id
+        );
+        assert!(
+            transport.sent.lock().await.is_empty(),
+            "the direct API caller owns the response decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_ingress_without_session_owner_sends_one_503_and_cleans_dialog() {
+        let (manager, transport) = recording_manager().await;
+        let request = initial_invite("unowned-ingress-invite", "z9hG4bK-unowned-ingress");
+        let source = "127.0.0.1:5061".parse().unwrap();
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request.clone(), source)
+            .await
+            .expect("ingress INVITE transaction");
+
+        manager
+            .handle_initial_invite(transaction.id().clone(), request.clone(), source)
+            .await
+            .expect("classified no-owner response");
+
+        let sent = transport.sent.lock().await;
+        assert_eq!(sent.len(), 1, "no-owner ingress emits one final response");
+        assert!(matches!(
+            sent.first(),
+            Some(Message::Response(response))
+                if response.status_code() == StatusCode::ServiceUnavailable.as_u16()
+        ));
+        drop(sent);
+
+        assert_eq!(manager.find_dialog_for_request(&request).await, None);
+        let retained = manager.retention_counts();
+        assert_eq!(retained.dialogs, 0);
+        assert_eq!(retained.dialog_lookup, 0);
+        assert_eq!(retained.early_dialog_lookup, 0);
+        assert_eq!(retained.transaction_to_dialog, 0);
+        assert_eq!(retained.dialog_invite_transactions, 0);
+        assert_eq!(retained.dialog_server_transactions, 0);
+        assert_eq!(retained.pending_response_transaction_by_dialog, 0);
+    }
+
+    #[tokio::test]
+    async fn authoritative_handler_error_never_authors_a_competing_503() {
+        use rvoip_infra_common::events::{EventCoordinatorConfig, GlobalEventCoordinator};
+
+        let (manager, transport) = recording_manager().await;
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let coordinator = Arc::new(
+            GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic())
+                .await
+                .expect("event coordinator"),
+        );
+        coordinator
+            .register_handler(
+                "dialog_to_session",
+                FailingSessionHandler {
+                    attempts: attempts.clone(),
+                },
+            )
+            .await
+            .expect("authoritative handler");
+        let event_hub = crate::events::DialogEventHub::new(coordinator, Arc::new(manager.clone()))
+            .await
+            .expect("dialog event hub");
+        manager.set_event_hub(event_hub).await;
+        let request = initial_invite("failed-owner-invite", "z9hG4bK-failed-owner");
+        let source = "127.0.0.1:5061".parse().unwrap();
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request.clone(), source)
+            .await
+            .expect("ingress INVITE transaction");
+
+        assert!(manager
+            .handle_initial_invite(transaction.id().clone(), request.clone(), source)
+            .await
+            .is_err());
+
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        assert!(
+            transport.sent.lock().await.is_empty(),
+            "handler failure may follow partial causal work and must not trigger a fallback"
+        );
+        assert_eq!(manager.dialog_count(), 1);
+        assert!(manager.find_dialog_for_request(&request).await.is_some());
     }
 }

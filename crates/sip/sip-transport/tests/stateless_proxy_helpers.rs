@@ -266,16 +266,19 @@ CSeq: 1 INVITE\r\n\
 
     let err =
         apply_via_rewrite(bytes.clone(), ViaRewrite::Pop).expect_err("missing Via must error");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("Via"),
-        "error should mention the missing Via header; got: {}",
-        msg
-    );
+    assert!(matches!(
+        err,
+        rvoip_sip_transport::Error::ProtocolError(ref message)
+            if message == "forward_raw_with_via_rewrite: message has no top Via header"
+    ));
 
     let err2 = apply_via_rewrite(bytes, ViaRewrite::Push(Bytes::from_static(b"Via: x\r\n")))
         .expect_err("push without anchor Via must also error");
-    assert!(err2.to_string().contains("Via"));
+    assert!(matches!(
+        err2,
+        rvoip_sip_transport::Error::ProtocolError(ref message)
+            if message == "forward_raw_with_via_rewrite: message has no top Via header"
+    ));
 }
 
 #[test]

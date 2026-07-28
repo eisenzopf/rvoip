@@ -40,13 +40,18 @@ pub mod builders;
 /// Server transactions are typically created by the `TransactionManager` when it receives
 /// a request from the network. It routes incoming messages to the appropriate transaction
 /// and provides a clean API for the Transaction User (TU) to send responses.
-mod common;
 mod data;
 mod invite;
 mod non_invite;
 pub mod reliable_invite;
 
-pub use data::{CommandReceiver, CommandSender, CommonServerTransaction, ServerTransactionData};
+#[doc(hidden)]
+pub use data::SupervisedServerResponse;
+pub(crate) use data::SupervisedServerResponseExecution;
+pub use data::{
+    CommandReceiver, CommandSender, CommonServerTransaction, FinalResponseCompletionDisposition,
+    ServerTransactionData,
+};
 pub use invite::ServerInviteTransaction;
 pub use non_invite::ServerNonInviteTransaction;
 

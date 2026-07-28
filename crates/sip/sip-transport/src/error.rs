@@ -1,156 +1,204 @@
+use std::fmt;
 use std::io;
 use std::net::SocketAddr;
-use thiserror::Error;
 
 /// Result type for SIP transport operations
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Error types for SIP transport operations
-#[derive(Error, Debug)]
 pub enum Error {
     /// Failed to bind to the specified address
-    #[error("Failed to bind to {0}: {1}")]
     BindFailed(SocketAddr, io::Error),
 
     /// Failed to connect to the specified address
-    #[error("Failed to connect to {0}: {1}")]
     ConnectFailed(SocketAddr, io::Error),
 
     /// Failed to send message to the specified address
-    #[error("Failed to send message to {0}: {1}")]
     SendFailed(SocketAddr, io::Error),
 
     /// Failed to receive message
-    #[error("Failed to receive message: {0}")]
     ReceiveFailed(io::Error),
 
     /// Failed to get local address
-    #[error("Failed to get local address: {0}")]
     LocalAddrFailed(io::Error),
 
     /// Transport is closed
-    #[error("Transport closed")]
     TransportClosed,
 
     /// Connection closed by peer
-    #[error("Connection closed by peer: {0}")]
     ConnectionClosedByPeer(SocketAddr),
 
     /// Connection timed out
-    #[error("Connection timed out: {0}")]
     ConnectionTimeout(SocketAddr),
 
     /// TLS handshake failed
-    #[error("TLS handshake failed: {0}")]
     TlsHandshakeFailed(String),
 
     /// TLS certificate error
-    #[error("TLS certificate error: {0}")]
     TlsCertificateError(String),
 
     /// WebSocket protocol error
-    #[error("WebSocket protocol error: {0}")]
     WebSocketProtocolError(String),
 
     /// WebSocket handshake failed
-    #[error("WebSocket handshake failed: {0}")]
     WebSocketHandshakeFailed(String),
 
     /// Message too large for transport
-    #[error("Message too large for transport ({0} bytes)")]
     MessageTooLarge(usize),
 
     /// Partial send
-    #[error("Partial send: {0} of {1} bytes sent")]
     PartialSend(usize, usize),
 
     /// I/O error
-    #[error("I/O error: {0}")]
-    IoError(#[from] io::Error),
+    IoError(io::Error),
 
     /// Invalid state
-    #[error("Invalid state: {0}")]
     InvalidState(String),
 
     /// Connection pool exhausted
-    #[error("Connection pool exhausted")]
     ConnectionPoolExhausted,
 
     /// Invalid address
-    #[error("Invalid address: {0}")]
     InvalidAddress(String),
 
     /// DNS resolution failed
-    #[error("DNS resolution failed: {0}")]
     DnsResolutionFailed(String),
 
     /// Protocol error
-    #[error("Protocol error: {0}")]
     ProtocolError(String),
 
     /// Connection reset
-    #[error("Connection reset")]
     ConnectionReset,
 
     /// Stream closed
-    #[error("Stream closed")]
     StreamClosed,
 
     /// Invalid URI
-    #[error("Invalid URI: {0}")]
     InvalidUri(String),
 
     /// Unsupported transport
-    #[error("Unsupported transport: {0}")]
     UnsupportedTransport(String),
 
     /// Connection limit reached
-    #[error("Connection limit reached")]
     ConnectionLimitReached,
 
     /// HTTP error
-    #[error("HTTP error: {0}")]
     HttpError(String),
 
     /// Timeout
-    #[error("Timeout")]
     Timeout,
 
     /// Failed to parse message
-    #[error("Failed to parse message: {0}")]
     ParseError(String),
 
     /// Transport already bound
-    #[error("Transport already bound")]
     AlreadyBound,
 
     /// Buffer capacity exceeded
-    #[error("Buffer capacity exceeded")]
     BufferCapacityExceeded,
 
     /// Operation would block
-    #[error("Operation would block")]
     WouldBlock,
 
     /// Not implemented
-    #[error("Not implemented: {0}")]
     NotImplemented(String),
 
     /// Channel closed
-    #[error("Channel closed")]
     ChannelClosed,
 
     /// Bind error
-    #[error("Bind error: {0}")]
     BindError(String),
 
     /// Other error
-    #[error("Other error: {0}")]
     Other(String),
 
     /// Internal error
-    #[error("Internal error: {0}")]
     InternalError(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BindFailed(address, error) => write!(
+                formatter,
+                "failed to bind to {address} (I/O class {:?})",
+                error.kind()
+            ),
+            Self::ConnectFailed(address, error) => write!(
+                formatter,
+                "failed to connect to {address} (I/O class {:?})",
+                error.kind()
+            ),
+            Self::SendFailed(address, error) => write!(
+                formatter,
+                "failed to send to {address} (I/O class {:?})",
+                error.kind()
+            ),
+            Self::ReceiveFailed(error) => {
+                write!(formatter, "receive failed (I/O class {:?})", error.kind())
+            }
+            Self::LocalAddrFailed(error) => write!(
+                formatter,
+                "local-address lookup failed (I/O class {:?})",
+                error.kind()
+            ),
+            Self::TransportClosed => formatter.write_str("transport closed"),
+            Self::ConnectionClosedByPeer(address) => {
+                write!(formatter, "connection closed by peer {address}")
+            }
+            Self::ConnectionTimeout(address) => {
+                write!(formatter, "connection timed out for {address}")
+            }
+            Self::TlsHandshakeFailed(_) => formatter.write_str("TLS handshake failed"),
+            Self::TlsCertificateError(_) => formatter.write_str("TLS certificate error"),
+            Self::WebSocketProtocolError(_) => formatter.write_str("WebSocket protocol error"),
+            Self::WebSocketHandshakeFailed(_) => formatter.write_str("WebSocket handshake failed"),
+            Self::MessageTooLarge(bytes) => {
+                write!(formatter, "message too large for transport ({bytes} bytes)")
+            }
+            Self::PartialSend(sent, total) => {
+                write!(formatter, "partial send: {sent} of {total} bytes")
+            }
+            Self::IoError(error) => {
+                write!(formatter, "I/O error class {:?}", error.kind())
+            }
+            Self::InvalidState(_) => formatter.write_str("invalid transport state"),
+            Self::ConnectionPoolExhausted => formatter.write_str("connection pool exhausted"),
+            Self::InvalidAddress(_) => formatter.write_str("invalid address"),
+            Self::DnsResolutionFailed(_) => formatter.write_str("DNS resolution failed"),
+            Self::ProtocolError(_) => formatter.write_str("transport protocol error"),
+            Self::ConnectionReset => formatter.write_str("connection reset"),
+            Self::StreamClosed => formatter.write_str("stream closed"),
+            Self::InvalidUri(_) => formatter.write_str("invalid URI"),
+            Self::UnsupportedTransport(_) => formatter.write_str("unsupported transport"),
+            Self::ConnectionLimitReached => formatter.write_str("connection limit reached"),
+            Self::HttpError(_) => formatter.write_str("HTTP transport error"),
+            Self::Timeout => formatter.write_str("timeout"),
+            Self::ParseError(_) => formatter.write_str("failed to parse SIP message"),
+            Self::AlreadyBound => formatter.write_str("transport already bound"),
+            Self::BufferCapacityExceeded => formatter.write_str("buffer capacity exceeded"),
+            Self::WouldBlock => formatter.write_str("operation would block"),
+            Self::NotImplemented(_) => formatter.write_str("transport operation not implemented"),
+            Self::ChannelClosed => formatter.write_str("transport channel closed"),
+            Self::BindError(_) => formatter.write_str("bind error"),
+            Self::Other(_) => formatter.write_str("transport operation failed"),
+            Self::InternalError(_) => formatter.write_str("internal transport error"),
+        }
+    }
+}
+
+impl fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::IoError(error)
+    }
 }
 
 impl Error {
@@ -265,5 +313,35 @@ mod tests {
         assert!(!Error::UnsupportedTransport("xyz".to_string()).is_recoverable());
         assert!(!Error::InvalidUri("bad:uri".to_string()).is_recoverable());
         assert!(!Error::MessageTooLarge(100000).is_recoverable());
+    }
+
+    #[test]
+    fn error_diagnostics_never_render_retained_lower_values() {
+        const SECRET: &str = "transport-error-secret-canary.example";
+        let errors = [
+            Error::TlsHandshakeFailed(SECRET.to_string()),
+            Error::TlsCertificateError(SECRET.to_string()),
+            Error::WebSocketProtocolError(SECRET.to_string()),
+            Error::WebSocketHandshakeFailed(SECRET.to_string()),
+            Error::InvalidState(SECRET.to_string()),
+            Error::InvalidAddress(SECRET.to_string()),
+            Error::DnsResolutionFailed(SECRET.to_string()),
+            Error::ProtocolError(SECRET.to_string()),
+            Error::InvalidUri(SECRET.to_string()),
+            Error::UnsupportedTransport(SECRET.to_string()),
+            Error::HttpError(SECRET.to_string()),
+            Error::ParseError(SECRET.to_string()),
+            Error::NotImplemented(SECRET.to_string()),
+            Error::BindError(SECRET.to_string()),
+            Error::Other(SECRET.to_string()),
+            Error::InternalError(SECRET.to_string()),
+            Error::IoError(io::Error::other(SECRET)),
+        ];
+
+        for error in errors {
+            for rendered in [error.to_string(), format!("{error:?}")] {
+                assert!(!rendered.contains(SECRET), "error leaked: {rendered}");
+            }
+        }
     }
 }

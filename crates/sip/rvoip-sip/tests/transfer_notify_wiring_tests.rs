@@ -9,25 +9,20 @@
 //!    RFC 3515 §2.4.5.
 //! 2. Transfer-leg UAC transitions (`Dialog180Ringing`,
 //!    `Dialog200OK` on `Initiating`, `Dialog200OK` on `Ringing`)
-//!    include the corresponding `SendTransferNotify*` action. Failure
-//!    (4xx/5xx/6xx) NOTIFYs are emitted at the adapter level in
-//!    `session_event_handler::handle_call_failed`, not through the YAML
-//!    state table — the yaml loader maps `Dialog4xxFailure` via
-//!    `MediaEvent` fallback and the Initiating failure transitions
-//!    don't match the runtime-dispatched `Dialog4xxFailure(status)`
-//!    events. Integration coverage for the failure path belongs with
-//!    the b2bua crate's three-peer fixtures.
+//!    include the corresponding `SendTransferNotify*` action. Failure and
+//!    timeout rows also carry `SendTransferNotifyFailure`, making the YAML
+//!    table the single lifecycle owner instead of an adapter fallback.
 //! 3. `SendTransferNotify*` actions land **after** media/state-commit
 //!    actions (`NegotiateSDPAsUAC`, `SendACK`, `StartMediaSession`)
 //!    so a NOTIFY-send failure cannot roll back dialog / media
 //!    establishment.
 //!
 //! Semantics covered: the "race" guarded by
-//! `StateMachineHelpers::make_transfer_leg` is *structural* — linkage is
-//! set on `SessionState` before `MakeCall` dispatches, so these actions
-//! always see a populated `transferor_session_id` when the corresponding
-//! dialog event fires. The actions are no-ops otherwise, so appending
-//! them to shared `Both`-role transitions is safe for non-transfer calls.
+//! `StateMachineHelpers::make_transfer_leg` is *structural* — exact linkage is
+//! set on `SessionState` before `MakeCall` dispatches, so these actions always
+//! carry the generation-qualified transferor handle. The actions are no-ops
+//! otherwise, so appending them to shared `Both`-role transitions is safe for
+//! non-transfer calls.
 
 use rvoip_sip::state_table::{Action, EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_sip::types::CallState;
@@ -73,6 +68,40 @@ fn assert_ordered(actions: &[Action], first: &Action, second: &Action, ctx: &str
         second,
         actions
     );
+}
+
+#[test]
+fn inbound_refer_notify_uses_explicit_uac_and_uas_wildcards() {
+    let table = load_default();
+    for role in [Role::UAC, Role::UAS] {
+        for state in [
+            CallState::Idle,
+            CallState::Initiating,
+            CallState::Active,
+            CallState::OnHold,
+            CallState::Subscribed,
+            CallState::Terminating,
+        ] {
+            let key = StateKey {
+                role,
+                state,
+                event: EventType::ReceiveNOTIFY,
+            };
+            let transition = table
+                .get(&key)
+                .unwrap_or_else(|| panic!("missing {role:?}/{state:?}/ReceiveNOTIFY wildcard"));
+            assert_eq!(transition.next_state, None);
+            assert_eq!(transition.actions, vec![Action::ProcessNOTIFY]);
+        }
+    }
+
+    assert!(table
+        .get(&StateKey {
+            role: Role::Both,
+            state: CallState::Active,
+            event: EventType::ReceiveNOTIFY,
+        })
+        .is_none());
 }
 
 #[test]
@@ -172,6 +201,45 @@ fn uac_early_media_200_fires_transfer_notify_success() {
         &Action::SendTransferNotifySuccess,
         "UAC/EarlyMedia/Dialog200OK ordering",
     );
+}
+
+#[test]
+fn failure_transitions_route_exact_status_notify_through_yaml() {
+    let table = load_default();
+    for state in [
+        CallState::Initiating,
+        CallState::Ringing,
+        CallState::EarlyMedia,
+    ] {
+        for event in [
+            EventType::Dialog4xxFailure(400),
+            EventType::Dialog5xxFailure(500),
+            EventType::Dialog6xxFailure(600),
+            EventType::DialogTimeout,
+        ] {
+            let key = StateKey {
+                role: if state == CallState::Initiating {
+                    Role::Both
+                } else {
+                    Role::UAC
+                },
+                state,
+                event,
+            };
+            let actions = actions_at(&table, &key);
+            assert_contains(
+                &actions,
+                &Action::SendTransferNotifyFailure,
+                "terminal transfer failure",
+            );
+            assert_ordered(
+                &actions,
+                &Action::SendTransferNotifyFailure,
+                &Action::CleanupDialog,
+                "terminal transfer failure ownership",
+            );
+        }
+    }
 }
 
 #[test]

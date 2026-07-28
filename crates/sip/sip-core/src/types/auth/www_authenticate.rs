@@ -16,8 +16,30 @@ use std::str::FromStr;
 /// The WWW-Authenticate header is used in 401 Unauthorized responses to challenge the client
 /// to authenticate itself. It can contain multiple challenges using different authentication
 /// schemes, allowing the client to choose the most appropriate one.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct WwwAuthenticate(pub Vec<Challenge>); // Holds multiple Challenge enums
+
+impl fmt::Debug for WwwAuthenticate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut scheme_counts = [0usize; 4];
+        for challenge in &self.0 {
+            scheme_counts[match challenge {
+                Challenge::Digest { .. } => 0,
+                Challenge::Basic { .. } => 1,
+                Challenge::Bearer { .. } => 2,
+                Challenge::Other { .. } => 3,
+            }] += 1;
+        }
+        formatter
+            .debug_struct("WwwAuthenticate")
+            .field("challenge_count", &self.0.len())
+            .field("digest_count", &scheme_counts[0])
+            .field("basic_count", &scheme_counts[1])
+            .field("bearer_count", &scheme_counts[2])
+            .field("other_count", &scheme_counts[3])
+            .finish()
+    }
+}
 
 impl fmt::Display for WwwAuthenticate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

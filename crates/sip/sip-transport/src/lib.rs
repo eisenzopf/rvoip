@@ -20,10 +20,16 @@ mod tests;
 pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
-pub use transport::tls::{TlsClientConfig, TlsTransport};
+pub use transport::tls::{
+    TlsClientAuthMode, TlsClientConfig, TlsServerClientAuthConfig, TlsTransport,
+};
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
-pub use transport::{OutboundTlsConfig, Transport, TransportEvent, TransportReceiveTiming};
+pub use transport::{
+    transport_authority_for_request, HandshakeAdmissionConfig, OutboundTlsConfig, TlsPeerIdentity,
+    Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent, TransportFlowId,
+    TransportReceiveTiming, TransportRoute,
+};
 
 // Simplified helper functions
 /// Bind a UDP transport to the specified address
@@ -44,8 +50,10 @@ pub async fn bind_tcp(
 pub mod prelude {
     pub use crate::{
         bind_tcp, bind_udp, events::TransportEventAdapter, factory::TransportFactory,
-        manager::TransportManager, Error, Result, TcpTransport, TlsTransport, Transport,
-        TransportEvent, TransportReceiveTiming, UdpParseDispatch, UdpSocketOptions, UdpTransport,
-        WebSocketTransport,
+        manager::TransportManager, Error, HandshakeAdmissionConfig, Result, TcpTransport,
+        TlsClientAuthMode, TlsClientConfig, TlsPeerIdentity, TlsServerClientAuthConfig,
+        TlsTransport, Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent,
+        TransportFlowId, TransportReceiveTiming, TransportRoute, UdpParseDispatch,
+        UdpSocketOptions, UdpTransport, WebSocketTransport,
     };
 }

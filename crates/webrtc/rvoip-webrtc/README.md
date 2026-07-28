@@ -21,6 +21,18 @@ Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` cor
   simulcast/SVC, hosted TURN relay operation, identity fingerprint binding. See
   [`WebRtcFeatureSupport`](src/peer/ice.rs) and `tests/webrtc_capability_gaps.rs`.
 
+### DTMF alpha-library limitation
+
+Initial RFC 4733 negotiation is qualified for the explicitly registered
+PT 101/8 kHz, PT 110/48 kHz, and PT 126/8 kHz mappings. The current
+`rtc`/webrtc-rs alpha retains an established payload mapping when a later
+offer remaps `telephone-event` on the same media section. If the final answer
+omits the newly offered pair, rvoip marks outbound DTMF unsupported and fails
+before writing RTP; it never guesses or silently reuses the old payload type.
+Supporting mid-session PT remapping is a candidate for the reviewed private
+fork, not a claimed capability. Do not publish or submit such a fork change
+upstream without project-owner review.
+
 ## Features
 
 | Feature | Enables |
@@ -57,6 +69,37 @@ orchestrator.register(server.adapter() as Arc<dyn ConnectionAdapter>)?;
 // Subscribe to orchestrator events; on ConnectionInbound call
 // orchestrator.route_inbound_connection(..., InboundAction::Accept { ... })
 ```
+
+For attachment-token or other durable routing policies, enable fail-closed
+protocol admission before listeners start and install the orchestrator's
+single-consumer gate before registering the adapter:
+
+```rust
+use std::time::Duration;
+
+let orchestrator = Orchestrator::new(Config::default());
+let mut admissions = orchestrator.install_inbound_admission_gate(
+    256,
+    Duration::from_secs(5),
+)?;
+let server = WebRtcServerBuilder::new(WebRtcConfig::default())
+    .with_inbound_admission_confirmation(Duration::from_secs(5))
+    .with_whip_auth(my_auth_hook.clone())
+    .with_ws_auth(my_auth_hook)
+    .with_whip("0.0.0.0:8080")
+    .with_ws("0.0.0.0:8081")
+    .build()
+    .await?;
+orchestrator.register(server.adapter() as Arc<dyn ConnectionAdapter>)?;
+
+// A bounded policy task consumes `admissions` and calls `accept()` only
+// after durable authorization; every other path rejects or drops the ticket.
+```
+
+Secure mode requires authentication hooks to return a complete active
+principal (issuer, tenant, subject, and non-anonymous assurance) plus an
+inbound routing hint. WHIP uses its path tag as the hint; WebSocket hooks set
+`AuthContext::session_hint`. WHEP is outbound and is not held by this gate.
 
 Quick start:
 
@@ -128,11 +171,26 @@ cargo test -p rvoip-webrtc --features comprehensive
 Capability tests and non-claim gap tests (trickle ICE, simulcast, TURN config, WS signaling):
 `tests/webrtc_capability_gaps.rs`.
 
+### Target-contacting WebSocket admission readiness
+
+`WebRtcOriginateContext::require_remote_admission_ready()` enables a fail-closed,
+application-level readiness boundary for outbound WS/WSS calls. The client sends
+`offer-ready` instead of the legacy `offer`; after returning the SDP `answer`, the
+server sends `ready` only after `ConnectionAdapter::accept` completes, or `rejected`
+when the application rejects the exact route. Both outcomes carry the original
+`request_id` and the server-assigned `connection_id`, and the client validates both
+before changing lifecycle state.
+
+The extension is deliberately default-off. Plain `offer` receives no readiness
+frames, so older clients remain compatible with a new server. A required client
+fails closed against an older server because that server rejects the unknown
+`offer-ready` message; rvoip never silently falls back to answer-based activation.
+
 ### Server API (`src/server.rs`)
 
 | Type | Methods |
 |------|---------|
-| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `build` |
+| `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `with_inbound_admission_confirmation`, `build` |
 | `WebRtcServer` | `adapter`, `whip_addr`, `ws_addr`, `shutdown` |
 
 ## Limitations

@@ -25,6 +25,8 @@ pub mod config;
 pub mod control;
 pub mod errors;
 pub mod mapping;
+pub mod media;
+pub mod originate;
 pub mod signaling;
 
 #[cfg(feature = "server")]
@@ -32,11 +34,30 @@ pub mod bridge;
 #[cfg(feature = "server")]
 pub mod server;
 
-pub use adapter::{AmazonConnectAdapter, ConnectMetrics, ContactTarget, ADAPTER_EVENT_CAP};
+pub use adapter::{
+    AmazonConnectAdapter, AmazonConnectAdapterBuilder, AmazonConnectCleanupObserver,
+    AmazonConnectDrainReport, AmazonConnectTransportHandle, ConnectMetrics,
+    ConnectProfileResolverError, ContactSetupObserver, ContactSetupStage, ContactTarget,
+    RecoveredAmazonConnectContact, RetainedAmazonConnectCleanup, ADAPTER_EVENT_CAP,
+    AMAZON_CONNECT_CONTACT_REFERENCE_KIND,
+};
 pub use config::ConnectConfig;
-pub use control::{ConnectContactStarter, ConnectionData, MediaPlacement, StartContactRequest};
-pub use errors::{ConnectError, Result};
+pub use control::{
+    ConnectContactStarter, ConnectionData, MediaPlacement, StartContactRequest, StopContactRequest,
+};
+pub use errors::{ConnectError, ConnectErrorClass, Result};
 pub use mapping::{AttributeMapping, MappedAttributes, UnmappedPolicy, MAX_ATTRIBUTE_BYTES};
+pub use media::{
+    ChimeWebRtcMediaConnector, ConnectMediaCloseOutcome, ConnectMediaConnectOptions,
+    ConnectMediaConnector, ConnectMediaDtmfEvent, ConnectMediaHealth, ConnectMediaSession,
+    ConnectMediaTerminalCause,
+};
+pub use originate::{
+    AmazonConnectOriginateContext, AmazonConnectOriginateContextError, AmazonConnectTarget,
+    ConnectClientToken, ConnectProfileId, DEFAULT_CONNECT_PROFILE_ID, MAX_CONNECT_ATTRIBUTE_COUNT,
+    MAX_CONNECT_ATTRIBUTE_KEY_BYTES, MAX_CONNECT_CLIENT_TOKEN_BYTES, MAX_CONNECT_DESCRIPTION_BYTES,
+    MAX_CONNECT_DISPLAY_NAME_BYTES, MAX_CONNECT_PROFILE_ID_BYTES, MAX_CONNECT_RESOURCE_ID_BYTES,
+};
 
 #[cfg(feature = "aws-control")]
 pub use control::AwsConnectStarter;
@@ -44,7 +65,8 @@ pub use control::AwsConnectStarter;
 #[cfg(feature = "server")]
 pub use server::{
     request_uri_user, to_uri_user, uri_user_part, ConnectScreenPopServer, ContactRoute,
-    ContactRouter, RouteDecision, RouteMetrics, ScreenPopServerConfig,
+    ContactRouter, RouteDecision, RouteMetrics, ScreenPopLifecycleEvent, ScreenPopLifecycleStage,
+    ScreenPopMediaLeg, ScreenPopServerConfig,
 };
 
 /// Re-export of the SIP UAS config (`rvoip_sip::Config`) so callers can build a

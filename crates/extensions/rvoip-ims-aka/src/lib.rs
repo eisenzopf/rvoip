@@ -6,6 +6,7 @@
 //! provider traits without claiming carrier IMS certification.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -14,7 +15,6 @@ use rvoip_sip::{
     SipAuthChallenge, SipAuthScheme, SipAuthSource,
 };
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 /// AKA algorithm name carried in SIP Digest-family headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,8 +38,11 @@ impl std::fmt::Display for ImsAkaAlgorithm {
     }
 }
 
-/// Non-secret AKA vector fields needed by the SIP auth layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// AKA vector fields needed by the SIP auth layer.
+///
+/// Nonce, expected response, and identity fields are credential-boundary
+/// material and therefore use metadata-only diagnostics.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ImsAkaVector {
     pub username: String,
     pub realm: String,
@@ -51,6 +54,28 @@ pub struct ImsAkaVector {
     pub subject: Option<String>,
     #[serde(default)]
     pub scopes: Vec<String>,
+}
+
+impl fmt::Debug for ImsAkaVector {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImsAkaVector")
+            .field("username_present", &!self.username.is_empty())
+            .field("username_len", &self.username.len())
+            .field("realm_present", &!self.realm.is_empty())
+            .field("realm_len", &self.realm.len())
+            .field("nonce_present", &!self.nonce.is_empty())
+            .field("nonce_len", &self.nonce.len())
+            .field("algorithm", &self.algorithm)
+            .field(
+                "expected_response_present",
+                &!self.expected_response.is_empty(),
+            )
+            .field("expected_response_len", &self.expected_response.len())
+            .field("subject_present", &self.subject.is_some())
+            .field("scope_count", &self.scopes.len())
+            .finish()
+    }
 }
 
 impl ImsAkaVector {
@@ -65,15 +90,30 @@ impl ImsAkaVector {
 }
 
 /// IMS AKA adapter error.
-#[derive(Debug, Error)]
 pub enum ImsAkaError {
-    #[error("AKA configuration error: {0}")]
     Config(String),
-    #[error("AKA validation failed")]
     Invalid,
-    #[error("AKA provider unavailable: {0}")]
     Unavailable(String),
 }
+
+impl fmt::Display for ImsAkaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let class = match self {
+            Self::Config(_) => "configuration",
+            Self::Invalid => "invalid",
+            Self::Unavailable(_) => "provider-unavailable",
+        };
+        write!(formatter, "AKA operation failed (class={class})")
+    }
+}
+
+impl fmt::Debug for ImsAkaError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for ImsAkaError {}
 
 impl From<ImsAkaError> for SessionError {
     fn from(err: ImsAkaError) -> Self {
@@ -82,9 +122,18 @@ impl From<ImsAkaError> for SessionError {
 }
 
 /// Deterministic vector provider for tests and lab fixtures.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StaticAkaProvider {
     vector: Arc<ImsAkaVector>,
+}
+
+impl fmt::Debug for StaticAkaProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("StaticAkaProvider")
+            .field("vector_present", &true)
+            .finish()
+    }
 }
 
 impl StaticAkaProvider {
@@ -185,11 +234,25 @@ impl AkaVectorProvider for StaticAkaProvider {
 /// Provider that validates AKA Authorization headers through an external
 /// HSS/UDM/AUSF broker while issuing a locally configured challenge.
 #[cfg(feature = "http")]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct HttpAkaVectorProvider {
     vector: Arc<ImsAkaVector>,
     validation_endpoint: String,
     client: reqwest::Client,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for HttpAkaVectorProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpAkaVectorProvider")
+            .field("vector_present", &true)
+            .field(
+                "validation_endpoint_present",
+                &!self.validation_endpoint.is_empty(),
+            )
+            .finish()
+    }
 }
 
 #[cfg(feature = "http")]
@@ -258,7 +321,7 @@ impl AkaVectorProvider for HttpAkaVectorProvider {
 }
 
 #[cfg(feature = "http")]
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct HttpAkaValidationRequest {
     authorization: String,
     method: String,
@@ -267,13 +330,40 @@ struct HttpAkaValidationRequest {
 }
 
 #[cfg(feature = "http")]
-#[derive(Debug, Deserialize)]
+impl fmt::Debug for HttpAkaValidationRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpAkaValidationRequest")
+            .field("authorization_present", &!self.authorization.is_empty())
+            .field("authorization_len", &self.authorization.len())
+            .field("method_len", &self.method.len())
+            .field("request_uri_present", &!self.request_uri.is_empty())
+            .field("body_sha256_present", &self.body_sha256.is_some())
+            .finish()
+    }
+}
+
+#[cfg(feature = "http")]
+#[derive(Deserialize)]
 struct HttpAkaValidationResponse {
     valid: bool,
     username: Option<String>,
     subject: Option<String>,
     #[serde(default)]
     scopes: Vec<String>,
+}
+
+#[cfg(feature = "http")]
+impl fmt::Debug for HttpAkaValidationResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("HttpAkaValidationResponse")
+            .field("valid", &self.valid)
+            .field("username_present", &self.username.is_some())
+            .field("subject_present", &self.subject.is_some())
+            .field("scope_count", &self.scopes.len())
+            .finish()
+    }
 }
 
 /// Lab-only Milenage adapter placeholder for deployments that want to plug
@@ -419,5 +509,70 @@ mod tests {
             .await
             .unwrap();
         assert!(rejected.is_none());
+    }
+
+    #[test]
+    fn vector_provider_and_errors_redact_all_credential_material() {
+        const CANARY: &str = "aka-credential-canary\r\nAuthorization: exposed";
+        let vector = ImsAkaVector {
+            username: CANARY.into(),
+            realm: CANARY.into(),
+            nonce: CANARY.into(),
+            algorithm: ImsAkaAlgorithm::AKAv1Md5,
+            expected_response: CANARY.into(),
+            subject: Some(CANARY.into()),
+            scopes: vec![CANARY.into()],
+        };
+        let provider = StaticAkaProvider::new(vector.clone());
+        let errors = [
+            ImsAkaError::Config(CANARY.into()),
+            ImsAkaError::Unavailable(CANARY.into()),
+        ];
+
+        for rendered in [format!("{vector:?}"), format!("{provider:?}")] {
+            assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        }
+        for error in errors {
+            let rendered = format!("{error} {error:?}");
+            assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+            match error {
+                ImsAkaError::Config(value) | ImsAkaError::Unavailable(value) => {
+                    assert_eq!(value, CANARY)
+                }
+                ImsAkaError::Invalid => unreachable!(),
+            }
+        }
+        assert_eq!(provider.vector().nonce, CANARY);
+        let wire = serde_json::to_string(&vector).unwrap();
+        let restored: ImsAkaVector = serde_json::from_str(&wire).unwrap();
+        assert_eq!(restored.expected_response, CANARY);
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn http_aka_request_response_and_provider_debug_are_metadata_only() {
+        const CANARY: &str = "http-aka-credential-canary\r\nAuthorization: exposed";
+        let request = HttpAkaValidationRequest {
+            authorization: CANARY.into(),
+            method: CANARY.into(),
+            request_uri: CANARY.into(),
+            body_sha256: Some(CANARY.into()),
+        };
+        let response = HttpAkaValidationResponse {
+            valid: true,
+            username: Some(CANARY.into()),
+            subject: Some(CANARY.into()),
+            scopes: vec![CANARY.into()],
+        };
+        let provider = HttpAkaVectorProvider::new(vector(), CANARY);
+        for rendered in [
+            format!("{request:?}"),
+            format!("{response:?}"),
+            format!("{provider:?}"),
+        ] {
+            assert!(!rendered.contains(CANARY), "credential leaked: {rendered}");
+        }
+        assert_eq!(request.authorization, CANARY);
+        assert_eq!(response.subject.as_deref(), Some(CANARY));
     }
 }

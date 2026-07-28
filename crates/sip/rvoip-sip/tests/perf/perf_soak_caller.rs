@@ -24,10 +24,89 @@ use support::soak::{
     in_process_resource_sampler_enabled, media_receive_diagnostics, memory_diagnostic_interval,
     memory_diagnostic_summary, perf_config, read_required_u16_env, resource_sampling_diagnostics,
     retention_drain_wait, round2, round4, rss_result_metrics, run_caller_load, DhatProfile,
-    MemoryDiagnosticSampler, RssGrowthGate, SoakCounters, SoakLoadSettings, ALICE_PORT_ENV,
-    BOB_PORT_ENV,
+    MemoryDiagnosticSampler, RssGatePolicy, RssGrowthGate, SoakCounters, SoakLoadSettings,
+    ALICE_PORT_ENV, BOB_PORT_ENV,
 };
 use support::{LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
+
+#[test]
+fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
+    let snapshot = json!({
+        "transaction_manager": {
+            "retired_client_transactions": 2,
+        },
+        "dialog_manager": {
+            "invite_failover_plans": 3,
+            "active_invite_failover_by_dialog": 5,
+            "invite_failover_plans_by_dialog": 17,
+            "invite_failover_attempts": 7,
+            "invite_failover_attempts_by_dialog": 19,
+            "invite_failover_plan_reservations": 11,
+            "invite_failover_attempt_reservations": 13,
+        },
+    });
+
+    assert_eq!(support::soak::endpoint_live_ownership_total(&snapshot), 29);
+    assert_eq!(
+        support::soak::endpoint_bounded_tombstone_total(&snapshot),
+        48
+    );
+    assert_eq!(support::soak::endpoint_retained_total(&snapshot), 77);
+
+    let summary = support::soak::endpoint_summary(&snapshot);
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/live_ownership")
+            .and_then(serde_json::Value::as_u64),
+        Some(29)
+    );
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/bounded_tombstones")
+            .and_then(serde_json::Value::as_u64),
+        Some(48)
+    );
+    assert_eq!(
+        summary
+            .pointer("/retention_totals/retained")
+            .and_then(serde_json::Value::as_u64),
+        Some(77)
+    );
+}
+
+#[test]
+fn retention_drain_horizon_covers_invite_state_ttl_with_margin() {
+    assert!(
+        support::soak::DEFAULT_RETENTION_DRAIN_WAIT_SECS
+            > support::soak::RETAINED_INVITE_STATE_TTL_SECS
+    );
+    assert_eq!(
+        support::soak::retention_drain_wait_for_configured(Some(1)),
+        Duration::from_secs(support::soak::MIN_RETENTION_DRAIN_WAIT_SECS as u64)
+    );
+    assert_eq!(
+        support::soak::retention_drain_wait_for_configured(Some(120)),
+        Duration::from_secs(120)
+    );
+    assert_eq!(
+        support::soak::burst_retention_drain_wait_for_configured(Some(130)),
+        Duration::from_secs(
+            support::soak::MIN_BURST_RETENTION_DRAIN_WAIT_SECS
+                .try_into()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        support::soak::burst_retention_drain_wait_for_configured(Some(200)),
+        Duration::from_secs(200)
+    );
+    assert_eq!(
+        support::soak::MIN_BURST_RETENTION_DRAIN_WAIT_SECS,
+        support::soak::MIN_RETENTION_DRAIN_WAIT_SECS
+            + support::soak::BURST_RSS_DIAGNOSTIC_SETTLE_SECS
+            + support::soak::BURST_RSS_QUIET_TAIL_SECS
+    );
+}
 
 #[ignore]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -67,7 +146,7 @@ async fn perf_soak_caller() {
     let retention_sampler = support::soak::EndpointRetentionSampler::start(
         "caller",
         Arc::clone(&caller),
-        Duration::from_secs(5),
+        support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
     );
     let memory_sampler =
         MemoryDiagnosticSampler::start("caller", &settings, memory_diagnostic_interval());
@@ -99,10 +178,17 @@ async fn perf_soak_caller() {
         Some(sampler) => sampler.stop().await,
         None => ResourceSummary::empty(),
     };
+    let rss_gate_policy = if settings.duration_secs >= 600 {
+        RssGatePolicy::ActiveTail600
+    } else {
+        RssGatePolicy::PostDrainOrTail
+    };
     let rss = rss_result_metrics(
         &resources,
         settings.duration_secs as f64,
+        settings.duration_secs as f64,
         retention_drain_wait.as_secs_f64(),
+        rss_gate_policy,
     );
     resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();
@@ -178,6 +264,39 @@ async fn perf_soak_caller() {
         .result(
             "rss_sustained_growth_mb_per_hr",
             round2(rss.sustained_growth_mb_per_hr),
+        )
+        .result(
+            "rss_active_tail_growth_mb_per_hr",
+            round2(rss.active_tail_growth_mb_per_hr),
+        )
+        .result(
+            "rss_active_tail_sample_count",
+            rss.active_tail_sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_window_secs",
+            round2(rss.active_tail_window_secs),
+        )
+        .result(
+            "rss_active_tail_window_complete",
+            rss.active_tail_window_complete,
+        )
+        .result("rss_active_tail_estimator", rss.active_tail_estimator)
+        .result(
+            "rss_active_tail_endpoint_band_secs",
+            round2(rss.active_tail_endpoint_band_secs),
+        )
+        .result(
+            "rss_active_tail_endpoint_separation_secs",
+            round2(rss.active_tail_endpoint_separation_secs),
+        )
+        .result(
+            "rss_active_tail_start_sample_count",
+            rss.active_tail_start_sample_count as u64,
+        )
+        .result(
+            "rss_active_tail_end_sample_count",
+            rss.active_tail_end_sample_count as u64,
         )
         .result(
             "rss_post_drain_growth_mb_per_hr",
@@ -260,6 +379,12 @@ async fn perf_soak_caller() {
     drop(caller);
 
     let mut gate_failures = Vec::new();
+    if settings.duration_secs >= 600 && !rss.active_tail_window_complete {
+        gate_failures.push(format!(
+            "caller active RSS gate window incomplete: measured {:.2}s with {} samples; required 600s",
+            rss.active_tail_window_secs, rss.active_tail_sample_count
+        ));
+    }
     if rss.gate_growth_mb_per_hr > rss_gate.effective_mb_per_hr {
         gate_failures.push(format!(
             "caller RSS gate growth {:.2} MB/hr over {} window exceeded effective threshold {:.2} MB/hr ({})",

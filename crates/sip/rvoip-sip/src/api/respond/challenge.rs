@@ -13,6 +13,7 @@ use crate::api::handle::CallId;
 use crate::api::headers::{take_staged, BuilderHeaderState, SipRequestOptions};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::session_registry::SessionRegistryHandle;
 
 /// Authentication scheme for a 401/407 challenge.
 #[non_exhaustive]
@@ -34,6 +35,7 @@ pub enum AuthScheme {
 pub struct AuthChallengeBuilder {
     coord: Arc<UnifiedCoordinator>,
     call_id: CallId,
+    lifecycle_handle: Option<SessionRegistryHandle>,
     method: Method,
     scheme: AuthScheme,
     realm: Option<String>,
@@ -57,9 +59,31 @@ impl AuthChallengeBuilder {
         method: Method,
         scheme: AuthScheme,
     ) -> Self {
+        let lifecycle_handle = coord.helpers.state_machine.store.lifecycle_handle(&call_id);
+        Self::new_captured(coord, call_id, method, scheme, lifecycle_handle)
+    }
+
+    pub(crate) fn new_exact(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        method: Method,
+        scheme: AuthScheme,
+        lifecycle_handle: SessionRegistryHandle,
+    ) -> Self {
+        Self::new_captured(coord, call_id, method, scheme, Some(lifecycle_handle))
+    }
+
+    pub(crate) fn new_captured(
+        coord: Arc<UnifiedCoordinator>,
+        call_id: CallId,
+        method: Method,
+        scheme: AuthScheme,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
         Self {
             coord,
             call_id,
+            lifecycle_handle,
             method,
             scheme,
             realm: None,
@@ -336,31 +360,24 @@ impl AuthChallengeBuilder {
         let mut extras = take_staged(&mut self.state);
         extras.push(challenge_header);
         let status = if self.proxy { 407 } else { 401 };
-
-        // SIP_API_DESIGN_2 §3.4 — stash extras on the session so
-        // `Action::SendRejectResponse` consumes them on its single
-        // wire dispatch (avoiding a duplicate response that would
-        // overwrite the auth header on the wire). The state machine
-        // owns the teardown bookkeeping; we only have to set up the
-        // headers before triggering it.
-        let mut session = self
-            .coord
-            .session_state(&self.call_id)
-            .await
-            .map_err(|_| SessionError::SessionNotFound(self.call_id.to_string()))?;
-        session.reject_response_extras = Some(extras);
-        self.coord.update_session_state(session).await?;
+        let lifecycle_handle = self.lifecycle_handle.as_ref().ok_or_else(|| {
+            SessionError::SessionNotFound(format!(
+                "Inbound request {} has no exact lifecycle authority",
+                self.call_id
+            ))
+        })?;
 
         self.coord
             .helpers
-            .reject_call(
-                &self.call_id,
+            .reject_call_with_extras_exact(
+                lifecycle_handle,
                 status,
                 if self.proxy {
                     "Proxy Authentication Required"
                 } else {
                     "Unauthorized"
                 },
+                extras,
             )
             .await
     }

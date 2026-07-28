@@ -83,6 +83,8 @@ pub mod network;
 pub mod rtcp;
 pub mod security;
 pub mod sync;
+#[doc(hidden)]
+pub mod task_runtime;
 
 /// The default maximum size for RTP packets in bytes
 pub const DEFAULT_MAX_PACKET_SIZE: usize = 1500;

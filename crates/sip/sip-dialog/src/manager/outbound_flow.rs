@@ -19,6 +19,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
+use rvoip_sip_transport::{TransportFlowId, TransportRoute};
 use tokio::sync::RwLock;
 
 /// Transport-side events relevant to outbound-flow liveness that the
@@ -34,11 +35,15 @@ pub enum FlowTransportEvent {
     PongReceived {
         /// Remote address that sent the pong.
         source: SocketAddr,
+        /// Exact flow that carried the pong.
+        flow_id: Option<TransportFlowId>,
     },
     /// Connection-oriented transport lost its connection to `remote_addr`.
     ConnectionClosed {
         /// Remote address whose connection was lost.
         remote_addr: SocketAddr,
+        /// Exact flow that closed.
+        flow_id: Option<TransportFlowId>,
     },
 }
 
@@ -68,6 +73,7 @@ pub(crate) enum FlowState {
 pub(crate) struct OutboundFlow {
     pub(crate) key: (String, u32, String),
     pub(crate) destination: SocketAddr,
+    pub(crate) route: TransportRoute,
     pub(crate) interval: Duration,
     pub(crate) pong_timeout: Duration,
 
@@ -82,15 +88,25 @@ pub(crate) struct OutboundFlow {
 const MIN_PONG_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl OutboundFlow {
+    #[cfg(test)]
     pub(crate) fn new(
         key: (String, u32, String),
         destination: SocketAddr,
         interval: Duration,
     ) -> Self {
+        Self::new_with_route(key, TransportRoute::new(destination), interval)
+    }
+
+    pub(crate) fn new_with_route(
+        key: (String, u32, String),
+        route: TransportRoute,
+        interval: Duration,
+    ) -> Self {
         let pong_timeout = std::cmp::max(interval.saturating_mul(2), MIN_PONG_TIMEOUT);
         Self {
             key,
-            destination,
+            destination: route.destination,
+            route,
             interval,
             pong_timeout,
             state: RwLock::new(FlowState::Idle),
