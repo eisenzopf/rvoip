@@ -119,17 +119,22 @@ impl MediaCodec {
     }
 
     /// Check if this is an audio codec
+    ///
+    /// RTP/SDP encoding names are case-insensitive (RFC 4855: "these names
+    /// are case-insensitive"), so `self.name` — which carries whatever case
+    /// the peer sent in `a=rtpmap` verbatim — is normalized before matching.
     pub fn is_audio(&self) -> bool {
         matches!(
-            self.name.as_str(),
-            "PCMU" | "PCMA" | "G722" | "G729" | "opus" | "AMR" | "AMR-WB"
+            self.name.to_ascii_uppercase().as_str(),
+            "PCMU" | "PCMA" | "G722" | "G729" | "OPUS" | "AMR" | "AMR-WB"
         )
     }
 
-    /// Check if this is a video codec
+    /// Check if this is a video codec. See [`Self::is_audio`] for why the
+    /// name is normalized before matching.
     pub fn is_video(&self) -> bool {
         matches!(
-            self.name.as_str(),
+            self.name.to_ascii_uppercase().as_str(),
             "H264" | "H.264" | "H265" | "H.265" | "VP8" | "VP9" | "AV1"
         )
     }
@@ -188,5 +193,38 @@ impl MediaStreamConfig {
     pub fn with_preferred_codec(mut self, codec: String) -> Self {
         self.preferred_codec = Some(codec);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // RFC 4855: RTP/SDP encoding names are case-insensitive. Real peers
+    // (e.g. Zoiper) send "OPUS" uppercase in `a=rtpmap`, which `MediaCodec`
+    // carries verbatim as `name` — `is_audio`/`is_video` must not silently
+    // reject it just because it doesn't match a hardcoded case.
+    #[test]
+    fn is_audio_is_case_insensitive() {
+        for name in ["opus", "OPUS", "Opus", "oPuS"] {
+            let codec = MediaCodec::new(name.to_string(), 111, 48000);
+            assert!(codec.is_audio(), "{name} should be recognized as audio");
+        }
+        for name in ["pcmu", "PCMU", "g722", "G722"] {
+            let codec = MediaCodec::new(name.to_string(), 0, 8000);
+            assert!(codec.is_audio(), "{name} should be recognized as audio");
+        }
+        let codec = MediaCodec::new("not-a-codec".to_string(), 99, 8000);
+        assert!(!codec.is_audio());
+    }
+
+    #[test]
+    fn is_video_is_case_insensitive() {
+        for name in ["vp8", "VP8", "h264", "H264", "h.264", "H.264"] {
+            let codec = MediaCodec::new(name.to_string(), 96, 90000);
+            assert!(codec.is_video(), "{name} should be recognized as video");
+        }
+        let codec = MediaCodec::new("opus".to_string(), 111, 48000);
+        assert!(!codec.is_video());
     }
 }
