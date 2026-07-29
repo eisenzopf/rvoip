@@ -3192,7 +3192,13 @@ mod tests {
         assert_eq!(downsampled[2].wrapping_sub(downsampled[1]), 160);
     }
 
+    // Requires the `opus` feature: this exercises a real Opus sink inside
+    // the graph actor and blocks on `recv().await` for the transcoded
+    // frame, so without real encode/decode available it hangs rather than
+    // failing cleanly (the actor drops the frame on a codec error and never
+    // sends anything).
     #[tokio::test]
+    #[cfg(feature = "opus")]
     async fn each_codec_group_uses_its_own_rtp_clock() {
         let (source_tx, source_rx) = mpsc::channel(4);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -3223,7 +3229,10 @@ mod tests {
         graph.shutdown();
     }
 
+    // Requires the `opus` feature; see the comment on
+    // `each_codec_group_uses_its_own_rtp_clock` above.
     #[tokio::test]
+    #[cfg(feature = "opus")]
     async fn sink_rekey_preserves_timestamp_epoch_across_8k_and_48k_targets() {
         let (source_tx, source_rx) = mpsc::channel(8);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -3267,7 +3276,10 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
+    // Requires the `opus` feature; see the comment on
+    // `each_codec_group_uses_its_own_rtp_clock` above.
     #[tokio::test]
+    #[cfg(feature = "opus")]
     async fn source_reconfiguration_preserves_target_clock_across_8k_48k_8k() {
         let (source_tx, source_rx) = mpsc::channel(8);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
@@ -3376,7 +3388,13 @@ mod tests {
         }
     }
 
+    // Exercises real Opus encode/decode, not just codec construction (see
+    // `configured_transcoder_honors_canonical_opus_mono` above for the
+    // feature-independent construction/config check). Requires the `opus`
+    // feature — real libopus, off by default so signaling-only consumers
+    // aren't forced to link it.
     #[test]
+    #[cfg(feature = "opus")]
     fn configured_transcoder_preserves_pcm_wideband_path_through_opus() {
         let pcm = codec("pcm_s16le", 16_000);
         let opus = codec("opus", 48_000);

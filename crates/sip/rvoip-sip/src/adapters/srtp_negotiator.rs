@@ -261,9 +261,14 @@ mod tests {
     fn process_offer_errors_when_no_crypto_suites_are_available() {
         let answerer = SrtpNegotiator::new_answerer();
         let result = answerer.process_offer(&[]);
-        assert!(
-            matches!(&result, Err(e) if format!("{:?}", e).contains("no offered a=crypto attribute"))
-        );
+        // `SessionError`'s Display/Debug deliberately redact string content
+        // (see `TextDiagnostic` in errors.rs) so peer-supplied SDP text
+        // never leaks into logs. Match the variant and inspect the wrapped
+        // message directly instead of formatting the error.
+        let Err(SessionError::SDPNegotiationFailed(message)) = &result else {
+            panic!("expected Err(SDPNegotiationFailed(_))");
+        };
+        assert!(message.contains("no offered a=crypto attribute"));
     }
 
     #[test]
@@ -333,7 +338,12 @@ mod tests {
         attr.key_lifetime = Some("2^20".to_string());
         let answerer = SrtpNegotiator::new_answerer();
         let result = answerer.process_offer(&[attr]);
-        assert!(matches!(&result, Err(e) if format!("{:?}", e).contains("lifetime")));
+        // See the comment in `process_offer_errors_when_no_crypto_suites_are_available`
+        // on why this matches the variant instead of formatting the error.
+        let Err(SessionError::SDPNegotiationFailed(message)) = &result else {
+            panic!("expected Err(SDPNegotiationFailed(_))");
+        };
+        assert!(message.contains("lifetime"));
     }
 
     #[test]
@@ -346,6 +356,11 @@ mod tests {
         attr.session_params = vec!["UNENCRYPTED_SRTP".to_string()];
         let answerer = SrtpNegotiator::new_answerer();
         let result = answerer.process_offer(&[attr]);
-        assert!(matches!(&result, Err(e) if format!("{:?}", e).contains("session parameters")));
+        // See the comment in `process_offer_errors_when_no_crypto_suites_are_available`
+        // on why this matches the variant instead of formatting the error.
+        let Err(SessionError::SDPNegotiationFailed(message)) = &result else {
+            panic!("expected Err(SDPNegotiationFailed(_))");
+        };
+        assert!(message.contains("session parameters"));
     }
 }

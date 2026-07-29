@@ -6,9 +6,11 @@
 //!
 //! Two mutually-exclusive-in-intent backends live behind separate features:
 //!
-//! - `opus`: real encode/decode via [`opus-rs`](https://docs.rs/opus-rs), a
-//!   pure-Rust Opus implementation (no C toolchain needed at build time).
-//!   This is what you want for actual audio.
+//! - `opus`: real encode/decode via the [`opus`](https://docs.rs/opus) crate
+//!   (SpaceManiac/opus-rs), which binds the native libopus C library via
+//!   `audiopus_sys`. Requires libopus (and a C toolchain) to build/link.
+//!   This is what you want for actual audio — it's the same reference
+//!   codebase every other libopus-based SIP/WebRTC stack uses.
 //! - `opus-sim`: a deterministic stub that produces plausible-shaped output
 //!   (right size, varies with bitrate) without doing any real DSP. Useful
 //!   for fast, deterministic pipeline tests that don't care about audio
@@ -28,7 +30,7 @@ pub struct OpusCodec {
     sample_rate: u32,
     /// Number of channels (1 or 2)
     channels: u8,
-    /// Frame size in samples *per channel* (matches opus-rs's own
+    /// Frame size in samples *per channel* (matches libopus's own
     /// `frame_size` convention). `AudioCodec::encode`/`decode`'s `samples`
     /// buffers are the interleaved total, `frame_size * channels` long.
     frame_size: usize,
@@ -38,21 +40,92 @@ pub struct OpusCodec {
     real: RealBackend,
 }
 
-/// The actual opus-rs encoder/decoder pair, kept behind the `opus` feature
-/// so building without it doesn't need opus-rs at all.
+/// The actual libopus encoder/decoder pair, kept behind the `opus` feature
+/// so building without it doesn't need libopus at all.
 #[cfg(feature = "opus")]
 struct RealBackend {
-    encoder: opus_rs::OpusEncoder,
-    decoder: opus_rs::OpusDecoder,
+    encoder: opus::Encoder,
+    decoder: opus::Decoder,
+}
+
+// SAFETY: `opus::Encoder`/`Decoder` wrap a raw libopus state pointer that
+// libopus itself only allows exclusive (single-thread-at-a-time) access to
+// ("a single codec state may only be accessed from a single thread at a
+// time and any required locking must be performed by the caller" - opus
+// crate docs). That's fine here: every `OpusCodec`/`RealBackend` method
+// that touches `encoder`/`decoder` takes `&mut self` (encode, decode,
+// reset, set_bitrate, set_complexity); no `&self` method ever reads these
+// fields, so concurrent shared (`&RealBackend`) access can never race on
+// the underlying C state. `Sync` is required transitively because
+// `AudioCodec: Send + Sync`.
+#[cfg(feature = "opus")]
+unsafe impl Sync for RealBackend {}
+
+#[cfg(feature = "opus")]
+fn to_opus_application(application: OpusApplication) -> opus::Application {
+    match application {
+        OpusApplication::Voip => opus::Application::Voip,
+        OpusApplication::Audio => opus::Application::Audio,
+        OpusApplication::RestrictedLowDelay => opus::Application::LowDelay,
+    }
+}
+
+/// Maps a validated channel count (1 or 2 — `OpusCodec::new` rejects
+/// anything else before this is ever called) to the crate's `Channels` enum.
+#[cfg(feature = "opus")]
+fn to_opus_channels(channels: u8) -> opus::Channels {
+    if channels == 1 {
+        opus::Channels::Mono
+    } else {
+        opus::Channels::Stereo
+    }
 }
 
 #[cfg(feature = "opus")]
-fn to_opus_rs_application(application: OpusApplication) -> opus_rs::Application {
-    match application {
-        OpusApplication::Voip => opus_rs::Application::Voip,
-        OpusApplication::Audio => opus_rs::Application::Audio,
-        OpusApplication::RestrictedLowDelay => opus_rs::Application::RestrictedLowDelay,
-    }
+fn apply_encoder_config(encoder: &mut opus::Encoder, config: &OpusConfig) -> Result<()> {
+    encoder
+        .set_bitrate(opus::Bitrate::Bits(config.bitrate as i32))
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_bitrate: {e}"),
+        })?;
+    encoder
+        .set_vbr(config.vbr)
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_vbr: {e}"),
+        })?;
+    encoder
+        .set_vbr_constraint(config.cvbr)
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_vbr_constraint: {e}"),
+        })?;
+    encoder
+        .set_complexity(i32::from(config.complexity))
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_complexity: {e}"),
+        })?;
+    encoder
+        .set_inband_fec(config.inband_fec)
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_inband_fec: {e}"),
+        })?;
+    encoder
+        .set_packet_loss_perc(i32::from(config.packet_loss_perc))
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_packet_loss_perc: {e}"),
+        })?;
+    encoder
+        .set_dtx(config.dtx)
+        .map_err(|e| CodecError::ExternalLibraryError {
+            library: "opus".to_string(),
+            error: format!("set_dtx: {e}"),
+        })?;
+    Ok(())
 }
 
 /// Opus codec configuration
@@ -145,26 +218,25 @@ impl OpusCodec {
 
         #[cfg(feature = "opus")]
         let real = {
-            let mut encoder = opus_rs::OpusEncoder::new(
-                sample_rate as i32,
-                config.channels as usize,
-                to_opus_rs_application(opus_config.application),
+            let opus_channels = to_opus_channels(config.channels);
+            let mut encoder = opus::Encoder::new(
+                sample_rate,
+                opus_channels,
+                to_opus_application(opus_config.application),
             )
             .map_err(|e| CodecError::ExternalLibraryError {
-                library: "opus-rs".to_string(),
+                library: "opus".to_string(),
                 error: format!("encoder init: {e}"),
             })?;
-            encoder.bitrate_bps = opus_config.bitrate as i32;
-            encoder.use_cbr = !opus_config.vbr;
-            encoder.complexity = i32::from(opus_config.complexity);
-            encoder.use_inband_fec = opus_config.inband_fec;
-            encoder.packet_loss_perc = i32::from(opus_config.packet_loss_perc);
+            apply_encoder_config(&mut encoder, &opus_config)?;
 
-            let decoder = opus_rs::OpusDecoder::new(sample_rate as i32, config.channels as usize)
-                .map_err(|e| CodecError::ExternalLibraryError {
-                library: "opus-rs".to_string(),
-                error: format!("decoder init: {e}"),
-            })?;
+            let decoder =
+                opus::Decoder::new(sample_rate, opus_channels).map_err(|e| {
+                    CodecError::ExternalLibraryError {
+                        library: "opus".to_string(),
+                        error: format!("decoder init: {e}"),
+                    }
+                })?;
 
             RealBackend { encoder, decoder }
         };
@@ -200,7 +272,13 @@ impl OpusCodec {
         self.config.bitrate = bitrate;
         #[cfg(feature = "opus")]
         {
-            self.real.encoder.bitrate_bps = bitrate as i32;
+            self.real
+                .encoder
+                .set_bitrate(opus::Bitrate::Bits(bitrate as i32))
+                .map_err(|e| CodecError::ExternalLibraryError {
+                    library: "opus".to_string(),
+                    error: format!("set_bitrate: {e}"),
+                })?;
         }
         debug!("Opus bitrate set to {} bps", bitrate);
         Ok(())
@@ -215,26 +293,28 @@ impl OpusCodec {
         self.config.complexity = complexity;
         #[cfg(feature = "opus")]
         {
-            self.real.encoder.complexity = i32::from(complexity);
+            self.real
+                .encoder
+                .set_complexity(i32::from(complexity))
+                .map_err(|e| CodecError::ExternalLibraryError {
+                    library: "opus".to_string(),
+                    error: format!("set_complexity: {e}"),
+                })?;
         }
         debug!("Opus complexity set to {}", complexity);
         Ok(())
     }
 
-    /// Real Opus encoding via opus-rs.
+    /// Real Opus encoding via libopus.
     #[cfg(feature = "opus")]
     fn real_encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
-        // i16 -> f32 in [-1.0, 1.0), the standard PCM float convention
-        // opus-rs (and libopus) expect.
-        let input: Vec<f32> = samples.iter().map(|&s| f32::from(s) / 32768.0).collect();
-
         // 1275 bytes is the largest a single Opus packet can ever be
         // (RFC 6716 §3.2.1).
         let mut output = vec![0u8; 1275];
         let written = self
             .real
             .encoder
-            .encode(&input, self.frame_size, &mut output)
+            .encode(samples, &mut output)
             .map_err(|e| CodecError::EncodingFailed {
                 reason: e.to_string(),
             })?;
@@ -242,25 +322,19 @@ impl OpusCodec {
         Ok(output)
     }
 
-    /// Real Opus decoding via opus-rs.
+    /// Real Opus decoding via libopus.
     #[cfg(feature = "opus")]
     fn real_decode(&mut self, data: &[u8]) -> Result<Vec<i16>> {
-        let mut output = vec![0.0f32; self.frame_size * self.channels as usize];
+        let mut output = vec![0i16; self.frame_size * self.channels as usize];
         let per_channel_written = self
             .real
             .decoder
-            .decode(data, self.frame_size, &mut output)
+            .decode(data, &mut output, false)
             .map_err(|e| CodecError::DecodingFailed {
                 reason: e.to_string(),
             })?;
         output.truncate(per_channel_written * self.channels as usize);
-
-        // f32 [-1.0, 1.0) -> i16, clamped so an over-range decode (e.g. a
-        // slightly hot input) saturates instead of wrapping.
-        Ok(output
-            .iter()
-            .map(|&f| (f * 32768.0).clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16)
-            .collect())
+        Ok(output)
     }
 
     /// Deterministic Opus stub (see the module docs for when this runs
@@ -298,7 +372,7 @@ impl OpusCodec {
         Ok(samples)
     }
 
-    /// Encode via whichever backend is compiled in: real opus-rs when the
+    /// Encode via whichever backend is compiled in: real libopus when the
     /// `opus` feature is enabled, the deterministic stub otherwise.
     fn backend_encode(&mut self, samples: &[i16]) -> Result<Vec<u8>> {
         #[cfg(feature = "opus")]
@@ -377,25 +451,26 @@ impl AudioCodec for OpusCodec {
         // mirrors what `new()` does from `self.config`.
         #[cfg(feature = "opus")]
         {
-            let mut encoder = opus_rs::OpusEncoder::new(
-                self.sample_rate as i32,
-                self.channels as usize,
-                to_opus_rs_application(self.config.application),
+            let opus_channels = to_opus_channels(self.channels);
+            let mut encoder = opus::Encoder::new(
+                self.sample_rate,
+                opus_channels,
+                to_opus_application(self.config.application),
             )
             .map_err(|e| CodecError::ResetFailed {
                 reason: format!("encoder re-init: {e}"),
             })?;
-            encoder.bitrate_bps = self.config.bitrate as i32;
-            encoder.use_cbr = !self.config.vbr;
-            encoder.complexity = i32::from(self.config.complexity);
-            encoder.use_inband_fec = self.config.inband_fec;
-            encoder.packet_loss_perc = i32::from(self.config.packet_loss_perc);
+            apply_encoder_config(&mut encoder, &self.config).map_err(|e| {
+                CodecError::ResetFailed {
+                    reason: format!("encoder reconfigure: {e}"),
+                }
+            })?;
 
-            let decoder =
-                opus_rs::OpusDecoder::new(self.sample_rate as i32, self.channels as usize)
-                    .map_err(|e| CodecError::ResetFailed {
-                        reason: format!("decoder re-init: {e}"),
-                    })?;
+            let decoder = opus::Decoder::new(self.sample_rate, opus_channels).map_err(|e| {
+                CodecError::ResetFailed {
+                    reason: format!("decoder re-init: {e}"),
+                }
+            })?;
 
             self.real = RealBackend { encoder, decoder };
         }
@@ -555,7 +630,7 @@ mod tests {
         assert!(codec.set_complexity(11).is_err());
     }
 
-    // These specifically exercise the real opus-rs backend. Opus's SILK
+    // These specifically exercise the real libopus backend. Opus's SILK
     // layer is adaptive/predictive, not a fixed-delay linear filter like
     // G.722's QMF, so a naive "find the best constant sample lag, then
     // measure SNR" approach (which worked well for G.722) doesn't converge
@@ -675,8 +750,11 @@ mod tests {
             codec.set_bitrate(96_000).unwrap();
             codec.set_complexity(3).unwrap();
 
-            assert_eq!(codec.real.encoder.bitrate_bps, 96_000);
-            assert_eq!(codec.real.encoder.complexity, 3);
+            assert_eq!(
+                codec.real.encoder.get_bitrate().unwrap(),
+                opus::Bitrate::Bits(96_000)
+            );
+            assert_eq!(codec.real.encoder.get_complexity().unwrap(), 3);
         }
     }
 }

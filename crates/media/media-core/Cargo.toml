@@ -76,7 +76,6 @@ apodize = "1.0"              # Used in VAD v2 for windowing functions
 biquad = "0.4"               # Used in AGC v2 for digital filters
 
 # Media codecs (optional)
-opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
 
 # WAV file support
@@ -98,7 +97,9 @@ dtls-srtp = ["rvoip-rtp-core/dtls-webrtc"]
 ice = ["rvoip-rtp-core/ice", "dep:rvoip-nat-core"]
 perf-diagnostics = []
 g729 = ["rvoip-codec-core/g729"]
-opus = ["dep:opus"]
+# Real Opus encode/decode, forwarded from rvoip-codec-core (the sole crate
+# that implements it - see crates/media/codec-core/src/codecs/opus.rs).
+opus = ["rvoip-codec-core/opus"]
 all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
 
 [dev-dependencies]

@@ -34,9 +34,9 @@ tracing-subscriber = "0.3"   # Logging initialization
 # submodule is used; `ezk`/`ezk-audio`/`ezk-rtp` come along as
 # transitive deps of the ezk-g722 crate itself but aren't referenced.
 ezk-g722 = { version = "0.1.1", optional = true }
-# Opus codec (behind the `opus` feature). Pure Rust, no C toolchain
-# needed at build time.
-opus-rs = { version = "0.1.23", optional = true }
+# Opus codec (behind the `opus` feature). Binds native libopus via
+# audiopus_sys - requires libopus (and a C toolchain) to build/link.
+opus = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -54,5 +54,5 @@ default = ["g711"]
 g711 = []                    # G.711 μ-law/A-law codec (always available)
 g722 = ["dep:ezk-g722"]      # G.722 wideband ADPCM codec
 g729 = []                    # G.729A/G.729AB codec
-opus = ["dep:opus-rs"]       # Opus codec, real encode/decode via opus-rs
+opus = ["dep:opus"]          # Opus codec, real encode/decode via libopus
 opus-sim = []                # Deterministic Opus stub for fast tests, no real DSP

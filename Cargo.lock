@@ -5186,12 +5186,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "opus-rs"
-version = "0.1.23"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cc978697f3ada0ad98b323b9d85e85c6b08d478830148636c19b6d5f2ac9b85"
-
-[[package]]
 name = "ordered-float"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7064,7 +7058,7 @@ version = "0.3.2"
 dependencies = [
  "criterion",
  "ezk-g722",
- "opus-rs",
+ "opus",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -7229,7 +7223,6 @@ dependencies = [
  "num-complex",
  "num_cpus",
  "once_cell",
- "opus",
  "parking_lot",
  "rand 0.8.7",
  "rustfft",
