@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import pathlib
 import re
+import stat
+import subprocess
 import tomllib
 import unittest
 
@@ -13,6 +15,8 @@ SCRIPT_DIR = pathlib.Path(__file__).resolve().parent
 CRATE_DIR = SCRIPT_DIR.parent
 WORKSPACE_ROOT = CRATE_DIR.parents[2]
 BETA_GATE = (SCRIPT_DIR / "beta_gate.sh").read_text(encoding="utf-8")
+FULL_BETA_RELEASE_PATH = SCRIPT_DIR / "full_beta_release.sh"
+FULL_BETA_RELEASE = FULL_BETA_RELEASE_PATH.read_text(encoding="utf-8")
 
 
 def shell_function(name: str) -> str:
@@ -27,6 +31,91 @@ def shell_function(name: str) -> str:
 
 
 class BetaGateCompatibilitySourceTests(unittest.TestCase):
+    def test_full_beta_release_wrapper_is_fail_closed_and_literal_all(self) -> None:
+        self.assertIn(
+            'DOCKER_BIN="$HOMEBREW_PREFIX/opt/docker/bin/docker"',
+            FULL_BETA_RELEASE,
+        )
+        self.assertIn(
+            'DOCKER_COMPOSE_BIN="$HOMEBREW_PREFIX/opt/docker-compose/bin/docker-compose"',
+            FULL_BETA_RELEASE,
+        )
+        self.assertNotIn("Docker.app", FULL_BETA_RELEASE)
+        self.assertNotIn("require_clean_peer", FULL_BETA_RELEASE)
+        self.assertNotIn('"/.git"', FULL_BETA_RELEASE)
+        self.assertIn("--network-address", FULL_BETA_RELEASE)
+        self.assertIn('"$DOCKER_BIN" context use colima', FULL_BETA_RELEASE)
+        self.assertIn("--activate=false", FULL_BETA_RELEASE)
+        self.assertLess(
+            FULL_BETA_RELEASE.index(
+                'ORIGINAL_DOCKER_CONTEXT="$("$DOCKER_BIN" context show'
+            ),
+            FULL_BETA_RELEASE.index('if ! colima_profile_is_release_ready; then'),
+        )
+        self.assertIn("env -i", FULL_BETA_RELEASE)
+        self.assertIn("BETA_*|RVOIP_*|PBX_*", FULL_BETA_RELEASE)
+        self.assertIn("COLIMA_*|LIMA_*|XDG_CONFIG_HOME", FULL_BETA_RELEASE)
+        self.assertIn("for pass in 1 2 3; do", FULL_BETA_RELEASE)
+        self.assertIn(
+            'prefix = "[perf-2k] mode=clean status=0 artifacts="',
+            FULL_BETA_RELEASE,
+        )
+        self.assertIn("helper.validate_run(path, fingerprint)", FULL_BETA_RELEASE)
+        self.assertIn("require_clean_source", FULL_BETA_RELEASE)
+
+        required_configuration = (
+            "RVOIP_REQUIRE_API_TOOLS=1",
+            "BETA_REPORT_PACKAGE=1",
+            "BETA_REQUIRE_CLEAN_SOURCE=1",
+            "BETA_REQUIRE_CANONICAL_2K_EVIDENCE=1",
+            "BETA_RUN_LOCAL_PBX=1",
+            "BETA_PBX_PROVIDER=both",
+            "BETA_PBX_API=all",
+            "BETA_PBX_SCENARIO=all",
+            "BETA_RUN_SIPP=1",
+            "BETA_RUN_STRICT_UA=1",
+            "BETA_RUN_FUZZ_SMOKE=1",
+            "BETA_RUN_PERF_ALL=1",
+            "BETA_PERF_REGRESSION_FAIL=1",
+            "BETA_RUN_BURST_MATRIX=1",
+            "BETA_BURST_MATRIX=all",
+            "BETA_RUN_LONG_SOAK=1",
+            "RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0",
+        )
+        for value in required_configuration:
+            self.assertIn(value, FULL_BETA_RELEASE)
+        self.assertIn('"$BETA_GATE" --full --require-external', FULL_BETA_RELEASE)
+
+    def test_full_beta_release_wrapper_is_executable_and_documented(self) -> None:
+        self.assertNotEqual(
+            FULL_BETA_RELEASE_PATH.stat().st_mode & stat.S_IXUSR,
+            0,
+            "full beta wrapper must remain executable",
+        )
+        subprocess.run(
+            ["bash", "-n", str(FULL_BETA_RELEASE_PATH)],
+            check=True,
+            cwd=WORKSPACE_ROOT,
+        )
+        help_result = subprocess.run(
+            [str(FULL_BETA_RELEASE_PATH), "--help"],
+            check=True,
+            cwd=WORKSPACE_ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertIn("Usage: full_beta_release.sh", help_result.stdout)
+        for document in (
+            CRATE_DIR / "README.md",
+            CRATE_DIR / "docs/BETA_RELEASE_CHECKLIST.md",
+        ):
+            self.assertIn(
+                "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
+                document.read_text(encoding="utf-8"),
+                f"{document.name} must expose the one-command beta release",
+            )
+
     def test_selected_state_table_evidence_is_explicit_and_fail_closed(self) -> None:
         self.assertIn(
             'BETA_STATE_TABLE_SOURCE="${BETA_STATE_TABLE_SOURCE:-embedded-default}"',

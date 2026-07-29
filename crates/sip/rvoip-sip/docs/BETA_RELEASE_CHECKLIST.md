@@ -62,11 +62,34 @@ conditions. The beta profile additionally fixes these release-critical values:
 Changing a threshold or workload requires a reviewed policy change before the
 run. Reporting may not reinterpret or silently relax recorded policy.
 
-## Reference full invocation
+## One-command full local invocation
 
-After three successful `perf_call_setup_2k_profile.sh clean` runs, export their
-absolute directories in chronological order and a host address reachable by
-the strict-UA environment. The release invocation is:
+Commit all intended release changes so the rvoip tree is clean, then run from
+the rvoip workspace root:
+
+```sh
+crates/sip/rvoip-sip/scripts/full_beta_release.sh
+```
+
+The wrapper uses the exact Homebrew Docker/Compose paths, starts or repairs the
+default Colima profile with the required resources and reachable network
+address, validates every external dependency and both local PBX lab directories,
+detects the host address for baresip, produces and validates three canonical
+2K passes, and runs the complete fail-closed gate below. It does not fall back
+to Docker Desktop, permit external skips, promote reports, or publish crates.
+The wrapper may restart and persistently resize/reconfigure the default Colima
+profile; it restores the previously selected Docker context when it exits.
+
+Use `full_beta_release.sh --preflight-only` for a non-test environment check.
+
+## Core gate settings reference
+
+The wrapper is the sole executable authority for the full local run. The block
+below preserves the core gate settings for policy review, but it is not a
+complete environment-isolated equivalent and must not be launched by hand.
+`full_beta_release.sh` additionally fixes tool paths, workload inputs,
+tolerances, warning policy, reporting capture, and a clean inherited
+environment.
 
 ```sh
 : "${RVOIP_STRICT_UA_HOST_IP:?export a reachable strict-UA host IP}"

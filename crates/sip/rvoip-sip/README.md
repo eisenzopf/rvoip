@@ -192,9 +192,13 @@ Full external evidence requires the local PBX, SIPp, strict-UA, and performance
 dependencies used by the gate script:
 
 ```sh
-BETA_RUN_LOCAL_PBX=1 RUSTUP_TOOLCHAIN=1.88 \
-  crates/sip/rvoip-sip/scripts/beta_gate.sh --full --require-external
+crates/sip/rvoip-sip/scripts/full_beta_release.sh
 ```
+
+The wrapper prepares and strictly validates the Homebrew Docker/Colima stack,
+both local PBX lab directories, the three canonical 2K evidence runs, every
+external interop dependency, the literal-all performance configuration, and
+packaged release reporting before it invokes the full gate.
 
 Operational references:
 
