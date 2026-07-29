@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use rvoip_sip_core::types::auth::{ProxyAuthenticate, WwwAuthenticate};
 use rvoip_sip_core::types::content_length::ContentLength;
 use rvoip_sip_core::types::param::Param;
 use rvoip_sip_core::types::status::StatusCode;
@@ -211,6 +212,29 @@ fn build_uac_invite(call_id: &str) -> Request {
         .build()
 }
 
+fn build_uac_cancel(call_id: &str) -> Request {
+    SimpleRequestBuilder::new(Method::Cancel, "sip:bob@10.0.0.10:5060")
+        .unwrap()
+        .from("Alice", "sip:alice@uac.example.com", Some("alicetag"))
+        .to("Bob", "sip:bob@10.0.0.10:5060", None)
+        .call_id(call_id)
+        .cseq(1)
+        .header(TypedHeader::Via(
+            Via::new(
+                "SIP",
+                "2.0",
+                "UDP",
+                "10.0.0.5",
+                Some(5060),
+                vec![Param::branch("z9hG4bK-uac-fork-test")],
+            )
+            .unwrap(),
+        ))
+        .max_forwards(70)
+        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+        .build()
+}
+
 #[tokio::test]
 async fn parallel_fork_fans_out_to_every_target() {
     let route = RouteDecision::parallel(vec![
@@ -251,6 +275,38 @@ async fn parallel_fork_fans_out_to_every_target() {
 }
 
 #[tokio::test]
+async fn stateless_cancel_selects_one_deterministic_target_without_fanout() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_cancel("stateless-single-target")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    harness
+        .wait_for(1000, |message, destination| {
+            matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                && *destination == uas_a
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    assert!(
+        !harness
+            .transport
+            .sent()
+            .await
+            .iter()
+            .any(|(message, destination)| {
+                matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                    && *destination == uas_b
+            }),
+        "stateless forwarding selects one target and must not create a fork"
+    );
+}
+
+#[tokio::test]
 async fn first_200_wins_and_cancels_siblings() {
     let uas_a: SocketAddr = UAS_A.parse().unwrap();
     let uas_b: SocketAddr = UAS_B.parse().unwrap();
@@ -265,6 +321,20 @@ async fn first_200_wins_and_cancels_siblings() {
 
     // Wait for all 3 INVITEs.
     let invites = harness.wait_for_invites(&[uas_a, uas_b, uas_c]).await;
+
+    // A proxy may send CANCEL only after a provisional response. Mark the
+    // siblings Proceeding before UAS B answers.
+    for destination in [uas_a, uas_c] {
+        let ringing = SimpleResponseBuilder::response_from_request(
+            &invites[&destination],
+            StatusCode::Ringing,
+            None,
+        )
+        .build();
+        harness
+            .inject(Message::Response(ringing), destination)
+            .await;
+    }
 
     // UAS B answers 200 OK.
     let uas_b_invite = &invites[&uas_b];
@@ -302,6 +372,230 @@ async fn first_200_wins_and_cancels_siblings() {
             matches!(m, Message::Request(r) if r.method() == Method::Cancel) && *d == uas_c
         })
         .await;
+}
+
+#[tokio::test]
+async fn matched_upstream_cancel_gets_200_and_latches_until_provisional() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let route = RouteDecision::to(uas_a);
+    let harness = Harness::new(route).await;
+    let call_id = "upstream-cancel-latch";
+
+    harness
+        .inject(
+            Message::Request(build_uac_invite(call_id)),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a]).await;
+
+    harness
+        .inject(
+            Message::Request(build_uac_cancel(call_id)),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+
+    harness
+        .wait_for(1000, |message, destination| {
+            matches!(message, Message::Response(response)
+                if response.status() == StatusCode::Ok
+                    && response.cseq().is_some_and(|cseq| cseq.method == Method::Cancel))
+                && *destination != uas_a
+        })
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    let premature_cancel = harness
+        .transport
+        .sent()
+        .await
+        .iter()
+        .any(|(message, destination)| {
+            matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                && *destination == uas_a
+        });
+    assert!(
+        !premature_cancel,
+        "CANCEL must be latched while the downstream INVITE is Calling"
+    );
+
+    let trying =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Trying, None)
+            .build();
+    harness.inject(Message::Response(trying), uas_a).await;
+
+    harness
+        .wait_for(1000, |message, destination| {
+            matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                && *destination == uas_a
+        })
+        .await;
+    assert!(
+        !harness.transport.sent().await.iter().any(|(message, destination)| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Trying)
+                && *destination != uas_a
+        }),
+        "100 releases a latched CANCEL but remains suppressed upstream"
+    );
+
+    let terminated = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_a],
+        StatusCode::RequestTerminated,
+        None,
+    )
+    .build();
+    harness.inject(Message::Response(terminated), uas_a).await;
+    harness
+        .wait_for(1000, |message, destination| {
+            matches!(message, Message::Response(response)
+                if response.status() == StatusCode::RequestTerminated)
+                && *destination != uas_a
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn every_forked_invite_2xx_is_forwarded_upstream() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_invite("multiple-2xx")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
+
+    for destination in [uas_a, uas_b] {
+        let ringing = SimpleResponseBuilder::response_from_request(
+            &invites[&destination],
+            StatusCode::Ringing,
+            None,
+        )
+        .build();
+        harness
+            .inject(Message::Response(ringing), destination)
+            .await;
+    }
+
+    for (destination, to_tag) in [(uas_a, "fork-a"), (uas_b, "fork-b")] {
+        let ok = SimpleResponseBuilder::response_from_request(
+            &invites[&destination],
+            StatusCode::Ok,
+            Some("OK"),
+        )
+        .to("Bob", "sip:bob@10.0.0.10:5060", Some(to_tag))
+        .build();
+        harness.inject(Message::Response(ok), destination).await;
+    }
+
+    let start = std::time::Instant::now();
+    loop {
+        let tags = harness
+            .transport
+            .sent()
+            .await
+            .iter()
+            .filter_map(|(message, destination)| match message {
+                Message::Response(response)
+                    if response.status() == StatusCode::Ok
+                        && *destination != uas_a
+                        && *destination != uas_b =>
+                {
+                    response.to().and_then(|to| to.tag()).map(str::to_owned)
+                }
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        if tags.contains("fork-a") && tags.contains("fork-b") {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(1500),
+            "expected both distinct forked 2xx responses upstream, observed tags {tags:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        harness._tm.retention_counts().invite_2xx_response_cache,
+        0,
+        "proxy forwarding must come from RFC 6026 Accepted state, not the UA 2xx cache"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn matched_late_2xx_is_discarded_after_upstream_server_transaction_ends() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let uac: SocketAddr = UAC_ADDR.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_invite("late-2xx-after-upstream-retirement")),
+            uac,
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
+
+    // Keep both client transactions alive beyond Timer B. The second branch
+    // remains in Proceeding after the first 2xx wins and its generated CANCEL
+    // races with a later 2xx.
+    for destination in [uas_a, uas_b] {
+        let ringing = SimpleResponseBuilder::response_from_request(
+            &invites[&destination],
+            StatusCode::Ringing,
+            None,
+        )
+        .build();
+        harness
+            .inject(Message::Response(ringing), destination)
+            .await;
+    }
+
+    let first_ok =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Ok, Some("OK"))
+            .build();
+    harness.inject(Message::Response(first_ok), uas_a).await;
+    harness
+        .wait_for(1000, |message, destination| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Ok)
+                && *destination == uac
+        })
+        .await;
+
+    // RFC 6026 Timer L retains the INVITE server transaction for 64*T1.
+    // Once it is gone, RFC 6026 section 8.3 replaces RFC 3261's former
+    // stateless fallback and requires a matching late response to be dropped.
+    tokio::time::advance(Duration::from_secs(33)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let second_ok =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_b], StatusCode::Ok, Some("OK"))
+            .build();
+    harness.inject(Message::Response(second_ok), uas_b).await;
+    tokio::time::advance(Duration::from_millis(100)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+
+    let upstream_ok_count = harness
+        .transport
+        .sent()
+        .await
+        .iter()
+        .filter(|(message, destination)| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Ok)
+                && *destination == uac
+        })
+        .count();
+    assert_eq!(
+        upstream_ok_count, 1,
+        "RFC 6026 forbids stateless forwarding after the upstream server transaction is gone"
+    );
 }
 
 #[tokio::test]
@@ -422,22 +716,240 @@ async fn global_6xx_wins_over_lower_class_failures() {
         .await;
     let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
 
-    // UAS A returns 404, UAS B returns 603 Decline (global failure).
-    let resp_a =
-        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::NotFound, None)
+    // Put UAS A into Proceeding so a global failure can legally CANCEL it.
+    let ringing =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Ringing, None)
             .build();
+    harness.inject(Message::Response(ringing), uas_a).await;
+
+    // UAS B returns 603 Decline (global failure) before A returns a final.
     let resp_b =
         SimpleResponseBuilder::response_from_request(&invites[&uas_b], StatusCode::Decline, None)
             .build();
-    harness.inject(Message::Response(resp_a), uas_a).await;
     harness.inject(Message::Response(resp_b), uas_b).await;
 
-    // 6xx wins.
-    let (_, _) = harness
-        .wait_for(1500, |m, d| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::Decline)
-                && *d != uas_a
-                && *d != uas_b
+    harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                && *destination == uas_a
         })
         .await;
+
+    tokio::time::sleep(Duration::from_millis(75)).await;
+    assert!(
+        !harness.transport.sent().await.iter().any(|(message, destination)| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Decline)
+                && *destination != uas_a
+                && *destination != uas_b
+        }),
+        "6xx must remain latched until pending branches settle"
+    );
+
+    let terminated = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_a],
+        StatusCode::RequestTerminated,
+        None,
+    )
+    .build();
+    harness.inject(Message::Response(terminated), uas_a).await;
+
+    harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Decline)
+                && *destination != uas_a
+                && *destination != uas_b
+        })
+        .await;
+}
+
+#[tokio::test]
+async fn racing_2xx_beats_a_latched_global_6xx() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_invite("2xx-races-6xx")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
+
+    let ringing =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Ringing, None)
+            .build();
+    harness.inject(Message::Response(ringing), uas_a).await;
+    let decline =
+        SimpleResponseBuilder::response_from_request(&invites[&uas_b], StatusCode::Decline, None)
+            .build();
+    harness.inject(Message::Response(decline), uas_b).await;
+    harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Request(request) if request.method() == Method::Cancel)
+                && *destination == uas_a
+        })
+        .await;
+
+    let ok = SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Ok, None)
+        .build();
+    harness.inject(Message::Response(ok), uas_a).await;
+    harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Ok)
+                && *destination != uas_a
+                && *destination != uas_b
+        })
+        .await;
+    assert!(
+        !harness.transport.sent().await.iter().any(|(message, destination)| {
+            matches!(message, Message::Response(response) if response.status() == StatusCode::Decline)
+                && *destination != uas_a
+                && *destination != uas_b
+        }),
+        "a racing INVITE 2xx must win over a previously received 6xx"
+    );
+}
+
+#[tokio::test]
+async fn selected_401_aggregates_challenges_from_every_branch() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_invite("aggregate-challenges")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
+
+    let mut response_a = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_a],
+        StatusCode::Unauthorized,
+        None,
+    )
+    .build();
+    response_a
+        .headers
+        .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+            "realm-a", "nonce-a",
+        )));
+    let mut response_b = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_b],
+        StatusCode::Unauthorized,
+        None,
+    )
+    .build();
+    response_b
+        .headers
+        .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+            "realm-b", "nonce-b",
+        )));
+    harness.inject(Message::Response(response_a), uas_a).await;
+    harness.inject(Message::Response(response_b), uas_b).await;
+
+    let (message, _) = harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Response(response)
+                if response.status() == StatusCode::Unauthorized)
+                && *destination != uas_a
+                && *destination != uas_b
+        })
+        .await;
+    let Message::Response(response) = message else {
+        unreachable!();
+    };
+    let challenges = response
+        .headers
+        .iter()
+        .filter(|header| matches!(header, TypedHeader::WwwAuthenticate(_)))
+        .count();
+    assert_eq!(challenges, 2);
+}
+
+#[tokio::test]
+async fn selected_auth_failure_aggregates_401_and_407_challenge_families() {
+    let uas_a: SocketAddr = UAS_A.parse().unwrap();
+    let uas_b: SocketAddr = UAS_B.parse().unwrap();
+    let harness = Harness::new(RouteDecision::parallel(vec![uas_a, uas_b])).await;
+    harness
+        .inject(
+            Message::Request(build_uac_invite("aggregate-mixed-challenges")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+    let invites = harness.wait_for_invites(&[uas_a, uas_b]).await;
+
+    let mut unauthorized = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_a],
+        StatusCode::Unauthorized,
+        None,
+    )
+    .build();
+    unauthorized
+        .headers
+        .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+            "origin-realm",
+            "origin-nonce",
+        )));
+    unauthorized
+        .headers
+        .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+            "origin-realm-2",
+            "origin-nonce-2",
+        )));
+
+    let mut proxy_auth_required = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_b],
+        StatusCode::ProxyAuthenticationRequired,
+        None,
+    )
+    .build();
+    proxy_auth_required
+        .headers
+        .push(TypedHeader::ProxyAuthenticate(ProxyAuthenticate::new(
+            "proxy-realm",
+            "proxy-nonce",
+        )));
+    proxy_auth_required
+        .headers
+        .push(TypedHeader::ProxyAuthenticate(ProxyAuthenticate::new(
+            "proxy-realm-2",
+            "proxy-nonce-2",
+        )));
+
+    harness.inject(Message::Response(unauthorized), uas_a).await;
+    harness
+        .inject(Message::Response(proxy_auth_required), uas_b)
+        .await;
+
+    let (message, _) = harness
+        .wait_for(1500, |message, destination| {
+            matches!(message, Message::Response(response)
+            if matches!(
+                response.status(),
+                StatusCode::Unauthorized | StatusCode::ProxyAuthenticationRequired
+            )) && *destination != uas_a
+                && *destination != uas_b
+        })
+        .await;
+    let Message::Response(response) = message else {
+        unreachable!();
+    };
+    assert_eq!(
+        response
+            .headers
+            .iter()
+            .filter(|header| matches!(header, TypedHeader::WwwAuthenticate(_)))
+            .count(),
+        2
+    );
+    assert_eq!(
+        response
+            .headers
+            .iter()
+            .filter(|header| matches!(header, TypedHeader::ProxyAuthenticate(_)))
+            .count(),
+        2
+    );
 }

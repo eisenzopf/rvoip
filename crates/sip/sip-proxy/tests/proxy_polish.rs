@@ -24,7 +24,9 @@ use rvoip_sip_core::types::via::Via;
 use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::{Message, Method, Request};
 use rvoip_sip_dialog::transaction::TransactionManager;
-use rvoip_sip_proxy::{ProxyConfig, ProxyEvent, RouteDecision, RouteFn, StatefulProxy};
+use rvoip_sip_proxy::{
+    ProxyConfig, ProxyEvent, ProxyRuntimeOptions, RouteDecision, RouteFn, StatefulProxy,
+};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::TransportEvent;
 use tokio::sync::{mpsc, Mutex};
@@ -86,6 +88,19 @@ struct Harness {
 
 impl Harness {
     async fn new_with_config(route: RouteDecision, config: ProxyConfig) -> Self {
+        Self::new_with_options(
+            route,
+            config,
+            ProxyRuntimeOptions::default().with_short_timer_c_for_tests(),
+        )
+        .await
+    }
+
+    async fn new_with_options(
+        route: RouteDecision,
+        config: ProxyConfig,
+        options: ProxyRuntimeOptions,
+    ) -> Self {
         let _ = tracing_subscriber::fmt()
             .with_env_filter("rvoip_sip_proxy=debug,rvoip_sip_dialog=warn")
             .with_test_writer()
@@ -100,7 +115,7 @@ impl Harness {
 
         let route_clone = route.clone();
         let route_fn: RouteFn = Arc::new(move |_req: &Request| Some(route_clone.clone()));
-        let proxy = StatefulProxy::with_config(tm.clone(), route_fn, config);
+        let proxy = StatefulProxy::with_options(tm.clone(), route_fn, config, options);
         let proxy_task = proxy.clone().run(events);
 
         Harness {
@@ -190,7 +205,12 @@ fn build_uac_invite(call_id: &str) -> Request {
 #[tokio::test]
 async fn inbound_with_our_branch_in_via_stack_returns_482() {
     let uas_addr: SocketAddr = UAS_ADDR.parse().unwrap();
-    let harness = Harness::new(RouteDecision::to(uas_addr)).await;
+    let harness = Harness::new_with_options(
+        RouteDecision::to(uas_addr),
+        ProxyConfig::default(),
+        ProxyRuntimeOptions::default().with_legacy_loop_detection_for_tests(),
+    )
+    .await;
 
     // First inbound INVITE — proxy forwards it and stamps a fresh
     // proxy branch we can inspect.
@@ -277,7 +297,7 @@ async fn timer_c_resets_on_1xx_and_does_not_fire_408() {
     // the reset, the timer restarts on each 1xx and 408 never comes.
     let config = ProxyConfig {
         timer_c: Duration::from_millis(200),
-        enforce_max_forwards: true,
+        ..ProxyConfig::default()
     };
     let uas_addr: SocketAddr = UAS_ADDR.parse().unwrap();
     let harness = Harness::new_with_config(RouteDecision::to(uas_addr), config).await;
