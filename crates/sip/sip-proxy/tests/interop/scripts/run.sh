@@ -701,8 +701,8 @@ validate_scenario_packet_evidence() {
     --original-target-uri "sip:agent@destination.invalid;transport=tcp"
     --next-hop-route-uri \
       "sip:next-hop@$HOST_ADDRESS:$AUX_UAS_PORT_1;transport=tcp;lr"
-    --record-route-uri "sip:rvoip.invalid;transport=tcp;lr"
-    --local-route-uri "sip:rvoip.invalid;transport=tcp;lr"
+    --record-route-uri "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr"
+    --local-route-uri "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr"
   )
   if [[ "$current_transport" == tls ]]; then
     packet_command+=(
@@ -1087,13 +1087,14 @@ run_advanced_scenarios() {
               python3 -B "$RAW_TCP_ROUTING_AUTH" \
               "${common_tcp_args[@]}" \
               --aux-listen "$HOST_ADDRESS:$AUX_UAS_PORT_1" \
-              --rvoip-local-uri "sip:rvoip.invalid;transport=tcp;lr" \
+              --rvoip-local-uri \
+                "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr" \
               --next-hop-route-uri \
                 "sip:next-hop@$HOST_ADDRESS:$AUX_UAS_PORT_1;transport=tcp;lr" \
               --original-target-uri \
                 "sip:agent@destination.invalid;transport=tcp" \
               --expected-record-route-uri \
-                "sip:rvoip.invalid;transport=tcp;lr" || return
+                "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr" || return
             ;;
           auth-aggregation)
             run_captured_external_scenario "$scenario" \
@@ -1362,9 +1363,9 @@ run_row() {
       --rfc3263-uri "sip:agent@failover.interop.test;transport=tcp"
       --timer-c-ms 500
       --max-response-contexts 64
-      --local-uri "sip:rvoip.invalid;transport=tcp;lr"
-      --record-route-sip "sip:rvoip.invalid;transport=tcp;lr"
-      --record-route-sips "sips:rvoip.invalid;transport=tls;lr"
+      --local-uri "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr"
+      --record-route-sip "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr"
+      --record-route-sips "sips:$HOST_ADDRESS:$RVOIP_PORT;transport=tls;lr"
     )
   fi
   if [[ "$transport" == tls && "$row_status" == PASS ]]; then

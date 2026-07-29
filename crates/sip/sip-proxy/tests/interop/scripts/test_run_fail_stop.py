@@ -184,6 +184,11 @@ class RunFailStopTests(unittest.TestCase):
             '--record-route-sip "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=udp;lr"',
             normalized(self.run_row),
         )
+        self.assertIn(
+            '--record-route-sip "sip:$HOST_ADDRESS:$RVOIP_PORT;transport=tcp;lr"',
+            normalized(self.run_row),
+        )
+        self.assertNotIn("sip:rvoip.invalid;transport=tcp;lr", self.source)
         interop = RUN_SH.parent.parent
         for peer in ("kamailio", "opensips"):
             for suffix in ("", "-tls"):
