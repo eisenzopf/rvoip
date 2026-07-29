@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy non-2xx ACK UAS">
+  <recv request="INVITE" crlf="true" />
+
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 486 Busy Here
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=busy-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      X-Interop-Origin: uas
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="ACK" />
+</scenario>

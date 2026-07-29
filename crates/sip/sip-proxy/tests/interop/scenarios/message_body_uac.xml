@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy MESSAGE body UAC">
+  <send retrans="500" start_txn="message">
+    <![CDATA[
+      MESSAGE sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 MESSAGE
+      X-Interop-Scenario: message-body-content-length
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Type: application/bridgefu-test
+      Content-Length: [len]
+
+      bridgefu-interop-request-body-0123456789
+    ]]>
+  </send>
+
+  <recv response="200" response_txn="message">
+    <action>
+      <ereg regexp="bridgefu-interop-response-body-9876543210"
+            search_in="msg" check_it="true" assign_to="1" />
+      <log message="validated MESSAGE response body=[$1]" />
+    </action>
+  </recv>
+</scenario>

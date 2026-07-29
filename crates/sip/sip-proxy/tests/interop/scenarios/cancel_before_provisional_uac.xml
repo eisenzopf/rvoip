@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy matched CANCEL before provisional UAC">
+  <send retrans="500" start_txn="invite">
+    <![CDATA[
+      INVITE sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:caller@[local_ip]:[local_port];transport=[transport]>
+      X-Interop-Scenario: matched-cancel-before-provisional
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- The upstream stateful peer/rvoip server transaction may generate its
+       own 100. The downstream UAS deliberately withholds 180 long enough for
+       this CANCEL to reach rvoip before the downstream branch is Proceeding. -->
+  <recv response="100" response_txn="invite" />
+  <pause milliseconds="50" />
+
+  <send retrans="500" start_txn="cancel">
+    <![CDATA[
+      CANCEL sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-3];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 CANCEL
+      X-Interop-Scenario: matched-cancel-before-provisional
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="180" optional="true" response_txn="invite" />
+  <recv response="200" response_txn="cancel" />
+  <recv response="180" optional="true" response_txn="invite" />
+  <recv response="487" response_txn="invite" />
+
+  <send ack_txn="invite">
+    <![CDATA[
+      ACK sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch-8]
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+</scenario>

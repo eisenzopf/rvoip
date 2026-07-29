@@ -1,0 +1,38 @@
+services:
+  kamailio:
+    image: ${KAMAILIO_IMAGE:?set KAMAILIO_IMAGE to the reviewed immutable digest}
+    platform: ${KAMAILIO_PLATFORM:-linux/amd64}
+    init: true
+    entrypoint: ["/usr/sbin/kamailio"]
+    command: ["-DD", "-E", "-f", "/etc/kamailio/kamailio.cfg"]
+    ports:
+      - "${PROXY_INTEROP_PEER_PORT:?peer port}:${PROXY_INTEROP_PEER_PORT:?peer port}/udp"
+      - "${PROXY_INTEROP_PEER_PORT:?peer port}:${PROXY_INTEROP_PEER_PORT:?peer port}/tcp"
+    volumes:
+      - "${PROXY_INTEROP_PEER_CONFIG:?rendered peer config}:/etc/kamailio/kamailio.cfg:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+    restart: "no"
+
+  opensips:
+    image: ${OPENSIPS_IMAGE:?set OPENSIPS_IMAGE to the reviewed immutable digest}
+    platform: ${OPENSIPS_PLATFORM:-linux/amd64}
+    init: true
+    entrypoint: ["/usr/sbin/opensips"]
+    command: ["-F", "-f", "/etc/opensips/opensips.cfg"]
+    ports:
+      - "${PROXY_INTEROP_PEER_PORT:?peer port}:${PROXY_INTEROP_PEER_PORT:?peer port}/udp"
+      - "${PROXY_INTEROP_PEER_PORT:?peer port}:${PROXY_INTEROP_PEER_PORT:?peer port}/tcp"
+    volumes:
+      - "${PROXY_INTEROP_PEER_CONFIG:?rendered peer config}:/etc/opensips/opensips.cfg:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+      start_period: 1s
+    restart: "no"

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy full INVITE dialog UAC">
+  <send retrans="500" start_txn="invite">
+    <![CDATA[
+      INVITE sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: <sip:caller@[local_ip]:[local_port];transport=[transport]>
+      X-Interop-Scenario: invite-success
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=interop 1 1 IN IP[local_ip_type] [local_ip]
+      s=rvoip-proxy-interop
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio 40000 RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" response_txn="invite" />
+  <recv response="180" optional="true" response_txn="invite" />
+  <recv response="200" response_txn="invite" rtd="true" rrs="true" />
+
+  <send ack_txn="invite">
+    <![CDATA[
+      ACK [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: <sip:caller@[local_ip]:[local_port];transport=[transport]>
+      [routes]
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="75" />
+
+  <send retrans="500" start_txn="bye">
+    <![CDATA[
+      BYE [next_url] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: <sip:caller@[local_ip]:[local_port];transport=[transport]>
+      [routes]
+      X-Interop-Scenario: invite-success
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="200" response_txn="bye" />
+</scenario>

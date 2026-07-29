@@ -1,0 +1,103 @@
+#!KAMAILIO
+
+debug=2
+log_stderror=yes
+fork=no
+children=2
+tcp_children=2
+disable_tcp=no
+enable_tls=yes
+
+listen=tls:0.0.0.0:__PUBLIC_PORT__ advertise __PUBLIC_HOST__:__PUBLIC_PORT__
+# Keep the plaintext side of the hostname-verifying mTLS boundary on a
+# separately tracked socket. request_route rejects inbound non-TLS SIP.
+listen=tcp:0.0.0.0:__TCP_EGRESS_PORT__
+alias="tls:__PUBLIC_HOST__:__PUBLIC_PORT__"
+
+# The TLS module must be loaded before modules which share OpenSSL state.
+loadmodule "tls.so"
+loadmodule "tm.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "pv.so"
+loadmodule "textops.so"
+loadmodule "xlog.so"
+
+modparam("tls", "config", "/etc/kamailio/tls-domain.cfg")
+
+request_route {
+    if ($proto != "tls") {
+        sl_send_reply("403", "TLS Required");
+        exit;
+    }
+    if (!is_peer_verified()) {
+        sl_send_reply("403", "Verified Client Certificate Required");
+        exit;
+    }
+    # Kamailio 6.1 verifies the chain during the TLS handshake but does not
+    # natively perform RFC 6125 hostname matching. Fail closed on the exact
+    # DNS SAN before relaying any SIP request.
+    if ($tls_peer_san_hostname != "__UPSTREAM_IDENTITY__") {
+        xlog("L_ERR", "INTEROP_TLS_IDENTITY_REJECT direction=inbound\n");
+        sl_send_reply("403", "TLS Peer Identity Mismatch");
+        exit;
+    }
+    xlog("L_INFO", "INTEROP_TLS_VERIFIED direction=inbound peer_serial=$tls_peer_serial\n");
+    xlog("L_INFO", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$proto\n");
+
+    if (!mf_process_maxfwd_header("20")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+            t_relay();
+        } else if (is_present_hf("X-Interop-Unmatched-Cancel")) {
+            # RFC 3261 section 16.10: a transaction-stateful proxy forwards
+            # an unmatched CANCEL statelessly. The marker limits this lab-only
+            # deterministic route to the conformance scenario.
+            $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+            forward();
+        }
+        exit;
+    }
+
+    if (is_method("ACK") && t_check_trans()) {
+        $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+        t_relay();
+        exit;
+    }
+
+    if (!is_method("ACK") && t_check_trans()) {
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+    }
+
+    # End-to-end 2xx ACK and in-dialog BYE follow the UAC's route set. Consume
+    # this proxy's Record-Route values before handing the next hop to the
+    # hostname-verifying TCP-to-mTLS boundary.
+    if ((is_method("ACK") || is_method("BYE")) && loose_route()) {
+        $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+        if (!t_relay()) {
+            sl_reply_error();
+        }
+        exit;
+    }
+
+    # Kamailio verifies inbound peer identity against the exact DNS SAN. Its
+    # outbound TLS connection event was tested with a valid-chain/wrong-name
+    # server and did not stop SIP bytes before delivery. Route outbound SIP
+    # through the gate-owned local TCP boundary instead. The boundary completes
+    # CA and exact-DNS-SAN verification before releasing application bytes.
+    $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+    if (!t_relay()) {
+        sl_reply_error();
+    }
+    exit;
+}

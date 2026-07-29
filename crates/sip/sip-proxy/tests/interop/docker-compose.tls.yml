@@ -1,0 +1,13 @@
+services:
+  kamailio:
+    volumes:
+      - "${PROXY_INTEROP_TLS_PKI_DIR:?ephemeral TLS PKI directory}:/run/rvoip-proxy-interop-pki:ro"
+      - "${PROXY_INTEROP_KAMAILIO_TLS_DOMAIN_CONFIG:?rendered Kamailio TLS domain config}:/etc/kamailio/tls-domain.cfg:ro"
+
+  opensips:
+    image: ${OPENSIPS_TLS_IMAGE:-rvoip/opensips-tls-interop:3.6.7-1}
+    build:
+      context: ./images/opensips-tls
+      dockerfile: Dockerfile
+    volumes:
+      - "${PROXY_INTEROP_TLS_PKI_DIR:?ephemeral TLS PKI directory}:/run/rvoip-proxy-interop-pki:ro"

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy unmatched CANCEL stateless UAS">
+  <recv request="CANCEL" crlf="true">
+    <action>
+      <ereg regexp="X-Interop-Unmatched-Cancel: yes"
+            search_in="msg" check_it="true" assign_to="1" />
+      <log message="validated unmatched CANCEL marker=[$1]" />
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+      SIP/2.0 481 Call/Transaction Does Not Exist
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=unmatched-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      X-Interop-Origin: uas
+      Content-Length: 0
+
+    ]]>
+  </send>
+</scenario>

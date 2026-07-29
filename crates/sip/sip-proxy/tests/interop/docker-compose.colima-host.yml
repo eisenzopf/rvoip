@@ -1,0 +1,8 @@
+services:
+  kamailio:
+    network_mode: host
+    ports: !reset []
+
+  opensips:
+    network_mode: host
+    ports: !reset []

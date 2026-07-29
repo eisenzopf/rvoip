@@ -1,0 +1,6 @@
+[server:default]
+method = TLSv1.2
+verify_client = on
+private_key = /run/rvoip-proxy-interop-pki/__PEER_KEY_BASENAME__
+certificate = /run/rvoip-proxy-interop-pki/__PEER_CERT_BASENAME__
+ca_list = /run/rvoip-proxy-interop-pki/ca.pem

@@ -1,0 +1,93 @@
+log_level=2
+stderror_enabled=yes
+syslog_enabled=no
+tcp_workers=2
+
+socket=tls:0.0.0.0:__PUBLIC_PORT__
+# OpenSIPS requires a local socket for the transport selected by an outbound
+# destination. This TCP-only socket feeds the gate-owned hostname-verifying
+# mTLS boundary; request_route still rejects any inbound non-TLS SIP.
+socket=tcp:0.0.0.0:__TCP_EGRESS_PORT__
+advertised_address=__PUBLIC_HOST__
+advertised_port=__PUBLIC_PORT__
+alias=tls:__PUBLIC_HOST__:__PUBLIC_PORT__
+
+mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+loadmodule "tls_openssl.so"
+loadmodule "tls_mgm.so"
+loadmodule "proto_tls.so"
+loadmodule "proto_tcp.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "signaling.so"
+loadmodule "sipmsgops.so"
+
+modparam("tls_mgm", "tls_library", "openssl")
+modparam("tls_mgm", "server_domain", "interop_server")
+modparam("tls_mgm", "match_ip_address", "[interop_server]*")
+modparam("tls_mgm", "match_sip_domain", "[interop_server]*")
+modparam("tls_mgm", "certificate", "[interop_server]/run/rvoip-proxy-interop-pki/__PEER_CERT_BASENAME__")
+modparam("tls_mgm", "private_key", "[interop_server]/run/rvoip-proxy-interop-pki/__PEER_KEY_BASENAME__")
+modparam("tls_mgm", "ca_list", "[interop_server]/run/rvoip-proxy-interop-pki/ca.pem")
+modparam("tls_mgm", "tls_method", "[interop_server]TLSv1_2")
+modparam("tls_mgm", "verify_cert", "[interop_server]1")
+modparam("tls_mgm", "require_cert", "[interop_server]1")
+
+route {
+    if ($socket_in(proto) != "tls") {
+        send_reply(403, "TLS Required");
+        exit;
+    }
+    if (!is_peer_verified()) {
+        send_reply(403, "Verified Client Certificate Required");
+        exit;
+    }
+    # OpenSIPS verifies the peer chain in the TLS layer. Bind that verified
+    # certificate to the configured logical peer before relaying SIP.
+    if ($tls_peer_san_hostname != "__UPSTREAM_IDENTITY__") {
+        xlog("L_ERR", "INTEROP_TLS_IDENTITY_REJECT direction=inbound\n");
+        send_reply(403, "TLS Peer Identity Mismatch");
+        exit;
+    }
+    xlog("L_INFO", "INTEROP_TLS_VERIFIED direction=inbound peer_serial=$tls_peer_serial\n");
+    xlog("L_INFO", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$socket_in(proto)\n");
+
+    if (!mf_process_maxfwd_header(20)) {
+        send_reply(483, "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+    }
+
+    # End-to-end 2xx ACK and in-dialog BYE follow the UAC's route set. Consume
+    # this proxy's Record-Route values, then use the verified egress boundary
+    # for the next encrypted hop. Non-2xx ACK remains transaction-owned and
+    # falls through to the ordinary hop-by-hop relay below.
+    if ((is_method("ACK") || is_method("BYE")) && loose_route()) {
+        $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+        if (!t_relay()) {
+            send_reply(500, "Relay Failed");
+        }
+        exit;
+    }
+
+    # OpenSIPS 3.6 verifies the outbound certificate chain, but its documented
+    # client-domain selection does not perform RFC 6125 hostname matching.
+    # Send over the gate-owned local TCP boundary; it establishes and verifies
+    # the external mTLS connection before releasing any SIP application bytes.
+    $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=tcp";
+    if (is_method("CANCEL") && is_present_hf("X-Interop-Unmatched-Cancel")) {
+        # RFC 3261 section 16.10 unmatched CANCELs are forwarded statelessly.
+        # This marker makes the otherwise ambiguous lab route deterministic.
+        forward();
+        exit;
+    }
+    if (!t_relay()) {
+        send_reply(500, "Relay Failed");
+    }
+    exit;
+}

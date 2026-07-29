@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy SIPS OPTIONS UAS">
+  <recv request="OPTIONS" crlf="true">
+    <action>
+      <ereg regexp="^OPTIONS sips:probe@example[.]test SIP/2[.]0"
+            search_in="msg" check_it="true" assign_to="1" />
+      <ereg regexp="To:[[:space:]]*&lt;sips:probe@example[.]test&gt;"
+            search_in="msg" check_it="true" assign_to="2" />
+      <ereg regexp="Contact:[[:space:]]*&lt;sips:uac@"
+            search_in="msg" check_it="true" assign_to="3" />
+      <ereg regexp="X-Interop-Scenario:[[:space:]]*sips-routing"
+            search_in="msg" check_it="true" assign_to="4" />
+      <log message="validated SIPS request=[$1] to=[$2] contact=[$3] marker=[$4]" />
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=sips-interop-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sips:probe@[local_ip]:[local_port];transport=tls>
+      Content-Length: 0
+
+    ]]>
+  </send>
+</scenario>

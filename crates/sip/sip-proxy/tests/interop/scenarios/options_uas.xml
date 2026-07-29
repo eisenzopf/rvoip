@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy OPTIONS UAS smoke">
+  <recv request="OPTIONS" crlf="true" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=interop-uas-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Contact: <sip:uas@[local_ip]:[local_port];transport=[transport]>
+      Content-Length: 0
+
+    ]]>
+  </send>
+</scenario>

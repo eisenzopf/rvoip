@@ -1,0 +1,62 @@
+log_level=2
+stderror_enabled=yes
+syslog_enabled=no
+udp_workers=2
+tcp_workers=2
+
+socket=udp:0.0.0.0:__PUBLIC_PORT__
+socket=tcp:0.0.0.0:__PUBLIC_PORT__
+advertised_address=__PUBLIC_HOST__
+advertised_port=__PUBLIC_PORT__
+alias=udp:__PUBLIC_HOST__:__PUBLIC_PORT__
+alias=tcp:__PUBLIC_HOST__:__PUBLIC_PORT__
+
+mpath="/usr/lib/x86_64-linux-gnu/opensips/modules/"
+loadmodule "proto_udp.so"
+loadmodule "proto_tcp.so"
+loadmodule "sl.so"
+loadmodule "tm.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "signaling.so"
+loadmodule "sipmsgops.so"
+
+route {
+    xlog("L_INFO", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$socket_in(proto)\n");
+    # Scenarios carrying this marker explicitly exercise RFC 3581. Other UDP
+    # scenarios retain RFC 3261 sent-by response routing.
+    if (is_present_hf("X-Interop-Peer-Rport")) {
+        add_local_rport();
+    }
+
+    if (!mf_process_maxfwd_header(20)) {
+        send_reply(483, "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+    }
+
+    # A 2xx ACK and an in-dialog BYE are end-to-end. Consume this proxy's
+    # Route and let the reversed dialog route set select the next hop.
+    # A non-2xx ACK has no dialog route set and falls through to the
+    # transaction-owned hop-by-hop relay below.
+    if ((is_method("ACK") || is_method("BYE")) && loose_route()) {
+        if (!t_relay()) {
+            send_reply(500, "Relay Failed");
+        }
+        exit;
+    }
+
+    $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=__TRANSPORT__";
+    if (is_method("CANCEL") && is_present_hf("X-Interop-Unmatched-Cancel")) {
+        # Preserve RFC 3261 section 16.10 unmatched-CANCEL statelessness.
+        forward();
+        exit;
+    }
+    if (!t_relay()) {
+        send_reply(500, "Relay Failed");
+    }
+    exit;
+}

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy SIPS OPTIONS UAC">
+  <send retrans="500">
+    <![CDATA[
+      OPTIONS sips:probe@example.test SIP/2.0
+      Via: SIP/2.0/TCP [local_ip]:[local_port];branch=[branch];rport
+      From: <sips:uac@[local_ip]:[local_port];transport=tls>;tag=[pid]-[call_number]
+      To: <sips:probe@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 OPTIONS
+      Contact: <sips:uac@[local_ip]:[local_port];transport=tls>
+      X-Interop-Scenario: sips-routing
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" />
+  <recv response="200" rtd="true">
+    <action>
+      <ereg regexp="Contact:[[:space:]]*&lt;sips:"
+            search_in="msg" check_it="true" assign_to="1" />
+      <log message="validated SIPS response contact=[$1]" />
+    </action>
+  </recv>
+
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
+  <CallLengthRepartition value="10,50,100,500,1000,5000" />
+</scenario>

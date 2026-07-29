@@ -4,17 +4,27 @@
 [![Documentation](https://docs.rs/rvoip-sip-proxy/badge.svg)](https://docs.rs/rvoip-sip-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/eisenzopf/rvoip)
 
-Stateful SIP proxy primitives (RFC 3261 §16) for
+Transaction-stateful SIP proxy primitives for
 [rvoip](https://github.com/eisenzopf/rvoip). Provides the
-`ProxyTransaction` state machine, target-set processing, and Record-Route
-/ Via handling consumed by the
-[`rvoip-sip`](https://crates.io/crates/sip/rvoip-sip) umbrella's B2BUA helpers.
+`StatefulProxy`, target-set processing, response-context aggregation,
+and Via handling consumed by the
+[`rvoip-sip`](https://crates.io/crates/sip/rvoip-sip) umbrella API.
 
 ## Status
 
-**Release-gated SIP component** — published in the unified `0.3.x` workspace release. The
-RFC 3261 §16 stateful-proxy path is covered. Forking (parallel and
-sequential) and the full failure-recovery matrix are post-beta scope.
+**Partial RFC 3261 stateful-proxy implementation.** Published `0.3.1`
+does not carry a bounded proxy-conformance claim. The coordinated
+`0.3.2` development work adds candidate support for
+transaction-stateful forwarding, parallel/sequential forking, Via and
+Max-Forwards processing, response aggregation, CANCEL propagation, and
+Timer C. Those features do not yet constitute a qualified RFC profile.
+
+The applicable normative behavior, known gaps, and executable evidence
+required for a bounded claim are tracked in
+[`docs/RFC3261_CONFORMANCE.md`](docs/RFC3261_CONFORMANCE.md). Baseline and
+gate provenance are in
+[`docs/CONFORMANCE_STATUS.md`](docs/CONFORMANCE_STATUS.md). A green unit
+suite alone must not be represented as RFC conformance.
 
 ## Install
 

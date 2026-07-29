@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy OPTIONS UAC smoke">
+  <send retrans="500">
+    <![CDATA[
+      OPTIONS sip:probe@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:uac@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:probe@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 OPTIONS
+      Contact: <sip:uac@[local_ip]:[local_port];transport=[transport]>
+      X-Interop-Scenario: options-readiness
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="100" optional="true" />
+  <recv response="200" rtd="true" />
+
+  <ResponseTimeRepartition value="10,20,50,100,150,500,1000" />
+  <CallLengthRepartition value="10,50,100,500,1000,5000" />
+</scenario>

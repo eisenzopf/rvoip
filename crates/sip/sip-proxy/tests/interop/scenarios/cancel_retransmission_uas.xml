@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy duplicate matched CANCEL UAS">
+  <recv request="INVITE" crlf="true" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 180 Ringing
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=cancel-retry-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="CANCEL" />
+
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:]
+      [last_Call-ID:]
+      CSeq: 1 CANCEL
+      X-Interop-Origin: uas
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <pause milliseconds="150" />
+
+  <send retrans="500">
+    <![CDATA[
+      SIP/2.0 487 Request Terminated
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=cancel-retry-[pid]-[call_number]
+      [last_Call-ID:]
+      CSeq: 1 INVITE
+      X-Interop-Origin: uas
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv request="ACK" />
+</scenario>

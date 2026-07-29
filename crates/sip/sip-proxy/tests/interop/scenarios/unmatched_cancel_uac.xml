@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy unmatched CANCEL stateless UAC">
+  <send retrans="500" start_txn="cancel">
+    <![CDATA[
+      CANCEL sip:agent@example.test;transport=[transport] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch];rport
+      From: <sip:caller@[local_ip]:[local_port]>;tag=[pid]-[call_number]
+      To: <sip:agent@example.test>
+      Call-ID: [call_id]
+      CSeq: 1 CANCEL
+      X-Interop-Scenario: unmatched-cancel
+      X-Interop-Unmatched-Cancel: yes
+      X-Interop-Peer-Rport: yes
+      Max-Forwards: 70
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="481" response_txn="cancel">
+    <action>
+      <ereg regexp="X-Interop-Origin: uas"
+            search_in="msg" check_it="true" assign_to="1" />
+      <log message="validated unmatched CANCEL origin=[$1]" />
+    </action>
+  </recv>
+</scenario>

@@ -1,0 +1,78 @@
+#!KAMAILIO
+
+debug=2
+log_stderror=yes
+fork=no
+children=2
+tcp_children=2
+disable_tcp=no
+
+listen=udp:0.0.0.0:__PUBLIC_PORT__ advertise __PUBLIC_HOST__:__PUBLIC_PORT__
+listen=tcp:0.0.0.0:__PUBLIC_PORT__ advertise __PUBLIC_HOST__:__PUBLIC_PORT__
+alias="__PUBLIC_HOST__:__PUBLIC_PORT__"
+
+loadmodule "tm.so"
+loadmodule "sl.so"
+loadmodule "rr.so"
+loadmodule "maxfwd.so"
+loadmodule "pv.so"
+loadmodule "textops.so"
+loadmodule "xlog.so"
+
+request_route {
+    xlog("L_INFO", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$proto\n");
+    # Scenarios carrying this marker explicitly exercise RFC 3581. Other UDP
+    # scenarios retain RFC 3261 sent-by response routing.
+    if (is_present_hf("X-Interop-Peer-Rport")) {
+        add_local_rport();
+    }
+
+    if (!mf_process_maxfwd_header("20")) {
+        sl_send_reply("483", "Too Many Hops");
+        exit;
+    }
+
+    if (is_method("CANCEL")) {
+        if (t_check_trans()) {
+            $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=__TRANSPORT__";
+            t_relay();
+        } else if (is_present_hf("X-Interop-Unmatched-Cancel")) {
+            # RFC 3261 section 16.10: a transaction-stateful proxy forwards
+            # an unmatched CANCEL statelessly. The marker limits this lab-only
+            # deterministic route to the conformance scenario.
+            $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=__TRANSPORT__";
+            forward();
+        }
+        exit;
+    }
+
+    if (is_method("ACK") && t_check_trans()) {
+        $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=__TRANSPORT__";
+        t_relay();
+        exit;
+    }
+
+    # A 2xx ACK and an in-dialog BYE are end-to-end. Consume this proxy's top
+    # Route and relay using the dialog route set instead of the static lab hop.
+    # Transaction-owned non-2xx ACK processing remains above this branch.
+    if ((is_method("ACK") || is_method("BYE")) && loose_route()) {
+        t_relay();
+        exit;
+    }
+
+    if (!is_method("ACK")) {
+        if (t_check_trans()) {
+            exit;
+        }
+    }
+
+    if (is_method("INVITE")) {
+        record_route();
+    }
+
+    $du = "sip:__NEXT_HOP_HOST__:__NEXT_HOP_PORT__;transport=__TRANSPORT__";
+    if (!t_relay()) {
+        sl_reply_error();
+    }
+    exit;
+}

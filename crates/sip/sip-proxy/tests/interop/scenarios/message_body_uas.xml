@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="rvoip proxy MESSAGE body UAS">
+  <recv request="MESSAGE" crlf="true">
+    <action>
+      <ereg regexp="bridgefu-interop-request-body-0123456789"
+            search_in="msg" check_it="true" assign_to="1" />
+      <ereg regexp="Content-Type: application/bridgefu-test"
+            search_in="msg" check_it="true" assign_to="2" />
+      <log message="validated MESSAGE body=[$1] content-type=[$2]" />
+    </action>
+  </recv>
+
+  <send>
+    <![CDATA[
+      SIP/2.0 200 OK
+      [last_Via:]
+      [last_From:]
+      [last_To:];tag=message-[pid]-[call_number]
+      [last_Call-ID:]
+      [last_CSeq:]
+      X-Interop-Origin: uas
+      Content-Type: application/bridgefu-test
+      Content-Length: [len]
+
+      bridgefu-interop-response-body-9876543210
+    ]]>
+  </send>
+</scenario>
