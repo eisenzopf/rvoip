@@ -203,6 +203,20 @@ serde = { version = "1.0" }
         self.assertIn('rvoip-a = { path = "a", version = "0.3.0" }', updated)
         self.assertIn('serde = { version = "1.0" }', updated)
 
+    def test_workspace_dependency_update_resolves_renamed_package(self) -> None:
+        source = """[workspace.dependencies]
+rtc = { package = "rvoip-rtc", path = "rtc", version = "0.3.3" }
+serde = { version = "1.0" }
+"""
+        updated = release.update_workspace_dependency_versions(
+            source, {"rvoip-rtc"}, "0.3.4"
+        )
+        self.assertIn(
+            'rtc = { package = "rvoip-rtc", path = "rtc", version = "0.3.4" }',
+            updated,
+        )
+        self.assertIn('serde = { version = "1.0" }', updated)
+
     def test_planned_version_edits_update_renamed_member_dependency(
         self,
     ) -> None:

@@ -333,12 +333,15 @@ def update_workspace_dependency_versions(
         if not active or "=" not in line:
             continue
         name = line.split("=", 1)[0].strip()
-        if name not in package_names:
+        package_match = re.search(r'\bpackage\s*=\s*"([^"]+)"', line)
+        package_name = package_match.group(1) if package_match else name
+        if package_name not in package_names:
             continue
         pattern = re.compile(r'(version\s*=\s*")[^"]+(")')
         if not pattern.search(line):
             raise ReleaseError(
-                f"internal workspace dependency {name} lacks a registry version"
+                "internal workspace dependency "
+                f"{name}->{package_name} lacks a registry version"
             )
         lines[index] = pattern.sub(rf"\g<1>{version}\g<2>", line, count=1)
         seen.add(name)
