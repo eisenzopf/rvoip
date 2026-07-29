@@ -215,13 +215,9 @@ pub use virtual_publisher::{
 };
 
 // V2.A.8 — when `vcon-signing` is enabled, re-export the
-// `rvoip-vcon` crate's surface so consumers can sign vCons + plug
-// their own `VconStore` impl without adding rvoip-vcon as a separate
-// Cargo dep. The orchestrator's auto-emission path still produces
-// raw bytes via `vcon::encode_snapshot` for the unsigned default; a
-// consumer wanting JWS signing constructs an adapter `VconStore`
-// impl that builds an `rvoip_vcon::Vcon` from the snapshot, calls
-// `signed_vcon::sign_jws`, then persists.
+// `rvoip-vcon` crate's surface so consumers can explicitly sign
+// vCons without adding rvoip-vcon as a separate Cargo dependency.
+// Core's automatic end-session emission remains unsigned.
 #[cfg(feature = "vcon-signing")]
 pub mod signed_vcon {
     //! V2.A.8 — feature-gated re-export of `rvoip-vcon` so consumers

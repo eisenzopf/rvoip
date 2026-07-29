@@ -50,4 +50,4 @@ they're not re-opened:
 1. **`rvoip-harness` spin-off** — spun off as a separate crate (the seam was the point).
 2. **`rvoip-identity` spin-off** — shipped as a separate crate with a no-op `BearerProvider`; the `IdentityProvider` trait stays in `rvoip-core::identity`.
 3. **Tenant scoping** — P6 landed multi-tenant data isolation per process (registries + per-tenant quota).
-4. **vCon production wiring** — P3 emits unsigned vCons by default; signing is gated behind `vcon-signing`. Production signing/encryption remains the `[V1.x]` item (not separately tracked above; folds into the vCon roadmap).
+4. **vCon production wiring** — P3 emits validated unsigned vCons by default. `rvoip-vcon` exposes opt-in JWS General JSON signing and signature appending; automatic tenant-key selection is not wired, and JWE is absent. Production key policy and confidentiality remain `[V1.x]` roadmap items.

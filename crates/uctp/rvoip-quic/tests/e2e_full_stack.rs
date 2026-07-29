@@ -8,10 +8,8 @@
 //!    inside the per-peer `UctpCoordinator` the QUIC server spawns.
 //! 3. **rvoip-core** owns the live Conversation/Session/Participant
 //!    registries (P1) and the vCon auto-emission path (P3).
-//! 4. **rvoip-vcon** is exercised side-by-side: a `Vcon` document is
-//!    constructed via `VconBuilder` using the same Session
-//!    participant data, stored in `rvoip_vcon::MemoryVconStore`, and
-//!    round-trips through `get`.
+//! 4. **rvoip-vcon** is the canonical model used to decode and
+//!    validate the exact bytes emitted by rvoip-core.
 //!
 //! What this test proves end-to-end:
 //! - Conversation + Session created via the new orchestrator methods.
@@ -21,10 +19,9 @@
 //!   binds the live Connection into the pre-created Session.
 //! - `end_session(sid)` triggers `Event::SessionEnded` and the
 //!   automatic `Event::VconReady` emission.
-//! - The vCon bytes in rvoip-core's `VconStore::get` are sha256-
+//! - The vCon bytes in rvoip-core's `VconStore::get` are SHA-512-
 //!   verifiable against the handle.
-//! - A parallel rvoip-vcon document model populated from the same
-//!   Session data round-trips cleanly through its own store.
+//! - Those same bytes deserialize and validate as a current vCon.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -46,7 +43,7 @@ use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
-use rvoip_vcon::{MemoryVconStore as IetfMemoryVconStore, Party, VconBuilder, VconStore};
+use rvoip_vcon::{content_hash, Vcon};
 
 const ALPN_UCTP: &[u8] = b"uctp/1";
 
@@ -347,11 +344,11 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
         "default MemoryVconStore URL shape"
     );
     assert!(
-        handle.content_hash.starts_with("sha256:"),
-        "content_hash uses sha256: prefix"
+        handle.content_hash.starts_with("sha512-"),
+        "content_hash uses the vCon SHA-512 token format"
     );
 
-    // === 9. Verify the bytes round-trip + hash-check. ===
+    // === 9. Verify the exact emitted bytes hash, decode, and validate. ===
     let store = orchestrator.config.vcon_store.clone();
     let bytes = store
         .get(&handle)
@@ -359,45 +356,28 @@ async fn e2e_quic_session_lifecycle_emits_vcon_and_rvoip_vcon_doc_roundtrips() {
         .unwrap()
         .expect("vCon bytes resolve");
     assert!(!bytes.is_empty(), "vCon bytes are non-empty");
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(&bytes);
-    let digest = h.finalize();
-    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
     assert_eq!(
         handle.content_hash,
-        format!("sha256:{}", hex),
+        content_hash(&bytes),
         "stored bytes must hash-match the VconHandle"
     );
 
-    // === 10. Side-by-side: exercise rvoip-vcon's *own* document
-    //    builder + store. Demonstrates that the IETF-shaped vCon
-    //    model (rvoip-vcon) and rvoip-core's encoder-shape model
-    //    are both functional. In production the consumer would
-    //    wire rvoip-vcon as a custom VconStore impl bridging
-    //    `rvoip_core::store::VconStore` to `rvoip_vcon::VconStore`. ===
-    let ietf_store = IetfMemoryVconStore::new();
-    let ietf_vcon = VconBuilder::new()
-        .with_party(Party {
-            name: Some("Alice".into()),
-            uuid: Some(alice.to_string()),
-            role: Some("customer".into()),
-            ..Default::default()
-        })
-        .with_party(Party {
-            name: Some("Bot".into()),
-            uuid: Some(bot.to_string()),
-            role: Some("agent".into()),
-            ..Default::default()
-        })
-        .recording(Utc::now(), 1500, vec![0, 1], "audio/opus")
-        .build();
-    let stored_uuid = ietf_store.put(ietf_vcon.clone()).await.expect("ietf put");
-    let fetched = ietf_store.get(&stored_uuid).await.expect("ietf get");
-    assert_eq!(fetched.parties.len(), 2);
-    assert_eq!(fetched.parties[0].name.as_deref(), Some("Alice"));
-    assert_eq!(fetched.parties[1].name.as_deref(), Some("Bot"));
-    assert_eq!(fetched.dialog.len(), 1);
+    let emitted: Vcon = serde_json::from_slice(&bytes).expect("canonical vCon JSON");
+    emitted.validate().expect("current vCon semantics");
+    assert_eq!(emitted.vcon.as_deref(), Some("0.4.0"));
+    assert_eq!(emitted.uuid.get_version_num(), 8);
+    assert!(
+        emitted.parties.len() >= 2,
+        "the emitted document retains the Session participants"
+    );
+    assert!(
+        !serde_json::to_value(&emitted)
+            .expect("serialize emitted vCon")
+            .as_object()
+            .expect("top-level vCon object")
+            .contains_key("group"),
+        "reserved group parameter must not be emitted"
+    );
 
     // Drain the client side of any lingering envelopes so the test
     // doesn't leave the QUIC connection in an awkward state.

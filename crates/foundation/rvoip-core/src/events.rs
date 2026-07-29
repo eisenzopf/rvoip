@@ -220,11 +220,10 @@ pub enum Event {
     RecordingComplete {
         recording_id: RecordingId,
         sink: String,
-        /// Opaque reference to the persisted vCon document.
+        /// Reserved for future recording-level linkage.
         ///
-        /// v0 always emits `None`; the `rvoip-vcon` crate landing in v0.x
-        /// populates `Some(VconRef::Local { uuid })` at session.ended. See
-        /// UCTP plan §2.4 / §7 (vCon emission row).
+        /// This remains `None` in 0.3.3; session-level vCons are announced
+        /// separately through [`Self::VconReady`].
         vcon_ref: Option<VconRef>,
         at: DateTime<Utc>,
     },

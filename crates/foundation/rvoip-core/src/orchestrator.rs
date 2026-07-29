@@ -51,6 +51,7 @@ use crate::stream::{
     BridgedDataMessageDecision, DataMessageBridgePolicy, MediaReceiverReservation,
     PassThroughDataMessageBridgePolicy, StreamKind,
 };
+#[cfg(feature = "vcon")]
 use crate::vcon::VconBuilderHandle;
 use crate::DataMessage;
 use bytes::Bytes;
@@ -4867,6 +4868,8 @@ impl Orchestrator {
 
         let sid = SessionId::new();
         let now = Utc::now();
+        #[cfg(feature = "vcon")]
+        let vcon_invitees = invitees.clone();
         let session = Session {
             id: sid.clone(),
             conversation_id: conversation_id.clone(),
@@ -4881,11 +4884,22 @@ impl Orchestrator {
         };
         self.sessions
             .insert(sid.clone(), Arc::new(RwLock::new(session)));
-        // P3 — every Session gets a vCon builder bound to it on start.
-        self.session_vcons.insert(
-            sid.clone(),
-            Arc::new(crate::vcon::DefaultVconBuilder::new()),
-        );
+        // P3 — every Session gets a vCon builder bound to it on start
+        // when canonical vCon support is enabled.
+        #[cfg(feature = "vcon")]
+        {
+            let builder = Arc::new(crate::vcon::DefaultVconBuilder::new());
+            for participant_id in vcon_invitees {
+                builder.add_party(crate::vcon::VconParty {
+                    participant_id,
+                    display_name: None,
+                    did: None,
+                    stir: None,
+                    validation: crate::identity::IdentityAssurance::Anonymous,
+                });
+            }
+            self.session_vcons.insert(sid.clone(), builder);
+        }
 
         {
             let mut conv = conv_arc.write().expect("conversation lock poisoned");
@@ -4930,42 +4944,57 @@ impl Orchestrator {
         self.sessions_by_connection
             .retain(|_, sid| sid != &session_id);
 
-        // P3 — finalize the Session's vCon: snapshot, encode, persist,
-        // emit VconReady. Best-effort — a store failure logs but does
-        // not block SessionEnded emission.
-        let tenant_id = self.conversations.get(&conv_id).map(|e| {
-            e.value()
-                .read()
-                .expect("conv lock poisoned")
-                .tenant_id
-                .clone()
-        });
-        if let (Some((_, builder)), Some(tenant_id)) =
-            (self.session_vcons.remove(&session_id), tenant_id)
+        // P3 — finalize the Session's vCon: convert into the canonical
+        // model, validate, serialize, persist, then emit VconReady.
+        // Every stage is best-effort and never blocks SessionEnded.
+        #[cfg(feature = "vcon")]
         {
-            let snap = builder.snapshot();
-            let bytes = crate::vcon::encode_snapshot(&snap);
-            let store = Arc::clone(&self.config.vcon_store);
-            let sid_clone = session_id.clone();
-            let events_tx = self.events.clone();
-            let cross_crate_publisher = self.cross_crate_publisher.clone();
-            tokio::spawn(async move {
-                match store.put(&tenant_id, &sid_clone, bytes).await {
-                    Ok(handle) => {
-                        let ev = Event::VconReady {
-                            session_id: sid_clone,
-                            handle,
-                            at: Utc::now(),
-                        };
-                        let _ = Self::emit_to_channels(
-                            &events_tx,
-                            cross_crate_publisher.as_deref(),
-                            ev,
-                        );
-                    }
-                    Err(e) => warn!(?e, "VconStore::put failed; VconReady not emitted"),
-                }
+            let tenant_id = self.conversations.get(&conv_id).map(|e| {
+                e.value()
+                    .read()
+                    .expect("conv lock poisoned")
+                    .tenant_id
+                    .clone()
             });
+            if let (Some((_, builder)), Some(tenant_id)) =
+                (self.session_vcons.remove(&session_id), tenant_id)
+            {
+                let snap = builder.snapshot();
+                match crate::vcon::encode_snapshot(&snap) {
+                    Ok(bytes) => {
+                        let store = Arc::clone(&self.config.vcon_store);
+                        let sid_clone = session_id.clone();
+                        let conv_id_clone = conv_id.clone();
+                        let events_tx = self.events.clone();
+                        let cross_crate_publisher = self.cross_crate_publisher.clone();
+                        tokio::spawn(async move {
+                            match store
+                                .put(&tenant_id, &conv_id_clone, &sid_clone, bytes)
+                                .await
+                            {
+                                Ok(handle) => {
+                                    let ev = Event::VconReady {
+                                        session_id: sid_clone,
+                                        handle,
+                                        at: Utc::now(),
+                                    };
+                                    let _ = Self::emit_to_channels(
+                                        &events_tx,
+                                        cross_crate_publisher.as_deref(),
+                                        ev,
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(?e, "VconStore::put failed; VconReady not emitted")
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => warn!(
+                        "vCon conversion, validation, or serialization failed; VconReady not emitted"
+                    ),
+                }
+            }
         }
 
         if let Some(conv_arc) = self
@@ -5062,6 +5091,7 @@ impl Orchestrator {
         }
 
         // P3 — auto-collect the joining party into the Session's vCon.
+        #[cfg(feature = "vcon")]
         if let Some(builder) = self
             .session_vcons
             .get(&session_id)
@@ -5070,7 +5100,8 @@ impl Orchestrator {
             builder.add_party(crate::vcon::VconParty {
                 participant_id: participant_id.clone(),
                 display_name: None,
-                did_or_stir: None,
+                did: None,
+                stir: None,
                 validation: crate::identity::IdentityAssurance::Anonymous,
             });
         }

@@ -50,9 +50,9 @@ The source of truth is
 ## Conventions
 
 - **Self-contained projects.** Each example is its own Cargo workspace and uses
-  local rvoip crates through `version = "0.3.2"` plus `path`. That builds
-  against the live tree today and records the crates.io version for when you
-  copy it into your own project (drop `path`, keep `version`).
+  local rvoip crates through the current unified release version plus `path`.
+  That builds against the live tree today and records the crates.io version for
+  when you copy it into your own project (drop `path`, keep `version`).
 - **`./run_demo.sh`** builds release binaries, boots every process with port
   readiness checks, prints the combined logs, and exits non-zero on failure.
   Logs land in each example's `logs/`.

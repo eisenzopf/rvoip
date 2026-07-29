@@ -19,14 +19,15 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.2` release.** All 44 publishable workspace crates ship on the
+> **Unified `0.3.3` release.** All 44 publishable workspace crates ship on the
 > same version. The SIP product is the release-gated beta surface. WebRTC,
 > UCTP, MoQ, the cross-transport APIs, Amazon Connect, and extension crates are
 > available today as developer-preview surfaces unless their own documentation
 > states a narrower qualification. Available does not mean API-stable or
 > production-certified; breaking changes remain possible before `1.0`.
-> The 0.3.2 SIP release is [approved with one documented performance
-> exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md); its strict
+> The 0.3.3 vCon delta does not rerun or relabel the SIP beta checkpoint. Its
+> unchanged-subsystem background remains the immutable [0.3.2 performance
+> exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md), whose strict
 > automated qualification remains NON-RC.
 > The same unified release includes all 14 optional extension crates and the
 > new native `rvoip-vapi` bidirectional raw-audio WebSocket transport.
@@ -114,7 +115,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.2"
+rvoip-sip = "0.3.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -219,7 +220,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.2`. They are first-class workspace
+All 14 extension crates ship at `0.3.3`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
@@ -241,22 +242,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.2", features = ["voip-3"] }
+rvoip = { version = "0.3.3", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.2", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.3", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.2"
-rvoip-redis = "0.3.2"
-rvoip-audit = "0.3.2"
+rvoip-keycloak = "0.3.3"
+rvoip-redis = "0.3.3"
+rvoip-audit = "0.3.3"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,
