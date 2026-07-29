@@ -68,7 +68,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
 dependencies = [
  "cfg-if 1.0.4",
+ "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -1348,6 +1350,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "borrow-or-share"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc0b364ead1874514c8c2855ab558056ebfeb775653e7ae45ff72f28f8f3166c"
+
+[[package]]
 name = "bs58"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1390,6 +1398,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "bytecount"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "175812e0be2bccb6abe50bb8d566126198344f707e304f45c648fd8f2cc0365e"
 
 [[package]]
 name = "bytemuck"
@@ -2711,6 +2725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "encoding_rs"
 version = "0.8.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2857,6 +2880,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fancy-regex"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "fastbloom"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2919,6 +2953,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fluent-uri"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1918b65d96df47d3591bed19c5cca17e3fa5d0707318e4b5ef2eae01764df7e5"
+dependencies = [
+ "borrow-or-share",
+ "ref-cast",
+ "serde",
+]
+
+[[package]]
 name = "flume"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2970,6 +3015,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fraction"
+version = "0.15.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e076045bb43dac435333ed5f04caf35c7463631d0dae2deb2638d94dd0a5b872"
+dependencies = [
+ "lazy_static",
+ "num",
 ]
 
 [[package]]
@@ -4126,6 +4181,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonschema"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d46662859bc5f60a145b75f4632fbadc84e829e45df6c5de74cfc8e05acb96b5"
+dependencies = [
+ "ahash",
+ "base64 0.22.1",
+ "bytecount",
+ "email_address",
+ "fancy-regex",
+ "fraction",
+ "idna",
+ "itoa",
+ "num-cmp",
+ "num-traits",
+ "once_cell",
+ "percent-encoding",
+ "referencing",
+ "regex",
+ "regex-syntax",
+ "serde",
+ "serde_json",
+ "uuid-simd",
+]
+
+[[package]]
 name = "jsonwebtoken"
 version = "9.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4796,6 +4877,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "num"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35bd024e8b2ff75562e5f34e7f4905839deb4b22955ef5e73d2fea1b9813cb23"
+dependencies = [
+ "num-bigint",
+ "num-complex",
+ "num-integer",
+ "num-iter",
+ "num-rational",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4820,6 +4915,12 @@ dependencies = [
  "smallvec",
  "zeroize",
 ]
+
+[[package]]
+name = "num-cmp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63335b2e2c34fae2fb0aa2cecfd9f0832a1e24b3b32ecec612c3426d46dc8aaa"
 
 [[package]]
 name = "num-complex"
@@ -4862,6 +4963,17 @@ version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c92800bd69a1eac91786bcfe9da64a897eb72911b8dc3095decbd07429e8048b"
 dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-rational"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
+dependencies = [
+ "num-bigint",
  "num-integer",
  "num-traits",
 ]
@@ -6165,6 +6277,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "referencing"
+version = "0.33.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e9c261f7ce75418b3beadfb3f0eb1299fe8eb9640deba45ffa2cb783098697d"
+dependencies = [
+ "ahash",
+ "fluent-uri",
+ "once_cell",
+ "parking_lot",
+ "percent-encoding",
+ "serde_json",
+]
+
+[[package]]
 name = "regex"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6914,7 +7040,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -6943,7 +7069,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-amazon-connect"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6976,7 +7102,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-audio-device"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "cpal",
@@ -6987,7 +7113,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-audit"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -7001,7 +7127,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-auth-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7032,7 +7158,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-client"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7054,7 +7180,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-codec-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "criterion",
  "ezk-g722",
@@ -7067,9 +7193,10 @@ dependencies = [
 
 [[package]]
 name = "rvoip-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "dashmap",
@@ -7099,7 +7226,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-core-traits"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7115,7 +7242,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-harness"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7125,7 +7252,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-identity"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "rvoip-core",
@@ -7134,7 +7261,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-ims-aka"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes",
  "async-trait",
@@ -7153,7 +7280,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-infra-common"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7181,7 +7308,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-keycloak"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -7195,7 +7322,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-ldap"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "ldap3",
@@ -7207,7 +7334,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-media-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "apodize",
@@ -7243,7 +7370,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7275,7 +7402,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-native"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -7303,7 +7430,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-relay"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7329,7 +7456,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-moq-transport"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures",
@@ -7363,7 +7490,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-oidc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -7377,7 +7504,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-quic"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7393,7 +7520,6 @@ dependencies = [
  "rvoip-uctp",
  "rvoip-vcon",
  "serde_json",
- "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
@@ -7403,7 +7529,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-redis"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7419,7 +7545,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-rtc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7458,7 +7584,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-rtp-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -7501,7 +7627,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-saml"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7516,7 +7642,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-scim"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -7535,7 +7661,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7603,7 +7729,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7622,7 +7748,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-dialog"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7648,7 +7774,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-proxy"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "dashmap",
@@ -7664,7 +7790,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-registrar"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7685,7 +7811,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-sip-transport"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7718,7 +7844,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-stir-shaken"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7743,7 +7869,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-uctp"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -7782,7 +7908,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-users-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7824,7 +7950,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-vapi"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -7849,25 +7975,28 @@ dependencies = [
 
 [[package]]
 name = "rvoip-vcon"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "dashmap",
+ "jsonschema",
  "jsonwebtoken",
- "parking_lot",
- "rvoip-auth-core",
+ "mime",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
- "tracing",
+ "url",
  "uuid",
+ "x509-parser 0.18.1",
 ]
 
 [[package]]
 name = "rvoip-vcon-postgres"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -7875,7 +8004,6 @@ dependencies = [
  "rvoip-core",
  "rvoip-vcon",
  "serde_json",
- "sha2 0.10.9",
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
@@ -7885,7 +8013,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webauthn"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -7902,7 +8030,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webrtc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "axum",
@@ -7956,7 +8084,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webrtc-stack"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-broadcast",
@@ -7979,7 +8107,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-websocket"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -8008,7 +8136,7 @@ dependencies = [
 
 [[package]]
 name = "rvoip-webtransport"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9812,6 +9940,17 @@ dependencies = [
  "js-sys",
  "serde_core",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "uuid-simd"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b082222b4f6619906941c17eb2297fff4c2fb96cb60164170522942a200bd8"
+dependencies = [
+ "outref",
+ "uuid",
+ "vsimd",
 ]
 
 [[package]]

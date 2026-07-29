@@ -52,6 +52,63 @@ available before publication.
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.
 
+### Approved targeted-delta verification
+
+For an owner-approved, narrowly scoped vCon patch, verification can consume a
+commit-bound targeted-delta attestation instead of rerunning the full SIP beta
+suite and broad workspace test/doc suites:
+
+```sh
+scripts/release.sh verify --version X.Y.Z \
+  --targeted-delta-attestation /path/to/targeted-delta.json
+```
+
+This mode still validates the unified workspace manifest, runs
+`cargo check --workspace --all-targets --locked`, and produces every package
+file manifest and every registry-resolvable archive hash. It then reruns this
+fixed targeted matrix:
+
+- `vcon-all-targets`: `cargo test -p rvoip-vcon --all-targets --locked`
+- `core-vcon-lib`: `cargo test -p rvoip-core --lib vcon --locked`
+- `core-vcon-emission`: `cargo test -p rvoip-core --test vcon_emission --locked`
+- `core-no-default-features`: `cargo check -p rvoip-core --no-default-features --all-targets --locked`
+- `core-all-features`: `cargo check -p rvoip-core --all-features --all-targets --locked`
+- `quic-e2e-full-stack`: `cargo test -p rvoip-quic --test e2e_full_stack --locked`
+- `facade-voip-3`: `cargo check -p rvoip --features voip-3 --locked`
+- `ai-harness-example`: `cargo check --manifest-path examples/11-ai-harness-demo/Cargo.toml`
+- `release-unit-tests`: `python3 -m unittest scripts/test_release.py`
+
+The live
+`cargo test -p rvoip-vcon-postgres --all-targets --features core-store,live-tests --locked`
+result (`postgres-core-store-live`) is not rerun by this command. It must
+instead be supplied as hash-bound JSON evidence with
+schema `rvoip-vcon-postgres-live-evidence-v1`, the exact release commit, the
+exact approved Cargo argv, exit status `0`, `live_database: true`, a PostgreSQL
+server version, `ephemeral_database: true`, an environment object containing
+the provider, image, database name, and unique run identifier (never
+credentials), and a timezone-aware `recorded_at`.
+
+The attestation schema is `rvoip-targeted-delta-attestation-v1`. It must bind
+the exact release version and commit, the vCon schema commit
+`2342aba64bdb71d9e80ab6e274a3921e2b1c769e`, an existing ancestor base commit,
+the exact changed-path list, all named commands with their exact argv/commit
+and exit status `0`, the live PostgreSQL evidence path and SHA-256, and
+timezone-aware owner approval metadata. For 0.3.3, the base commit must resolve
+exactly from the immutable `v0.3.2` tag; a later arbitrary ancestor cannot hide
+out-of-scope changes. The release tool checks the declared
+path list against the Git diff and against its hard-coded vCon-only policy;
+self-declaring an unrelated SIP, media, or workspace path does not authorize
+it. The resulting receipt copies the ephemeral PostgreSQL environment so the
+targeted qualification cannot be mistaken for a test against an unspecified
+or persistent database.
+
+The three verification inputs `--beta-report-root`,
+`--beta-exception-attestation`, and `--targeted-delta-attestation` are mutually
+exclusive. A targeted receipt says `NOT-RERUN` for the beta, broad workspace
+tests, and doctests; it never relabels them as passing. Receipt schema v4
+records the attestation hash, targeted commands, PostgreSQL evidence hash, and
+the manifest/compile/package checks that did run.
+
 ## Publish
 
 The default is non-publishing:

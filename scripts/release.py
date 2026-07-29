@@ -23,9 +23,140 @@ import urllib.request
 
 EXPECTED_PACKAGE_COUNT = 44
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
+VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
+TARGETED_DELTA_ATTESTATION_SCHEMA = "rvoip-targeted-delta-attestation-v1"
+TARGETED_POSTGRES_EVIDENCE_SCHEMA = "rvoip-vcon-postgres-live-evidence-v1"
+VCON_SCHEMA_COMMIT = "2342aba64bdb71d9e80ab6e274a3921e2b1c769e"
+TARGETED_DELTA_VERSION = "0.3.3"
+TARGETED_DELTA_BASE_TAG = "v0.3.2"
+TARGETED_DELTA_EXACT_PATHS = frozenset(
+    {
+        "Cargo.toml",
+        "Cargo.lock",
+        "README.md",
+        "CHANGELOG.md",
+        "docs/RELEASING.md",
+        "docs/PRD.md",
+        "docs/CONVERSATION_PROTOCOL.md",
+        "docs/INTERFACE_DESIGN.md",
+        "docs/GAP_PLAN.md",
+        ".github/workflows/vcon.yml",
+        "scripts/release.py",
+        "scripts/release.sh",
+        "scripts/test_release.py",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/webrtc/rvoip-webrtc-stack/Cargo.toml",
+        "crates/foundation/rvoip-core/Cargo.toml",
+        "crates/foundation/rvoip-core/README.md",
+        "crates/foundation/rvoip-core/src/events.rs",
+        "crates/foundation/rvoip-core/src/lib.rs",
+        "crates/foundation/rvoip-core/src/orchestrator.rs",
+        "crates/foundation/rvoip-core/src/vcon.rs",
+        "crates/foundation/rvoip-core/src/store/vcon_store.rs",
+        "crates/foundation/rvoip-core/tests/vcon_emission.rs",
+        "crates/rvoip/README.md",
+        "crates/rvoip/src/lib.rs",
+        "examples/README.md",
+        "crates/uctp/rvoip-quic/Cargo.toml",
+        "crates/uctp/rvoip-quic/tests/e2e_full_stack.rs",
+        "crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md",
+    }
+)
+TARGETED_DELTA_PATH_PREFIXES = (
+    "crates/extensions/rvoip-vcon/",
+    "crates/extensions/rvoip-vcon-postgres/",
+    "examples/11-ai-harness-demo/",
+)
+
+TARGETED_DELTA_COMMANDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "vcon-all-targets",
+        ("cargo", "test", "-p", "rvoip-vcon", "--all-targets", "--locked"),
+    ),
+    (
+        "core-vcon-lib",
+        ("cargo", "test", "-p", "rvoip-core", "--lib", "vcon", "--locked"),
+    ),
+    (
+        "core-vcon-emission",
+        (
+            "cargo",
+            "test",
+            "-p",
+            "rvoip-core",
+            "--test",
+            "vcon_emission",
+            "--locked",
+        ),
+    ),
+    (
+        "core-no-default-features",
+        (
+            "cargo",
+            "check",
+            "-p",
+            "rvoip-core",
+            "--no-default-features",
+            "--all-targets",
+            "--locked",
+        ),
+    ),
+    (
+        "core-all-features",
+        (
+            "cargo",
+            "check",
+            "-p",
+            "rvoip-core",
+            "--all-features",
+            "--all-targets",
+            "--locked",
+        ),
+    ),
+    (
+        "quic-e2e-full-stack",
+        (
+            "cargo",
+            "test",
+            "-p",
+            "rvoip-quic",
+            "--test",
+            "e2e_full_stack",
+            "--locked",
+        ),
+    ),
+    (
+        "facade-voip-3",
+        ("cargo", "check", "-p", "rvoip", "--features", "voip-3", "--locked"),
+    ),
+    (
+        "ai-harness-example",
+        (
+            "cargo",
+            "check",
+            "--manifest-path",
+            "examples/11-ai-harness-demo/Cargo.toml",
+        ),
+    ),
+    (
+        "release-unit-tests",
+        ("python3", "-m", "unittest", "scripts/test_release.py"),
+    ),
+)
+TARGETED_POSTGRES_COMMAND = (
+    "cargo",
+    "test",
+    "-p",
+    "rvoip-vcon-postgres",
+    "--all-targets",
+    "--features",
+    "core-store,live-tests",
+    "--locked",
+)
 
 
 class ReleaseError(RuntimeError):
@@ -216,6 +347,88 @@ def update_workspace_dependency_versions(
     return "".join(lines)
 
 
+def update_member_dependency_versions(
+    text: str, dependency_names: set[str], version: str
+) -> str:
+    lines = text.splitlines(keepends=True)
+    dependency_section = re.compile(
+        r"^\[(?:target\..+\.)?"
+        r"(?:dependencies|dev-dependencies|build-dependencies)\]$"
+    )
+    dependency_table = re.compile(
+        r"^\[(?:target\..+\.)?"
+        r"(?:dependencies|dev-dependencies|build-dependencies)"
+        r"\.([A-Za-z0-9_-]+)\]$"
+    )
+    active_section = False
+    active_dependency: str | None = None
+    version_field = re.compile(r'(version\s*=\s*")[^"]+(")')
+    table_version = re.compile(r'^(\s*version\s*=\s*")[^"]+(")')
+    simple_version = re.compile(
+        r'^(\s*[A-Za-z0-9_-]+\s*=\s*")[^"]+(")'
+    )
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            table_match = dependency_table.fullmatch(stripped)
+            active_dependency = (
+                table_match.group(1)
+                if table_match and table_match.group(1) in dependency_names
+                else None
+            )
+            active_section = dependency_section.fullmatch(stripped) is not None
+            continue
+        if active_dependency is not None:
+            if table_version.search(line):
+                lines[index] = table_version.sub(
+                    rf"\g<1>{version}\g<2>", line, count=1
+                )
+            continue
+        if not active_section or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name not in dependency_names:
+            continue
+        if version_field.search(line):
+            lines[index] = version_field.sub(
+                rf"\g<1>{version}\g<2>", line, count=1
+            )
+        elif simple_version.search(line):
+            lines[index] = simple_version.sub(
+                rf"\g<1>{version}\g<2>", line, count=1
+            )
+    return "".join(lines)
+
+
+def validate_member_dependency_versions(
+    packages: dict[str, dict[str, Any]], version: str
+) -> None:
+    expected_requirement = f"^{version}"
+    wrong: set[str] = set()
+    for package_name, package in packages.items():
+        for dependency in package.get("dependencies", []):
+            dependency_name = dependency.get("name")
+            if dependency_name not in packages:
+                continue
+            requirement = dependency.get("req")
+            if requirement == expected_requirement or (
+                dependency.get("kind") == "dev" and requirement == "*"
+            ):
+                continue
+            declared_name = dependency.get("rename") or dependency_name
+            target = (
+                f"{declared_name} ({dependency_name})"
+                if declared_name != dependency_name
+                else str(dependency_name)
+            )
+            wrong.add(f"{package_name} -> {target}@{requirement}")
+    if wrong:
+        raise ReleaseError(
+            f"member internal requirements are not {version}: {sorted(wrong)}"
+        )
+
+
 def planned_version_edits(
     root: Path, packages: dict[str, dict[str, Any]], version: str
 ) -> dict[Path, bytes]:
@@ -233,6 +446,14 @@ def planned_version_edits(
         text = manifest.read_text()
         updated = replace_section_version(
             text, "package", "version.workspace = true"
+        )
+        internal_dependency_names = {
+            dependency.get("rename") or dependency.get("name")
+            for dependency in package.get("dependencies", [])
+            if dependency.get("name") in packages
+        }
+        updated = update_member_dependency_versions(
+            updated, internal_dependency_names, version
         )
         changes[manifest] = updated.encode()
     return changes
@@ -296,6 +517,7 @@ def validate_workspace(
         raise ReleaseError(
             f"internal workspace requirements are not {version}: {wrong_dependencies}"
         )
+    validate_member_dependency_versions(packages, version)
     for package in packages.values():
         manifest = Path(package["manifest_path"]).read_text()
         package_section = manifest.split("[package]", 1)[1].split("\n[", 1)[0]
@@ -474,7 +696,360 @@ class ReleaseLog:
         return output
 
 
-def verify_beta_reporting(root: Path, beta_report_root: str | None, log: ReleaseLog) -> None:
+def relative_or_absolute(root: Path, path: Path) -> str:
+    return path.relative_to(root).as_posix() if path.is_relative_to(root) else str(path)
+
+
+def load_json_object(path: Path, description: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ReleaseError(f"cannot read {description} {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise ReleaseError(f"{description} must be a JSON object: {path}")
+    return payload
+
+
+def require_nonempty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReleaseError(f"targeted delta attestation requires non-empty {field}")
+    return value
+
+
+def require_timestamp(value: Any, field: str) -> str:
+    timestamp = require_nonempty_string(value, field)
+    try:
+        parsed = dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ReleaseError(
+            f"targeted delta attestation requires ISO-8601 {field}"
+        ) from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReleaseError(f"targeted delta attestation requires timezone-aware {field}")
+    return timestamp
+
+
+def targeted_delta_path_allowed(path: str) -> bool:
+    return path in TARGETED_DELTA_EXACT_PATHS or path.startswith(
+        TARGETED_DELTA_PATH_PREFIXES
+    )
+
+
+def verify_attested_command(
+    record: Any,
+    *,
+    name: str,
+    argv: tuple[str, ...],
+    head: str,
+) -> None:
+    if not isinstance(record, dict):
+        raise ReleaseError(f"targeted command {name!r} must be a JSON object")
+    if record.get("name") != name:
+        raise ReleaseError(f"targeted command name mismatch for {name!r}")
+    if record.get("argv") != list(argv):
+        raise ReleaseError(f"targeted command argv mismatch for {name!r}")
+    if record.get("exit_status") != 0:
+        raise ReleaseError(f"targeted command {name!r} did not attest exit status 0")
+    if record.get("git_commit") != head:
+        raise ReleaseError(f"targeted command {name!r} is not bound to release commit")
+
+
+def verify_targeted_delta_attestation(
+    root: Path,
+    version: str,
+    head: str,
+    attestation_value: str,
+    log: ReleaseLog,
+) -> tuple[dict[str, Any], list[tuple[str, list[str]]]]:
+    attestation = Path(attestation_value)
+    if not attestation.is_absolute():
+        attestation = root / attestation
+    if not attestation.is_file():
+        raise ReleaseError(f"missing targeted delta attestation: {attestation}")
+    payload = load_json_object(attestation, "targeted delta attestation")
+    if payload.get("schema") != TARGETED_DELTA_ATTESTATION_SCHEMA:
+        raise ReleaseError("unexpected targeted delta attestation schema")
+    if version != TARGETED_DELTA_VERSION:
+        raise ReleaseError(
+            f"targeted delta mode is limited to release {TARGETED_DELTA_VERSION}"
+        )
+
+    release = payload.get("release")
+    if not isinstance(release, dict):
+        raise ReleaseError("targeted delta attestation lacks release metadata")
+    if release.get("version") != version:
+        raise ReleaseError("targeted delta attestation version mismatch")
+    if release.get("git_commit") != head or not COMMIT_SHA.fullmatch(head):
+        raise ReleaseError("targeted delta attestation release commit mismatch")
+    if release.get("vcon_schema_commit") != VCON_SCHEMA_COMMIT:
+        raise ReleaseError("targeted delta attestation vCon schema commit mismatch")
+
+    base_commit = release.get("base_commit")
+    if not isinstance(base_commit, str) or not COMMIT_SHA.fullmatch(base_commit):
+        raise ReleaseError("targeted delta base commit must be a full lowercase SHA-1")
+    try:
+        resolved_base = git_output(
+            root, "rev-parse", "--verify", f"{base_commit}^{{commit}}"
+        )
+    except ReleaseError as error:
+        raise ReleaseError(
+            f"targeted delta base commit does not exist: {base_commit}"
+        ) from error
+    if resolved_base != base_commit:
+        raise ReleaseError("targeted delta base commit did not resolve exactly")
+    try:
+        expected_base = git_output(
+            root,
+            "rev-parse",
+            "--verify",
+            f"refs/tags/{TARGETED_DELTA_BASE_TAG}^{{commit}}",
+        )
+    except ReleaseError as error:
+        raise ReleaseError(
+            f"targeted delta requires immutable base tag {TARGETED_DELTA_BASE_TAG}"
+        ) from error
+    if base_commit != expected_base:
+        raise ReleaseError(
+            "targeted delta base commit must be the commit identified by "
+            f"{TARGETED_DELTA_BASE_TAG}"
+        )
+    ancestor = run(
+        ["git", "merge-base", "--is-ancestor", base_commit, head],
+        cwd=root,
+        check=False,
+    )
+    if ancestor.returncode:
+        raise ReleaseError("targeted delta base commit is not an ancestor of release")
+
+    actual_paths = sorted(
+        line
+        for line in git_output(
+            root,
+            "diff",
+            "--name-only",
+            "--diff-filter=ACDMRTUXB",
+            base_commit,
+            head,
+        ).splitlines()
+        if line
+    )
+    disallowed_paths = [
+        path for path in actual_paths if not targeted_delta_path_allowed(path)
+    ]
+    if disallowed_paths:
+        raise ReleaseError(
+            "targeted delta contains paths outside the hard-coded vCon release "
+            f"policy: {disallowed_paths}"
+        )
+    allowed_paths = payload.get("allowed_changed_paths")
+    if (
+        not isinstance(allowed_paths, list)
+        or not allowed_paths
+        or any(not isinstance(path, str) or not path for path in allowed_paths)
+        or allowed_paths != sorted(set(allowed_paths))
+    ):
+        raise ReleaseError(
+            "targeted delta allowed_changed_paths must be a non-empty sorted unique list"
+        )
+    if actual_paths != allowed_paths:
+        missing = sorted(set(actual_paths) - set(allowed_paths))
+        excess = sorted(set(allowed_paths) - set(actual_paths))
+        raise ReleaseError(
+            "targeted delta changed paths differ from the exact allowlist "
+            f"(not allowed: {missing}; not changed: {excess})"
+        )
+
+    command_records = payload.get("commands")
+    if not isinstance(command_records, list):
+        raise ReleaseError("targeted delta attestation lacks command records")
+    by_name: dict[str, dict[str, Any]] = {}
+    for record in command_records:
+        if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+            raise ReleaseError("targeted delta command record is malformed")
+        name = record["name"]
+        if name in by_name:
+            raise ReleaseError(f"duplicate targeted command record: {name}")
+        by_name[name] = record
+    expected_names = {name for name, _ in TARGETED_DELTA_COMMANDS}
+    if set(by_name) != expected_names:
+        raise ReleaseError(
+            "targeted command names differ from the approved matrix "
+            f"(missing: {sorted(expected_names - set(by_name))}; "
+            f"unexpected: {sorted(set(by_name) - expected_names)})"
+        )
+    commands: list[tuple[str, list[str]]] = []
+    for name, argv in TARGETED_DELTA_COMMANDS:
+        verify_attested_command(by_name[name], name=name, argv=argv, head=head)
+        commands.append((name, list(argv)))
+
+    postgresql = payload.get("postgresql")
+    if not isinstance(postgresql, dict) or postgresql.get("live_database") is not True:
+        raise ReleaseError("targeted delta requires explicit live PostgreSQL evidence")
+    if postgresql.get("ephemeral_database") is not True:
+        raise ReleaseError("targeted delta PostgreSQL evidence must use an ephemeral database")
+    server_version = require_nonempty_string(
+        postgresql.get("server_version"), "postgresql.server_version"
+    )
+    environment = postgresql.get("environment")
+    if not isinstance(environment, dict):
+        raise ReleaseError("targeted delta lacks PostgreSQL environment metadata")
+    postgres_environment = {
+        "provider": require_nonempty_string(
+            environment.get("provider"), "postgresql.environment.provider"
+        ),
+        "image": require_nonempty_string(
+            environment.get("image"), "postgresql.environment.image"
+        ),
+        "database": require_nonempty_string(
+            environment.get("database"), "postgresql.environment.database"
+        ),
+        "run_id": require_nonempty_string(
+            environment.get("run_id"), "postgresql.environment.run_id"
+        ),
+    }
+    if environment != postgres_environment:
+        raise ReleaseError(
+            "PostgreSQL environment must contain exactly provider, image, database, and run_id"
+        )
+    postgres_command = postgresql.get("command")
+    verify_attested_command(
+        postgres_command,
+        name="postgres-core-store-live",
+        argv=TARGETED_POSTGRES_COMMAND,
+        head=head,
+    )
+    evidence = postgresql.get("evidence")
+    if not isinstance(evidence, dict):
+        raise ReleaseError("targeted delta lacks PostgreSQL evidence metadata")
+    evidence_value = require_nonempty_string(
+        evidence.get("path"), "postgresql.evidence.path"
+    )
+    evidence_path = Path(evidence_value)
+    if not evidence_path.is_absolute():
+        evidence_path = root / evidence_path
+    if not evidence_path.is_file():
+        raise ReleaseError(f"missing PostgreSQL evidence file: {evidence_path}")
+    evidence_sha256 = evidence.get("sha256")
+    actual_evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    if (
+        not isinstance(evidence_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256)
+        or evidence_sha256 != actual_evidence_sha256
+    ):
+        raise ReleaseError("PostgreSQL evidence SHA-256 mismatch")
+    evidence_payload = load_json_object(
+        evidence_path, "targeted delta PostgreSQL evidence"
+    )
+    expected_evidence = {
+        "schema": TARGETED_POSTGRES_EVIDENCE_SCHEMA,
+        "git_commit": head,
+        "argv": list(TARGETED_POSTGRES_COMMAND),
+        "exit_status": 0,
+        "live_database": True,
+        "ephemeral_database": True,
+        "server_version": server_version,
+        "environment": postgres_environment,
+    }
+    for field, expected_value in expected_evidence.items():
+        if evidence_payload.get(field) != expected_value:
+            raise ReleaseError(
+                f"PostgreSQL evidence {field} does not match the release"
+            )
+    postgres_recorded_at = require_timestamp(
+        evidence_payload.get("recorded_at"), "postgresql.recorded_at"
+    )
+
+    approval = payload.get("approval")
+    if not isinstance(approval, dict):
+        raise ReleaseError("targeted delta attestation lacks approval metadata")
+    approved_by = require_nonempty_string(
+        approval.get("approved_by"), "approval.approved_by"
+    )
+    approved_at = require_timestamp(
+        approval.get("approved_at"), "approval.approved_at"
+    )
+    rationale = require_nonempty_string(
+        approval.get("rationale"), "approval.rationale"
+    )
+
+    attestation_sha256 = hashlib.sha256(attestation.read_bytes()).hexdigest()
+    qualification = {
+        "mode": "targeted-delta",
+        "disposition": "APPROVED-TARGETED-DELTA",
+        "strict_automated_status": "NOT-RERUN",
+        "workspace_test_status": "TARGETED-ONLY",
+        "base_commit": base_commit,
+        "vcon_schema_commit": VCON_SCHEMA_COMMIT,
+        "changed_paths": actual_paths,
+        "changed_path_count": len(actual_paths),
+        "targeted_command_count": len(commands),
+        "attestation_path": relative_or_absolute(root, attestation),
+        "attestation_sha256": attestation_sha256,
+        "approved_by": approved_by,
+        "approved_at": approved_at,
+        "rationale": rationale,
+        "postgresql": {
+            "status": "ATTESTED-PASS",
+            "live_database": True,
+            "ephemeral_database": True,
+            "server_version": server_version,
+            "environment": postgres_environment,
+            "recorded_at": postgres_recorded_at,
+            "command": list(TARGETED_POSTGRES_COMMAND),
+            "evidence_path": relative_or_absolute(root, evidence_path),
+            "evidence_sha256": evidence_sha256,
+        },
+    }
+    log.event(
+        "targeted-delta-attestation",
+        path=qualification["attestation_path"],
+        sha256=attestation_sha256,
+        base_commit=base_commit,
+        vcon_schema_commit=VCON_SCHEMA_COMMIT,
+        changed_path_count=len(actual_paths),
+        targeted_command_count=len(commands),
+        postgres_evidence_sha256=evidence_sha256,
+    )
+    return qualification, commands
+
+
+def verify_beta_reporting(
+    root: Path,
+    version: str,
+    beta_report_root: str | None,
+    beta_exception_attestation: str | None,
+    log: ReleaseLog,
+) -> dict[str, Any]:
+    if beta_report_root and beta_exception_attestation:
+        raise ReleaseError(
+            "--beta-report-root and --beta-exception-attestation are mutually exclusive"
+        )
+    if beta_exception_attestation:
+        attestation = Path(beta_exception_attestation)
+        if not attestation.is_absolute():
+            attestation = root / attestation
+        verifier = root / "scripts/release_exception_attestation.py"
+        command = [
+            sys.executable,
+            str(verifier),
+            "verify",
+            "--attestation",
+            str(attestation),
+            "--version",
+            version,
+        ]
+        log.command(command, root)
+        payload = json.loads(attestation.read_text())
+        return {
+            "mode": "owner-approved-exception",
+            "disposition": payload["release"]["disposition"],
+            "strict_automated_status": payload["release"][
+                "strict_automated_status"
+            ],
+            "attestation_path": relative_or_absolute(root, attestation),
+            "attestation_sha256": hashlib.sha256(attestation.read_bytes()).hexdigest(),
+        }
+
     crate = root / "crates/sip/rvoip-sip"
     reporter = crate / "scripts/beta_release_report.py"
     docs = crate / "docs"
@@ -488,6 +1063,12 @@ def verify_beta_reporting(root: Path, beta_report_root: str | None, log: Release
     if beta_report_root:
         command.extend(["--report-root", beta_report_root])
     log.command(command, root)
+    return {
+        "mode": "strict",
+        "disposition": "RELEASE-CANDIDATE",
+        "strict_automated_status": "PASS",
+        "report_root": beta_report_root or "docs-current",
+    }
 
 
 def package_artifact(
@@ -548,9 +1129,11 @@ def write_verification_receipt(
     log: ReleaseLog,
     package_hashes: dict[str, str],
     package_file_hashes: dict[str, str],
+    beta_qualification: dict[str, Any],
+    verification_scope: dict[str, Any],
 ) -> None:
     receipt = {
-        "schema": "rvoip-unified-release-verification-v2",
+        "schema": VERIFICATION_RECEIPT_SCHEMA,
         "verified_at": utc_now(),
         "version": version,
         "git_commit": head,
@@ -558,6 +1141,8 @@ def write_verification_receipt(
         "ordered_packages": ordered,
         "package_sha256": package_hashes,
         "package_file_manifest_sha256": package_file_hashes,
+        "beta_qualification": beta_qualification,
+        "verification_scope": verification_scope,
         "package_hash_scope": (
             "Pre-publication .crate hashes exist only where all target-version "
             "registry dependencies were already resolvable. Publication records "
@@ -574,28 +1159,103 @@ def write_verification_receipt(
 
 
 def verify(
-    root: Path, version: str, beta_report_root: str | None
+    root: Path,
+    version: str,
+    beta_report_root: str | None,
+    beta_exception_attestation: str | None,
+    targeted_delta_attestation: str | None,
 ) -> None:
     head = ensure_release_state(root, version, require_no_tag=True)
     packages, ordered = validate_workspace(root, version, locked=True)
     log = ReleaseLog(root, version, "verify")
     log.event("start", operation="verify", version=version, git_commit=head)
-    verify_beta_reporting(root, beta_report_root, log)
-    commands = [
-        ["cargo", "check", "--workspace", "--all-targets", "--locked"],
-        ["cargo", "test", "--workspace", "--lib", "--locked"],
-        [
-            "cargo",
-            "test",
-            "--workspace",
-            "--bins",
-            "--examples",
-            "--tests",
-            "--locked",
-        ],
-        ["cargo", "test", "--workspace", "--doc", "--locked"],
+    if targeted_delta_attestation and (
+        beta_report_root or beta_exception_attestation
+    ):
+        raise ReleaseError(
+            "--targeted-delta-attestation is mutually exclusive with beta "
+            "reporting and exception inputs"
+        )
+
+    workspace_check = [
+        "cargo",
+        "check",
+        "--workspace",
+        "--all-targets",
+        "--locked",
     ]
-    for command in commands:
+    named_commands: list[tuple[str, list[str]]]
+    if targeted_delta_attestation:
+        beta_qualification, named_commands = verify_targeted_delta_attestation(
+            root,
+            version,
+            head,
+            targeted_delta_attestation,
+            log,
+        )
+        verification_scope = {
+            "mode": "targeted-delta",
+            "workspace_manifest": "PASS",
+            "workspace_compile": "PASS",
+            "workspace_tests": "NOT-RERUN",
+            "workspace_doctests": "NOT-RERUN",
+            "beta_suite": "NOT-RERUN",
+            "targeted_commands": [
+                {"name": name, "argv": argv, "exit_status": 0}
+                for name, argv in named_commands
+            ],
+            "postgresql_evidence": beta_qualification["postgresql"],
+            "package_file_manifests": "PASS",
+            "package_archives": "VERIFIED-WHEN-REGISTRY-RESOLVABLE",
+        }
+    else:
+        beta_qualification = verify_beta_reporting(
+            root,
+            version,
+            beta_report_root,
+            beta_exception_attestation,
+            log,
+        )
+        named_commands = [
+            ("workspace-lib-tests", ["cargo", "test", "--workspace", "--lib", "--locked"]),
+            (
+                "workspace-target-tests",
+                [
+                    "cargo",
+                    "test",
+                    "--workspace",
+                    "--bins",
+                    "--examples",
+                    "--tests",
+                    "--locked",
+                ],
+            ),
+            (
+                "workspace-doctests",
+                ["cargo", "test", "--workspace", "--doc", "--locked"],
+            ),
+        ]
+        verification_scope = {
+            "mode": "full",
+            "workspace_manifest": "PASS",
+            "workspace_compile": "PASS",
+            "workspace_tests": "PASS",
+            "workspace_doctests": "PASS",
+            "beta_suite": (
+                "PASS"
+                if beta_qualification["mode"] == "strict"
+                else "OWNER-APPROVED-EXCEPTION"
+            ),
+            "targeted_commands": [],
+            "postgresql_evidence": None,
+            "package_file_manifests": "PASS",
+            "package_archives": "VERIFIED-WHEN-REGISTRY-RESOLVABLE",
+        }
+
+    log.command(workspace_check, root)
+    for name, command in named_commands:
+        log.message(f"== verification command: {name}")
+        log.event("named-verification-command", name=name, argv=command)
         log.command(command, root)
     package_hashes: dict[str, str] = {}
     package_file_hashes: dict[str, str] = {}
@@ -637,6 +1297,8 @@ def verify(
         log,
         package_hashes,
         package_file_hashes,
+        beta_qualification,
+        verification_scope,
     )
     log.event("complete", operation="verify", package_count=len(packages))
     log.message(f"verified {len(packages)} packages at {version}")
@@ -651,8 +1313,99 @@ def read_verification_receipt(
     receipt = json.loads(path.read_text())
     file_hashes = receipt.get("package_file_manifest_sha256")
     package_hashes = receipt.get("package_sha256")
+    qualification = receipt.get("beta_qualification")
+    scope = receipt.get("verification_scope")
+    qualification_mode = (
+        qualification.get("mode") if isinstance(qualification, dict) else None
+    )
+    scope_mode = scope.get("mode") if isinstance(scope, dict) else None
+    common_scope = (
+        isinstance(scope, dict)
+        and scope.get("workspace_manifest") == "PASS"
+        and scope.get("workspace_compile") == "PASS"
+        and scope.get("package_file_manifests") == "PASS"
+        and scope.get("package_archives")
+        == "VERIFIED-WHEN-REGISTRY-RESOLVABLE"
+    )
+    full_scope = (
+        scope_mode == "full"
+        and qualification_mode in {"strict", "owner-approved-exception"}
+        and scope.get("workspace_tests") == "PASS"
+        and scope.get("workspace_doctests") == "PASS"
+        and scope.get("beta_suite") in {"PASS", "OWNER-APPROVED-EXCEPTION"}
+        and scope.get("targeted_commands") == []
+        and scope.get("postgresql_evidence") is None
+    ) if isinstance(scope, dict) else False
+    targeted_commands = (
+        scope.get("targeted_commands") if isinstance(scope, dict) else None
+    )
+    targeted_command_shape = (
+        isinstance(targeted_commands, list)
+        and targeted_commands
+        == [
+            {"name": name, "argv": list(argv), "exit_status": 0}
+            for name, argv in TARGETED_DELTA_COMMANDS
+        ]
+    )
+    postgres_evidence = (
+        scope.get("postgresql_evidence") if isinstance(scope, dict) else None
+    )
+    targeted_scope = (
+        scope_mode == "targeted-delta"
+        and qualification_mode == "targeted-delta"
+        and qualification.get("disposition") == "APPROVED-TARGETED-DELTA"
+        and qualification.get("strict_automated_status") == "NOT-RERUN"
+        and qualification.get("workspace_test_status") == "TARGETED-ONLY"
+        and isinstance(qualification.get("base_commit"), str)
+        and COMMIT_SHA.fullmatch(qualification["base_commit"]) is not None
+        and qualification.get("vcon_schema_commit") == VCON_SCHEMA_COMMIT
+        and isinstance(qualification.get("changed_paths"), list)
+        and qualification["changed_paths"]
+        == sorted(set(qualification["changed_paths"]))
+        and all(
+            isinstance(path, str) and targeted_delta_path_allowed(path)
+            for path in qualification["changed_paths"]
+        )
+        and isinstance(qualification.get("changed_path_count"), int)
+        and qualification.get("changed_path_count")
+        == len(qualification["changed_paths"])
+        and qualification.get("changed_path_count", 0) > 0
+        and qualification.get("targeted_command_count")
+        == len(TARGETED_DELTA_COMMANDS)
+        and isinstance(qualification.get("attestation_sha256"), str)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", qualification["attestation_sha256"]
+        )
+        is not None
+        and scope.get("workspace_tests") == "NOT-RERUN"
+        and scope.get("workspace_doctests") == "NOT-RERUN"
+        and scope.get("beta_suite") == "NOT-RERUN"
+        and targeted_command_shape
+        and isinstance(postgres_evidence, dict)
+        and postgres_evidence.get("status") == "ATTESTED-PASS"
+        and postgres_evidence.get("live_database") is True
+        and postgres_evidence.get("ephemeral_database") is True
+        and isinstance(postgres_evidence.get("server_version"), str)
+        and bool(postgres_evidence["server_version"].strip())
+        and isinstance(postgres_evidence.get("environment"), dict)
+        and set(postgres_evidence["environment"])
+        == {"provider", "image", "database", "run_id"}
+        and all(
+            isinstance(postgres_evidence["environment"].get(field), str)
+            and bool(postgres_evidence["environment"][field].strip())
+            for field in ("provider", "image", "database", "run_id")
+        )
+        and isinstance(postgres_evidence.get("recorded_at"), str)
+        and postgres_evidence.get("command") == list(TARGETED_POSTGRES_COMMAND)
+        and isinstance(postgres_evidence.get("evidence_sha256"), str)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", postgres_evidence["evidence_sha256"]
+        )
+        is not None
+        and qualification.get("postgresql") == postgres_evidence
+    ) if isinstance(scope, dict) and isinstance(qualification, dict) else False
     expected = (
-        receipt.get("schema") == "rvoip-unified-release-verification-v2"
+        receipt.get("schema") == VERIFICATION_RECEIPT_SCHEMA
         and receipt.get("version") == version
         and receipt.get("git_commit") == head
         and receipt.get("ordered_packages") == ordered
@@ -661,6 +1414,8 @@ def read_verification_receipt(
         and set(file_hashes) == set(ordered)
         and isinstance(package_hashes, dict)
         and set(package_hashes) <= set(ordered)
+        and common_scope
+        and (full_scope or targeted_scope)
     )
     if not expected:
         raise ReleaseError("verification receipt does not match this release commit")
@@ -858,9 +1613,18 @@ def parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--version", required=True)
         if name == "verify":
-            command.add_argument(
+            report_group = command.add_mutually_exclusive_group()
+            report_group.add_argument(
                 "--beta-report-root",
                 default=os.environ.get("RVOIP_BETA_REPORT_ROOT"),
+            )
+            report_group.add_argument(
+                "--beta-exception-attestation",
+                default=os.environ.get("RVOIP_BETA_EXCEPTION_ATTESTATION"),
+            )
+            report_group.add_argument(
+                "--targeted-delta-attestation",
+                default=os.environ.get("RVOIP_TARGETED_DELTA_ATTESTATION"),
             )
         if name == "publish":
             command.add_argument(
@@ -882,7 +1646,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "prepare":
                 prepare(root, version)
             elif args.command == "verify":
-                verify(root, version, args.beta_report_root)
+                verify(
+                    root,
+                    version,
+                    args.beta_report_root,
+                    args.beta_exception_attestation,
+                    args.targeted_delta_attestation,
+                )
             elif args.command == "publish":
                 publish(root, version, execute=args.execute)
     except ReleaseError as error:

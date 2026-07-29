@@ -486,9 +486,9 @@ The full v0 catalog. Each is detailed in §7–§11.
 | `dtmf.send` | bidi | Send DTMF digits on a Connection |
 | `dtmf.received` | S→C | DTMF received from far end |
 | **vCon (§7.6)** | | |
-| `recording.vcon-ready` | S→C | Emitted at session.ended when the Session's vCon is finalized, signed, and persisted |
+| `recording.vcon-ready` | S→C | Emitted at session.ended when the Session's vCon is validated and persisted |
 | `recording.vcon-fetch` | C→S | Request retrieval of a previously emitted vCon by handle |
-| `recording.vcon-fetched` | S→C | Response carrying the signed vCon body or a download URL |
+| `recording.vcon-fetched` | S→C | Response carrying the vCon body or a download URL |
 | **Quality (§10.3)** | | |
 | `connection.quality` | bidi | Per-Stream quality snapshot (loss, jitter, RTT, MOS, bitrate) |
 | **Identity (§5.6/§5.8)** | | |
@@ -938,7 +938,7 @@ UCTP-native Connections deliver DTMF as `dtmf.received` envelopes. The gateway t
 
 ### 7.6 vCon emission and retrieval
 
-UCTP servers emit a [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) (the IETF Virtualized Conversations envelope) for **every Session at session.ended**, regardless of whether audio recording was enabled. The vCon is the durable signed JSON record of who joined, what happened, and what analyses were attached. See `INTERFACE_DESIGN.md` §3.9 / §11.4 for the server-side construction.
+UCTP servers emit a [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) (the IETF Virtualized Conversations envelope) for **every Session at session.ended**, regardless of whether audio recording was enabled. The vCon is the durable JSON record of who joined, what happened, and what analyses were attached. The built-in end-of-Session path validates and persists unsigned canonical JSON. Applications may explicitly sign a vCon with JWS General JSON Serialization; signing is not automatic, and JWE encryption is not implemented. See `INTERFACE_DESIGN.md` §3.9 / §11.4 for the server-side construction.
 
 #### `recording.vcon-ready` (server → client, multicast to Session participants)
 ```json
@@ -948,14 +948,9 @@ UCTP servers emit a [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon
   "sid": "sess_...",
   "payload": {
     "vcon_handle": {
-      "uuid": "01HXYZ...",
-      "url": "https://store.example.com/vcons/01HXYZ.vcon.jws",
-      "content_hash": "sha256:abcdef...",
-      "group": "01HXYZ...",
-      "created_at": "..."
-    },
-    "encrypted": false,             // true if JWE-wrapped
-    "signed_by": ["tenant", "ai-provider"]  // entities that JWS-signed
+      "url": "https://store.example.com/vcons/01HXYZ.vcon",
+      "content_hash": "sha512-GLy6IPaIUM1GqzZqfIPZlWjaDsNgNvZM0iCONNThnH0a75fhUM6cYzLZ5GynSURREvZwmOh54-2lRRieyj82UQ"
+    }
   }
 }
 ```
@@ -979,7 +974,7 @@ The vCon is **not** delivered inline — clients fetch it explicitly via `record
   "in_reply_to": "<recording.vcon-fetch.id>",
   "payload": {
     "delivery": "inline" | "url",  // small vCons inline; large ones return a download URL
-    "vcon": "<JWS body>",          // when delivery=inline
+    "vcon": "<vCon JSON or JWS General JSON body>", // when delivery=inline
     "url": "https://...",          // when delivery=url; URL carries access token in query string or via co-issued Bearer
     "expires_at": "..."            // when delivery=url
   }
@@ -1475,7 +1470,7 @@ The minimum federation surface in v1 will likely include:
 
 **Federation identity backbone (planned).** [AAuth's 4-party federated mode](https://aauth.dev) — the identity gradient with cross-issuer agent verification — is the planned identity backbone for v1+ federation. A UCTP server discovers a peer server's `/.well-known/aauth-agent`, exchanges signing keys, and then federates `session.invite` envelopes signed via RFC 9421 + Signature-Key headers. This is contingent on AAuth stabilizing; if it does not, the federation backbone will fall back to OAuth 2.1 client-credentials with DPoP. Per the project's PRD §14.2 item 10, AAuth is experimental in v1.
 
-**vCon federation.** When a federated Session ends, each participating server's vCon is independently signed by that server's key and linked via the vCon `group` UUID. Cross-server vCon retrieval is gated by the federation-level access policy. Details to follow in v1.
+**vCon federation.** The core vCon `group` parameter is reserved and MUST NOT be used for federation. A server MAY index its own Session vCons by local Conversation ID outside the vCon document. A future federation design will define a named vCon extension with its own grouping parameter and semantics, and every document using it will declare that extension in `extensions[]`. Until that extension is specified, independently produced sibling vCons have no portable protocol-defined Conversation grouping. Cross-server retrieval and any explicit signing policy remain part of the future federation design.
 
 Federation requires non-trivial decisions on trust, anti-spam, per-tenant policy, and identity portability. v0 does not address them.
 
@@ -1515,7 +1510,7 @@ Per project direction, voip-3 (`/Users/jonathan/Developer/Rudeless/voip-3-conver
 12. **No multi-tenancy threading.** UCTP carries `tenant_id` in Conversation metadata and authenticated session_token; voip-3 defers multi-tenancy.
 13. **No idempotency story.** UCTP §3.2 / §11.3 commits via envelope `id`.
 14. **No federation reservation.** UCTP §13 reserves namespace.
-15. **No conversation envelope.** voip-3 has no equivalent of [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) — the IETF Virtualized Conversations standard. UCTP §7.6 commits to vCon emission for every Session and adds `recording.vcon-ready` / `recording.vcon-fetch` envelopes. Mapping voip-3 nouns to vCon: Participant → Party, Session → Dialog, Message → Dialog with `type=text`, Conversation → vCon `group` UUID.
+15. **No conversation envelope.** voip-3 has no equivalent of [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) — the IETF Virtualized Conversations standard. UCTP §7.6 commits to vCon emission for every Session and adds `recording.vcon-ready` / `recording.vcon-fetch` envelopes. Mapping voip-3 nouns to vCon: Participant → Party, a Session → one or more Dialog Objects, and Message → Dialog with `type=text`. The local store index links sibling Session vCons to a Conversation; portable federation linkage is deferred to the named extension described in §13, and the reserved core `group` parameter is not used. A `recording-set` Dialog can describe several recordings that compose one call.
 16. **No identity-assurance gradient.** voip-3 §11 lists identity as open. UCTP §5.6 commits to the gradient (Anonymous → Pseudonymous → Identified → TaskScoped → UserAuthorized) and routes assurance through `auth.session`, `CapabilityDescriptor`, and `403 forbidden-for-assurance-level` errors.
 17. **No per-request signing model.** voip-3 has no protocol-level message authentication. UCTP §5.5 commits to [RFC 9421 HTTP Message Signatures](https://datatracker.ietf.org/doc/rfc9421/) plus Hardt's `Signature-Key` / `Signature-Agent` headers for substrates that carry HTTP-shaped requests.
 18. **No agent-identity model.** UCTP §5 lists `aauth` as a supported (experimental) auth method. AAuth (`draft-hardt-oauth-aauth-protocol`) is the candidate agent-to-agent identity protocol — accommodated, not yet committed to.

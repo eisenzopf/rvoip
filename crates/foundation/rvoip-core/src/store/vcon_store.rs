@@ -1,8 +1,7 @@
 use crate::error::Result;
-use crate::ids::{SessionId, TenantId};
+use crate::ids::{ConversationId, SessionId, TenantId};
 use bytes::Bytes;
 use dashmap::DashMap;
-use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::Arc;
 
@@ -25,30 +24,47 @@ impl fmt::Debug for VconHandle {
     }
 }
 
-/// Plug-in persistence for finalized vCons. Production signing /
-/// encryption lives in `rvoip-vcon`; the v1 in-process pathway accepts
-/// already-built bytes here.
+/// Plug-in persistence for finalized vCons. Core's automatic pathway
+/// writes unsigned canonical JSON; callers may also persist explicitly
+/// signed bytes produced by `rvoip-vcon`.
 #[async_trait::async_trait]
 pub trait VconStore: Send + Sync {
     async fn put(
         &self,
         tenant_id: &TenantId,
+        conversation_id: &ConversationId,
         session_id: &SessionId,
-        vcon_jws: Bytes,
+        vcon_body: Bytes,
     ) -> Result<VconHandle>;
 
     async fn get(&self, handle: &VconHandle) -> Result<Option<Bytes>>;
 
     async fn list_for_session(&self, session_id: &SessionId) -> Result<Vec<VconHandle>>;
+
+    /// List vCons for every Session belonging to one Conversation.
+    ///
+    /// This store/index relationship replaces the reserved vCon `group`
+    /// parameter; it is deliberately not serialized into the vCon itself.
+    async fn list_for_conversation(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<VconHandle>>;
+}
+
+#[derive(Clone)]
+struct VconIndexEntry {
+    conversation_id: ConversationId,
+    session_id: SessionId,
 }
 
 /// In-memory store keyed by `memory:vcon/<session_id>/<seq>`. P3
 /// promotes this from a mock (returning `len=N` for content_hash) to a
-/// real `sha256:<hex>` content hash so callers can verify the stored
+/// vCon `sha512-<base64url>` content hash so callers can verify the stored
 /// bytes match the returned handle.
 #[derive(Clone, Default)]
 pub struct MemoryVconStore {
     inner: Arc<DashMap<String, Bytes>>,
+    index: Arc<DashMap<String, VconIndexEntry>>,
     /// Per-session counter so multiple `put`s for the same Session
     /// generate distinct handles (vs the old design that overwrote).
     seq: Arc<DashMap<String, u64>>,
@@ -59,6 +75,7 @@ impl fmt::Debug for MemoryVconStore {
         formatter
             .debug_struct("MemoryVconStore")
             .field("object_count", &self.inner.len())
+            .field("index_count", &self.index.len())
             .field("session_count", &self.seq.len())
             .finish()
     }
@@ -75,8 +92,9 @@ impl VconStore for MemoryVconStore {
     async fn put(
         &self,
         _tenant_id: &TenantId,
+        conversation_id: &ConversationId,
         session_id: &SessionId,
-        vcon_jws: Bytes,
+        vcon_body: Bytes,
     ) -> Result<VconHandle> {
         let sid = session_id.to_string();
         let n = {
@@ -85,11 +103,15 @@ impl VconStore for MemoryVconStore {
             *entry
         };
         let url = format!("memory:vcon/{}/{}", sid, n);
-        let mut hasher = Sha256::new();
-        hasher.update(&vcon_jws);
-        let digest = hasher.finalize();
-        let content_hash = format!("sha256:{}", hex::encode(digest));
-        self.inner.insert(url.clone(), vcon_jws);
+        let content_hash = stored_content_hash(&vcon_body);
+        self.inner.insert(url.clone(), vcon_body);
+        self.index.insert(
+            url.clone(),
+            VconIndexEntry {
+                conversation_id: conversation_id.clone(),
+                session_id: session_id.clone(),
+            },
+        );
         Ok(VconHandle { url, content_hash })
     }
 
@@ -98,44 +120,64 @@ impl VconStore for MemoryVconStore {
     }
 
     async fn list_for_session(&self, session_id: &SessionId) -> Result<Vec<VconHandle>> {
-        // P3 — return all `memory:vcon/<sid>/*` entries, freshly
-        // hashing for the content_hash field. Cheap because the
-        // in-memory store is dev-only.
-        let prefix = format!("memory:vcon/{}/", session_id);
+        self.list_matching(|entry| &entry.session_id == session_id)
+    }
+
+    async fn list_for_conversation(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<VconHandle>> {
+        self.list_matching(|entry| &entry.conversation_id == conversation_id)
+    }
+}
+
+impl MemoryVconStore {
+    fn list_matching(&self, matches: impl Fn(&VconIndexEntry) -> bool) -> Result<Vec<VconHandle>> {
         let mut out = Vec::new();
-        for entry in self.inner.iter() {
-            if entry.key().starts_with(&prefix) {
-                let mut hasher = Sha256::new();
-                hasher.update(entry.value());
-                let digest = hasher.finalize();
+        for indexed in self.index.iter() {
+            if matches(indexed.value()) {
+                let Some(body) = self.inner.get(indexed.key()) else {
+                    continue;
+                };
                 out.push(VconHandle {
-                    url: entry.key().clone(),
-                    content_hash: format!("sha256:{}", hex::encode(digest)),
+                    url: indexed.key().clone(),
+                    content_hash: stored_content_hash(body.value()),
                 });
             }
         }
+        out.sort_by(|left, right| left.url.cmp(&right.url));
         Ok(out)
     }
 }
 
-// Local hex helper so we don't pull a tiny extra dep just for one
-// encode. Lower-case, fixed-width per byte.
-mod hex {
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let bytes = bytes.as_ref();
-        let mut s = String::with_capacity(bytes.len() * 2);
-        for b in bytes {
-            s.push(HEX[(b >> 4) as usize] as char);
-            s.push(HEX[(b & 0x0f) as usize] as char);
-        }
-        s
+fn stored_content_hash(bytes: impl AsRef<[u8]>) -> String {
+    #[cfg(feature = "vcon")]
+    {
+        rvoip_vcon::content_hash(bytes)
+    }
+
+    #[cfg(not(feature = "vcon"))]
+    {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine;
+        use sha2::{Digest, Sha512};
+
+        let digest = Sha512::digest(bytes.as_ref());
+        format!("sha512-{}", URL_SAFE_NO_PAD.encode(digest))
     }
 }
 
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn stored_hash_uses_vcon_sha512_base64url_format() {
+        assert_eq!(
+            stored_content_hash(b"abc"),
+            "sha512-3a81oZNherrMQXNJriBBMRLm-k6JqX6iCp7u5ktV05ohkpkqJ0_BqDa6PCOj_uu9RU1EI2Q86A4qmslPpUyknw"
+        );
+    }
 
     #[tokio::test]
     async fn vcon_store_debug_never_renders_urls_hashes_keys_or_payloads() {
@@ -150,6 +192,7 @@ mod diagnostic_tests {
         store
             .put(
                 &TenantId::from_string(CANARY),
+                &ConversationId::from_string(CANARY),
                 &SessionId::from_string(CANARY),
                 Bytes::from_static(b"vcon-store-canary\r\nAuthorization: exposed"),
             )

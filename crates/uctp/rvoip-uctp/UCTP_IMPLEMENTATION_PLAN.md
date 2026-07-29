@@ -49,7 +49,7 @@ This plan adds three new crates (above) and depends on these existing/planned wo
 |---|---|---|
 | `auth-core` | Exists (`crates/identity/auth-core/`) | Home of the v0 `BearerValidator` (stub, no validation), alongside the existing `DigestAuthenticator`. Future DPoP, JWT, AAuth, RFC 9421 signing implementations land here too — not in `rvoip-uctp`. |
 | `rvoip-media-core` | Exists (`crates/media/media-core/`, package `rvoip-media-core`) | Home of `Transcoder` (`media-core/src/codec/transcoding.rs`), mixer, jitter buffer, AEC/AGC/VAD, processing pipeline. Phase 4 demo uses `rvoip_media_core::codec::transcoding::Transcoder` for SIP G.711 ↔ UCTP Opus bridging. **Naming note:** INTERFACE_DESIGN.md §2 calls this crate `rvoip-media`; the actual workspace name today is `rvoip-media-core`. Plan uses the actual name; reconciling the design-doc name is a separate rename project (see §10). |
-| `rvoip-vcon` | Planned, v0.x (does not exist yet) | Home of `VconBuilder`, `VconStore` trait, JWS sign/verify, JWE encrypt/decrypt, redaction lineage, voip-3 → vCon adapter. Per INTERFACE_DESIGN.md §2 it ships as the FIRST Rust implementation of the IETF vCon spec. Created in v0.x; consumed by `rvoip-uctp`, `rvoip-sip`, `rvoip-webrtc` for `recording.vcon-ready` emission at `session.ended`. |
+| `rvoip-vcon` | Exists (`crates/extensions/rvoip-vcon/`) | Canonical current-core model and validator, `VconBuilder`, stores, and explicit JWS General JSON sign/verify. It represents redacted/amended lineage but does not perform redaction or JWE encryption. `rvoip-core` uses the model to emit validated unsigned JSON and announces it with `VconReady` at `session.ended`. |
 
 ### 1.4 After v0: v0.x roadmap
 
@@ -57,7 +57,7 @@ This document is scoped to the **v0 spike** — the smallest end-to-end cut that
 
 | v0.x track | What ships | Status | Reference docs |
 |---|---|---|---|
-| **vCon emission** | New `rvoip-vcon` crate; `VconBuilder`; `MemoryVconStore`; `Vcon` data types per IETF WG draft; JWS sign/verify. `recording.vcon-ready` envelope emission and `RecordingComplete.vcon_ref` population wired at the orchestrator boundary (Sessions → `VconStore::put`) is the follow-on. | ✅ crate landed (§13.10) | PRD.md §4, INTERFACE_DESIGN.md §3.9 + §11.4, CONVERSATION_PROTOCOL.md §7.6 |
+| **vCon emission** | `rvoip-vcon` current-core model, validator, builder, stores, and explicit JWS General JSON sign/verify. Core Session finalization emits validated unsigned JSON through `VconStore::put` and announces `VconReady`; `RecordingComplete.vcon_ref` remains intentionally unwired. | ✅ landed (§13.10) | PRD.md §4, INTERFACE_DESIGN.md §3.9 + §11.4, CONVERSATION_PROTOCOL.md §7.6 |
 | **Multi-party routing** | `Orchestrator::add_subscription` / `remove_subscription` / `apply_subscriptions`; per-Session routing table; per-subscriber `stream_local_id` rewriting (MP3c); codec mismatch refusal. `stream.active-speaker` emission still v1. | ✅ landed (§12 + §13.2 MP3c + §13.3 codec gate) | CONVERSATION_PROTOCOL.md §7.7, INTERFACE_DESIGN.md §10.6 |
 | **Identity assurance enforcement** | Per-peer auth gating on the coordinator (`PeerAuthState`); `Authenticated` flips at `auth.response`; non-auth envelopes from un-authed peers → `error 401`. `identity.step-up-request` / `step-up-response` envelope flow is v0.x follow-on. | ✅ landed (§13.1 / G1 auth gating) | CONVERSATION_PROTOCOL.md §5.6 + §8, INTERFACE_DESIGN.md §3.8 |
 | **`Orchestrator::bridge_connections` automation** | `BridgeManager` / `BridgeHandle` per INTERFACE_DESIGN.md §10.2; automatic frame-pump. | ✅ landed (v0 §11 — `bridge_connections` no longer stubbed) | INTERFACE_DESIGN.md §10.2–3 |
@@ -1192,7 +1192,7 @@ The companion docs (CONVERSATION_PROTOCOL.md, INTERFACE_DESIGN.md) remain author
 - **Shutdown choreography** (§3.5 layers 2b–2c): `UctpCoordinator::shutdown()` now synthesizes a local `session.end` envelope + `UctpSessionEvent::SessionEnded` for every Active/Inviting/Ending session, then drains the `Pending` correlation map. Substrate close happens after `shutdown()` returns — clean teardown for peers.
 - **Backpressure soft timeout** (§3.5): outbound signaling sends wrap a `tokio::time::timeout(SIGNALING_SEND_TIMEOUT, ...)` (5s default, exported constant). On timeout the coordinator cancels its driver and surfaces `UctpError::Closed` so the adapter can close the substrate.
 - **Quinn stats sampler** (§3.9): `substrate::spawn_stats_sampler` is the canonical per-connection poller, called by both `rvoip-quic` and `rvoip-webtransport` so per-transport metric series have identical shape. Counters use `.absolute()` for cumulative `quinn::Connection::stats()` values; gauges for RTT/CWND.
-- **`Event::RecordingComplete.vcon_ref`** (§2.4 placeholder): present as `Option<VconRef>` with `VconRef::{Local{uuid}, Url{url}}` in [`vcon.rs`](../../foundation/rvoip-core/src/vcon.rs). v0 always emits `None`; v0.x's `rvoip-vcon` populates it without a wire-shape change.
+- **`Event::RecordingComplete.vcon_ref`** (§2.4 placeholder): present as `Option<VconRef>` with `VconRef::{Local{uuid}, Url{url}}` in [`vcon.rs`](../../foundation/rvoip-core/src/vcon.rs). It remains `None` in 0.3.3 because recording completion and Session-level vCon finalization are separate; the latter is announced through `VconReady`.
 - **Public surface** (§3.2): [`rvoip-uctp/src/lib.rs`](src/lib.rs) re-exports `UctpEnvelope`, `MessageType`, `UctpCoordinator`, `UctpSessionEvent`, `UctpSessionState`, `UctpConnectionState`, `default_v0_descriptor`, `ENVELOPE_CHANNEL_CAP`, `SIGNALING_SEND_TIMEOUT`, errors, and ids — adapter authors no longer need to reach into deep module paths.
 
 ### Architectural cleanups landed post-PR-E
@@ -1215,7 +1215,7 @@ The list below is the **as-of-v0-ship** state. The v0.x production-hardening pas
 
 - ✅ **Per-peer auth gating** of session/connection envelopes — landed as §13.1 / G1.
 - 🟡 **`Pending` integration into envelope flows** — still no v0.x envelope path uses `wait_for/deliver`. The field, accessor, and shutdown drain remain wired (§3.5 layer 2b); first user lands with whatever request/response envelope the next milestone needs.
-- ✅ **vCon emission** — `rvoip-vcon` crate landed (§13.10). `recording.vcon-ready` envelope emission and `RecordingComplete { vcon_ref: Some(...) }` wiring at the orchestrator boundary is the follow-on (the data path is there; just needs to be hooked up at session-end).
+- ✅ **vCon emission** — `rvoip-vcon` and core Session-end emission landed (§13.10). Core validates and stores unsigned canonical JSON, then emits `VconReady`. Signing is an explicit application operation; JWE and `RecordingComplete.vcon_ref` wiring are outside 0.3.3.
 - ✅ **Multi-party routing** — functionally complete (§12 + §13.2 MP3c + §13.3 codec gate).
 - ✅ **DTMF + quality reports** — signaling end-to-end (§13.6 / §13.7). 🟡 audio-pipeline integration partial (§13.11); full RFC 4733 PT-aware routing in [V0X_REMAINING.md §3.3](archived/V0X_REMAINING.md).
 - ✅ **`rvoip-websocket` adapter** — signaling + WebRTC media plane both shipped. Media is gated on the `media-webrtc` feature (pulls in `rvoip-webrtc`). End-to-end bridge proof at `crates/uctp/rvoip-websocket/tests/ws_bridge_flow.rs`. Envelope-level `connection.offer`/`connection.answer` SDP interception remains v0.x cleanup; production callers currently drive SDP via the `UctpWsAdapter::bridge_for` accessor.
@@ -1355,12 +1355,14 @@ New `UctpCoordinator::start_full_with_caps(...)` constructor; legacy entry point
 
 New crate at `crates/extensions/rvoip-vcon/`. Modules:
 
-- `types` — `Vcon`, `Party`, `Dialog`, `DialogKind`, `Attachment`, `Analysis`, `RedactionRecord` per the IETF vCon WG draft (`draft-ietf-vcon-vcon-container-00`).
-- `builder` — `VconBuilder` fluent constructor + `verify_jws` helper.
+- `types` — the full vCon core model pinned to working-group commit `2342aba`, including all five Dialog types, lineage, extension fields, references, analyses, and attachments.
+- `builder` — `VconBuilder` generic and typed convenience constructors.
 - `store` — `VconStore` async trait + `MemoryVconStore` default (DashMap-backed). `put` refuses silent overwrite (use `put_overwrite`); `get`/`delete` keyed by `uuid::Uuid`.
-- Top-level: `sign_jws(vcon, encoding_key, algorithm)` wrapper around `jsonwebtoken::encode`.
+- `jws` — explicit JWS General JSON signing, signature appending, and caller-trusted-key verification. HMAC signing is rejected; JWE is not implemented.
 
-Wires through `Event::RecordingComplete.vcon_ref` (the `VconRef::Local { uuid }` placeholder from v0). Adapter-side emission of `recording.vcon-ready` at `session.ended` is the next integration step; the data model is in place.
+`rvoip-core` converts the live Session snapshot into this canonical model,
+validates it, persists the actual unsigned JSON bytes, and emits `VconReady`.
+`RecordingComplete.vcon_ref` remains reserved and `None` in 0.3.3.
 
 ### 13.11 C2 (audio-pipeline partial) — RFC 4733 DTMF passthrough
 

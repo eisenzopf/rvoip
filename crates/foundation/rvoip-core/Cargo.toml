@@ -14,6 +14,7 @@ description = "Transport-agnostic spine for RVoIP — types, ConnectionAdapter t
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
@@ -30,7 +31,7 @@ rvoip-media-core.workspace = true
 # rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
 # and `use rvoip_core::identity::*` call sites keep working unchanged.
 rvoip-core-traits.workspace = true
-# V2.A.8 — optional rvoip-vcon dep, gated by `vcon-signing`. Now
+# V2.A.8 — optional rvoip-vcon dep, gated by `vcon`. Now
 # possible because the cycle (rvoip-core → rvoip-vcon →
 # rvoip-auth-core → rvoip-core) was broken by switching auth-core
 # to depend on rvoip-core-traits.
@@ -80,6 +81,11 @@ path = "examples/sip_only_orchestrator.rs"
 name = "cross_transport_bridge"
 path = "examples/cross_transport_bridge.rs"
 
+[[test]]
+name = "vcon_emission"
+path = "tests/vcon_emission.rs"
+required-features = ["vcon"]
+
 [features]
 # P11 — feature flags per INTERFACE_DESIGN.md §2.2. The "shape" flags
 # (`uctp`/`sip`/`rtp`/`media`) are advisory today — they signal what
@@ -93,7 +99,7 @@ uctp = []
 sip = []
 rtp = []
 media = []
-vcon = []
+vcon = ["dep:rvoip-vcon"]
 identity = []
 webrtc = []
 # Real Opus encode/decode in `MediaGraph`, forwarded down through
@@ -102,10 +108,10 @@ webrtc = []
 opus = ["rvoip-media-core/opus"]
 aauth-experimental = []
 identity-fingerprint-binding = []
-# V2.A.8 — Production vCon JWS signing. Now a real Cargo gate (the
-# cycle was broken in V2.A.1). Pulls rvoip-vcon and lets the
-# orchestrator's auto-emission path sign before persisting.
-vcon-signing = ["dep:rvoip-vcon"]
+# V2.A.8 — Exposes the opt-in vCon JWS signing API. The normal `vcon`
+# feature already pulls the canonical document model used by core's
+# unsigned auto-emission path.
+vcon-signing = ["vcon"]
 # V2.A.9 — Recording / transcription / AI dispatch — pulls
 # rvoip-harness (now possible after V2.A cycle break).
 harness = ["dep:rvoip-harness"]

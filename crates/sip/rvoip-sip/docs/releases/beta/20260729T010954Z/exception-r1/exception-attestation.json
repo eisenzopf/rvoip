@@ -1,0 +1,375 @@
+{
+  "approval": {
+    "actor": "project owner/operator",
+    "basis": "Explicit owner decision to accept the single high-density media-burst ASR deviation for the 0.3.2 release.",
+    "cryptographically_signed": false,
+    "method": "explicit project-owner/operator instruction"
+  },
+  "artifacts": [
+    {
+      "bytes": 9999,
+      "path": "BETA_GATE_REPORT.md",
+      "sha256": "2d7d17bfd551d3735bfa98875fb301ebdc0d19ce2f7361a1762dd5c867ffbd9c"
+    },
+    {
+      "bytes": 1794,
+      "path": "BETA_PERFORMANCE_REPORT.md",
+      "sha256": "d5143af7f881e604b0049cd3af0518af7dcc68c8808f18f877e47f22086999d9"
+    },
+    {
+      "bytes": 2517,
+      "path": "BETA_RELEASE_REPORT.md",
+      "sha256": "ff586b6a8bc832bd3cbb32fd960bd651e054e367e1ad76282e489a56ed427f1a"
+    },
+    {
+      "bytes": 3789,
+      "path": "evidence/canonical-2k-index.json",
+      "sha256": "677dd8e1e3cf73e2a4e4a2e717b6fc2b2b32d7de54779276486d5f751cee160e"
+    },
+    {
+      "bytes": 198520,
+      "path": "evidence/canonical-2k-run-1.json",
+      "sha256": "5f0e4c0309a82c3577bcaf4545889219aa0279f1283e00ca77800a2dbbb190f0"
+    },
+    {
+      "bytes": 199869,
+      "path": "evidence/canonical-2k-run-2.json",
+      "sha256": "1fd001ad91c85747c1bf90cf5a88ac82faff0b2f3c0ac1825c8def8bb13d973f"
+    },
+    {
+      "bytes": 199642,
+      "path": "evidence/canonical-2k-run-3.json",
+      "sha256": "963bbec2e984f1c23959e907c71676b004bd96ff4b0a7c3af05156e01e8151bb"
+    },
+    {
+      "bytes": 435864,
+      "path": "evidence/high-density-caller.json",
+      "sha256": "ba2058b22fa168e2dfb0acc8f0f64ad4c61a4ed5267557508012aed550182965"
+    },
+    {
+      "bytes": 101291,
+      "path": "evidence/high-density-receiver.json",
+      "sha256": "d7488c64e72ef742ae402d52059a32f988677a1c2cc66aa2d7a17acfe8a9696d"
+    },
+    {
+      "bytes": 905,
+      "path": "evidence/host-udp-delta.txt",
+      "sha256": "c8f6a825834e6bd6bb5daf8210aaa69e8b8bb4520f0815236f07ade844f953bc"
+    },
+    {
+      "bytes": 173670,
+      "path": "evidence/monolithic-soak.json",
+      "sha256": "607e6417036bd42098d6cff148d9e6cc9ef3d67d3b475ba1de111ff483baa9fb"
+    },
+    {
+      "bytes": 61938,
+      "path": "evidence/split-soak-caller.json",
+      "sha256": "e9efc3b3801d72b68a267252c5484fd353e6bd97c2d38b0cb4bc2c269130e5f6"
+    },
+    {
+      "bytes": 62287,
+      "path": "evidence/split-soak-receiver.json",
+      "sha256": "ff7788aa8102a45a3d54088028b12fe71aaf19cf91612a4f4fc93022ab6d176a"
+    },
+    {
+      "bytes": 23450,
+      "path": "inputs/beta-release-policy.yaml",
+      "sha256": "8cddb4b097971714f62d3c705e8ed3de20f6fec995e8e7251f926b584d7d3180"
+    },
+    {
+      "bytes": 38353,
+      "path": "inputs/release-exception-attestation.py",
+      "sha256": "5971bb7dcd181b5d56f48913f79604474539a2da9a3ffb41079a7a47aa6f9ba7"
+    },
+    {
+      "bytes": 458692,
+      "path": "source/attestation.json",
+      "sha256": "82b78511076a255b287bc12a861a2059d5718368c291e5dcf7438db25dc1b6d2"
+    },
+    {
+      "bytes": 83,
+      "path": "source/attestation.json.sha256",
+      "sha256": "7164fedbf9ec2898644f736a2bdc98b5fafc5b437cd1c995ed93a70fe9e1cb1b"
+    },
+    {
+      "bytes": 18851,
+      "path": "source/effective-gate-config.json",
+      "sha256": "b4fb360b77255003a8c0bba8b602e7b464ee2ae8f3ff9c00e938830c4fa261ad"
+    },
+    {
+      "bytes": 115578,
+      "path": "source/gate-results.json",
+      "sha256": "3da8068c5b96e7ab8f2978078a4782fe3b85d4c54bce6d01c72886f49f277e54"
+    },
+    {
+      "bytes": 324,
+      "path": "source/performance-gate-metrics.log",
+      "sha256": "9d0f72f8bff7cbd59ac2ae093bf5e6cd434fae5ae6aa314c8c4bfad918009240"
+    },
+    {
+      "bytes": 16883,
+      "path": "source/summary.md",
+      "sha256": "18b3ae6e4cb0bd71b074fb3ada6e559239b4294b2db4204af3c557dc412eb152"
+    }
+  ],
+  "assurance": {
+    "cryptographically_signed": false,
+    "hash_algorithm": "SHA-256",
+    "kind": "integrity-and-explicit-risk-acceptance",
+    "note": "The digest binds the exception decision and copied evidence; it is not third-party signing and does not alter strict gate results."
+  },
+  "created_at_utc": "2026-07-29T09:53:56+00:00",
+  "facts": {
+    "canonical_2k": {
+      "common_executable_sha256": "48e2c81731ef3424a412b67d7541f9f0e416b02291812cdd984c0023449ede57",
+      "common_source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+      "runs": [
+        {
+          "achieved_cps": 1857.1,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "full_cycle_p99_ms": 1.962,
+          "sequence": 1,
+          "setup_p99_ms": 1.243,
+          "target_cps": 2000.0
+        },
+        {
+          "achieved_cps": 1857.05,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "full_cycle_p99_ms": 1.75,
+          "sequence": 2,
+          "setup_p99_ms": 1.126,
+          "target_cps": 2000.0
+        },
+        {
+          "achieved_cps": 1857.05,
+          "asr": 1.0,
+          "calls_offered": 65000,
+          "calls_succeeded": 65000,
+          "full_cycle_p99_ms": 2.327,
+          "sequence": 3,
+          "setup_p99_ms": 1.453,
+          "target_cps": 2000.0
+        }
+      ],
+      "status": "PASS"
+    },
+    "exception": {
+      "absolute_shortfall": 0.0022,
+      "allowed_timeout_percent": 0.5,
+      "non_timeout_errors": 0,
+      "observed_asr": 0.9928,
+      "observed_timeout_percent": 0.716667,
+      "offered_calls": 18000,
+      "required_asr": 0.995,
+      "scope": "high-density-media-burst answer timeout rate",
+      "succeeded_calls": 17871,
+      "timeout_calls": 129
+    },
+    "gates": {
+      "derived_failed_gate": "report.performance-metrics",
+      "failed": 2,
+      "failed_records": [
+        {
+          "category": "Performance and resiliency",
+          "duration_seconds": 5591,
+          "id": "perf.media-burst-matrix",
+          "name": "perf media burst matrix"
+        },
+        {
+          "category": "Reporting and regression",
+          "duration_seconds": 0,
+          "id": "report.performance-metrics",
+          "name": "performance gate metrics report"
+        }
+      ],
+      "passed": 106,
+      "required": 108,
+      "root_deviation_count": 1,
+      "root_failed_gate": "perf.media-burst-matrix",
+      "skipped": 0
+    },
+    "monolithic_soak": {
+      "active_audio_receivers_after_drain": 0,
+      "calls_offered": 587,
+      "calls_succeeded": 587,
+      "duration_secs": 3600,
+      "retained_after_drain": 0,
+      "rss_gate_growth_mb_per_hr": 12.7
+    },
+    "package": {
+      "cargo_metadata_path": "environment/cargo-metadata.json",
+      "cargo_metadata_sha256": "8410edac096d7de16dfb5e950186d3862cd2f28c4ef443e41da01dbf0de2aa83",
+      "name": "rvoip-sip",
+      "version": "0.3.2"
+    },
+    "preserved_invariants": {
+      "caller_retained_after_drain": 0,
+      "caller_rss_gate_mb_per_hr": 0.0,
+      "caller_transaction_manager_after_drain": 0,
+      "delivered_audio_frames": 9922061,
+      "host_udp_full_socket_buffer_drops": 0,
+      "receiver_active_audio_receivers_after_drain": 0,
+      "receiver_retained_after_drain": 0,
+      "receiver_rss_gate_mb_per_hr": 0.0,
+      "receiver_transaction_manager_after_drain": 0
+    },
+    "run": {
+      "duration_seconds": 27512,
+      "ended_at_utc": "2026-07-29T08:48:26Z",
+      "id": "20260729T010954Z",
+      "mode": "full",
+      "started_at_utc": "2026-07-29T01:09:54Z"
+    },
+    "source": {
+      "clean": true,
+      "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+      "tested_commit": "fbc96ed4f1736f1cc4b0a1145497183d6acf0d2f",
+      "tested_tree": "2dfc781726589cf5758c6277ab5ae82441f4b495",
+      "unchanged": true
+    },
+    "strict_result": {
+      "overall": "FAIL",
+      "qualification": "NON-RC",
+      "release_candidate": false
+    }
+  },
+  "release": {
+    "disposition": "APPROVED-WITH-EXCEPTION",
+    "strict_automated_status": "NON-RC",
+    "version": "0.3.2"
+  },
+  "schema": "rvoip-release-exception-attestation-v1",
+  "source_attestation": {
+    "original_sha256": "44ba4c71809efdf9fba4510210222c8c54d6ff8d98853ba88722f885ec3477d6",
+    "path": "source/attestation.json",
+    "schema": "rvoip-sip-beta-attestation-v2",
+    "sha256": "82b78511076a255b287bc12a861a2059d5718368c291e5dcf7438db25dc1b6d2",
+    "strict_overall": "FAIL",
+    "strict_qualification": "NON-RC"
+  },
+  "source_bindings": [
+    {
+      "snapshot_path": "evidence/canonical-2k-index.json",
+      "snapshot_sha256": "677dd8e1e3cf73e2a4e4a2e717b6fc2b2b32d7de54779276486d5f751cee160e",
+      "source_path": "canonical-2k/index.json",
+      "source_sha256": "81b8b0fae44f7b1ef88271794ad0c9e4153274343ea5e26cea6f648b07a7d907",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/canonical-2k-run-1.json",
+      "snapshot_sha256": "5f0e4c0309a82c3577bcaf4545889219aa0279f1283e00ca77800a2dbbb190f0",
+      "source_path": "canonical-2k/run-1/report.json",
+      "source_sha256": "c30caa475f6591cd3a7b2dc19bc82228e1e2a8949f59b5b4a1a5d33ada86c2e9",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/canonical-2k-run-2.json",
+      "snapshot_sha256": "1fd001ad91c85747c1bf90cf5a88ac82faff0b2f3c0ac1825c8def8bb13d973f",
+      "source_path": "canonical-2k/run-2/report.json",
+      "source_sha256": "9a80681a999bb77f996fed91c841d5502f5f5065120d35eb104b585a0175980d",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/canonical-2k-run-3.json",
+      "snapshot_sha256": "963bbec2e984f1c23959e907c71676b004bd96ff4b0a7c3af05156e01e8151bb",
+      "source_path": "canonical-2k/run-3/report.json",
+      "source_sha256": "3f9f7bda7dc1a1fa59c536c0f0aa989fbff43738c2ba31a1e436ed67caa457c4",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/high-density-caller.json",
+      "snapshot_sha256": "ba2058b22fa168e2dfb0acc8f0f64ad4c61a4ed5267557508012aed550182965",
+      "source_path": "perf-results/perf_burst_matrix/burst_20260728_230142_42456/high-density-media-burst/perf_burst_caller_high-density-media-burst.json",
+      "source_sha256": "a2bb47ac176c5e8e7ed91e166d6d155f76cf68ed700b4dc8f86062e72ab1e5b9",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/high-density-receiver.json",
+      "snapshot_sha256": "d7488c64e72ef742ae402d52059a32f988677a1c2cc66aa2d7a17acfe8a9696d",
+      "source_path": "perf-results/perf_burst_matrix/burst_20260728_230142_42456/high-density-media-burst/perf_burst_receiver_high-density-media-burst.json",
+      "source_sha256": "ff6562cccdccf5851cbe96d7f568f6804709d6d51c6b0140e4cae3c4bfd8466a",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/host-udp-delta.txt",
+      "snapshot_sha256": "c8f6a825834e6bd6bb5daf8210aaa69e8b8bb4520f0815236f07ade844f953bc",
+      "source_path": "perf-results/perf_burst_matrix/burst_20260728_230142_42456/high-density-media-burst/host_udp_delta.txt",
+      "source_sha256": "c57d0be9663e654b9834e0de1b44ace1ecf12c78d600fcfd5e6393529703fcba",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/monolithic-soak.json",
+      "snapshot_sha256": "607e6417036bd42098d6cff148d9e6cc9ef3d67d3b475ba1de111ff483baa9fb",
+      "source_path": "perf-results/perf_soak_30min.json",
+      "source_sha256": "4e26aa3d286eae9dc326a226fdf55c14528e9c8c30957a2f5364f4b42cd991fc",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/split-soak-caller.json",
+      "snapshot_sha256": "e9efc3b3801d72b68a267252c5484fd353e6bd97c2d38b0cb4bc2c269130e5f6",
+      "source_path": "perf-results/perf_soak_caller.json",
+      "source_sha256": "29e3cfbc06213dd6b2fed82c381e572a7fcd130af892e66f000fda95132814a9",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "evidence/split-soak-receiver.json",
+      "snapshot_sha256": "ff7788aa8102a45a3d54088028b12fe71aaf19cf91612a4f4fc93022ab6d176a",
+      "source_path": "perf-results/perf_soak_receiver.json",
+      "source_sha256": "51d1928b1b8b9216d78a9d5771aec260491ec435baa331635ceaa4054ad2414a",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "inputs/beta-release-policy.yaml",
+      "snapshot_sha256": "8cddb4b097971714f62d3c705e8ed3de20f6fec995e8e7251f926b584d7d3180",
+      "source_path": "inputs/beta-release-policy.yaml",
+      "source_sha256": "8cddb4b097971714f62d3c705e8ed3de20f6fec995e8e7251f926b584d7d3180",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/attestation.json",
+      "snapshot_sha256": "82b78511076a255b287bc12a861a2059d5718368c291e5dcf7438db25dc1b6d2",
+      "source_path": "attestation.json",
+      "source_sha256": "44ba4c71809efdf9fba4510210222c8c54d6ff8d98853ba88722f885ec3477d6",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/attestation.json.sha256",
+      "snapshot_sha256": "7164fedbf9ec2898644f736a2bdc98b5fafc5b437cd1c995ed93a70fe9e1cb1b",
+      "source_path": "attestation.json.sha256",
+      "source_sha256": "a506cd0036d58d72cbb8faa0f4378a81439a3f2205a05fe287c219586619fb5a",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/effective-gate-config.json",
+      "snapshot_sha256": "b4fb360b77255003a8c0bba8b602e7b464ee2ae8f3ff9c00e938830c4fa261ad",
+      "source_path": "effective-gate-config.json",
+      "source_sha256": "b4fb360b77255003a8c0bba8b602e7b464ee2ae8f3ff9c00e938830c4fa261ad",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/gate-results.json",
+      "snapshot_sha256": "3da8068c5b96e7ab8f2978078a4782fe3b85d4c54bce6d01c72886f49f277e54",
+      "source_path": "gate-results.json",
+      "source_sha256": "3da8068c5b96e7ab8f2978078a4782fe3b85d4c54bce6d01c72886f49f277e54",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/performance-gate-metrics.log",
+      "snapshot_sha256": "9d0f72f8bff7cbd59ac2ae093bf5e6cd434fae5ae6aa314c8c4bfad918009240",
+      "source_path": "performance_gate_metrics_report.log",
+      "source_sha256": "313af1b155b64a77ab7f9e2a6919adf6911e962c1df80cdc6d598422f10f2aa3",
+      "transformation": "personal-path-redaction-v1"
+    },
+    {
+      "snapshot_path": "source/summary.md",
+      "snapshot_sha256": "18b3ae6e4cb0bd71b074fb3ada6e559239b4294b2db4204af3c557dc412eb152",
+      "source_path": "summary.md",
+      "source_sha256": "4b75283a90410f90d5eebc32d881545056db649eef22ab8afc71bf7953d26303",
+      "transformation": "personal-path-redaction-v1"
+    }
+  ]
+}

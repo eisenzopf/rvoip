@@ -95,8 +95,8 @@ rvoip                         facade crate; re-exports rvoip-core + adapters as 
 ├── rvoip-rtp                 RTP/SRTP-specific transport (used by rvoip-sip and rvoip-webrtc)
 ├── rvoip-vcon                FIRST Rust implementation of the IETF vCon spec
 │                             (draft-ietf-vcon-vcon-core). Builder pattern, serde-based,
-│                             JWS sign/verify, JWE encrypt/decrypt, voip-3 → vCon adapter,
-│                             feature-gated SIP-signaling and consent extensions
+│                             JWS General JSON sign/verify, redacted/amended lineage
+│                             models, voip-3 → vCon adapter; no JWE implementation
 ├── rvoip-identity            IdentityProvider trait + verifier implementations:
 │                             OAuth 2.1+DPoP (default), OIDC, SIP Digest, FIDO/passkeys,
 │                             AAuth (experimental, RFC 9421 HTTP Message Signatures).
@@ -128,7 +128,7 @@ The `rvoip` facade is feature-flagged so consumers compile only what they need:
 | `uctp` | rvoip-core, rvoip-uctp, rvoip-quic, rvoip-webtransport, rvoip-websocket, rvoip-media | UCTP-native server (lightest UCTP gateway) |
 | `sip` | rvoip-core, rvoip-sip, rvoip-rtp, rvoip-media | Pure SIP carrier (no UCTP) |
 | `webrtc` | rvoip-core, rvoip-webrtc, rvoip-rtp, rvoip-media | Pure WebRTC SFU-bridge use cases |
-| `vcon` | rvoip-vcon | vCon emission, signing, encryption (default-on; vCons are emitted for every Session) |
+| `vcon` | rvoip-vcon | Canonical vCon emission plus explicit JWS General JSON signing (default-on emission; no JWE) |
 | `identity` | rvoip-identity | Identity backends (default-on; OAuth 2.1+DPoP minimum) |
 | `aauth-experimental` | rvoip-identity[aauth] | Enables the AAuth backend (RFC 9421 + Signature-Key headers); off-by-default |
 | `identity-fingerprint-binding` | rvoip-identity[fingerprint] | DTLS-SRTP fingerprint binding from Identity signing keys; off-by-default |
@@ -404,14 +404,14 @@ Sessions and tenants may require a minimum assurance level (per §9). When a Con
 
 ### 3.9 In-flight `Vcon` builder
 
-vCon (the IETF Virtualized Conversations envelope) is a concept **not present in voip-3** — the conversation model has no equivalent of a signed, durable Session-end artifact. rvoip adopts vCon as the canonical durable record because (a) PRD §1.2.3 commits the project to being the first-mover Rust adoption, and (b) compliance-bound deployments (healthcare, financial services, lawful intercept) structurally need a signed conversation envelope per Session. Other voip-3-aligned implementations may pick a different durable record or none at all; rvoip commits to vCon.
+vCon (the IETF Virtualized Conversations envelope) is a concept **not present in voip-3** — the conversation model has no equivalent durable Session-end artifact. rvoip adopts vCon as the canonical durable record because (a) PRD §1.2.3 commits the project to being the first-mover Rust adoption, and (b) compliance-bound deployments need a standard conversation envelope per Session. The automatic core path emits validated unsigned JSON; consumers that require cryptographic provenance explicitly apply JWS General JSON signatures. Other voip-3-aligned implementations may pick a different durable record or none at all; rvoip commits to vCon.
 
 Every Session has an associated in-flight vCon builder that is populated as the Session progresses. This is owned by the Session and accessible to harness/transcription via a handle:
 
 ```rust
 impl Session {
     /// Returns a handle for writing into the in-flight vCon.
-    /// The vCon is finalized (signed and emitted to VconStore) at session.ended.
+    /// The vCon is validated and emitted to VconStore at session.ended.
     pub fn vcon_handle(&self) -> VconBuilderHandle;
 }
 
@@ -426,11 +426,11 @@ pub trait VconBuilderHandle: Send + Sync {
 ```
 
 Lifecycle:
-- **On `ConversationOpened`** the Conversation gets a `group` UUID; all its Sessions' vCons share that group (the vCon spec's mechanism for linking related vCons).
+- **On `ConversationOpened`** no vCon grouping field is assigned. Core `group` is reserved. The store index records each emitted vCon's `ConversationId` for local lookup; portable or federated on-wire linkage waits for a future named extension declared in `extensions[]`.
 - **On `ParticipantJoined`** rvoip-core appends a `Party` populated from the Participant's Identity (name, did/stir if present, `validation` reflecting `IdentityAssurance`).
 - **On Connection lifecycle** rvoip-core appends a `Dialog` per audio Stream + per text Stream + per transfer event. SIP signaling is captured into Attachments via `rvoip-sip` (when the SIP-signaling vCon extension is enabled).
 - **On harness/transcription events** the harness or transcription pipeline appends `Analysis` entries (transcripts with confidence, dialog-turn summaries, sentiment).
-- **On `SessionEnded`** rvoip-core finalizes the vCon: validates structure, signs via JWS using the tenant key, optionally encrypts via JWE if a tenant encryption key is configured, persists via `VconStore` (§11), and emits `VconReady` event with a `VconHandle`.
+- **On `SessionEnded`** rvoip-core converts the snapshot into the canonical model, validates it, serializes with serde, persists the unsigned bytes via `VconStore` (§11), and emits `VconReady` with a `VconHandle`. Conversion, validation, serialization, or storage failure suppresses `VconReady` without blocking `SessionEnded`. Signing is an explicit caller operation; JWE is absent.
 
 ---
 
@@ -490,8 +490,8 @@ Events are emitted on `infra-common::events::GlobalEventCoordinator` (per PRD §
 | `MessageReceived` / `MessageSent` / `MessageDelivered` / `MessageRead` | Messaging events |
 | `TranscriptTurn` | Per-turn ASR result with `stream_id`, `speaker`, `text`, `confidence`, `is_final`, `assigned_provider` |
 | `RecordingStarted` / `RecordingStopped` / `RecordingComplete` | Recording lifecycle with sink reference |
-| `VconReady` | Emitted when the in-flight vCon for a Session is finalized, signed, and persisted to `VconStore`. Carries the `VconHandle` (URL + content hash) for retrieval. Emitted for every Session at end-of-Session per §3.9. |
-| `VconRedacted` | A new redacted vCon was produced from an existing one; carries both old and new `VconHandle`s. |
+| `VconReady` | Emitted when the in-flight vCon for a Session is validated, serialized, and persisted to `VconStore`. Carries the `VconHandle` (URL + content hash) for retrieval. |
+| `VconRedacted` | Records a consumer-produced redacted vCon and its predecessor handle; the event/model do not perform redaction. |
 | `IdentityAssuranceChanged` | A Connection's IdentityAssurance level changed mid-Session (e.g., user stepped up from Pseudonymous to Identified via passkey challenge). |
 | `DtmfReceived` | DTMF from far end |
 | `RegistrationChanged` / `RegistrationHeartbeat` | Per PRD §10 (rvoip-sip and rvoip-uctp emit these from their registrars / auth services) |
@@ -1035,40 +1035,48 @@ vCons (per §3.9) are persisted via a separate trait so that conversation state 
 ```rust
 #[async_trait]
 pub trait VconStore: Send + Sync {
-    /// Persist a signed (and optionally JWE-encrypted) vCon. Returns a handle that
-    /// includes the canonical URL and content hash for later retrieval.
-    async fn store(&self, vcon: SignedVcon) -> Result<VconHandle>;
+    /// Persist finalized vCon bytes and return their retrieval handle.
+    async fn put(
+        &self,
+        tenant_id: &TenantId,
+        conversation_id: &ConversationId,
+        session_id: &SessionId,
+        vcon: Bytes,
+    ) -> Result<VconHandle>;
 
-    /// Fetch a stored vCon by handle. Returns None if not found or if the caller's
-    /// access policy denies retrieval.
-    async fn fetch(&self, handle: &VconHandle) -> Result<Option<SignedVcon>>;
+    /// Fetch the exact stored bytes.
+    async fn get(&self, handle: &VconHandle) -> Result<Option<Bytes>>;
 
-    /// List all vCons associated with a Conversation (matched by the vCon's `group` UUID).
-    async fn list_for_conversation(&self, c: ConversationId) -> Result<Vec<VconHandle>>;
+    /// List vCons emitted for one Session.
+    async fn list_for_session(&self, session_id: &SessionId) -> Result<Vec<VconHandle>>;
 
-    /// Produce a redacted vCon from an existing one. The redacted vCon carries a
-    /// `redacted` reference back to its predecessor; the predecessor remains in the
-    /// store but may have stricter access policy applied.
-    async fn redact(&self, handle: &VconHandle, redaction: RedactionSpec) -> Result<VconHandle>;
-
-    /// Verify a stored vCon's JWS signatures and return the verification report.
-    async fn verify(&self, handle: &VconHandle) -> Result<VerificationReport>;
+    /// List sibling Session vCons indexed under one local Conversation.
+    async fn list_for_conversation(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<VconHandle>>;
 }
 
 pub struct VconHandle {
-    pub uuid: VconUuid,
-    pub url: String,            // canonical retrieval URL (may be a content hash + storage prefix)
-    pub content_hash: String,   // SHA-256 of the signed JWS body
-    pub group: Option<String>,  // vCon group UUID for related-vCon linkage
-    pub created_at: DateTime<Utc>,
+    pub url: String,
+    pub content_hash: String,   // sha512- + Base64Url(SHA-512(stored bytes))
 }
 ```
+
+The store is byte-oriented: automatic core emission writes unsigned canonical
+vCon JSON, while an application can explicitly store a JWS General JSON form.
+The `rvoip-vcon` model exposes mutually exclusive `redacted` and `amended`
+lineage objects, but `VconStore` does not redact, encrypt, group, or verify
+documents. Those policy operations belong to the consumer. Local
+Conversation-to-vCon relationships live in store/index metadata; a future
+named extension may add portable cross-system linkage. The reserved core
+`group` parameter is not used.
 
 ### 11.5 Default and production implementations
 
 - `rvoip-core` ships an in-memory `MemoryVconStore` (DashMap-backed; suitable for tests and small deployments).
 - Production deployments typically implement `VconStore` against S3 / GCS / Azure Blob (content-addressable) plus a Postgres index.
-- An optional `rvoip-vcon-postgres` crate may ship as a reference implementation (per PRD §14.2 item 8). Decision deferred.
+- The optional `rvoip-vcon-postgres` crate ships a reference implementation; its live integration tests are enabled with `live-tests` and fail closed unless `DATABASE_URL` is set.
 
 ---
 
@@ -1557,7 +1565,7 @@ Per project direction, voip-3 (`/Users/jonathan/Developer/Rudeless/voip-3-conver
 13. **No Conversation cardinality at scale.** §11.3 commits to `Ephemeral` default with idle close.
 14. **No interop boundary specification.** §7 + UCTP §12 commit to gateway-not-tunnel for SIP and WebRTC.
 15. **No listener-tap pattern.** §10.5 carves out the 3-party listener as distinct from multi-party SFU.
-16. **No conversation envelope.** voip-3 has no equivalent of [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) — the IETF Virtualized Conversations standard. This doc adopts vCon as the canonical signed JSON envelope for conversation recording and analysis (§3.9, §11.4). Mapping: `Participant` → `parties[]`, `Session` → `dialog[]`, `Message` → `dialog[type=text]`, `Conversation` → vCon group.
+16. **No conversation envelope.** voip-3 has no equivalent of [vCon](https://datatracker.ietf.org/doc/draft-ietf-vcon-vcon-core/) — the IETF Virtualized Conversations standard. This doc adopts vCon as the canonical JSON envelope for conversation recording and analysis (§3.9, §11.4), with signing explicitly opt-in. Mapping: `Participant` → `parties[]`, a `Session` → one or more `dialog[]` entries, and `Message` → `dialog[type=text]`. Conversation-level sibling-vCon linkage is deferred to a future named extension; reserved core `group` is not used.
 17. **No agent-identity model.** voip-3 §11 lists identity as open. This doc commits to `IdentityAssurance` (Anonymous → Pseudonymous → Identified → TaskScoped → UserAuthorized) as the public-facing concept and accommodates AAuth (`draft-hardt-oauth-aauth-protocol`) as one of several backends behind `IdentityProvider`.
 18. **No per-request signing model.** voip-3 has no protocol-level message authentication. This doc adopts [RFC 9421 HTTP Message Signatures](https://datatracker.ietf.org/doc/rfc9421/) for substrates that carry HTTP-shaped requests, with hooks on `ConnectionAdapter::verify_request_signature` to surface assurance from signature verification.
 19. **No signaling↔media identity binding.** §8.4 introduces DTLS-SRTP fingerprint binding (feature-flagged in v1) that ties Identity signing keys to the DTLS handshake — closing the gap between signaling-time and media-time identity.
@@ -1582,10 +1590,10 @@ Items deferred or left for a later version:
 12. **Anomaly taxonomy.** PRD §14.2 item 4 is open; resolve by enumerating the specific anomalies rvoip emits.
 13. **AAuth conformance.** AAuth backend is **experimental** in v1; trait shape supports it but the public API does not commit until the IETF status stabilizes (PRD §14.2 item 10).
 14. **DTLS-SRTP fingerprint binding.** Designed in §8.4; implementation behind feature flag `identity-fingerprint-binding`, default off in v1. Needs implementation experience before promoting.
-15. **vCon storage default.** rvoip-core ships an in-memory `MemoryVconStore` for tests; whether to ship a reference Postgres implementation as `rvoip-vcon-postgres` is open (PRD §14.2 item 8). Lean: yes, as an optional crate.
+15. **vCon storage default.** Resolved: rvoip-core ships `MemoryVconStore` for tests and `rvoip-vcon-postgres` is the optional reference production store.
 16. **vCon emission cadence.** Default plan: async-batched at session.ended, with `VconReady` event when committed (PRD §14.2 item 7). 5-second SLA target. Decide once we measure JWS signing cost at scale.
 17. **vCon-without-audio policy.** §3.9 commits to "always emit a vCon for every Session, even without audio." Useful as the durable audit primitive; needs telemetry to confirm storage cost is acceptable for high-volume tenants.
-18. **vCon redaction default.** rvoip-core surfaces redaction primitives only; the consumer's compliance layer applies jurisdiction-specific redaction. Whether rvoip ships a default PII-detection redactor is open — lean: no (consumers integrate their existing detection pipelines).
+18. **vCon redaction default.** `rvoip-vcon` represents redacted/amended lineage but ships no redaction operation. Whether to add a default PII-detection redactor remains open — lean: no (consumers integrate their existing detection pipelines).
 
 ---
 

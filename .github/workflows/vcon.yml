@@ -1,0 +1,101 @@
+name: vcon
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/extensions/rvoip-vcon/**"
+      - "crates/extensions/rvoip-vcon-postgres/**"
+      - "crates/foundation/rvoip-core/Cargo.toml"
+      - "crates/foundation/rvoip-core/src/events.rs"
+      - "crates/foundation/rvoip-core/src/lib.rs"
+      - "crates/foundation/rvoip-core/src/orchestrator.rs"
+      - "crates/foundation/rvoip-core/src/vcon.rs"
+      - "crates/foundation/rvoip-core/src/store/vcon_store.rs"
+      - "crates/foundation/rvoip-core/tests/vcon_emission.rs"
+      - "crates/uctp/rvoip-quic/Cargo.toml"
+      - "crates/uctp/rvoip-quic/tests/e2e_full_stack.rs"
+      - "examples/11-ai-harness-demo/**"
+      - "scripts/release.py"
+      - "scripts/test_release.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/vcon.yml"
+  pull_request:
+    paths:
+      - "crates/extensions/rvoip-vcon/**"
+      - "crates/extensions/rvoip-vcon-postgres/**"
+      - "crates/foundation/rvoip-core/Cargo.toml"
+      - "crates/foundation/rvoip-core/src/events.rs"
+      - "crates/foundation/rvoip-core/src/lib.rs"
+      - "crates/foundation/rvoip-core/src/orchestrator.rs"
+      - "crates/foundation/rvoip-core/src/vcon.rs"
+      - "crates/foundation/rvoip-core/src/store/vcon_store.rs"
+      - "crates/foundation/rvoip-core/tests/vcon_emission.rs"
+      - "crates/uctp/rvoip-quic/Cargo.toml"
+      - "crates/uctp/rvoip-quic/tests/e2e_full_stack.rs"
+      - "examples/11-ai-harness-demo/**"
+      - "scripts/release.py"
+      - "scripts/test_release.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/vcon.yml"
+  workflow_dispatch: {}
+
+jobs:
+  conformance:
+    name: model, emission, signing, and stores
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: rvoip_vcon_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rvoip_vcon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/rvoip_vcon_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: vcon
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+
+      - name: Test vCon model and General JSON signatures
+        run: cargo test -p rvoip-vcon --all-targets --locked
+
+      - name: Test canonical core emission
+        run: |
+          cargo test -p rvoip-core --lib vcon --locked
+          cargo test -p rvoip-core --test vcon_emission --locked
+
+      - name: Compile core feature boundaries
+        run: |
+          cargo check -p rvoip-core --no-default-features --all-targets --locked
+          cargo check -p rvoip-core --all-features --all-targets --locked
+
+      - name: Test PostgreSQL store against live PostgreSQL
+        run: cargo test -p rvoip-vcon-postgres --all-targets --features core-store,live-tests --locked
+
+      - name: Test affected integration boundaries
+        run: |
+          cargo test -p rvoip-quic --test e2e_full_stack --locked
+          cargo check -p rvoip --features voip-3 --locked
+          cargo check --manifest-path examples/11-ai-harness-demo/Cargo.toml
+
+      - name: Test release verification tooling
+        run: python3 -m unittest scripts/test_release.py

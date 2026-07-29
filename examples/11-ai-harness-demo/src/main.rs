@@ -163,13 +163,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut builder = VconBuilder::new().subject("AI harness demo");
     let caller = builder.party(Party {
         name: Some("Caller".into()),
-        role: Some("caller".into()),
+        kind: Some("person".into()),
         uuid: transcript.speaker.as_ref().map(ToString::to_string),
         ..Party::default()
     });
     let bot = builder.party(Party {
         name: Some("Deterministic Bot".into()),
-        role: Some("bot".into()),
+        kind: Some("bot".into()),
         uuid: Some("part_bot".into()),
         ..Party::default()
     });
@@ -178,7 +178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .text(Utc::now(), bot, response.0.clone())
         .recording(
             Utc::now(),
-            response.1.duration_ms,
+            response.1.duration_ms as f64 / 1_000.0,
             vec![caller, bot],
             "audio/raw",
         )

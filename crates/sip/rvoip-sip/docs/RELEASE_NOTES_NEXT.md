@@ -1,11 +1,11 @@
 # rvoip 0.3.2 Release Notes
 
-Date: 2026-07-26
+Date: 2026-07-29
 
-These notes describe the unified `0.3.2` workspace candidate. Behavioral and
-performance claims remain bounded by the current clean beta report,
-compatibility and RFC matrices, interoperability evidence, security posture,
-and performance report.
+These notes describe the unified `0.3.2` workspace release approved with one
+explicit performance exception. Behavioral and performance claims remain
+bounded by the clean full-run evidence, compatibility and RFC matrices,
+interoperability evidence, security posture, and exception report.
 
 ## Headline
 
@@ -86,8 +86,15 @@ consumed dependency graph.
 
 ## Evidence and Promotion
 
-The [current release report](BETA_RELEASE_REPORT.md),
-[complete gate report](BETA_GATE_REPORT.md), and
-[performance report](BETA_PERFORMANCE_REPORT.md) are the authority for the
-promoted candidate. Report promotion is a deterministic post-run derivation;
-the source attestation remains bound to the clean tested commit.
+The owner-approved [0.3.2 release exception](BETA_RELEASE_EXCEPTION.md),
+[complete gate record](BETA_GATE_EXCEPTION.md), and
+[performance evidence](BETA_PERFORMANCE_EXCEPTION.md) are the authority for
+this release disposition. The source run remains `FAIL` / `NON-RC`: 106 of 108
+required records passed, with zero skips. The root deviation was high-density
+full-media burst ASR of 0.9928 against the 0.995 requirement; the second failed
+record is the reporting roll-up of that same miss.
+
+No failed gate was changed to PASS. The immutable exception snapshot binds the
+decision to the clean, unchanged tested commit and its evidence with SHA-256.
+The last fully strict 108/108 beta candidate remains available through
+[the strict current reports](BETA_RELEASE_REPORT.md).

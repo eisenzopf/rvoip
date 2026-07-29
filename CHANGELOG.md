@@ -4,13 +4,78 @@
 
 No changes yet.
 
-## 0.3.2 — 2026-07-26
+## 0.3.3 — 2026-07-29
+
+This unified patch release corrects the vCon wire model, Session-finalization
+path, signatures, content hashes, stores, and documentation against
+`draft-ietf-vcon-vcon-core` commit
+`2342aba64bdb71d9e80ab6e274a3921e2b1c769e`.
+
+### Fixed
+
+- End-of-Session emission now converts snapshots into the canonical
+  `rvoip-vcon` model, validates them, serializes with serde, and suppresses
+  persistence/`VconReady` on conversion, validation, or serialization failure.
+  Inline dialog, analysis, and attachment bodies are preserved as Base64Url.
+- The container now uses vCon `0.4.0`, durations in seconds, required analysis
+  vendor/encoding data, attachment placement and purpose fields, URL/hash
+  dependencies, complete dialog/party fields, and mutually exclusive
+  redacted/amended lineage.
+- vCon signatures now use JWS General JSON Serialization with appendable
+  signatures and certificate references. Compact JWT serialization is no
+  longer emitted as a signed vCon.
+- New store handles use the specified
+  `sha512-<unpadded-base64url-digest>` content hash in memory and PostgreSQL.
+  The typed `VconStore` contract exposes the stored content hash, and identical
+  canonical documents hash identically across memory and PostgreSQL. Existing
+  persisted legacy hashes are not rewritten.
+- Federation documentation no longer assigns semantics to reserved core
+  `group`; sibling-vCon grouping is deferred to a future named extension
+  declared in `extensions[]`.
+- Documentation now states the shipped security boundary: core emission is
+  unsigned, JWS signing is explicit, JWE is absent, and lineage types do not
+  perform redaction.
+
+### Added
+
+- Canonical draft example/schema conformance coverage and a dedicated vCon CI
+  job, including live PostgreSQL store tests and affected integration
+  boundaries.
+- Hash- and commit-bound `--targeted-delta-attestation` release verification.
+  It retains unified manifest, workspace compile, and package checks while
+  honestly recording that broad beta/workspace test/doc suites were not
+  rerun. The approved targeted matrix is rerun and live PostgreSQL evidence is
+  machine-verified.
+
+### Breaking vCon changes
+
+- `sign_jws` now accepts a certificate reference and returns `SignedVcon`;
+  `append_signature` adds another signer, and verification accepts the General
+  JSON form. HMAC algorithms are rejected for this certificate-bound API.
+- Dialog `duration_ms` becomes `duration` in seconds. The model adds the
+  standard party, dialog, analysis, attachment, extension, and critical
+  fields. The undeclared Party `role` field is removed; the core `type` field
+  classifies parties (for example, `person`, `bot`, or `organization`), while
+  role semantics require a declared extension.
+- `redacted: Vec<RedactionRecord>` becomes one optional `Redacted` object and
+  gains the mutually exclusive optional `Amended` object.
+- Core vCon analysis vendors and attachment placement become required;
+  attachment `note` becomes `purpose`; party `did_or_stir` splits into `did`
+  and `stir`; and snapshot encoding is fallible. The core byte-store `put`
+  contract now also receives `ConversationId` and exposes
+  `list_for_conversation` so sibling vCons are linked in index metadata rather
+  than through the reserved `group` parameter.
+
+## 0.3.2 — 2026-07-29
 
 This unified release advances the reusable Bridgefu 1.0 foundation across all
 44 publishable workspace crates.
 
 ### Added
 
+- Hash-bound release-exception reporting for the owner-approved 0.3.2
+  candidate, with the strict 106/108 gate result and NON-RC qualification
+  preserved rather than rewritten.
 - Complete authenticated-principal propagation and ownership checks across
   SIP, WebRTC, UCTP, routes, and operational events.
 - Transport-neutral `DataMessage`, arbitrary WebRTC DataChannels, SIP MESSAGE,

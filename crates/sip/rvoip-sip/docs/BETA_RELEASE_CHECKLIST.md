@@ -9,6 +9,7 @@ Current release train and runtime crate version: `0.3.2`.
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)
 - [Beta Performance Report](BETA_PERFORMANCE_REPORT.md)
+- [0.3.2 owner-approved release exception](BETA_RELEASE_EXCEPTION.md)
 - [Immutable release history](releases/beta/README.md)
 
 ## Promotion rule
@@ -41,6 +42,45 @@ them. They are never classified as optional or “additional” after execution.
 Unknown, duplicate, ambiguous, uncatalogued, missing, or unvalidated gates fail
 closed.
 
+## Owner-approved exception path
+
+The strict promotion rule above is unchanged. A project owner may separately
+accept a bounded deviation only through a tracked exception attestation that:
+
+- retains the source run's original `FAIL` / `NON-RC` status and every gate
+  result;
+- identifies the exact accepted deviation and approval basis;
+- binds the decision, full gate inventory, and selected source evidence with
+  SHA-256;
+- passes the dedicated exception verifier; and
+- is supplied explicitly to unified release verification.
+
+For 0.3.2, the owner accepted the high-density full-media burst ASR result of
+0.9928 against the 0.995 threshold. The adjacent reporting failure is a derived
+roll-up of that same miss. All 106 other gates passed and no gate was skipped.
+The immutable report is
+[`20260729T010954Z/exception-r1`](releases/beta/20260729T010954Z/exception-r1/BETA_RELEASE_REPORT.md).
+
+Verify the exception by itself:
+
+```sh
+python3 scripts/release_exception_attestation.py verify \
+  --attestation crates/sip/rvoip-sip/docs/releases/beta/20260729T010954Z/exception-r1/exception-attestation.json \
+  --version 0.3.2
+```
+
+Use it during the normal unified verification phase:
+
+```sh
+python3 scripts/release.py verify \
+  --version 0.3.2 \
+  --beta-exception-attestation crates/sip/rvoip-sip/docs/releases/beta/20260729T010954Z/exception-r1/exception-attestation.json
+```
+
+`--beta-exception-attestation` and the strict `--beta-report-root` input are
+mutually exclusive. The verification receipt records which qualification mode
+was used and the exception attestation's SHA-256.
+
 ## Required release configuration
 
 The policy catalog contains the complete typed defaults and selection
@@ -62,11 +102,34 @@ conditions. The beta profile additionally fixes these release-critical values:
 Changing a threshold or workload requires a reviewed policy change before the
 run. Reporting may not reinterpret or silently relax recorded policy.
 
-## Reference full invocation
+## One-command full local invocation
 
-After three successful `perf_call_setup_2k_profile.sh clean` runs, export their
-absolute directories in chronological order and a host address reachable by
-the strict-UA environment. The release invocation is:
+Commit all intended release changes so the rvoip tree is clean, then run from
+the rvoip workspace root:
+
+```sh
+crates/sip/rvoip-sip/scripts/full_beta_release.sh
+```
+
+The wrapper uses the exact Homebrew Docker/Compose paths, starts or repairs the
+default Colima profile with the required resources and reachable network
+address, validates every external dependency and both local PBX lab directories,
+detects the host address for baresip, produces and validates three canonical
+2K passes, and runs the complete fail-closed gate below. It does not fall back
+to Docker Desktop, permit external skips, promote reports, or publish crates.
+The wrapper may restart and persistently resize/reconfigure the default Colima
+profile; it restores the previously selected Docker context when it exits.
+
+Use `full_beta_release.sh --preflight-only` for a non-test environment check.
+
+## Core gate settings reference
+
+The wrapper is the sole executable authority for the full local run. The block
+below preserves the core gate settings for policy review, but it is not a
+complete environment-isolated equivalent and must not be launched by hand.
+`full_beta_release.sh` additionally fixes tool paths, workload inputs,
+tolerances, warning policy, reporting capture, and a clean inherited
+environment.
 
 ```sh
 : "${RVOIP_STRICT_UA_HOST_IP:?export a reachable strict-UA host IP}"

@@ -1,0 +1,32 @@
+{
+  "parties": [
+    {
+      "mailto": "a@example.com",
+      "name": "Alice"
+    },
+    {
+      "mailto": "b@example.com",
+      "name": "Bob"
+    }
+  ],
+  "dialog": [
+    {
+      "type": "text",
+      "start": "2022-09-23T23:24:59.000+00:00",
+      "duration": 0,
+      "parties": [
+        0,
+        1
+      ],
+      "mediatype": "text/plain",
+      "encoding": "none",
+      "body": "Hi Bob:\nI just wanted to follow up to see that your account is ok now.\n\nRegards,\nAlice\n\n",
+      "message_id": "<2031327240.390235.1663969499936@mail.yahoo.com>"
+    }
+  ],
+  "analysis": [],
+  "attachments": [],
+  "created_at": "2026-06-29T23:11:16.017+00:00",
+  "subject": "Account issue followup",
+  "uuid": "019f15a6-ba37-8ed3-b9a2-279e0d16bc46"
+}

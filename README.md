@@ -12,19 +12,25 @@
 [![Facade API](https://docs.rs/rvoip/badge.svg)](https://docs.rs/rvoip)
 [![SIP API](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
 
-[**What ships**](#what-ships-today) · [**Choose a crate**](#choose-your-entry-point) · [**Quick start**](#quick-start) · [**Capabilities**](#capability-matrix) · [**Extensions**](#extensions) · [**Architecture**](#architecture) · [**Evidence**](#release-evidence) · [**Roadmap**](#roadmap)
+[**What ships**](#what-ships-today) · [**SIP interop**](#sip-interoperability) · [**Choose a crate**](#choose-your-entry-point) · [**Quick start**](#quick-start) · [**Capabilities**](#capability-matrix) · [**Extensions**](#extensions) · [**Architecture**](#architecture) · [**Evidence**](#release-evidence) · [**Roadmap**](#roadmap)
 
 </div>
 
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.2` release.** All 44 publishable workspace crates ship on the
+> **Unified `0.3.3` release.** All 44 publishable workspace crates ship on the
 > same version. The SIP product is the release-gated beta surface. WebRTC,
 > UCTP, MoQ, the cross-transport APIs, Amazon Connect, and extension crates are
 > available today as developer-preview surfaces unless their own documentation
 > states a narrower qualification. Available does not mean API-stable or
 > production-certified; breaking changes remain possible before `1.0`.
+> The 0.3.3 vCon delta does not rerun or relabel the SIP beta checkpoint. Its
+> unchanged-subsystem background remains the immutable [0.3.2 performance
+> exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md), whose strict
+> automated qualification remains NON-RC.
+> The same unified release includes all 14 optional extension crates and the
+> new native `rvoip-vapi` bidirectional raw-audio WebSocket transport.
 
 ## What ships today
 
@@ -41,7 +47,7 @@ them.
 | **UCTP substrates** | One conversation protocol over raw QUIC, WebTransport, or WebSocket, including capability negotiation and RTP datagram framing | **Available — developer preview** |
 | **Media over QUIC** | MOQT draft-19 transport, native helper, embeddable relay, and an rvoip media-graph broadcast adapter | **Available — developer preview** |
 | **Gateways and bridges** | SIP ↔ WebRTC ↔ UCTP routing, a high-level application builder, and SIP-to-Amazon-Connect audio/screen-pop integration | **Available — developer preview** |
-| **Voice AI and conversation data** | Pluggable ASR, TTS, dialog, and recording providers; Vapi WebSocket agents; signed vCon artifacts; and Postgres-backed vCon storage | **Available — developer preview** |
+| **Voice AI and conversation data** | Pluggable ASR, TTS, dialog, and recording providers; native bidirectional Vapi raw-audio WebSocket agents; signed vCon artifacts; and Postgres-backed vCon storage | **Available — developer preview** |
 | **Identity and compliance** | Digest/Bearer foundations, OIDC, Keycloak, LDAP, Redis, SAML, SCIM, WebAuthn, IMS AKA, STIR/SHAKEN, and redacted audit/SIEM sinks | Beta-qualified SIP auth core + developer-preview extensions |
 
 ### Maturity labels
@@ -51,6 +57,42 @@ them.
 - **Available — developer preview** — implemented and included in `0.3.2`,
   but API-unstable or outside the SIP beta attestation.
 - **Planned** — not implemented; listed only in the [roadmap](#roadmap).
+
+## SIP interoperability
+
+The 0.3.2 full release run passed all 16 selected PBX and interoperability
+gates. The table distinguishes peers that were actually exercised from proxy
+targets that were only audited and deliberately excluded from the release
+claim.
+
+| Peer/tool | 0.3.2 status | Executed scope |
+| --- | --- | --- |
+| **Asterisk** | **Interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer`; registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
+| **FreeSWITCH** | **Interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **SIPp** | **Standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS; every configured call completed |
+| **baresip** | **Strict-UA check passed** | External user-agent call against the rvoip SIP listener |
+| **Kamailio** | **Not release-tested** | Named proxy/RTPengine investigation track; the 0.3.2 gate records a de-scope audit, not a Kamailio interoperability claim |
+| **OpenSIPS** | **Not release-tested** | Named proxy/RTPengine investigation track; the 0.3.2 gate records a de-scope audit, not an OpenSIPS interoperability claim |
+
+See the [0.3.2 complete gate
+record](crates/sip/rvoip-sip/docs/BETA_GATE_EXCEPTION.md) and
+[compatibility matrix](crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md) for
+the evidence boundaries. A passing lab matrix is not carrier certification or
+a claim about every peer version and deployment topology.
+
+### Native Vapi WebSocket agents
+
+New in 0.3.2, [`rvoip-vapi`](crates/extensions/rvoip-vapi) implements Vapi's
+bidirectional WebSocket call transport directly in Rust. It originates the
+Vapi agent leg, streams full-duplex μ-law 8 kHz or PCM 16 kHz raw audio, exposes
+typed agent events and control/context messages, bridges an existing SIP or
+WebRTC caller connection through the shared orchestrator, and supervises
+symmetric teardown. It does not require a third-party telephony intermediary
+between rvoip and Vapi.
+
+The adapter is a developer-preview extension. Start with the
+[`14-vapi-agent`](examples/14-vapi-agent) server, which accepts either SIP or
+WebRTC callers.
 
 ## Choose your entry point
 
@@ -63,7 +105,7 @@ them.
 | QUIC, WebTransport, or WebSocket conversation transport | [`rvoip-uctp`](crates/uctp/rvoip-uctp) | UCTP protocol plus dedicated substrate adapters |
 | Broadcast/fan-out over Media over QUIC | [`rvoip-moq`](crates/moq/rvoip-moq) | MOQT media-graph adapter with native transport and relay crates |
 | SIP calls delivered to Amazon Connect agents | [`rvoip-amazon-connect`](crates/webrtc/rvoip-amazon-connect) | Turnkey SIP UAS, G.711 ↔ Opus bridge, contact attributes, and agent screen pops |
-| SIP or WebRTC calls connected to Vapi voice agents | [`rvoip-vapi`](crates/extensions/rvoip-vapi) | Bidirectional Vapi WebSocket transport integrated with the shared orchestrator and media bridge |
+| SIP or WebRTC calls connected to Vapi voice agents | [`rvoip-vapi`](crates/extensions/rvoip-vapi) | Native bidirectional raw-audio Vapi WebSocket transport integrated with the shared orchestrator and media bridge |
 | Microphone and speaker audio for a SIP app | [`rvoip-audio-device`](crates/media/rvoip-audio-device) | CPAL device I/O, pacing, resampling, jitter buffering, mute, and metering |
 | Authentication, provisioning, AI, vCon, or audit integrations | [Extensions](#extensions) | Optional provider crates keep protocol cores independent of deployment backends |
 
@@ -73,7 +115,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.2"
+rvoip-sip = "0.3.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -154,7 +196,7 @@ voice AI, and cross-transport integrations:
 | --- | --- | --- | --- |
 | RTP/RTCP and G.711 | **Beta-qualified** | PCMU/PCMA media delivery, RTCP receiver reports, telephone-event DTMF, hold/resume, and bridging | [`rvoip-media-core`](crates/media/media-core) |
 | SDES-SRTP | **Beta-qualified** | Tested AES-CM/HMAC profiles with negotiated encrypted media | [`07-secure-call-srtp`](examples/07-secure-call-srtp) |
-| G.729A/G.729AB | **Available — developer preview** | Fully integrated optional path: PT 18 SDP/Annex B negotiation, RTP encode/decode, G.711 transcoding, and Asterisk/FreeSWITCH matrix coverage; excluded only from the general SIP full-media performance claim | [Beta gate report](crates/sip/rvoip-sip/docs/BETA_GATE_REPORT.md) |
+| G.729A/G.729AB | **Available — developer preview** | Fully integrated optional path: PT 18 SDP/Annex B negotiation, RTP encode/decode, G.711 transcoding, and Asterisk/FreeSWITCH matrix coverage; excluded only from the general SIP full-media performance claim | [0.3.2 gate record](crates/sip/rvoip-sip/docs/BETA_GATE_EXCEPTION.md) |
 | Opus and G.722 paths | **Available — developer preview** | Feature-gated codec/media support; not part of the bounded SIP beta media claim | [`rvoip-media-core`](crates/media/media-core) |
 | OS audio devices | **Available — developer preview** | Microphone/speaker bridge, drift-free pacing, resampling, jitter buffering, mute-as-silence, and VU metering | [`02-softphone-audio`](examples/02-softphone-audio) |
 | Conference mixing | **Available — developer preview** | Lower-level N-way/N-1 mixing and conference monitoring primitives; not an integrated SIP beta conference product | [Media README](crates/media/media-core/README.md) |
@@ -171,7 +213,7 @@ voice AI, and cross-transport integrations:
 | Media over QUIC | **Available — developer preview** | MOQT draft-19 transport/native/relay packages plus rvoip media-graph broadcast integration | [`crates/moq`](crates/moq) |
 | Cross-transport app builder | **Available — developer preview** | Role/capability policy, assignment, callbacks, SIP/WebRTC/UCTP listeners, and orchestration | [`rvoip::app`](crates/rvoip/src/app.rs) |
 | Amazon Connect | **Available — developer preview** | `StartWebRTCContact`, Amazon Chime WebRTC media, SIP-header contact attributes, G.711 ↔ Opus bridging, and agent screen pops | [`13-sip-to-amazon-connect`](examples/13-sip-to-amazon-connect) |
-| Vapi voice agents | **Available — developer preview** | Bidirectional raw-audio WebSocket agent sessions bridged to rvoip-owned SIP or WebRTC legs | [`rvoip-vapi`](crates/extensions/rvoip-vapi) |
+| Vapi voice agents | **Available — developer preview** | Native bidirectional μ-law/PCM raw-audio WebSocket agent sessions bridged to rvoip-owned SIP or WebRTC legs, with typed events, control messages, and supervised teardown | [`rvoip-vapi`](crates/extensions/rvoip-vapi) |
 
 The WebRTC implementation of ICE and DTLS-SRTP is separate from the SIP beta
 claim. Likewise, UCTP and MoQ availability does not imply that SIP-over-QUIC or
@@ -179,13 +221,13 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.2`. They are first-class workspace
+All 14 extension crates ship at `0.3.3`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
 | Group | Extensions | Available capability |
 | --- | --- | --- |
-| **AI and conversation data** | [`rvoip-harness`](crates/extensions/rvoip-harness), [`rvoip-vapi`](crates/extensions/rvoip-vapi), [`rvoip-vcon`](crates/extensions/rvoip-vcon), [`rvoip-vcon-postgres`](crates/extensions/rvoip-vcon-postgres) | ASR/TTS/dialog/recording provider traits, hosted Vapi voice-agent bridging, signed vCon artifacts, in-memory interfaces, and Postgres storage |
+| **AI and conversation data** | [`rvoip-harness`](crates/extensions/rvoip-harness), [`rvoip-vapi`](crates/extensions/rvoip-vapi), [`rvoip-vcon`](crates/extensions/rvoip-vcon), [`rvoip-vcon-postgres`](crates/extensions/rvoip-vcon-postgres) | ASR/TTS/dialog/recording provider traits, native Vapi raw-audio WebSocket voice-agent bridging, signed vCon artifacts, in-memory interfaces, and Postgres storage |
 | **Caller trust** | [`rvoip-stir-shaken`](crates/extensions/rvoip-stir-shaken) | STIR/SHAKEN PASSporT signing and verification for RFC 8224/RFC 8225/ATIS profiles |
 | **Authentication providers** | [`rvoip-oidc`](crates/extensions/rvoip-oidc), [`rvoip-keycloak`](crates/extensions/rvoip-keycloak), [`rvoip-ldap`](crates/extensions/rvoip-ldap), [`rvoip-redis`](crates/extensions/rvoip-redis), [`rvoip-ims-aka`](crates/extensions/rvoip-ims-aka) | OIDC discovery and validation, Keycloak integration, LDAP password verification, clustered auth/revocation/replay state, and IMS AKA adapters |
 | **User lifecycle** | [`rvoip-saml`](crates/extensions/rvoip-saml), [`rvoip-scim`](crates/extensions/rvoip-scim), [`rvoip-webauthn`](crates/extensions/rvoip-webauthn) | SAML 2.0 service-provider integration, SCIM 2.0 provisioning, and WebAuthn/passkeys |
@@ -201,22 +243,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.2", features = ["voip-3"] }
+rvoip = { version = "0.3.3", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.2", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.3", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.2"
-rvoip-redis = "0.3.2"
-rvoip-audit = "0.3.2"
+rvoip-keycloak = "0.3.3"
+rvoip-redis = "0.3.3"
+rvoip-audit = "0.3.3"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,
@@ -284,9 +326,13 @@ SIP beta claims are intentionally bounded by checked-in evidence rather than
 inferred from the presence of parser types, low-level primitives, or another
 product's implementation:
 
-- [Beta performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md)
-  — canonical and matrix results, including the documented general full-media
-  profile of up to 2,000 target CPS.
+- [0.3.2 release exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md)
+  and [performance evidence](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_EXCEPTION.md)
+  — the complete owner-approved disposition, strict 106/108 result, and the
+  accepted high-density burst deviation.
+- [Last strict beta candidate](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)
+  — the most recent candidate that passed all 108 automated gates without an
+  exception.
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) —
   exact supported, partial, and unsupported standards claims.
 - [Security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) —
