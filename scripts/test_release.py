@@ -203,6 +203,131 @@ serde = { version = "1.0" }
         self.assertIn('rvoip-a = { path = "a", version = "0.3.0" }', updated)
         self.assertIn('serde = { version = "1.0" }', updated)
 
+    def test_planned_version_edits_update_renamed_member_dependency(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rtc_manifest = root / "rvoip-rtc/Cargo.toml"
+            stack_manifest = root / "rvoip-webrtc-stack/Cargo.toml"
+            rtc_manifest.parent.mkdir()
+            stack_manifest.parent.mkdir()
+            (root / "Cargo.toml").write_text(
+                """[workspace.package]
+version = "0.3.3"
+
+[workspace.dependencies]
+rvoip-rtc = { path = "rvoip-rtc", version = "0.3.3" }
+rvoip-webrtc-stack = { path = "rvoip-webrtc-stack", version = "0.3.3" }
+"""
+            )
+            rtc_manifest.write_text(
+                """[package]
+name = "rvoip-rtc"
+version.workspace = true
+"""
+            )
+            stack_manifest.write_text(
+                """[package]
+name = "rvoip-webrtc-stack"
+version.workspace = true
+
+[dependencies.rtc]
+version = "0.3.3"
+path = "../rvoip-rtc"
+package = "rvoip-rtc"
+
+[dependencies.serde_json]
+version = "1.0"
+"""
+            )
+            packages = {
+                "rvoip-rtc": {
+                    **package("rvoip-rtc", "0.3.3"),
+                    "manifest_path": str(rtc_manifest),
+                },
+                "rvoip-webrtc-stack": {
+                    **package(
+                        "rvoip-webrtc-stack",
+                        "0.3.3",
+                        [
+                            {
+                                "name": "rvoip-rtc",
+                                "rename": "rtc",
+                                "req": "^0.3.3",
+                                "kind": None,
+                            }
+                        ],
+                    ),
+                    "manifest_path": str(stack_manifest),
+                },
+            }
+
+            edits = release.planned_version_edits(root, packages, "0.3.4")
+
+            self.assertIn(
+                'rvoip-rtc = { path = "rvoip-rtc", version = "0.3.4" }',
+                edits[root / "Cargo.toml"].decode(),
+            )
+            self.assertIn(
+                '[dependencies.rtc]\nversion = "0.3.4"',
+                edits[stack_manifest].decode(),
+            )
+            self.assertIn(
+                '[dependencies.serde_json]\nversion = "1.0"',
+                edits[stack_manifest].decode(),
+            )
+
+    def test_member_dependency_versions_reject_stale_renamed_requirement(
+        self,
+    ) -> None:
+        packages = {
+            "rvoip-rtc": package("rvoip-rtc", "0.3.3"),
+            "rvoip-webrtc-stack": package(
+                "rvoip-webrtc-stack",
+                "0.3.3",
+                [
+                    {
+                        "name": "rvoip-rtc",
+                        "rename": "rtc",
+                        "req": "^0.3.2",
+                        "kind": None,
+                    }
+                ],
+            ),
+        }
+        with self.assertRaisesRegex(
+            release.ReleaseError,
+            r"rvoip-webrtc-stack -> rtc \(rvoip-rtc\)@\^0\.3\.2",
+        ):
+            release.validate_member_dependency_versions(packages, "0.3.3")
+
+    def test_member_dependency_versions_accept_current_and_path_only_dev(
+        self,
+    ) -> None:
+        packages = {
+            "rvoip-rtc": package("rvoip-rtc", "0.3.3"),
+            "rvoip-webrtc-stack": package(
+                "rvoip-webrtc-stack",
+                "0.3.3",
+                [
+                    {
+                        "name": "rvoip-rtc",
+                        "rename": "rtc",
+                        "req": "^0.3.3",
+                        "kind": None,
+                    },
+                    {
+                        "name": "rvoip-rtc",
+                        "rename": None,
+                        "req": "*",
+                        "kind": "dev",
+                    },
+                ],
+            ),
+        }
+        release.validate_member_dependency_versions(packages, "0.3.3")
+
     def test_checksum_safe_resume(self) -> None:
         release.assert_existing_checksum(
             "demo", "0.3.0", "abc", {"checksum": "abc"}
@@ -452,6 +577,30 @@ serde = { version = "1.0" }
                 release.verify_targeted_delta_attestation(
                     root, "0.3.3", new_head, str(attestation), mock.Mock()
                 )
+
+    def test_targeted_delta_allows_only_metadata_files_outside_vcon_scope(
+        self,
+    ) -> None:
+        self.assertTrue(
+            release.targeted_delta_path_allowed(
+                "crates/webrtc/rvoip-webrtc-stack/Cargo.toml"
+            )
+        )
+        self.assertTrue(
+            release.targeted_delta_path_allowed(
+                "crates/sip/rvoip-sip/Cargo.toml"
+            )
+        )
+        self.assertFalse(
+            release.targeted_delta_path_allowed(
+                "crates/webrtc/rvoip-webrtc-stack/src/lib.rs"
+            )
+        )
+        self.assertFalse(
+            release.targeted_delta_path_allowed(
+                "crates/sip/rvoip-sip/src/lib.rs"
+            )
+        )
 
     def test_targeted_delta_requires_timezone_aware_approval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

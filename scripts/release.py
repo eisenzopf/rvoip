@@ -48,6 +48,8 @@ TARGETED_DELTA_EXACT_PATHS = frozenset(
         "scripts/release.py",
         "scripts/release.sh",
         "scripts/test_release.py",
+        "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/webrtc/rvoip-webrtc-stack/Cargo.toml",
         "crates/foundation/rvoip-core/Cargo.toml",
         "crates/foundation/rvoip-core/README.md",
         "crates/foundation/rvoip-core/src/events.rs",
@@ -345,6 +347,86 @@ def update_workspace_dependency_versions(
     return "".join(lines)
 
 
+def update_member_dependency_versions(
+    text: str, dependency_names: set[str], version: str
+) -> str:
+    lines = text.splitlines(keepends=True)
+    dependency_section = re.compile(
+        r"^\[(?:target\..+\.)?"
+        r"(?:dependencies|dev-dependencies|build-dependencies)\]$"
+    )
+    dependency_table = re.compile(
+        r"^\[(?:target\..+\.)?"
+        r"(?:dependencies|dev-dependencies|build-dependencies)"
+        r"\.([A-Za-z0-9_-]+)\]$"
+    )
+    active_section = False
+    active_dependency: str | None = None
+    version_field = re.compile(r'(version\s*=\s*")[^"]+(")')
+    table_version = re.compile(r'^(\s*version\s*=\s*")[^"]+(")')
+    simple_version = re.compile(r'(\s*=\s*")[^"]+(")')
+
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            table_match = dependency_table.fullmatch(stripped)
+            active_dependency = (
+                table_match.group(1)
+                if table_match and table_match.group(1) in dependency_names
+                else None
+            )
+            active_section = dependency_section.fullmatch(stripped) is not None
+            continue
+        if active_dependency is not None:
+            if table_version.search(line):
+                lines[index] = table_version.sub(
+                    rf"\g<1>{version}\g<2>", line, count=1
+                )
+            continue
+        if not active_section or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name not in dependency_names:
+            continue
+        if version_field.search(line):
+            lines[index] = version_field.sub(
+                rf"\g<1>{version}\g<2>", line, count=1
+            )
+        elif simple_version.search(line):
+            lines[index] = simple_version.sub(
+                rf"\g<1>{version}\g<2>", line, count=1
+            )
+    return "".join(lines)
+
+
+def validate_member_dependency_versions(
+    packages: dict[str, dict[str, Any]], version: str
+) -> None:
+    expected_requirement = f"^{version}"
+    wrong: set[str] = set()
+    for package_name, package in packages.items():
+        for dependency in package.get("dependencies", []):
+            dependency_name = dependency.get("name")
+            if dependency_name not in packages:
+                continue
+            requirement = dependency.get("req")
+            if requirement == expected_requirement or (
+                dependency.get("kind") == "dev" and requirement == "*"
+            ):
+                continue
+            declared_name = dependency.get("rename") or dependency_name
+            target = (
+                f"{declared_name} ({dependency_name})"
+                if declared_name != dependency_name
+                else str(dependency_name)
+            )
+            wrong.add(f"{package_name} -> {target}@{requirement}")
+    if wrong:
+        raise ReleaseError(
+            f"member internal requirements are not {version}: {sorted(wrong)}"
+        )
+
+
 def planned_version_edits(
     root: Path, packages: dict[str, dict[str, Any]], version: str
 ) -> dict[Path, bytes]:
@@ -362,6 +444,14 @@ def planned_version_edits(
         text = manifest.read_text()
         updated = replace_section_version(
             text, "package", "version.workspace = true"
+        )
+        internal_dependency_names = {
+            dependency.get("rename") or dependency.get("name")
+            for dependency in package.get("dependencies", [])
+            if dependency.get("name") in packages
+        }
+        updated = update_member_dependency_versions(
+            updated, internal_dependency_names, version
         )
         changes[manifest] = updated.encode()
     return changes
@@ -425,6 +515,7 @@ def validate_workspace(
         raise ReleaseError(
             f"internal workspace requirements are not {version}: {wrong_dependencies}"
         )
+    validate_member_dependency_versions(packages, version)
     for package in packages.values():
         manifest = Path(package["manifest_path"]).read_text()
         package_section = manifest.split("[package]", 1)[1].split("\n[", 1)[0]

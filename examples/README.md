@@ -50,9 +50,13 @@ The source of truth is
 ## Conventions
 
 - **Self-contained projects.** Each example is its own Cargo workspace and uses
-  local rvoip crates through the current unified release version plus `path`.
-  That builds against the live tree today and records the crates.io version for
-  when you copy it into your own project (drop `path`, keep `version`).
+  local rvoip crates from this checkout through `path`. The paired `version`
+  records that example's release baseline: unchanged SIP examples intentionally
+  remain on 0.3.2, while examples updated for the targeted 0.3.3 vCon delta use
+  0.3.3. The immutable 0.3.2 SIP beta evidence remains the unchanged-subsystem
+  baseline; the targeted delta is not a new beta qualification. When copying an
+  example into your own project, drop `path` and select the published version
+  you intend to use.
 - **`./run_demo.sh`** builds release binaries, boots every process with port
   readiness checks, prints the combined logs, and exits non-zero on failure.
   Logs land in each example's `logs/`.

@@ -1,6 +1,6 @@
 [package]
 name = "rvoip-sip"
-version.workspace = true  # 0.3.2 — beta-tier
+version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true

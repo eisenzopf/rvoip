@@ -80,10 +80,11 @@
 //!
 //! ## vCon, recording, transcription, AI harness
 //!
-//! Every Session gets a [`DefaultVconBuilder`] auto-bound at
-//! `start_session`; on `end_session` the snapshot is encoded, persisted
-//! via [`VconStore`], and emitted as `Event::VconReady`. Recording
-//! and transcription dispatch via consumer-registered providers
+//! With the `vcon` feature enabled, every Session gets a
+//! [`DefaultVconBuilder`] auto-bound at `start_session`; on `end_session` the
+//! snapshot is encoded, persisted via [`VconStore`], and emitted as
+//! `Event::VconReady`. Recording and transcription dispatch via
+//! consumer-registered providers
 //! ([`Orchestrator::register_recording_sink`],
 //! [`Orchestrator::register_asr_provider`]); the AI harness path
 //! includes barge-in support (`Event::BargeInDetected`).

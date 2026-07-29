@@ -1,8 +1,9 @@
 [package]
 name = "rvoip-vcon"
-# Alpha-tier but DOES publish — rvoip-core lists rvoip-vcon as an
-# optional runtime dep (vcon-signing feature), so cargo verifies this
-# version exists on crates.io even when the feature isn't activated.
+# Alpha-tier but DOES publish — rvoip-core lists rvoip-vcon as an optional
+# runtime dependency behind its `vcon` feature; `vcon-signing` includes `vcon`.
+# Cargo therefore verifies this version exists on crates.io even when neither
+# feature is activated.
 version.workspace = true
 edition.workspace = true
 license.workspace = true
