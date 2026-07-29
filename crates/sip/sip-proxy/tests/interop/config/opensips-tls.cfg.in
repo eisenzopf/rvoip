@@ -51,8 +51,11 @@ route {
         send_reply(403, "TLS Peer Identity Mismatch");
         exit;
     }
-    xlog("L_INFO", "INTEROP_TLS_VERIFIED direction=inbound peer_serial=$tls_peer_serial\n");
-    xlog("L_INFO", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$socket_in(proto)\n");
+    # NOTICE is intentional: the pinned OpenSIPS image suppresses route-level
+    # INFO at its production-like log level, while release evidence must bind
+    # accepted SIP traffic to the verified certificate.
+    xlog("L_NOTICE", "INTEROP_TLS_VERIFIED direction=inbound peer_serial=$tls_peer_serial\n");
+    xlog("L_NOTICE", "INTEROP_RX method=$rm call_id=$ci source=$si:$sp transport=$socket_in(proto)\n");
 
     if (!mf_process_maxfwd_header(20)) {
         send_reply(483, "Too Many Hops");

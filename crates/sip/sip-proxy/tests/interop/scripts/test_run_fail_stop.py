@@ -174,6 +174,10 @@ class RunFailStopTests(unittest.TestCase):
             with self.subTest(peer=peer):
                 self.assertIn(directive, source)
                 self.assertIn(ingress_guard, source)
+                if peer == "opensips":
+                    self.assertIn(
+                        'xlog("L_NOTICE", "INTEROP_TLS_VERIFIED', source
+                    )
 
     def test_dialog_ack_and_bye_routes_are_enabled_end_to_end(self) -> None:
         self.assertIn(
