@@ -70,7 +70,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, trace, warn};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::{Transport, TransportRoute};
+use rvoip_sip_transport::{OutboundTlsConfig, Transport, TransportRoute};
 
 use crate::transaction::client::data::CommonClientTransaction;
 use crate::transaction::client::{ClientTransaction, ClientTransactionData};
@@ -704,6 +704,32 @@ impl ClientNonInviteTransaction {
         )
     }
 
+    /// Same as [`Self::new_with_command_channel_capacity`]. The
+    /// `tls_override` parameter is accepted for source compatibility but is
+    /// not yet applied — per-call outbound TLS/WSS client identity override
+    /// is not wired into the route-based transaction pipeline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_command_channel_capacity_and_tls_identity(
+        id: TransactionKey,
+        request: Request,
+        remote_addr: SocketAddr,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+        _tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<Self> {
+        Self::new_with_command_channel_capacity(
+            id,
+            request,
+            remote_addr,
+            transport,
+            events_tx,
+            timer_config_override,
+            command_channel_capacity,
+        )
+    }
+
     /// Create a non-INVITE client transaction bound to an explicit route.
     pub fn new_with_route_and_command_channel_capacity(
         id: TransactionKey,
@@ -769,6 +795,7 @@ impl ClientNonInviteTransaction {
             terminal_event_publication:
                 crate::transaction::event_sender::TerminalEventPublication::new(),
             timer_config: timer_config.clone(),
+            tls_override: None,
             initial_send_state: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             initial_send_notify: Arc::new(tokio::sync::Notify::new()),
         });

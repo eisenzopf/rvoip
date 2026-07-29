@@ -108,7 +108,7 @@ fn test_crypto_suite(name: &str, suite: SrtpCryptoSuite) -> Result<()> {
         );
 
         // Encrypt the packet - now returns tuple of (packet, auth_tag)
-        let (encrypted, auth_tag) = crypto.encrypt_rtp(&packet)?;
+        let (encrypted, auth_tag) = crypto.encrypt_rtp(&packet, 0)?;
 
         // Print encrypted packet details
         println!(
@@ -137,7 +137,7 @@ fn test_crypto_suite(name: &str, suite: SrtpCryptoSuite) -> Result<()> {
         }
 
         // Decrypt the packet
-        let decrypted = crypto.decrypt_rtp(&packet_with_auth)?;
+        let decrypted = crypto.decrypt_rtp(&packet_with_auth, 0)?;
 
         // Print decrypted packet details
         println!(
@@ -198,7 +198,7 @@ fn test_tamper_resistance() -> Result<()> {
     );
 
     // Encrypt the packet and get authentication tag
-    let (encrypted, auth_tag) = crypto.encrypt_rtp(&packet)?;
+    let (encrypted, auth_tag) = crypto.encrypt_rtp(&packet, 0)?;
     let serialized = encrypted.serialize()?;
 
     // Build packet with authentication tag
@@ -215,7 +215,7 @@ fn test_tamper_resistance() -> Result<()> {
 
     // Try decrypting untampered packet - should succeed
     println!("Attempting to decrypt untampered packet...");
-    match crypto.decrypt_rtp(&packet_with_auth) {
+    match crypto.decrypt_rtp(&packet_with_auth, 0) {
         Ok(_) => println!("Success: Untampered packet decrypted correctly"),
         Err(e) => println!("ERROR: Failed to decrypt untampered packet: {}", e),
     }
@@ -231,7 +231,7 @@ fn test_tamper_resistance() -> Result<()> {
         tampered[header_size + 5] ^= 0x42;
 
         // Try to decrypt the tampered packet - should fail due to auth tag mismatch
-        let result = crypto.decrypt_rtp(&tampered);
+        let result = crypto.decrypt_rtp(&tampered, 0);
         match result {
             Ok(_) => println!("ERROR: Tampered packet was accepted!"),
             Err(e) => println!("Success: Tampered packet correctly rejected: {}", e),
@@ -248,7 +248,7 @@ fn test_tamper_resistance() -> Result<()> {
         tampered[last_idx] ^= 0xFF; // Flip all bits in last byte
 
         // Try to decrypt the tampered packet - should fail
-        let result = crypto.decrypt_rtp(&tampered);
+        let result = crypto.decrypt_rtp(&tampered, 0);
         match result {
             Ok(_) => println!("ERROR: Packet with tampered auth tag was accepted!"),
             Err(e) => println!(

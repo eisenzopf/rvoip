@@ -2985,6 +2985,7 @@ impl DialogAdapter {
             outbound_proxy_uri,
             supported_100rel: false,
             extra_headers,
+            tls_override: None,
         };
         self.send_initial_invite_staged(
             session_id,

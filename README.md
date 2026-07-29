@@ -200,6 +200,7 @@ voice AI, and cross-transport integrations:
 | Opus and G.722 paths | **Available — developer preview** | Feature-gated codec/media support; not part of the bounded SIP beta media claim | [`rvoip-media-core`](crates/media/media-core) |
 | OS audio devices | **Available — developer preview** | Microphone/speaker bridge, drift-free pacing, resampling, jitter buffering, mute-as-silence, and VU metering | [`02-softphone-audio`](examples/02-softphone-audio) |
 | Conference mixing | **Available — developer preview** | Lower-level N-way/N-1 mixing and conference monitoring primitives; not an integrated SIP beta conference product | [Media README](crates/media/media-core/README.md) |
+| ICE (RFC 8445) for the SIP media plane | **Available — developer preview** | Real `webrtc-ice`-backed connectivity checks via the alpha-tier [`rvoip-nat-core`](crates/media/nat-core) crate, bridged onto the shared RTP socket; host and server-reflexive candidates only, no TURN relay | [`14-ice-nat-traversal`](examples/14-ice-nat-traversal) |
 
 ### WebRTC, UCTP, MoQ, and integrations
 
@@ -312,6 +313,12 @@ The unified release contains 44 publishable crates:
 | MoQ | [`rvoip-moq-transport`](crates/moq/rvoip-moq-transport), [`rvoip-moq-native`](crates/moq/rvoip-moq-native), [`rvoip-moq-relay`](crates/moq/rvoip-moq-relay), [`rvoip-moq`](crates/moq/rvoip-moq) |
 | Identity | [`rvoip-auth-core`](crates/identity/auth-core), [`rvoip-users-core`](crates/identity/users-core), [`rvoip-identity`](crates/identity/rvoip-identity) |
 | Extensions | The [14 extension crates](#extensions) listed above |
+
+[`rvoip-nat-core`](crates/media/nat-core) — the ICE (RFC 8445) engine behind
+the SIP media plane's connectivity checks — ships alongside these crates but
+is versioned independently (alpha-tier, not part of the unified `0.3.2`
+train) since it's newer and narrower in scope than the rest of the media
+family.
 
 ## Release evidence
 

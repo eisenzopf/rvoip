@@ -22,6 +22,9 @@ workspace = true
 # 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
 rvoip-rtp-core.workspace = true
 rvoip-infra-common.workspace = true
+# Real ICE (RFC 8445) agent, behind the `ice` feature — only referenced
+# by `relay::controller::MediaSessionController::create_ice_agent`.
+rvoip-nat-core = { workspace = true, optional = true, features = ["ice"] }
 
 # Codec support
 rvoip-codec-core.workspace = true
@@ -73,7 +76,6 @@ apodize = "1.0"              # Used in VAD v2 for windowing functions
 biquad = "0.4"               # Used in AGC v2 for digital filters
 
 # Media codecs (optional)
-opus = { version = "0.3", optional = true }
 # g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
 
 # WAV file support
@@ -88,9 +90,16 @@ memory-diagnostics = [
     "rvoip-infra-common/memory-diagnostics",
 ]
 rtp-memory-diagnostics = ["rvoip-rtp-core/memory-diagnostics"]
+# Real DTLS-SRTP handshake support, forwarded from rvoip-rtp-core.
+dtls-srtp = ["rvoip-rtp-core/dtls-webrtc"]
+# Real ICE (RFC 8445) connectivity checks, bridged over the same shared
+# RTP socket. See `relay::controller::create_ice_agent`.
+ice = ["rvoip-rtp-core/ice", "dep:rvoip-nat-core"]
 perf-diagnostics = []
 g729 = ["rvoip-codec-core/g729"]
-opus = ["dep:opus"]
+# Real Opus encode/decode, forwarded from rvoip-codec-core (the sole crate
+# that implements it - see crates/media/codec-core/src/codecs/opus.rs).
+opus = ["rvoip-codec-core/opus"]
 all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
 
 [dev-dependencies]

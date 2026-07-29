@@ -231,6 +231,18 @@ impl DialogManagerConfig {
         self.dialog_config().tls_advertised_local_address
     }
 
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for plain WebSocket (WS) requests, when configured.
+    pub fn ws_advertised_local_address(&self) -> Option<std::net::SocketAddr> {
+        self.dialog_config().ws_advertised_local_address
+    }
+
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for secure WebSocket (WSS) requests, when configured.
+    pub fn wss_advertised_local_address(&self) -> Option<std::net::SocketAddr> {
+        self.dialog_config().wss_advertised_local_address
+    }
+
     /// Check if this configuration supports outgoing calls
     pub fn supports_outgoing_calls(&self) -> bool {
         match self {

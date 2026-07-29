@@ -215,6 +215,9 @@ impl SubscriptionState {
 pub enum MediaSecurityKeying {
     /// SDP Security Descriptions (RFC 4568).
     Sdes,
+    /// DTLS-SRTP (RFC 5763/5764): keys are derived from a real DTLS 1.2
+    /// handshake run over the media port, not carried in the SDP itself.
+    DtlsSrtp,
 }
 
 /// RTP profile negotiated for protected media.
@@ -222,6 +225,8 @@ pub enum MediaSecurityKeying {
 pub enum MediaSecurityProfile {
     /// Secure RTP Audio/Video Profile (`RTP/SAVP`).
     RtpSavp,
+    /// DTLS-SRTP transport profile (`UDP/TLS/RTP/SAVP`, RFC 5764 §8).
+    UdpTlsRtpSavp,
 }
 
 /// Current negotiated media-security state for a call.
@@ -566,6 +571,22 @@ pub enum Event {
         request: crate::api::incoming::IncomingRequest,
     },
 
+    /// A re-INVITE carrying SDP arrived while
+    /// [`crate::api::unified::ReinvitePolicy::ApplicationControlled`] is
+    /// active. The call keeps running on its previously negotiated media
+    /// until this is resolved. Use
+    /// [`crate::api::incoming_reinvite::IncomingReinvite`] (constructed
+    /// from this event by whichever peer surface delivers it) to answer
+    /// with `accept_with_answer` or `reject`. A bodyless re-INVITE and
+    /// every UPDATE never produce this event; see `ReinvitePolicy`'s doc
+    /// comment for why.
+    IncomingReinvite {
+        /// Session identifier for the dialog the re-INVITE arrived on.
+        call_id: CallId,
+        /// The peer's offer.
+        sdp: String,
+    },
+
     /// SIP_API_DESIGN_2 Phase D — inbound REGISTER (RFC 3261 §10).
     /// Surfaces the typed `IncomingRegister` view so registrar
     /// applications can author the response via `accept_builder` /
@@ -670,6 +691,17 @@ pub enum Event {
         profile: MediaSecurityProfile,
         /// Whether SRTP send/receive contexts have been installed in media-core.
         contexts_installed: bool,
+    },
+
+    /// RFC 8445 ICE connectivity check completed and the dialog's RTP
+    /// remote address has been overridden with the selected candidate
+    /// pair. Fired independently of call setup — media flow is never
+    /// gated on ICE completing.
+    IceConnected {
+        /// Session identifier for the connected media stream.
+        call_id: CallId,
+        /// The winning candidate pair's remote address.
+        selected_addr: std::net::SocketAddr,
     },
 
     // ===== Registration Events =====
@@ -949,6 +981,10 @@ impl std::fmt::Debug for Event {
                 .debug_tuple("UpdateReceived")
                 .field(request)
                 .finish(),
+            Self::IncomingReinvite { sdp, .. } => formatter
+                .debug_struct("IncomingReinvite")
+                .field("sdp_bytes", &sdp.len())
+                .finish(),
             Self::IncomingRegister { register } => formatter
                 .debug_tuple("IncomingRegister")
                 .field(register)
@@ -986,6 +1022,10 @@ impl std::fmt::Debug for Event {
                 .field("suite", suite)
                 .field("profile", profile)
                 .field("contexts_installed", contexts_installed)
+                .finish(),
+            Self::IceConnected { selected_addr, .. } => formatter
+                .debug_struct("IceConnected")
+                .field("selected_addr", selected_addr)
                 .finish(),
             Self::RegistrationSuccess {
                 registrar,
@@ -1059,6 +1099,7 @@ impl Event {
             | Event::DtmfReceived { call_id, .. }
             | Event::MediaQualityChanged { call_id, .. }
             | Event::MediaSecurityNegotiated { call_id, .. }
+            | Event::IceConnected { call_id, .. }
             | Event::NotifyReceived { call_id, .. }
             | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferTargetAnswered {
@@ -1083,7 +1124,8 @@ impl Event {
             | Event::CallFailedDetailed(r) => Some(&r.call_id),
             Event::InfoReceived { call_id, .. }
             | Event::MessageReceived { call_id, .. }
-            | Event::UpdateReceived { call_id, .. } => Some(call_id),
+            | Event::UpdateReceived { call_id, .. }
+            | Event::IncomingReinvite { call_id, .. } => Some(call_id),
             Event::OptionsReceived { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
             Event::RegistrationSuccess { .. }
@@ -1112,6 +1154,7 @@ impl Event {
                 | Event::MessageReceived { .. }
                 | Event::OptionsReceived { .. }
                 | Event::UpdateReceived { .. }
+                | Event::IncomingReinvite { .. }
         )
     }
 
@@ -1151,6 +1194,7 @@ impl Event {
             Event::DtmfReceived { .. }
                 | Event::MediaQualityChanged { .. }
                 | Event::MediaSecurityNegotiated { .. }
+                | Event::IceConnected { .. }
         )
     }
 

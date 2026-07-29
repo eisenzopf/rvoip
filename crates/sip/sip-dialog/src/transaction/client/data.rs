@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, trace};
 
 use rvoip_sip_core::prelude::*;
-use rvoip_sip_transport::{Transport, TransportRoute};
+use rvoip_sip_transport::{OutboundTlsConfig, Transport, TransportRoute};
 
 use crate::transaction::completion::ClientTransactionCompletion;
 use crate::transaction::error::{Error, Result};
@@ -161,6 +161,11 @@ pub struct ClientTransactionData {
 
     /// Configuration for transaction timers (T1, T2, etc.)
     pub timer_config: TimerSettings,
+
+    /// Per-call outbound TLS/WSS client identity override, propagated
+    /// from the originating `Dialog`. Not yet applied by the route-based
+    /// send path — reserved for a future per-call identity integration.
+    pub tls_override: Option<OutboundTlsConfig>,
 
     /// Completion handshake for the first transport write. `initiate()` must
     /// not report success merely because the state-transition command was

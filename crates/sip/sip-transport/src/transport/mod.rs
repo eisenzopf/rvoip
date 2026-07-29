@@ -17,7 +17,7 @@ pub mod ws;
 
 pub use runtime::HandshakeAdmissionConfig;
 pub use tcp::TcpTransport;
-pub use tls::TlsTransport;
+pub use tls::{OutboundTlsConfig, TlsTransport};
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
 
@@ -720,6 +720,26 @@ pub trait Transport: Send + Sync + fmt::Debug {
         Err(crate::error::Error::NotImplemented(
             "send_message_raw is not supported on this transport".to_string(),
         ))
+    }
+
+    /// Sends a SIP message using a caller-supplied outbound TLS/WSS
+    /// client identity override, instead of whatever identity this
+    /// transport instance was constructed with.
+    ///
+    /// `identity: None` behaves exactly like [`Transport::send_message`]
+    /// — the transport's default/baked-in identity. The default
+    /// implementation ignores `identity` and delegates to
+    /// `send_message`; no transport currently overrides this — per-call
+    /// outbound TLS/WSS identity is not yet wired into the route-based
+    /// connection pool.
+    async fn send_message_with_tls_identity(
+        &self,
+        message: Message,
+        destination: SocketAddr,
+        identity: Option<&tls::OutboundTlsConfig>,
+    ) -> Result<()> {
+        let _ = identity;
+        self.send_message(message, destination).await
     }
 
     /// Send pre-built SIP bytes using an authority- and flow-aware route.

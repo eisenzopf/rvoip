@@ -1083,7 +1083,7 @@ impl WebSocketTransport {
         if self.inner.secure && self.inner.tls_connector.is_none() {
             return Err(Error::NotImplemented(
                 "WSS client requires TlsClientConfig — use \
-                 WebSocketTransport::bind_with_client_tls instead of bind()"
+                 WebSocketTransport::bind_with_client_tls"
                     .into(),
             ));
         }

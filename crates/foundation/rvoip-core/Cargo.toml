@@ -19,10 +19,14 @@ bytes.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 rvoip-infra-common.workspace = true
-# `MediaGraph` provides production G.711 <-> Opus transcoding directly, so
-# Opus cannot depend on a downstream crate accidentally unifying an optional
-# feature. Keep the codec available whenever core's media graph is available.
-rvoip-media-core = { workspace = true, features = ["opus"] }
+# `MediaGraph` provides production G.711 <-> Opus transcoding, but the real
+# libopus backend (native lib + C toolchain, forwarded transitively down to
+# rvoip-codec-core) is opt-in via this crate's own `opus` feature below —
+# signaling-only consumers (e.g. an edge-SIP component that never touches
+# media) must be able to build without linking libopus. Without the `opus`
+# feature, `MediaGraph`'s Opus codec path still compiles and cleanly errors
+# at runtime instead of encoding/decoding.
+rvoip-media-core.workspace = true
 # V2.A — the pure-type/trait surface that consumer crates depend on.
 # rvoip-core re-exports from it so existing `use rvoip_core::ids::*`
 # and `use rvoip_core::identity::*` call sites keep working unchanged.
@@ -98,6 +102,10 @@ media = []
 vcon = ["dep:rvoip-vcon"]
 identity = []
 webrtc = []
+# Real Opus encode/decode in `MediaGraph`, forwarded down through
+# rvoip-media-core to rvoip-codec-core (the sole crate that implements it).
+# Off by default: pulls in native libopus + a C toolchain via audiopus_sys.
+opus = ["rvoip-media-core/opus"]
 aauth-experimental = []
 identity-fingerprint-binding = []
 # V2.A.8 — Exposes the opt-in vCon JWS signing API. The normal `vcon`
@@ -115,6 +123,7 @@ full = [
     "aauth-experimental",
     "identity-fingerprint-binding",
     "vcon-signing",
+    "opus",
 ]
 
 [lints]

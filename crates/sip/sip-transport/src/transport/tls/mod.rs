@@ -32,6 +32,8 @@ use tokio_rustls::rustls::{
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tracing::{debug, error, info, warn};
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{Error, Result};
 use crate::transport::{
     next_transport_flow_id,
@@ -122,7 +124,7 @@ fn remove_tls_connection_if_generation(
 /// Builder-friendly TLS client configuration. Mirrors the knobs we
 /// expect to expose through `session-core::Config` once Step 1C wires
 /// it up.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TlsClientConfig {
     /// Optional path to a PEM-encoded CA bundle to *add to* the system
     /// trust store. Useful for enterprise PKI / private carriers.
@@ -139,6 +141,25 @@ pub struct TlsClientConfig {
     /// Optional PEM-encoded PKCS#8 private key for
     /// [`TlsClientConfig::client_cert_path`].
     pub client_key_path: Option<PathBuf>,
+}
+
+/// A resolved per-call outbound TLS/WSS client identity + trust policy,
+/// overriding whatever identity the transport was constructed with for
+/// just this one call.
+///
+/// Reserved for a future per-call identity integration — not yet applied
+/// by [`TlsTransport`]'s connection pool, which currently keys purely by
+/// destination and this instance's own baked-in trust context. `None`
+/// anywhere this type is accepted means "use the transport's default
+/// identity", preserving today's behavior exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OutboundTlsConfig {
+    /// Client identity + trust policy for this call.
+    pub client: TlsClientConfig,
+    /// Explicit SNI server name for this call. `None` falls back to the
+    /// existing derivation ([`tls_server_name_for_message`] for a
+    /// request's next-hop URI host, [`ip_to_server_name`] otherwise).
+    pub server_name: Option<String>,
 }
 
 /// Inbound TLS client-certificate policy for SIP TLS and SIP WSS listeners.
@@ -1097,6 +1118,12 @@ impl TlsTransport {
     /// Send data to a specific remote address. Auto-dials if no
     /// connection exists yet. Request sends supply SNI from the next-hop
     /// URI host; response/raw sends fall back to destination-address SNI.
+    ///
+    /// `identity` selects which client identity's connection to reuse
+    /// or dial: `None` is this transport's own baked-in default
+    /// (today's behavior); `Some` is a per-call [`OutboundTlsConfig`]
+    /// override, matched *and* dialed independently of any other
+    /// identity's connection to the same `addr`.
     async fn send_to_addr(
         &self,
         data: Bytes,
@@ -1208,6 +1235,21 @@ impl TlsTransport {
         &self,
         remote_addr: SocketAddr,
         server_name: ServerName<'static>,
+    ) -> Result<()> {
+        self.connect_with_identity(remote_addr, server_name, None)
+            .await
+    }
+
+    /// Same as [`Self::connect_with_server_name`]. The `identity`
+    /// parameter is accepted for source compatibility but is not yet
+    /// applied — per-call outbound TLS client identity override is not
+    /// wired into the connection pool; every dial uses this transport's
+    /// own baked-in default identity (`self.connector`).
+    pub async fn connect_with_identity(
+        &self,
+        remote_addr: SocketAddr,
+        server_name: ServerName<'static>,
+        _identity: Option<TlsClientConfig>,
     ) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
@@ -1603,7 +1645,9 @@ impl Transport for TlsTransport {
         // `try_lock` so this is non-blocking — the multiplexer may call
         // it from inside its own dispatch path. A momentary lock-busy
         // is acceptable to report `false` (the multiplexer will fall
-        // through to its default transport).
+        // through to its default transport). Matches on address only
+        // (any identity) — this answers "is TLS reachable here at all"
+        // for scheme selection, not "which identity's connection".
         match self.connections.try_lock() {
             Ok(guard) => guard
                 .iter()

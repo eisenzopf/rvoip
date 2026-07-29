@@ -286,15 +286,22 @@ async fn demo_unified_sdes_context() -> Result<(), ExampleError> {
     info!("Method: {:?}", sdes_context.get_method());
     info!("Initial state: {:?}", sdes_context.get_state().await);
 
-    // Initialize the context
-    sdes_context
-        .initialize()
-        .await
-        .map_err(|e| ExampleError(format!("Failed to initialize SDES context: {}", e)))?;
-
-    info!("After initialization:");
-    info!("State: {:?}", sdes_context.get_state().await);
-    info!("Established: {}", sdes_context.is_established().await);
+    // This generic byte-oriented initialize() path doesn't support SDES
+    // any more — SDES lives behind the typed SdesNegotiator API instead
+    // (see demo_basic_sdes_exchange above for the real, working exchange).
+    match sdes_context.initialize().await {
+        Ok(()) => {
+            info!("After initialization:");
+            info!("State: {:?}", sdes_context.get_state().await);
+            info!("Established: {}", sdes_context.is_established().await);
+        }
+        Err(e) => {
+            info!(
+                "initialize() correctly rejects SDES on this generic path: {}",
+                e
+            );
+        }
+    }
 
     // Create security context manager with SDES preference
     let security_config = SecurityConfig::sip_operator();
@@ -359,10 +366,10 @@ async fn demo_sdp_integration() -> Result<(), ExampleError> {
             );
             for (i, attr) in crypto_attrs.iter().enumerate() {
                 info!(
-                    "  Crypto {}: tag={}, suite={}",
+                    "  Crypto {}: tag={}, suite={:?}",
                     i + 1,
                     attr.tag,
-                    attr.crypto_suite
+                    attr.suite
                 );
             }
         }

@@ -189,7 +189,8 @@ use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
-    Error as TransportError, Transport, TransportEvent, TransportReceiveTiming, TransportRoute,
+    Error as TransportError, OutboundTlsConfig, Transport, TransportEvent, TransportReceiveTiming,
+    TransportRoute,
 };
 
 use crate::diagnostics;
@@ -8093,6 +8094,20 @@ impl TransactionManager {
         self.create_client_transaction(request, destination).await
     }
 
+    /// Same as [`Self::create_non_invite_client_transaction`]. The
+    /// `tls_override` parameter is accepted for source compatibility but is
+    /// not yet applied — per-call outbound TLS/WSS client identity override
+    /// is not wired into the route-based transaction pipeline.
+    pub async fn create_non_invite_client_transaction_with_tls_identity(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        _tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<TransactionKey> {
+        self.create_non_invite_client_transaction(request, destination)
+            .await
+    }
+
     /// Creates a client transaction for an INVITE request.
     ///
     /// # Arguments
@@ -8113,6 +8128,20 @@ impl TransactionManager {
         }
 
         self.create_client_transaction(request, destination).await
+    }
+
+    /// Same as [`Self::create_invite_client_transaction`]. The
+    /// `tls_override` parameter is accepted for source compatibility but is
+    /// not yet applied — per-call outbound TLS/WSS client identity override
+    /// is not wired into the route-based transaction pipeline.
+    pub async fn create_invite_client_transaction_with_tls_identity(
+        &self,
+        request: Request,
+        destination: SocketAddr,
+        _tls_override: Option<OutboundTlsConfig>,
+    ) -> Result<TransactionKey> {
+        self.create_invite_client_transaction(request, destination)
+            .await
     }
 
     /// Get information about available transport types and their capabilities

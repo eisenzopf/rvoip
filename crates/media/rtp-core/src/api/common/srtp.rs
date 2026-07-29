@@ -3,9 +3,8 @@
 //! This module provides API types and utilities for SRTP (Secure RTP) configuration.
 
 use crate::srtp::{
-    SrtpCryptoSuite, SrtpCryptoKey, SrtpEncryptionAlgorithm, SrtpAuthenticationAlgorithm,
-    SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
-    SRTP_NULL_NULL
+    SrtpAuthenticationAlgorithm, SrtpCryptoKey, SrtpCryptoSuite, SrtpEncryptionAlgorithm,
+    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
 };
 
 use crate::api::common::config::SrtpProfile;
@@ -71,13 +70,19 @@ impl SrtpConfig {
         self
     }
 
-    /// Convert API SrtpProfile to internal SrtpCryptoSuite
-    pub fn to_crypto_suite(&self) -> SrtpCryptoSuite {
+    /// Convert API SrtpProfile to internal SrtpCryptoSuite. Errors for the
+    /// AES-GCM profiles, which this crate doesn't actually implement (RFC
+    /// 7714) — see the module docs on `crate::srtp` for why those consts
+    /// don't exist.
+    pub fn to_crypto_suite(&self) -> Result<SrtpCryptoSuite, MediaTransportError> {
         match self.profile {
-            SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
-            SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
-            SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
-            SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
+            SrtpProfile::AesCm128HmacSha1_80 => Ok(SRTP_AES128_CM_SHA1_80),
+            SrtpProfile::AesCm128HmacSha1_32 => Ok(SRTP_AES128_CM_SHA1_32),
+            SrtpProfile::AesGcm128 | SrtpProfile::AesGcm256 => {
+                Err(MediaTransportError::ConfigError(
+                    "AES-GCM SRTP profiles are not implemented (RFC 7714)".to_string(),
+                ))
+            }
         }
     }
 
@@ -88,9 +93,9 @@ impl SrtpConfig {
                 let key_clone = key.clone();
                 let salt_clone = salt.clone();
                 Ok(SrtpCryptoKey::new(key_clone, salt_clone))
-            },
+            }
             _ => Err(MediaTransportError::ConfigError(
-                "Missing SRTP master key or salt".to_string()
+                "Missing SRTP master key or salt".to_string(),
             )),
         }
     }
@@ -103,24 +108,23 @@ impl SrtpConfig {
                 combined.extend_from_slice(key);
                 combined.extend_from_slice(salt);
                 Ok(BASE64.encode(&combined))
-            },
+            }
             _ => Err(MediaTransportError::ConfigError(
-                "Missing SRTP master key or salt".to_string()
+                "Missing SRTP master key or salt".to_string(),
             )),
         }
     }
 
     /// Parse a base64 encoded key+salt (as used in SDP)
     pub fn from_base64(data: &str) -> Result<Self, MediaTransportError> {
-        let decoded = BASE64.decode(data)
-            .map_err(|e| MediaTransportError::ConfigError(
-                format!("Failed to decode base64 key: {}", e)
-            ))?;
+        let decoded = BASE64.decode(data).map_err(|e| {
+            MediaTransportError::ConfigError(format!("Failed to decode base64 key: {}", e))
+        })?;
 
         // Typical format is 30 bytes = 16 bytes key + 14 bytes salt
         if decoded.len() < 16 {
             return Err(MediaTransportError::ConfigError(
-                "Key material too short".to_string()
+                "Key material too short".to_string(),
             ));
         }
 
@@ -157,7 +161,10 @@ impl SrtpConfig {
         let crypto_name = self.get_crypto_name();
 
         if self.key_derivation_rate > 0 {
-            Ok(format!("1 {} inline:{} KDR={}", crypto_name, base64_key, self.key_derivation_rate))
+            Ok(format!(
+                "1 {} inline:{} KDR={}",
+                crypto_name, base64_key, self.key_derivation_rate
+            ))
         } else {
             Ok(format!("1 {} inline:{}", crypto_name, base64_key))
         }
@@ -171,7 +178,7 @@ impl SrtpConfig {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 3 {
             return Err(MediaTransportError::ConfigError(
-                "Invalid crypto line format".to_string()
+                "Invalid crypto line format".to_string(),
             ));
         }
 
@@ -181,16 +188,19 @@ impl SrtpConfig {
             "AES_CM_128_HMAC_SHA1_32" => SrtpProfile::AesCm128HmacSha1_32,
             "AEAD_AES_128_GCM" => SrtpProfile::AesGcm128,
             "AEAD_AES_256_GCM" => SrtpProfile::AesGcm256,
-            _ => return Err(MediaTransportError::ConfigError(
-                format!("Unsupported crypto suite: {}", parts[1])
-            )),
+            _ => {
+                return Err(MediaTransportError::ConfigError(format!(
+                    "Unsupported crypto suite: {}",
+                    parts[1]
+                )))
+            }
         };
 
         // Parse key info
         let key_parts: Vec<&str> = parts[2].split(':').collect();
         if key_parts.len() < 2 || key_parts[0] != "inline" {
             return Err(MediaTransportError::ConfigError(
-                "Invalid key format".to_string()
+                "Invalid key format".to_string(),
             ));
         }
 
@@ -240,9 +250,11 @@ pub struct SrtpContextInfo {
 /// This is intentionally a free function rather than a method to maintain proper API boundaries.
 /// It hides the internal SRTP implementation and returns the raw SrtpContext that the existing
 /// code uses. Eventually, we should create a proper abstraction layer with interfaces.
-pub fn create_srtp_context(config: &SrtpConfig) -> Result<crate::srtp::SrtpContext, MediaTransportError> {
+pub fn create_srtp_context(
+    config: &SrtpConfig,
+) -> Result<crate::srtp::SrtpContext, MediaTransportError> {
     // Create crypto suite from profile
-    let suite = config.to_crypto_suite();
+    let suite = config.to_crypto_suite()?;
 
     // Create crypto key from master key/salt
     let key = config.to_crypto_key()?;
@@ -259,19 +271,17 @@ pub fn create_srtp_context(config: &SrtpConfig) -> Result<crate::srtp::SrtpConte
 pub fn get_srtp_context_info(context: &crate::srtp::SrtpContext) -> SrtpContextInfo {
     // Determine the profile based on parameters
     let (profile, algorithm_name) = match context.get_crypto_params() {
-        (alg, auth) => {
-            match (alg, auth) {
-                (SrtpEncryptionAlgorithm::AesCm128, SrtpAuthenticationAlgorithm::HmacSha1_80) =>
-                    (SrtpProfile::AesCm128HmacSha1_80, "AES_CM_128_HMAC_SHA1_80"),
-                (SrtpEncryptionAlgorithm::AesCm128, SrtpAuthenticationAlgorithm::HmacSha1_32) =>
-                    (SrtpProfile::AesCm128HmacSha1_32, "AES_CM_128_HMAC_SHA1_32"),
-                (SrtpEncryptionAlgorithm::AesGcm128, _) =>
-                    (SrtpProfile::AesGcm128, "AEAD_AES_128_GCM"),
-                (SrtpEncryptionAlgorithm::AesGcm256, _) =>
-                    (SrtpProfile::AesGcm256, "AEAD_AES_256_GCM"),
-                _ => (SrtpProfile::AesCm128HmacSha1_80, "UNKNOWN"),
+        (alg, auth) => match (alg, auth) {
+            (SrtpEncryptionAlgorithm::AesCm128, SrtpAuthenticationAlgorithm::HmacSha1_80) => {
+                (SrtpProfile::AesCm128HmacSha1_80, "AES_CM_128_HMAC_SHA1_80")
             }
-        }
+            (SrtpEncryptionAlgorithm::AesCm128, SrtpAuthenticationAlgorithm::HmacSha1_32) => {
+                (SrtpProfile::AesCm128HmacSha1_32, "AES_CM_128_HMAC_SHA1_32")
+            }
+            (SrtpEncryptionAlgorithm::AesGcm128, _) => (SrtpProfile::AesGcm128, "AEAD_AES_128_GCM"),
+            (SrtpEncryptionAlgorithm::AesGcm256, _) => (SrtpProfile::AesGcm256, "AEAD_AES_256_GCM"),
+            _ => (SrtpProfile::AesCm128HmacSha1_80, "UNKNOWN"),
+        },
     };
 
     // Extract key and salt information

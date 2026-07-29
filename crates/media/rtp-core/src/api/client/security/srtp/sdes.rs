@@ -14,11 +14,62 @@ use crate::api::client::security::{ClientSecurityConfig, ClientSecurityContext};
 use crate::api::common::config::{SecurityConfig, SecurityInfo, SecurityMode, SrtpProfile};
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
-use crate::security::{
-    sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
-    SecurityKeyExchange,
-};
+use crate::security::sdes::{SdesCryptoAttribute, SdesNegotiator};
 use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
+
+/// RFC 4568 §6.2 wire name for the suites this module offers.
+fn suite_wire_name(suite: &SrtpCryptoSuite) -> Result<&'static str, SecurityError> {
+    match (suite.key_length, suite.tag_length) {
+        (16, 10) => Ok("AES_CM_128_HMAC_SHA1_80"),
+        (16, 4) => Ok("AES_CM_128_HMAC_SHA1_32"),
+        _ => Err(SecurityError::Configuration(format!(
+            "unsupported crypto suite for SDES: {suite:?}"
+        ))),
+    }
+}
+
+fn suite_from_wire_name(name: &str) -> Result<SrtpCryptoSuite, SecurityError> {
+    match name {
+        "AES_CM_128_HMAC_SHA1_80" => Ok(SRTP_AES128_CM_SHA1_80),
+        "AES_CM_128_HMAC_SHA1_32" => Ok(SRTP_AES128_CM_SHA1_32),
+        other => Err(SecurityError::Configuration(format!(
+            "unsupported crypto suite: {other}"
+        ))),
+    }
+}
+
+/// Format an `SdesCryptoAttribute` as a bare `a=crypto:` line body. This
+/// module's `Vec<String>` SDP lines are only ever consumed by this same
+/// module — no real SDP text is produced here, unlike the actual SIP
+/// adapter's typed `sip-core` integration.
+fn format_crypto_line(attr: &SdesCryptoAttribute) -> Result<String, SecurityError> {
+    Ok(format!(
+        "{} {} inline:{}",
+        attr.tag,
+        suite_wire_name(&attr.suite)?,
+        attr.key_inline
+    ))
+}
+
+/// Parse a bare `a=crypto:` line body (as produced by
+/// [`format_crypto_line`]) back into an `SdesCryptoAttribute`.
+fn parse_crypto_line(line: &str) -> Result<SdesCryptoAttribute, SecurityError> {
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 3 {
+        return Err(SecurityError::Configuration(
+            "invalid SDES crypto attribute format".to_string(),
+        ));
+    }
+    let tag: u32 = parts[0]
+        .parse()
+        .map_err(|_| SecurityError::Configuration("invalid tag in crypto attribute".to_string()))?;
+    let suite = suite_from_wire_name(parts[1])?;
+    let key_inline = parts[2]
+        .strip_prefix("inline:")
+        .ok_or_else(|| SecurityError::Configuration("missing inline: key".to_string()))?
+        .to_string();
+    Ok(SdesCryptoAttribute::new(tag, suite, key_inline))
+}
 
 /// SDES client configuration
 #[derive(Debug, Clone)]
@@ -65,8 +116,6 @@ pub struct SdesClient {
     config: SdesClientConfig,
     /// Current state
     state: Arc<RwLock<SdesClientState>>,
-    /// Core SDES implementation
-    sdes: Arc<RwLock<Sdes>>,
     /// Established SRTP context (if any)
     srtp_context: Arc<RwLock<Option<SrtpContext>>>,
     /// Selected crypto attribute
@@ -74,20 +123,14 @@ pub struct SdesClient {
 }
 
 impl SdesClient {
-    /// Create a new SDES client
+    /// Create a new SDES client. Unlike the old byte-oriented engine,
+    /// [`SdesNegotiator::new_answerer`] carries no state to hold between
+    /// construction and processing an offer, so there's nothing to build
+    /// here beyond the config itself.
     pub fn new(config: SdesClientConfig) -> Self {
-        // Convert API config to core SDES config
-        let sdes_config = SdesConfig {
-            crypto_suites: Self::convert_srtp_profiles(&config.supported_profiles),
-            offer_count: config.supported_profiles.len().min(4),
-        };
-
-        let sdes = Sdes::new(sdes_config, SdesRole::Answerer);
-
         Self {
             config,
             state: Arc::new(RwLock::new(SdesClientState::Initial)),
-            sdes: Arc::new(RwLock::new(sdes)),
             srtp_context: Arc::new(RwLock::new(None)),
             selected_crypto: Arc::new(RwLock::new(None)),
         }
@@ -181,48 +224,43 @@ impl SdesClient {
             debug!("  Crypto {}: {}", i + 1, line);
         }
 
-        // Process through core SDES implementation
-        let offer_message = crypto_lines.join("\r\n");
-        let mut sdes = self.sdes.write().await;
+        // Parse crypto lines into typed attributes and process through
+        // the canonical SDES engine (this is always the answerer side —
+        // we're processing an inbound offer).
+        let attrs: Vec<SdesCryptoAttribute> = match crypto_lines
+            .iter()
+            .map(|line| {
+                let body = line.trim().strip_prefix("a=crypto:").unwrap_or(line);
+                parse_crypto_line(body)
+            })
+            .collect()
+        {
+            Ok(attrs) => attrs,
+            Err(e) => {
+                *self.state.write().await = SdesClientState::Failed;
+                return Err(e);
+            }
+        };
 
-        match sdes.process_message(offer_message.as_bytes()) {
-            Ok(Some(answer_bytes)) => {
-                let answer_str = String::from_utf8(answer_bytes).map_err(|_| {
-                    SecurityError::CryptoError("Invalid UTF-8 in SDES answer".to_string())
-                })?;
-
-                let answer_lines: Vec<String> = answer_str.lines().map(|s| s.to_string()).collect();
-
-                // Set up SRTP context if keys are available
-                if let (Some(srtp_key), Some(srtp_suite)) =
-                    (sdes.get_srtp_key(), sdes.get_srtp_suite())
-                {
-                    match SrtpContext::new(srtp_suite, srtp_key) {
-                        Ok(context) => {
-                            *self.srtp_context.write().await = Some(context);
-                            info!("SDES client: SRTP context established");
-                        }
-                        Err(e) => {
-                            error!("Failed to create SRTP context: {}", e);
-                            *self.state.write().await = SdesClientState::Failed;
-                            return Err(SecurityError::CryptoError(format!(
-                                "Failed to create SRTP context: {}",
-                                e
-                            )));
-                        }
+        let answerer = SdesNegotiator::new_answerer();
+        match answerer.process_offer(&attrs) {
+            Ok((answer_attr, pair)) => {
+                let answer_line = match format_crypto_line(&answer_attr) {
+                    Ok(line) => format!("a=crypto:{line}"),
+                    Err(e) => {
+                        *self.state.write().await = SdesClientState::Failed;
+                        return Err(e);
                     }
-                }
+                };
+
+                *self.srtp_context.write().await = Some(pair.recv_ctx);
+                *self.selected_crypto.write().await = Some(answer_attr);
+                info!("SDES client: SRTP context established");
 
                 *self.state.write().await = SdesClientState::Completed;
                 info!("SDES client: Key exchange completed successfully");
 
-                Ok(answer_lines)
-            }
-            Ok(None) => {
-                *self.state.write().await = SdesClientState::Failed;
-                Err(SecurityError::CryptoError(
-                    "No answer generated by SDES".to_string(),
-                ))
+                Ok(vec![answer_line])
             }
             Err(e) => {
                 error!("SDES processing failed: {}", e);
@@ -254,7 +292,7 @@ impl SdesClient {
             .read()
             .await
             .as_ref()
-            .map(|attr| format!("tag={}, suite={}", attr.tag, attr.crypto_suite))
+            .map(|attr| format!("tag={}, suite={:?}", attr.tag, attr.suite))
     }
 
     /// Parse crypto attributes from SDP lines (utility method)
@@ -265,7 +303,7 @@ impl SdesClient {
 
         for line in sdp_lines {
             if let Some(crypto_part) = line.strip_prefix("a=crypto:") {
-                match SdesCryptoAttribute::parse(crypto_part) {
+                match parse_crypto_line(crypto_part) {
                     Ok(attr) => attributes.push(attr),
                     Err(e) => {
                         warn!("Failed to parse crypto attribute '{}': {}", crypto_part, e);
@@ -290,45 +328,24 @@ impl SdesClient {
             ));
         }
 
-        // Change role to offerer temporarily
-        let sdes_config = SdesConfig {
-            crypto_suites: Self::convert_srtp_profiles(&self.config.supported_profiles),
-            offer_count: self.config.supported_profiles.len().min(4),
-        };
+        let suites = Self::convert_srtp_profiles(&self.config.supported_profiles);
+        let (_offerer, attrs) = SdesNegotiator::new_offerer(&suites).map_err(|e| {
+            SecurityError::CryptoError(format!("SDES offer generation failed: {e}"))
+        })?;
 
-        let mut offerer_sdes = Sdes::new(sdes_config, SdesRole::Offerer);
-        offerer_sdes
-            .init()
-            .map_err(|e| SecurityError::CryptoError(format!("SDES init failed: {}", e)))?;
+        let offer_lines: Result<Vec<String>, SecurityError> = attrs
+            .iter()
+            .map(|attr| format_crypto_line(attr).map(|line| format!("a=crypto:{line}")))
+            .collect();
+        let offer_lines = offer_lines?;
 
-        // Generate offer
-        match offerer_sdes.process_message(b"") {
-            Ok(Some(offer_bytes)) => {
-                let offer_str = String::from_utf8(offer_bytes).map_err(|_| {
-                    SecurityError::CryptoError("Invalid UTF-8 in SDES offer".to_string())
-                })?;
+        *state = SdesClientState::AnswerSent;
+        info!(
+            "SDES client generated offer with {} crypto attributes",
+            offer_lines.len()
+        );
 
-                let offer_lines: Vec<String> = offer_str.lines().map(|s| s.to_string()).collect();
-
-                *state = SdesClientState::AnswerSent;
-                info!(
-                    "SDES client generated offer with {} crypto attributes",
-                    offer_lines.len()
-                );
-
-                Ok(offer_lines)
-            }
-            Ok(None) => Err(SecurityError::CryptoError(
-                "No offer generated by SDES".to_string(),
-            )),
-            Err(e) => {
-                error!("SDES offer generation failed: {}", e);
-                Err(SecurityError::CryptoError(format!(
-                    "SDES offer generation failed: {}",
-                    e
-                )))
-            }
-        }
+        Ok(offer_lines)
     }
 }
 

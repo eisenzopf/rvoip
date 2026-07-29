@@ -109,10 +109,14 @@ pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
                 crate::srtp::SRTP_AES128_CM_SHA1_32
             }
             &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm => {
-                crate::srtp::SRTP_AEAD_AES_128_GCM
+                panic!(
+                    "AES-GCM SRTP profiles are not implemented (RFC 7714); do not configure them"
+                )
             }
             &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm => {
-                crate::srtp::SRTP_AEAD_AES_256_GCM
+                panic!(
+                    "AES-GCM SRTP profiles are not implemented (RFC 7714); do not configure them"
+                )
             }
             &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(_) => {
                 panic!("Unknown SRTP protection profile specified")

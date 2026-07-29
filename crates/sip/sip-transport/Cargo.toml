@@ -33,6 +33,10 @@ anyhow.workspace = true
 bytes.workspace = true
 tracing.workspace = true
 socket2.workspace = true
+# `TlsClientConfig`/`OutboundTlsConfig` need `Serialize`/`Deserialize` —
+# `rvoip-sip-dialog`'s `Dialog` (which stores an `Option<OutboundTlsConfig>`
+# for per-call outbound TLS/WSS identity) already derives both.
+serde.workspace = true
 sha2.workspace = true
 
 # TLS support

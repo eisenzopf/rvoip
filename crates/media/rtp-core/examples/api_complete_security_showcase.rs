@@ -11,7 +11,7 @@ use rvoip_rtp_core::{
     packet::{RtpHeader, RtpPacket},
     security::{
         mikey::{Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole},
-        sdes::{Sdes, SdesConfig, SdesRole},
+        sdes::SdesNegotiator,
         SecurityKeyExchange,
     },
     srtp::{crypto::SrtpCryptoKey, SrtpContext, SRTP_AES128_CM_SHA1_80},
@@ -73,18 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("📡 Showcase 2: SDES-SRTP for SIP Integration");
     info!("-------------------------------------------");
 
-    // Create SDES configuration for SIP
-    let sdes_config = SdesConfig {
-        crypto_suites: vec![SRTP_AES128_CM_SHA1_80],
-        offer_count: 1,
-    };
-
-    let mut sdes_offerer = Sdes::new(sdes_config.clone(), SdesRole::Offerer);
-    let mut sdes_answerer = Sdes::new(sdes_config, SdesRole::Answerer);
-
-    // Initialize SDES exchange
-    sdes_offerer.init()?;
-    sdes_answerer.init()?;
+    // Run a real SDES offer/answer exchange for SIP.
+    let (sdes_offerer, offer_attrs) = SdesNegotiator::new_offerer(&[SRTP_AES128_CM_SHA1_80])?;
+    let sdes_answerer = SdesNegotiator::new_answerer();
+    let (answer_attr, _answerer_pair) = sdes_answerer.process_offer(&offer_attrs)?;
+    let _offerer_pair = sdes_offerer.accept_answer(&answer_attr)?;
 
     info!("✅ SDES-SRTP: SIP-compatible key exchange configured");
     info!("✅ SDP crypto attributes: Ready for SIP signaling");

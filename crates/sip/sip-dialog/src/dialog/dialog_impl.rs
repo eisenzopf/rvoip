@@ -135,6 +135,15 @@ pub struct Dialog {
     /// negotiated `Session-Expires` header). Only meaningful when
     /// `session_expires_secs.is_some()`.
     pub is_session_refresher: bool,
+
+    /// Per-call outbound TLS/WSS client identity override. `None` means
+    /// requests on this dialog use whichever identity the process-wide
+    /// `TlsTransport`/`WebSocketTransport` was constructed with (today's
+    /// behavior, unchanged). Set once at dialog creation for outbound
+    /// calls that need a different client cert/truststore/SNI than the
+    /// process default (e.g. a multi-tenant gateway placing calls to
+    /// different endpoints under different identities).
+    pub tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
 }
 
 impl fmt::Debug for Dialog {
@@ -216,6 +225,7 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            tls_override: None,
         }
     }
 
@@ -421,6 +431,7 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            tls_override: None,
         })
     }
 
@@ -538,6 +549,7 @@ impl Dialog {
             peer_supports_100rel: false,
             session_expires_secs: None,
             is_session_refresher: false,
+            tls_override: None,
         })
     }
 

@@ -13,9 +13,11 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use tokio::net::UdpSocket;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
+
+use crate::dtmf::TelephoneEvent;
 
 /// RFC 4733 §2.5.1.3 — the sender emits up to three identical
 /// end-of-event frames for loss resilience. Each shares
@@ -56,8 +58,15 @@ where
     crate::task_runtime::spawn_media_task(future)
 }
 
+/// RFC 7983 §7 datagram classification for a shared RTP/RTCP/STUN/DTLS
+/// port, plus the RFC 5761 §4 RTP-vs-RTCP split within the media range.
+/// Public so callers bridging their own socket/reactor into this crate's
+/// media or DTLS-SRTP handshake (e.g. `transport::dtls_datagram_bridge`)
+/// can classify inbound datagrams the same way
+/// [`UdpRtpTransport`](super::udp::UdpRtpTransport)'s own receive loop
+/// does, via [`classify_rtp_mux_packet`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RtpMuxPacketClass {
+pub enum RtpMuxPacketClass {
     Rtp,
     Rtcp,
     Stun,
@@ -69,7 +78,7 @@ enum RtpMuxPacketClass {
 }
 
 impl RtpMuxPacketClass {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Rtp => "rtp",
             Self::Rtcp => "rtcp",
@@ -82,7 +91,7 @@ impl RtpMuxPacketClass {
         }
     }
 
-    fn is_media(self) -> bool {
+    pub fn is_media(self) -> bool {
         matches!(self, Self::Rtp | Self::Rtcp)
     }
 }
@@ -100,7 +109,12 @@ fn rtp_diagnostics_enabled() -> bool {
     RTP_DIAGNOSTICS_ENABLED.load(Ordering::Relaxed)
 }
 
-fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
+/// Classify one inbound datagram per RFC 7983 §7 (STUN/ZRTP/DTLS/TURN
+/// ChannelData ranges) plus RFC 5761 §4 (RTP-vs-RTCP within the media
+/// range 128-191). Pure and allocation-free — safe to call from any
+/// context (an external `mio` reactor, a test, etc.), not just this
+/// crate's own receive loop.
+pub fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
     if buffer.len() < 2 {
         return RtpMuxPacketClass::TooSmall;
     }
@@ -381,6 +395,23 @@ pub struct UdpRtpTransport {
     /// peers must each fire independently.
     dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
 
+    /// Sender half of the channel a DTLS-SRTP handshake reads from, when
+    /// one is in progress. `None` means datagrams classified as DTLS by
+    /// [`classify_rtp_mux_packet`] are just dropped (the pre-DTLS-SRTP
+    /// behavior). Set by [`Self::dtls_conn_adapter`].
+    #[cfg(feature = "dtls-webrtc")]
+    dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
+
+    /// Outbound sender for inbound datagrams classified as STUN (RFC
+    /// 7983) — the demux path an ICE connectivity check's bytes arrive
+    /// on when sharing this socket with RTP/RTCP. `None` until a caller
+    /// subscribes via [`Self::subscribe_stun_datagrams`], in which case
+    /// STUN bytes are dropped exactly like before this existed.
+    /// Re-subscribing swaps the previous sender out — same
+    /// one-active-consumer-per-transport discipline as the rest of this
+    /// struct (one transport per call/media-stream already).
+    stun_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<(Bytes, SocketAddr)>>>>,
+
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
     #[cfg(feature = "memory-diagnostics")]
@@ -549,6 +580,9 @@ impl UdpRtpTransport {
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
+            #[cfg(feature = "dtls-webrtc")]
+            dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
+            stun_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -586,6 +620,9 @@ impl UdpRtpTransport {
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
         let dtmf_seen = self.dtmf_seen.clone();
+        #[cfg(feature = "dtls-webrtc")]
+        let dtls_tx = self.dtls_tx.clone();
+        let stun_tx = self.stun_tx.clone();
         let symmetric_rtp_policy = self.symmetric_rtp_policy;
         let symmetric_rtp_counters = self.symmetric_rtp_counters.clone();
         let symmetric_rtp_latched = self.symmetric_rtp_latched.clone();
@@ -624,6 +661,50 @@ impl UdpRtpTransport {
                             info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
+
+                            #[cfg(feature = "dtls-webrtc")]
+                            if packet_class == RtpMuxPacketClass::Dtls {
+                                let forwarded = dtls_tx
+                                    .lock()
+                                    .as_ref()
+                                    .map(|tx| {
+                                        tx.try_send(Bytes::copy_from_slice(&buffer[..size])).is_ok()
+                                    })
+                                    .unwrap_or(false);
+                                if !forwarded {
+                                    // No handshake in flight (or its
+                                    // receiver is backed up) to hand this
+                                    // to; nothing else can use it either.
+                                    non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
+                                    log_dropped_non_rtp_packet(
+                                        rtp_diagnostics,
+                                        non_rtp_drop_count,
+                                        local_rtp_addr,
+                                        addr,
+                                        size,
+                                        packet_class,
+                                        &buffer[..size],
+                                    );
+                                }
+                                continue;
+                            }
+
+                            if packet_class == RtpMuxPacketClass::Stun {
+                                let sender = stun_tx.lock().clone();
+                                if let Some(sender) = sender {
+                                    let datagram = Bytes::copy_from_slice(&buffer[..size]);
+                                    if sender.try_send((datagram, addr)).is_err() {
+                                        trace!(
+                                            "Dropped inbound STUN datagram from {}: subscriber channel full or closed",
+                                            addr
+                                        );
+                                    }
+                                    continue;
+                                }
+                                // No subscriber (ICE not in use for this
+                                // transport) — fall through to the
+                                // generic non-media drop path below.
+                            }
                             if !packet_class.is_media() {
                                 non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
                                 log_dropped_non_rtp_packet(
@@ -787,65 +868,67 @@ impl UdpRtpTransport {
 
                                         // RFC 4733: PT 101 (by default) is `telephone-event` —
                                         // DTMF tones carried as RTP events rather than audio
-                                        // samples. Decode the 4-byte body inline and emit a
+                                        // samples. Decode via the shared codec and emit a
                                         // typed `DtmfEvent` instead of a generic
                                         // `MediaReceived`, so the media layer doesn't have
                                         // to re-parse and doesn't try to feed the bytes to
-                                        // a PCMU/PCMA/Opus decoder. Oversized payloads are
-                                        // tolerated per RFC 4733's forward-compat clause
-                                        // (read only first 4 bytes).
-                                        if packet.header.payload_type == 101
-                                            && packet.payload.len() >= 4
-                                        {
-                                            let p = &packet.payload[..4];
-                                            let event = p[0];
-                                            let byte1 = p[1];
-                                            let end_of_event = (byte1 & 0b1000_0000) != 0;
-                                            let volume = byte1 & 0b0011_1111;
-                                            let duration = u16::from_be_bytes([p[2], p[3]]);
+                                        // a PCMU/PCMA/Opus decoder. `TelephoneEvent::decode`
+                                        // returns `None` for a too-short payload, in which
+                                        // case this falls through to the generic handling
+                                        // below, same as before.
+                                        if packet.header.payload_type == 101 {
+                                            if let Some(tele) =
+                                                TelephoneEvent::decode(&packet.payload)
+                                            {
+                                                let event = tele.event;
+                                                let end_of_event = tele.end_of_event;
+                                                let volume = tele.volume;
+                                                let duration = tele.duration;
 
-                                            // RFC 4733 §2.5.1.3 retransmit dedup. The
-                                            // sender emits up to three identical E=1
-                                            // frames sharing `(ssrc, rtp_timestamp)`.
-                                            // Keyed by `(peer_addr, ssrc, ts)` so two
-                                            // simultaneous DTMF streams from
-                                            // different peers fire independently.
-                                            // Inline retain prunes stale entries on
-                                            // every fire — at one PT 101 frame per
-                                            // ~20 ms per active tone, this stays
-                                            // bounded.
-                                            if end_of_event {
-                                                let key = (
-                                                    addr,
-                                                    packet.header.ssrc,
-                                                    packet.header.timestamp,
-                                                );
-                                                let now = Instant::now();
-                                                dtmf_seen.retain(|_, seen_at| {
-                                                    now.duration_since(*seen_at) < DTMF_DEDUP_TTL
-                                                });
-                                                if dtmf_seen.insert(key, now).is_some() {
-                                                    continue; // retransmit — suppress
+                                                // RFC 4733 §2.5.1.3 retransmit dedup. The
+                                                // sender emits up to three identical E=1
+                                                // frames sharing `(ssrc, rtp_timestamp)`.
+                                                // Keyed by `(peer_addr, ssrc, ts)` so two
+                                                // simultaneous DTMF streams from
+                                                // different peers fire independently.
+                                                // Inline retain prunes stale entries on
+                                                // every fire — at one PT 101 frame per
+                                                // ~20 ms per active tone, this stays
+                                                // bounded.
+                                                if end_of_event {
+                                                    let key = (
+                                                        addr,
+                                                        packet.header.ssrc,
+                                                        packet.header.timestamp,
+                                                    );
+                                                    let now = Instant::now();
+                                                    dtmf_seen.retain(|_, seen_at| {
+                                                        now.duration_since(*seen_at)
+                                                            < DTMF_DEDUP_TTL
+                                                    });
+                                                    if dtmf_seen.insert(key, now).is_some() {
+                                                        continue; // retransmit — suppress
+                                                    }
                                                 }
-                                            }
 
-                                            let dtmf = RtpEvent::DtmfEvent {
-                                                event,
-                                                end_of_event,
-                                                volume,
-                                                duration,
-                                                timestamp: packet.header.timestamp,
-                                                source: addr,
-                                                ssrc: packet.header.ssrc,
-                                            };
-                                            if event_tx.receiver_count() > 0 {
-                                                if let Err(e) = event_tx.send(dtmf) {
-                                                    warn!("Failed to send DTMF event: {}", e);
+                                                let dtmf = RtpEvent::DtmfEvent {
+                                                    event,
+                                                    end_of_event,
+                                                    volume,
+                                                    duration,
+                                                    timestamp: packet.header.timestamp,
+                                                    source: addr,
+                                                    ssrc: packet.header.ssrc,
+                                                };
+                                                if event_tx.receiver_count() > 0 {
+                                                    if let Err(e) = event_tx.send(dtmf) {
+                                                        warn!("Failed to send DTMF event: {}", e);
+                                                    }
+                                                } else {
+                                                    let _ = event_tx.send(dtmf);
                                                 }
-                                            } else {
-                                                let _ = event_tx.send(dtmf);
+                                                continue;
                                             }
-                                            continue;
                                         }
 
                                         // Create RTP event
@@ -1002,6 +1085,42 @@ impl UdpRtpTransport {
         self.remote_rtp_addr.load().as_deref().copied()
     }
 
+    /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for running a
+    /// DTLS-SRTP handshake over this transport's RTP socket, sharing the
+    /// port with RTP/RTCP. [`Self::set_remote_rtp_addr`] must be called
+    /// first — the adapter needs a fixed peer to send handshake bytes to.
+    ///
+    /// From this point on, incoming datagrams the receive loop classifies
+    /// as DTLS (RFC 7983) are routed to the returned adapter instead of
+    /// being dropped. Only one handshake can be in flight at a time per
+    /// transport; calling this again replaces the previous channel.
+    #[cfg(feature = "dtls-webrtc")]
+    pub fn dtls_conn_adapter(
+        &self,
+    ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
+        let remote = self
+            .remote_rtp_addr
+            .load()
+            .as_deref()
+            .copied()
+            .ok_or_else(|| {
+                crate::error::Error::Transport(
+                    "remote RTP address must be set before starting a DTLS handshake".to_string(),
+                )
+            })?;
+
+        let (tx, rx) = mpsc::channel(64);
+        *self.dtls_tx.lock() = Some(tx);
+
+        Ok(Arc::new(
+            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
+                self.rtp_socket.clone(),
+                remote,
+                rx,
+            ),
+        ))
+    }
+
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtcp_addr.load().as_deref().copied()
@@ -1022,6 +1141,32 @@ impl UdpRtpTransport {
     /// This is used when sharing the same socket with other protocols (e.g., DTLS)
     pub fn get_socket(&self) -> Arc<UdpSocket> {
         self.rtp_socket.clone()
+    }
+
+    /// Subscribe to inbound datagrams classified as STUN (RFC 7983) —
+    /// the demux path an ICE connectivity check's bytes take when
+    /// sharing this socket with RTP/RTCP. Feed the received
+    /// `(datagram, source)` pairs into `IceAgent::handle_incoming_stun`
+    /// (`rvoip-nat-core`) to drive connectivity checks over
+    /// [`Self::ice_conn_adapter`].
+    ///
+    /// Only one subscriber is active at a time — one transport per
+    /// call/media-stream already, same scope an `IceAgent` needs.
+    /// Subscribing again replaces the previous channel; its receiver
+    /// then simply stops getting new datagrams.
+    #[cfg(feature = "ice")]
+    pub fn subscribe_stun_datagrams(&self) -> mpsc::Receiver<(Bytes, SocketAddr)> {
+        let (tx, rx) = mpsc::channel(32);
+        *self.stun_tx.lock() = Some(tx);
+        rx
+    }
+
+    /// An outbound-only handle to this transport's shared socket for
+    /// `rvoip-nat-core`'s `IceAgent::new_with_shared_socket` — pair with
+    /// [`Self::subscribe_stun_datagrams`] to also route inbound bytes.
+    #[cfg(feature = "ice")]
+    pub fn ice_conn_adapter(&self) -> Arc<super::IceUdpSocketAdapter> {
+        Arc::new(super::IceUdpSocketAdapter::new(self.rtp_socket.clone()))
     }
 
     /// Install per-direction SRTP contexts (RFC 4568 §6.1, RFC 3711).

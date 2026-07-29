@@ -4688,6 +4688,7 @@ impl DialogManager {
                 outbound_proxy_uri: opts.outbound_proxy_uri.clone(),
                 supported_100rel: opts.supported_100rel,
                 extra_headers: preview_headers,
+                tls_override: None,
             },
         )
         .map_err(|_| {

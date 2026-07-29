@@ -78,6 +78,14 @@ path = "examples/stream_peer/06_concurrent_calls/server.rs"
 [[example]]
 name = "stream_peer_concurrent_calls_client"
 path = "examples/stream_peer/06_concurrent_calls/client.rs"
+[[example]]
+name = "stream_peer_ice_alice"
+path = "examples/stream_peer/07_ice/alice.rs"
+required-features = ["ice"]
+[[example]]
+name = "stream_peer_ice_bob"
+path = "examples/stream_peer/07_ice/bob.rs"
+required-features = ["ice"]
 
 # CallbackPeer examples (reactive server API)
 [[example]]
@@ -366,6 +374,12 @@ rvoip-media-core.workspace = true
 rvoip-sip-core.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-core-traits.workspace = true
+# Real ICE (RFC 8445) agent, behind the `ice` feature — used directly by
+# `adapters::media_adapter` for the steps that don't need the live
+# transport (gathering candidates, feeding remote candidates, running
+# connectivity checks), same as `rvoip_rtp_core::dtls_srtp` is used
+# directly for DTLS identity generation.
+rvoip-nat-core = { workspace = true, optional = true, features = ["ice"] }
 ipnet = "2.12"
 # RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
 base64 = "0.22"
@@ -466,6 +480,15 @@ generated-validation = [
 dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
 # Optional G.729A/G.729AB media support. Off by default.
 g729 = ["rvoip-media-core/g729"]
+# Real DTLS-SRTP (RFC 5763/5764) support: a=fingerprint/a=setup SDP
+# handling and the real handshake, as an alternative to SDES keying.
+# Forwards to rvoip-media-core's and rvoip-rtp-core's matching features.
+# Off by default.
+dtls-srtp = ["rvoip-media-core/dtls-srtp", "rvoip-rtp-core/dtls-webrtc"]
+# Real ICE (RFC 8445) connectivity checks: a=ice-ufrag/a=ice-pwd/a=candidate
+# SDP handling and a live webrtc-ice agent bridged over the shared RTP
+# socket. Orthogonal to `dtls-srtp` — combine freely. Off by default.
+ice = ["rvoip-media-core/ice", "rvoip-rtp-core/ice", "dep:rvoip-nat-core"]
 # Optional native Opus media support for negotiated SIP legs. Bridgefu enables
 # this so SIP Opus is represented as Opus codec payload in MediaFrame rather
 # than being mis-decoded as G.711.

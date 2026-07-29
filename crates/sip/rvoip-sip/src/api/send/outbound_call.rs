@@ -112,6 +112,12 @@ pub struct OutboundCallOptionsSnapshot {
     /// want B2BUA-style hiding turn this on per call via
     /// [`OutboundCallBuilder::with_topology_hiding`].
     pub topology_hiding: bool,
+    /// Per-call outbound TLS/WSS client identity override (client
+    /// cert/truststore/SNI), set via
+    /// [`OutboundCallBuilder::with_transport_security`]. `None` uses
+    /// whichever identity `Config`'s TLS/WSS fields baked into the
+    /// process-wide transport.
+    pub tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
 }
 
 impl fmt::Debug for OutboundCallOptionsSnapshot {
@@ -144,6 +150,7 @@ impl fmt::Debug for OutboundCallOptionsSnapshot {
             .field("supported_100rel", &self.supported_100rel)
             .field("extra_header_count", &self.extra_headers.len())
             .field("topology_hiding", &self.topology_hiding)
+            .field("tls_override_present", &self.tls_override.is_some())
             .finish()
     }
 }
@@ -166,6 +173,7 @@ pub struct OutboundCallBuilder {
     supported_100rel: bool,
     state: BuilderHeaderState,
     topology_hiding: bool,
+    tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
     session_id: Option<CallId>,
 }
 
@@ -192,6 +200,7 @@ impl OutboundCallBuilder {
             supported_100rel: false,
             state: BuilderHeaderState::default(),
             topology_hiding: false,
+            tls_override: None,
             session_id: None,
         }
     }
@@ -319,6 +328,22 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Override the outbound TLS/WSS client identity (client
+    /// cert/key/truststore, SNI) for this call only, instead of using
+    /// whichever identity `Config`'s TLS/WSS fields baked into the
+    /// process-wide transport at startup.
+    ///
+    /// Useful for a multi-tenant gateway that must place simultaneous
+    /// calls to different endpoints under different client
+    /// certificates/trust policies from a single process — each call
+    /// gets its own pooled connection, keyed by destination *and*
+    /// identity, so distinct identities never share a connection to the
+    /// same destination.
+    pub fn with_transport_security(mut self, tls: rvoip_sip_transport::OutboundTlsConfig) -> Self {
+        self.tls_override = Some(tls);
+        self
+    }
+
     /// Use a caller-reserved Session identity for this INVITE.
     ///
     /// This crate-private seam lets the core adapter install its Connection ID
@@ -389,6 +414,7 @@ impl OutboundCallBuilder {
             supported_100rel: self.supported_100rel,
             extra_headers: self.state.headers.clone(),
             topology_hiding: self.topology_hiding,
+            tls_override: self.tls_override,
         });
 
         // Validate the complete wire-facing option set before allocating a
@@ -512,6 +538,15 @@ mod tests {
                 HeaderValue::Raw(SECRET.as_bytes().to_vec()),
             )],
             topology_hiding: true,
+            tls_override: Some(rvoip_sip_transport::OutboundTlsConfig {
+                client: rvoip_sip_transport::TlsClientConfig {
+                    extra_ca_path: None,
+                    insecure_skip_verify: false,
+                    client_cert_path: None,
+                    client_key_path: None,
+                },
+                server_name: Some(SECRET.into()),
+            }),
         };
 
         let debug = format!("{snapshot:?}");
@@ -523,6 +558,7 @@ mod tests {
         assert!(debug.contains("outbound_proxy_override: \"override\""));
         assert!(debug.contains("extra_header_count: 1"));
         assert!(debug.contains("supported_100rel: true"));
+        assert!(debug.contains("tls_override_present: true"));
 
         let pai_debug = format!("{:?}", PaiOverride::Use(SECRET.into()));
         let proxy_debug = format!("{:?}", ProxyOverride::Use(SECRET.into()));

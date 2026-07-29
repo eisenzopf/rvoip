@@ -631,6 +631,12 @@ pub use types::CallState;
 // without importing the lower-level crate directly).
 pub use rvoip_sip_core::types::{HeaderName, TypedHeader};
 
+// Per-call outbound TLS/WSS client identity override — see
+// `Config::tls_client_cert_path` for the process-wide default and
+// `api::send::outbound_call::OutboundCallBuilder::with_transport_security`
+// for the per-call override that uses these types.
+pub use rvoip_sip_transport::{OutboundTlsConfig, TlsClientConfig};
+
 // ── Prelude ─────────────────────────────────────────────────────────────────
 
 /// Common imports for most use cases.

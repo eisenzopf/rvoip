@@ -51,6 +51,18 @@ pub enum PendingReinvite {
     SdpUpdate(String),
 }
 
+/// An inbound re-INVITE carrying SDP, held pending an application decision
+/// while `ReinvitePolicy::ApplicationControlled` is active. Resolved by
+/// `IncomingReinvite::accept_with_answer` or `IncomingReinvite::reject`,
+/// which respond directly on `transaction_id` rather than through the
+/// state-table transition machinery, since the app's decision can arrive
+/// arbitrarily long after the re-INVITE itself did.
+#[derive(Clone, Debug)]
+pub struct PendingIncomingReinvite {
+    pub transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+    pub offered_sdp: String,
+}
+
 /// Private RFC 4028 refresh ownership for one exact session lifetime.
 ///
 /// This is deliberately separate from [`PendingReinvite`]. That public
@@ -166,6 +178,39 @@ pub struct SessionStateCold {
     pub redirect_attempts: u8,
     pub pending_reinvite: Option<PendingReinvite>,
     pub reinvite_retry_attempts: u8,
+    /// Set when `NegotiateSDPAsUAS` had no remote offer to negotiate
+    /// against, an offerless INVITE/re-INVITE, and instead sent a freshly
+    /// generated local offer in the 200 OK. `CompleteAckNegotiation` clears
+    /// it once the peer's answer arrives in the ACK (RFC 3261 §14.2):
+    /// success promotes it into `remote_sdp`/`negotiated_config`, while a
+    /// missing or invalid answer just clears it without promoting
+    /// anything, so `sdp_negotiated` stays false.
+    pub pending_local_offer: Option<String>,
+    /// An inbound SDP offer (re-INVITE or UPDATE) that hasn't been
+    /// negotiated yet. Either negotiation hasn't run this transition yet
+    /// (the normal path, where `NegotiateSDPAsUAS` consumes and clears it,
+    /// promoting to `remote_sdp` only on success), or it's awaiting an
+    /// application decision (`IncomingReinvite`). It's kept separate from
+    /// `remote_sdp` specifically so a failed or still-pending negotiation
+    /// never disturbs the last committed remote SDP: the call keeps using
+    /// its previously confirmed media unless and until this is actually
+    /// accepted.
+    pub pending_remote_offer: Option<String>,
+    /// The ACK's answer body, stashed here by the `DialogACK` event's
+    /// pre-table handling so `CompleteAckNegotiation` can consume it.
+    /// Transient, always taken (cleared) by that action.
+    pub ack_answer_sdp: Option<String>,
+    /// Set by `CompleteAckNegotiation` when a delayed-offer exchange
+    /// couldn't be completed from the ACK, because the answer was missing
+    /// or invalid. The call is dialog-established (the 3-way handshake is
+    /// done, so there's no SIP response left to reject it with) but has no
+    /// negotiated media, so the caller must tear it down with BYE rather
+    /// than leave it looking healthy. Cleared once that teardown is
+    /// scheduled.
+    pub needs_teardown_after_failed_ack_negotiation: bool,
+    /// A re-INVITE the application is currently deciding on. See
+    /// [`PendingIncomingReinvite`].
+    pub pending_incoming_reinvite: Option<PendingIncomingReinvite>,
     pub session_timer_min_se: Option<u32>,
     pub session_timer_retry_count: u8,
     /// Monotonic owner of the retained RFC 4028 deadline task. A superseded
@@ -276,7 +321,10 @@ pub struct SessionState {
     // Track if call established was triggered
     pub call_established_triggered: bool,
 
-    // SDP data
+    // SDP data. `local_sdp`/`remote_sdp` hold the *committed* values, the
+    // last ones successfully negotiated. See `pending_local_offer` below
+    // for the RFC 3261 §14.2 delayed-offer in-flight case, where we've
+    // sent an offer but haven't negotiated it yet.
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
@@ -414,6 +462,14 @@ impl fmt::Debug for SessionState {
             )
             .field("local_sdp_present", &self.local_sdp.is_some())
             .field("remote_sdp_present", &self.remote_sdp.is_some())
+            .field(
+                "pending_local_offer_present",
+                &self.pending_local_offer.is_some(),
+            )
+            .field(
+                "pending_remote_offer_present",
+                &self.pending_remote_offer.is_some(),
+            )
             .field(
                 "negotiated_config_present",
                 &self.negotiated_config.is_some(),
@@ -887,6 +943,11 @@ impl SessionState {
                 redirect_attempts: 0,
                 pending_reinvite: None,
                 reinvite_retry_attempts: 0,
+                pending_local_offer: None,
+                pending_remote_offer: None,
+                ack_answer_sdp: None,
+                needs_teardown_after_failed_ack_negotiation: false,
+                pending_incoming_reinvite: None,
                 session_timer_min_se: None,
                 session_timer_retry_count: 0,
                 session_refresh_timer_generation: 0,
@@ -1338,6 +1399,7 @@ mod tests {
             supported_100rel: true,
             extra_headers: vec![secret_header()],
             topology_hiding: true,
+            tls_override: None,
         }));
         session.pending_register_options = Some(Arc::new(
             rvoip_sip_dialog::api::unified::RegisterRequestOptions {

@@ -1102,6 +1102,8 @@ impl UnifiedDialogManager {
             dialog.route_set = service_route;
         }
 
+        dialog.tls_override = options.tls_override.clone();
+
         let owner = InitialInviteOwner {
             dialog_id: dialog.id.clone(),
             call_id,
@@ -1906,6 +1908,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -1928,6 +1931,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -2251,6 +2255,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -2278,6 +2283,7 @@ impl UnifiedDialogManager {
             None,
             None,
             false,
+            None,
         )
         .await
     }
@@ -2322,6 +2328,7 @@ impl UnifiedDialogManager {
             opts.contact_uri,
             opts.outbound_proxy_uri,
             opts.supported_100rel,
+            opts.tls_override,
         )
         .await
     }
@@ -2339,6 +2346,7 @@ impl UnifiedDialogManager {
         contact_override: Option<String>,
         outbound_proxy_uri: Option<Uri>,
         supported_100rel: bool,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
     ) -> ApiResult<CallHandle> {
         info!("Making outgoing call with caller and target URIs present");
         let plan = self
@@ -2355,6 +2363,7 @@ impl UnifiedDialogManager {
                     outbound_proxy_uri,
                     supported_100rel,
                     extra_headers,
+                    tls_override,
                 },
             )
             .await?;

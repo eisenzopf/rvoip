@@ -26,8 +26,8 @@ pub use transport::tls::{
 pub use transport::udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
 pub use transport::{
-    transport_authority_for_request, HandshakeAdmissionConfig, TlsPeerIdentity, Transport,
-    TransportAuthority, TransportConnectionMetadata, TransportEvent, TransportFlowId,
+    transport_authority_for_request, HandshakeAdmissionConfig, OutboundTlsConfig, TlsPeerIdentity,
+    Transport, TransportAuthority, TransportConnectionMetadata, TransportEvent, TransportFlowId,
     TransportReceiveTiming, TransportRoute,
 };
 

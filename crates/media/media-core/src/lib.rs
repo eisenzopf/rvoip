@@ -103,6 +103,8 @@ pub use relay::{
     DtmfNotification, G711PcmaCodec, G711PcmuCodec, MediaConfig, MediaSessionController,
     MediaSessionControllerConfig, MediaSessionInfo, MediaSessionStatus,
 };
+#[cfg(feature = "dtls-srtp")]
+pub use relay::DtlsRole;
 
 // NEW: Enhanced configuration re-exports
 pub use engine::config::{

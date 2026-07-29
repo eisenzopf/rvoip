@@ -117,7 +117,8 @@ impl SrtpAuthenticator {
     }
 }
 
-/// SRTP Replay Protection
+/// SRTP Replay Protection (RFC 3711 §3.3.2)
+#[derive(Debug)]
 pub struct SrtpReplayProtection {
     /// Window size in packets
     window_size: u64,
@@ -130,6 +131,11 @@ pub struct SrtpReplayProtection {
 
     /// Whether replay protection is enabled
     enabled: bool,
+
+    /// Whether any packet has been processed yet. Kept separate from
+    /// `highest_seq == 0` so a legitimate first packet at index 0 isn't
+    /// mistaken for "nothing received yet" on every subsequent check.
+    has_received: bool,
 }
 
 impl SrtpReplayProtection {
@@ -143,78 +149,90 @@ impl SrtpReplayProtection {
             highest_seq: 0,
             window,
             enabled: true,
+            has_received: false,
         }
     }
 
-    /// Check if a packet is a replay
-    pub fn check(&mut self, seq: u64) -> Result<bool> {
+    /// Check whether `seq` would be accepted, without mutating any state.
+    ///
+    /// Callers that need to authenticate/decrypt before trusting a packet
+    /// should call this first, then only call [`Self::commit`] once
+    /// authentication and decryption have both succeeded — that keeps a
+    /// failed packet from ever poisoning the window or the high-water mark.
+    pub fn would_accept(&self, seq: u64) -> bool {
         if !self.enabled {
-            return Ok(true); // Always allow if disabled
+            return true;
         }
 
-        // Check if this is the first packet
-        if self.highest_seq == 0 {
-            self.highest_seq = seq;
-            // Mark first packet as received in the bitmap
-            self.window[0] = true;
-            return Ok(true);
+        if !self.has_received {
+            return true;
         }
 
-        // Check if the sequence number is too old (outside the replay window)
         // The window covers [highest_seq - window_size + 1, highest_seq]
         let window_lower_bound = self.highest_seq.saturating_sub(self.window_size - 1);
         if seq < window_lower_bound {
-            // Too old, reject
-            return Ok(false);
+            return false;
         }
 
-        // Check if this is a higher sequence number
+        if seq > self.highest_seq {
+            // Any higher sequence number moves the window forward.
+            return true;
+        }
+
+        // In-window, not higher than the high-water mark: reject only if
+        // we've already marked this exact position as seen.
+        let window_pos = self.highest_seq - seq;
+        !self.window[window_pos as usize]
+    }
+
+    /// Record `seq` as received. Only call this after the packet has been
+    /// authenticated (and, if applicable, decrypted) successfully — see
+    /// [`Self::would_accept`].
+    pub fn commit(&mut self, seq: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        if !self.has_received {
+            self.has_received = true;
+            self.highest_seq = seq;
+            self.window[0] = true;
+            return;
+        }
+
         if seq > self.highest_seq {
             let diff = seq - self.highest_seq;
 
-            // Shift the window
             if diff >= self.window_size {
-                // If the gap is larger than our window, clear the entire window
-                for i in 0..self.window.len() {
-                    self.window[i] = false;
+                for bit in self.window.iter_mut() {
+                    *bit = false;
                 }
             } else {
-                // Shift the window by the number of new positions
-                // We use the logical position within the window, not raw indices
                 for i in 0..diff as usize {
-                    // For each position we're shifting, clear the corresponding bit
-                    // This is (window_size - diff + i) positions back from highest_seq
-                    let idx = (self.window_size - diff as u64 + i as u64) % self.window_size;
+                    let idx = (self.window_size - diff + i as u64) % self.window_size;
                     self.window[idx as usize] = false;
                 }
             }
 
-            // Update highest sequence
             self.highest_seq = seq;
-
-            // Mark this sequence as received (position 0 in the window)
             self.window[0] = true;
-
-            return Ok(true);
+            return;
         }
 
-        // At this point, we know:
-        // 1. The sequence is not too old (within the valid window)
-        // 2. It's not higher than highest_seq
-
-        // Calculate the position in the window
-        // The window is indexed relative to highest_seq
-        // Position 0 = highest_seq, position 1 = highest_seq-1, etc.
         let window_pos = self.highest_seq - seq;
+        self.window[window_pos as usize] = true;
+    }
 
-        // Check if we've already seen this sequence
-        if self.window[window_pos as usize] {
-            // Already received, reject as replay
+    /// Check if a packet is a replay, marking it as seen if not.
+    ///
+    /// Convenience wrapper over [`Self::would_accept`] + [`Self::commit`]
+    /// for callers that don't need to gate the commit on a later
+    /// authentication/decryption step (e.g. this module's own tests).
+    pub fn check(&mut self, seq: u64) -> Result<bool> {
+        if !self.would_accept(seq) {
             return Ok(false);
         }
-
-        // Mark as received and allow
-        self.window[window_pos as usize] = true;
+        self.commit(seq);
         Ok(true)
     }
 
@@ -226,6 +244,7 @@ impl SrtpReplayProtection {
     /// Reset the replay protection
     pub fn reset(&mut self) {
         self.highest_seq = 0;
+        self.has_received = false;
         for i in 0..self.window.len() {
             self.window[i] = false;
         }

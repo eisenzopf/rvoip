@@ -127,6 +127,12 @@ pub enum PortPairingStrategy {
 
 // Re-export submodules
 mod allocator;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_bridge;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_datagram_bridge;
+#[cfg(feature = "ice")]
+mod ice_bridge;
 pub mod security_transport;
 mod symmetric;
 mod tcp;
@@ -138,10 +144,15 @@ pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
     PortAllocatorDiagnostics, DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
+#[cfg(feature = "ice")]
+pub use ice_bridge::IceUdpSocketAdapter;
 pub use security_transport::SecurityRtpTransport;
 pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
-pub use udp::{set_diagnostics as set_udp_diagnostics, UdpRtpTransport};
+pub use udp::{
+    classify_rtp_mux_packet, set_diagnostics as set_udp_diagnostics, RtpMuxPacketClass,
+    UdpRtpTransport,
+};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 #[cfg(test)]

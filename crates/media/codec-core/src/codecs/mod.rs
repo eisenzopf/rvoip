@@ -72,6 +72,9 @@ use std::collections::HashMap;
 #[cfg(feature = "g711")]
 pub mod g711;
 
+#[cfg(feature = "g722")]
+pub mod g722;
+
 #[cfg(feature = "g729")]
 pub mod g729;
 
@@ -100,6 +103,12 @@ impl CodecFactory {
                 Ok(Box::new(codec))
             }
 
+            #[cfg(feature = "g722")]
+            CodecType::G722 => {
+                let codec = g722::G722Codec::new(config)?;
+                Ok(Box::new(codec))
+            }
+
             #[cfg(feature = "g729")]
             CodecType::G729 | CodecType::G729A | CodecType::G729BA => {
                 let codec = g729::G729Codec::new(config)?;
@@ -124,6 +133,7 @@ impl CodecFactory {
         let codec_type = match normalize_codec_name(name).as_str() {
             "PCMU" => CodecType::G711Pcmu,
             "PCMA" => CodecType::G711Pcma,
+            "G722" => CodecType::G722,
             "G729" => CodecType::G729,
             "G729A" => CodecType::G729A,
             "G729AB" | "G729BA" => CodecType::G729BA,
@@ -147,6 +157,7 @@ impl CodecFactory {
         let codec_type = match payload_type {
             0 => CodecType::G711Pcmu,
             8 => CodecType::G711Pcma,
+            9 => CodecType::G722,
             18 => CodecType::G729,
 
             _ => return Err(CodecError::unsupported_codec(format!("PT{}", payload_type))),
@@ -167,6 +178,8 @@ impl CodecFactory {
             "PCMU",
             #[cfg(feature = "g711")]
             "PCMA",
+            #[cfg(feature = "g722")]
+            "G722",
             #[cfg(feature = "g729")]
             "G729",
             #[cfg(feature = "g729")]
@@ -184,6 +197,8 @@ impl CodecFactory {
         match normalized.as_str() {
             #[cfg(feature = "g711")]
             "PCMU" | "PCMA" => true,
+            #[cfg(feature = "g722")]
+            "G722" => true,
             #[cfg(feature = "g729")]
             "G729" | "G729A" | "G729AB" | "G729BA" => true,
             #[cfg(any(feature = "opus", feature = "opus-sim"))]

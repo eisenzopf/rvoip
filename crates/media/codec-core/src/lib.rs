@@ -161,12 +161,16 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "PCMU",
     #[cfg(feature = "g711")]
     "PCMA",
+    #[cfg(feature = "g722")]
+    "G722",
     #[cfg(feature = "g729")]
     "G729",
     #[cfg(feature = "g729")]
     "G729A",
     #[cfg(feature = "g729")]
     "G729BA",
+    #[cfg(any(feature = "opus", feature = "opus-sim"))]
+    "opus",
 ];
 
 /// Initialize the codec library
@@ -233,6 +237,9 @@ mod tests {
             assert!(SUPPORTED_CODECS.contains(&"PCMU"));
             assert!(SUPPORTED_CODECS.contains(&"PCMA"));
         }
+
+        #[cfg(feature = "g722")]
+        assert!(SUPPORTED_CODECS.contains(&"G722"));
 
         #[cfg(feature = "g729")]
         {

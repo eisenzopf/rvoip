@@ -27,7 +27,7 @@ use rvoip_sip_core::{
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    Transport, TransportAuthority, TransportFlowId, TransportRoute,
+    OutboundTlsConfig, Transport, TransportAuthority, TransportFlowId, TransportRoute,
 };
 use tracing::{debug, trace, warn};
 
@@ -557,6 +557,63 @@ impl Transport for MultiplexedTransport {
         selected_route.transport_type = Some(transport_type);
         transport
             .send_message_on_route(message, selected_route)
+            .await
+    }
+
+    /// Same dispatch as [`Transport::send_message`] (URI-based transport
+    /// selection, RFC 3261 §18.1.1 UDP→TCP MTU failover, SIP-trace
+    /// publishing) but forwards a caller-supplied per-call outbound
+    /// TLS/WSS identity override to whichever child transport is chosen,
+    /// instead of that transport's baked-in default identity.
+    async fn send_message_with_tls_identity(
+        &self,
+        mut message: Message,
+        destination: SocketAddr,
+        identity: Option<&OutboundTlsConfig>,
+    ) -> TransportResult<()> {
+        let (mut transport_type, mut transport) = self.pick_transport(&message, destination)?;
+
+        if transport_type == TransportType::Udp {
+            if let Message::Request(ref req) = message {
+                let size = message.to_bytes().len();
+                let limit = transport.max_safe_message_size();
+                if size > limit {
+                    match self.transports.get(&TransportType::Tcp) {
+                        Some(tcp) => {
+                            debug!(
+                                "MultiplexedTransport: {} is {} bytes (UDP limit {}), failing over to TCP per RFC 3261 §18.1.1",
+                                req.method(), size, limit
+                            );
+                            if let Message::Request(ref mut req_mut) = message {
+                                crate::transaction::utils::set_top_via_protocol(req_mut, "TCP");
+                            }
+                            transport_type = TransportType::Tcp;
+                            transport = tcp.clone();
+                        }
+                        None => {
+                            warn!(
+                                "MultiplexedTransport: {} is {} bytes (UDP limit {}) and no TCP transport is registered; refusing to send",
+                                req.method(), size, limit
+                            );
+                            return Err(TransportError::MessageTooLarge(size));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(trace) = &self.sip_trace {
+            let local_addr = transport.local_addr().unwrap_or(self.local_addr);
+            trace.publish(
+                SipTraceDirection::Outbound,
+                transport_type,
+                local_addr,
+                destination,
+                &message,
+            );
+        }
+        transport
+            .send_message_with_tls_identity(message, destination, identity)
             .await
     }
 

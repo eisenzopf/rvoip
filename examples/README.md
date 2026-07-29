@@ -8,18 +8,20 @@ a standalone Cargo project with its own README and (for multi-process demos) a
 ## Maturity scope
 
 Examples 01-10 target **`rvoip-sip`, the beta-qualified product** — the only
-workspace product covered by the SIP release gate. Examples 11-14 demonstrate
+workspace product covered by the SIP release gate. Examples 11-15 demonstrate
 available developer-preview products: the AI harness and vCon path,
-cross-transport WebRTC-to-SIP escalation, Amazon Connect integration, and
-hosted Vapi voice agents.
+cross-transport WebRTC-to-SIP escalation, Amazon Connect integration, hosted
+Vapi voice agents, and real ICE (RFC 8445) connectivity behind rvoip-sip's
+off-by-default `ice` feature and the alpha-tier `rvoip-nat-core` crate.
 
 Beta media defaults to **PCMU/PCMA**; the fully integrated optional
 **G.729A/G.729AB** path is developer preview and is not exercised here.
 Transports are **UDP** (interop-tested) and **TCP/TLS** (supported), with
 **SDES-SRTP** in the qualified SIP media envelope. **Opus/G.722** are
-developer-preview additions. **DTLS-SRTP, ICE, external TURN configuration,
-and WebRTC are available as developer previews outside the SIP beta gate.**
-The source of truth is
+developer-preview additions. **DTLS-SRTP, ICE (RFC 8445, host +
+server-reflexive only, no TURN), external TURN configuration, and WebRTC are
+available as developer previews outside the SIP beta gate** — see example 15
+for real ICE connectivity checks. The source of truth is
 [`crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md`](../crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md).
 
 ## Recommended path
@@ -46,6 +48,7 @@ The source of truth is
 | 12 | [customer-escalation-sip-webrtc](12-customer-escalation-sip-webrtc/) | Browser WebRTC chat escalates to Alice's SIP phone | `rvoip::app` gateway API | `cargo run -- --auto-proof` |
 | 13 | [sip-to-amazon-connect](13-sip-to-amazon-connect/) | SIP headers become Amazon Connect attributes with a live audio bridge | `rvoip-amazon-connect` | `cargo run` |
 | 14 | [vapi-agent](14-vapi-agent/) | One server accepts SIP or WebRTC callers and attaches a Vapi voice agent | `rvoip::app` + `rvoip::vapi` | `cargo run -- --transport sip\|webrtc` |
+| 15 | [ice-nat-traversal](14-ice-nat-traversal/) | Real RFC 8445 ICE connectivity check | `Config::enable_ice` (`ice` feature) | `./run_demo.sh` |
 
 ## Conventions
 

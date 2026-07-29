@@ -416,6 +416,10 @@ pub struct InviteRequestOptions {
     pub supported_100rel: bool,
     /// Headers appended after the stack stamps Call-ID/CSeq/Via/Max-Forwards.
     pub extra_headers: Vec<TypedHeader>,
+    /// Per-call outbound TLS/WSS client identity override (client
+    /// cert/truststore/SNI). `None` uses the process's default transport
+    /// identity, same as omitting this field entirely.
+    pub tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
 }
 
 /// Structural inputs for an authenticated retry of an initial INVITE.
@@ -727,6 +731,7 @@ impl fmt::Debug for InviteRequestOptions {
             )
             .field("supported_100rel", &self.supported_100rel)
             .field("extra_header_count", &self.extra_headers.len())
+            .field("tls_override_present", &self.tls_override.is_some())
             .finish()
     }
 }
@@ -919,6 +924,7 @@ mod retained_request_debug_tests {
             outbound_proxy_uri: Some(format!("sip:{SECRET}@proxy.invalid").parse().unwrap()),
             supported_100rel: true,
             extra_headers: vec![secret_header()],
+            tls_override: None,
         };
         let subscribe = SubscribeRequestOptions {
             event: SECRET.into(),

@@ -324,6 +324,24 @@ pub enum SipContactMode {
     RegisteredFlowSymmetric,
 }
 
+/// Which SRTP keying mechanism to offer when [`Config::offer_srtp`] is set.
+///
+/// The two are mutually exclusive on the wire: SDES carries the raw
+/// master key in the SDP itself (`a=crypto:`); DTLS-SRTP carries only a
+/// certificate fingerprint (`a=fingerprint`/`a=setup`) and derives keys
+/// from a real DTLS 1.2 handshake run over the media port. Requires the
+/// `dtls-srtp` feature to actually run the handshake — with it off,
+/// `DtlsSrtp` silently behaves like `Sdes` is unset (offers stay
+/// SDES/plaintext) rather than failing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SrtpKeyingMode {
+    /// RFC 4568 Security Descriptions — the long-standing default.
+    #[default]
+    Sdes,
+    /// RFC 5763/5764 DTLS-SRTP.
+    DtlsSrtp,
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -367,6 +385,29 @@ pub enum MediaMode {
         /// RTP port to advertise in SDP when no public media port override is set.
         sdp_rtp_port: u16,
     },
+}
+
+/// Who decides how an inbound re-INVITE that carries an SDP offer gets
+/// answered.
+///
+/// This only affects a re-INVITE that carries SDP. RFC 3261 §14.2
+/// delayed-offer re-INVITEs (no body) are always handled automatically
+/// regardless of this setting, since generating a fresh offer and
+/// completing the exchange from the ACK isn't a decision an application
+/// can usefully weigh in on. UPDATE (RFC 3311) is also always automatic:
+/// that RFC itself recommends against deferring to user/application
+/// interaction for UPDATE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReinvitePolicy {
+    /// Negotiate and answer every re-INVITE automatically (the historical
+    /// behavior, and still the default).
+    #[default]
+    Automatic,
+    /// Hold a re-INVITE that carries SDP and deliver it to the
+    /// application as an [`crate::api::incoming_reinvite::IncomingReinvite`],
+    /// which the application resolves with `accept_with_answer` or
+    /// `reject`.
+    ApplicationControlled,
 }
 
 /// SIP media NAT behavior kept as a source-compatible sidecar to [`Config`].
@@ -2055,6 +2096,40 @@ pub struct Config {
     /// by peers.
     pub tls_advertised_addr: Option<SocketAddr>,
 
+    /// Whether to enable WebSocket (WS/WSS) SIP transport.
+    ///
+    /// When `true`, a plain WebSocket listener is started on
+    /// [`Config::ws_bind_addr`] (default `0.0.0.0:5080`). If TLS is also
+    /// configured ([`Config::tls_cert_path`] + [`Config::tls_key_path`]), a
+    /// secure WebSocket (WSS) listener is additionally started on
+    /// [`Config::wss_bind_addr`] (default `0.0.0.0:5081`).
+    ///
+    /// Default: `false`.
+    pub enable_ws: bool,
+
+    /// Optional local bind address for the plain WebSocket (WS) SIP listener.
+    ///
+    /// Must use a port that does not conflict with [`Config::bind_addr`] (used
+    /// for UDP/TCP) or [`Config::tls_bind_addr`] (used for TLS).
+    /// When `None` and [`Config::enable_ws`] is `true`, defaults to
+    /// `0.0.0.0:5080`.
+    pub ws_bind_addr: Option<SocketAddr>,
+
+    /// Optional advertised address for the WS listener — used in Via
+    /// sent-by and fallback Contact generation. Bind can be `0.0.0.0`,
+    /// while this must be routable by peers.
+    pub ws_advertised_addr: Option<SocketAddr>,
+
+    /// Optional local bind address for the secure WebSocket (WSS) SIP
+    /// listener. Requires [`Config::tls_cert_path`] and
+    /// [`Config::tls_key_path`] to be set. When `None` and WSS is active,
+    /// defaults to `0.0.0.0:5081`.
+    pub wss_bind_addr: Option<SocketAddr>,
+
+    /// Optional advertised address for the WSS listener — used in Via
+    /// sent-by and fallback Contact generation.
+    pub wss_advertised_addr: Option<SocketAddr>,
+
     /// Optional Contact URI override used by rvoip-sip-dialog for
     /// dialog-creating and target-refresh requests. Registrations can
     /// still override Contact per REGISTER via [`Registration`].
@@ -2073,6 +2148,12 @@ pub struct Config {
 
     /// Optional PEM-encoded client certificate chain for mutual TLS.
     /// Leave unset for normal server-authenticated SIP TLS.
+    ///
+    /// This is the *process-wide default* identity, baked into the
+    /// TLS/WSS transport at startup. A single call can override it with
+    /// [`crate::OutboundTlsConfig`] via
+    /// [`crate::api::send::outbound_call::OutboundCallBuilder::with_transport_security`]
+    /// without affecting any other call.
     pub tls_client_cert_path: Option<std::path::PathBuf>,
 
     /// Optional PEM-encoded PKCS#8 private key matching
@@ -2170,6 +2251,13 @@ pub struct Config {
     /// preference.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
+    /// Which SRTP keying mechanism to offer, when `offer_srtp` is set.
+    /// Default: [`SrtpKeyingMode::Sdes`], the long-standing behavior.
+    /// Set to [`SrtpKeyingMode::DtlsSrtp`] for a real DTLS 1.2 handshake
+    /// instead of carrying the master key in the SDP — requires the
+    /// `dtls-srtp` feature to actually run the handshake.
+    pub srtp_keying: SrtpKeyingMode,
+
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
     ///
@@ -2192,6 +2280,11 @@ pub struct Config {
     /// RTP allocation but still emits SDP; useful for signaling-only services
     /// and controlled tests.
     pub media_mode: MediaMode,
+
+    /// Who decides how an inbound re-INVITE carrying SDP gets answered.
+    /// Default: [`ReinvitePolicy::Automatic`]. See that type for exactly
+    /// which re-INVITE/UPDATE shapes are affected.
+    pub reinvite_policy: ReinvitePolicy,
 
     /// Optional capacity hint for media-core session and RTP port indexes.
     ///
@@ -2218,14 +2311,36 @@ pub struct Config {
     /// [`Config::local_ip`]. This is best-effort address discovery: it is
     /// useful for simple cone-NAT labs, but it does not guarantee the exact
     /// mapping of a later per-call RTP socket. Symmetric NATs and production
-    /// Internet edges should use a static [`Config::media_public_addr`] today
-    /// or ICE in a future WebRTC/edge layer. Failure mode: probe timeout /
+    /// Internet edges should use a static [`Config::media_public_addr`] or
+    /// [`Config::enable_ice`]. Failure mode: probe timeout /
     /// unreachable / unparseable response → log a warning and fall back to
     /// the local interface address. STUN is intentionally soft-fail — the
     /// call path is never blocked on it.
     ///
+    /// Also used as the STUN server list for [`Config::enable_ice`]'s
+    /// per-call `IceAgent`s, when set — server-reflexive candidate
+    /// gathering needs a STUN server the same way the boot-time probe
+    /// does.
+    ///
     /// Default: `None` — no probe runs (today's behaviour).
     pub stun_server: Option<String>,
+
+    /// Enable real ICE (RFC 8445) connectivity checks per call: gather
+    /// host/server-reflexive candidates, advertise `a=ice-ufrag`/
+    /// `a=ice-pwd`/`a=candidate` in SDP, run connectivity checks against
+    /// the peer's candidates (requires the `ice` feature; a no-op
+    /// without it), and override the RTP remote address with the
+    /// winning pair once found. Orthogonal to [`Config::srtp_keying`] —
+    /// combine with SDES or DTLS-SRTP freely. Call setup and audio flow
+    /// are never gated on ICE completing; see
+    /// [`crate::api::events::Event::IceConnected`].
+    ///
+    /// Requires [`Config::media_mode`] to be [`MediaMode::Enabled`] —
+    /// ICE needs a live RTP socket to bind to. `Config::validate`
+    /// rejects `enable_ice = true` with `MediaMode::SignalingOnly`.
+    ///
+    /// Default: `false`.
+    pub enable_ice: bool,
 
     /// RFC 3389 Comfort Noise (PT 13) advertisement.
     ///
@@ -2664,6 +2779,7 @@ impl std::fmt::Debug for Config {
                 &self.media_public_addr.is_some(),
             )
             .field("media_mode", &self.media_mode)
+            .field("reinvite_policy", &self.reinvite_policy)
             .field("media_session_capacity", &self.media_session_capacity)
             .field("stun_configured", &self.stun_server.is_some())
             .field("offered_codec_count", &self.offered_codecs.len())
@@ -2800,6 +2916,11 @@ impl Config {
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             tls_advertised_addr: None,
+            enable_ws: false,
+            ws_bind_addr: None,
+            ws_advertised_addr: None,
+            wss_bind_addr: None,
+            wss_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -2813,13 +2934,16 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            reinvite_policy: ReinvitePolicy::Automatic,
             media_session_capacity: None,
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
+            enable_ice: false,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
@@ -2911,6 +3035,11 @@ impl Config {
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             tls_advertised_addr: None,
+            enable_ws: false,
+            ws_bind_addr: None,
+            ws_advertised_addr: None,
+            wss_bind_addr: None,
+            wss_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -2924,13 +3053,16 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            reinvite_policy: ReinvitePolicy::Automatic,
             media_session_capacity: None,
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             stun_server: None,
+            enable_ice: false,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
@@ -3504,6 +3636,14 @@ impl Config {
     /// Set media allocation behavior.
     pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
         self.media_mode = mode;
+        self
+    }
+
+    /// Set who decides how an inbound re-INVITE carrying SDP gets
+    /// answered. See [`ReinvitePolicy`] for exactly which re-INVITE/UPDATE
+    /// shapes this affects.
+    pub fn with_reinvite_policy(mut self, policy: ReinvitePolicy) -> Self {
+        self.reinvite_policy = policy;
         self
     }
 
@@ -4393,6 +4533,13 @@ impl Config {
         if self.offer_srtp && self.srtp_offered_suites.is_empty() {
             return Err(SessionError::ConfigError(
                 "offer_srtp=true requires at least one srtp_offered_suites entry".to_string(),
+            ));
+        }
+        if self.enable_ice && matches!(self.media_mode, MediaMode::SignalingOnly { .. }) {
+            return Err(SessionError::ConfigError(
+                "enable_ice=true requires MediaMode::Enabled — ICE needs a live RTP socket \
+                 to bind to, which MediaMode::SignalingOnly doesn't allocate"
+                    .to_string(),
             ));
         }
         if matches!(
@@ -8549,12 +8696,22 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_reinvite_policy(config.reinvite_policy);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
             config.offer_srtp,
             config.srtp_required,
             config.srtp_offered_suites.clone(),
         );
+        // RFC 5763/5764 DTLS-SRTP: offer it instead of SDES when
+        // configured. No-op without the `dtls-srtp` feature.
+        media_adapter_inner.set_dtls_srtp_policy(
+            config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
+        );
+        // RFC 8445 ICE: gather candidates and run connectivity checks
+        // when configured. No-op without the `ice` feature. Reuses
+        // `Config::stun_server` for server-reflexive candidates.
+        media_adapter_inner.set_ice_policy(config.enable_ice, config.stun_server.clone());
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
@@ -11301,11 +11458,13 @@ impl UnifiedCoordinator {
         let transport_config = TransportManagerConfig {
             enable_udp: true,
             enable_tcp: true,
-            enable_ws: false,
+            enable_ws: config.enable_ws,
             enable_tls,
             tls_role,
             bind_addresses: vec![config.bind_addr],
             tls_bind_addresses: config.tls_bind_addr.into_iter().collect(),
+            ws_bind_addresses: config.ws_bind_addr.into_iter().collect(),
+            wss_bind_addresses: config.wss_bind_addr.into_iter().collect(),
             tls_cert_path: config
                 .tls_cert_path
                 .as_ref()
@@ -11438,6 +11597,8 @@ impl UnifiedCoordinator {
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
+                dialog.ws_advertised_local_address = config.ws_advertised_addr;
+                dialog.wss_advertised_local_address = config.wss_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
                 dialog.event_dispatch_workers = config.sip_dialog_dispatch_workers;
                 dialog.event_dispatch_queue_capacity = config.sip_dialog_dispatch_queue_capacity;

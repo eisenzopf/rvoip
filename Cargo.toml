@@ -19,6 +19,7 @@ members = [
     "crates/media/media-core",
     "crates/media/codec-core",
     "crates/media/rtp-core",
+    "crates/media/nat-core",
     # Optional OS audio-device bridge — top-of-stack helper that depends UP on
     # rvoip-sip (so it sits with the SIP product, not below it).
     "crates/media/rvoip-audio-device",
@@ -247,6 +248,10 @@ rvoip-moq-relay     = { path = "crates/moq/rvoip-moq-relay", version = "0.3.3", 
 rvoip-moq           = { path = "crates/moq/rvoip-moq", version = "0.3.3" }
 rvoip-rtc           = { path = "crates/webrtc/rvoip-rtc", version = "0.3.3" }
 rvoip-webrtc-stack  = { path = "crates/webrtc/rvoip-webrtc-stack", version = "0.3.3" }
+# rvoip-nat-core is develop-only (ICE/RFC 8445), independently versioned at
+# alpha-tier 0.1.0 rather than tracking the workspace release version — see
+# the note in README.md's workspace crate map.
+rvoip-nat-core      = { path = "crates/media/nat-core", version = "0.1.0" }
 rvoip-webrtc        = { path = "crates/webrtc/rvoip-webrtc", version = "0.3.3" }
 rvoip-identity      = { path = "crates/identity/rvoip-identity", version = "0.3.3" }
 rvoip-client        = { path = "crates/rvoip-client", version = "0.3.3" }

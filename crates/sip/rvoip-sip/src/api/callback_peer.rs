@@ -2567,6 +2567,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
+                | Event::IceConnected { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. }
                 // SIP_API_DESIGN_2 Phase A: detailed-response events are
@@ -2615,6 +2616,13 @@ impl<H: CallHandler> CallbackPeer<H> {
                     register.set_coordinator(coordinator.clone());
                     handler.on_register_received(register).await;
                 }
+                // No dedicated CallHandler hook (unlike IncomingCall/
+                // UpdateReceived/etc). The generic `handler.on_event`
+                // call above already delivered the raw event; the
+                // application builds an `IncomingReinvite` itself via
+                // `IncomingReinvite::for_call(coordinator, call_id)`
+                // when it wants to act on it.
+                Event::IncomingReinvite { .. } => {}
             }
             dispatch_guard.finish_success();
         });
@@ -3135,6 +3143,10 @@ mod tests {
                 profile: MediaSecurityProfile::RtpSavp,
                 contexts_installed: true,
             },
+            Event::IceConnected {
+                call_id: call_id.clone(),
+                selected_addr: "127.0.0.1:5000".parse().unwrap(),
+            },
             Event::ReferReceived {
                 call_id: call_id.clone(),
                 refer_to: "sip:c@example.test".into(),
@@ -3236,7 +3248,7 @@ mod tests {
             seen.iter()
                 .filter(|value| value.as_str() == "event")
                 .count(),
-            25
+            26
         );
         assert_eq!(
             seen.iter()

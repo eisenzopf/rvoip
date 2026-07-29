@@ -366,19 +366,27 @@ transitions:
         reason: "OK"
     description: "Accept after early media (reuse negotiated SDP)"
 
-  # UAS receives ACK after 200 OK
+  # UAS receives ACK after 200 OK. `CompleteAckNegotiation` is a no-op
+  # unless the 200 OK carried a delayed offer (RFC 3261 §14.2), see that
+  # action's doc comment. `sdp_negotiated` is deliberately not stamped here
+  # unconditionally: it's already true from NegotiateSDPAsUAS for the
+  # common (offer-in-INVITE) case, and CompleteAckNegotiation itself sets
+  # it on a successful delayed-offer completion. `dialog_established` is
+  # unconditional though, since the 3-way handshake completing is exactly
+  # what that flag means, independent of whether media negotiation
+  # succeeded.
   - role: "UAS"
     state: "Answering"
     event:
       type: "DialogACK"
     next_state: "Active"
     actions:
+      - type: "CompleteAckNegotiation"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
       - type: "ArmSessionRefreshTimer"
     conditions:
       dialog_established: true
-      sdp_negotiated: true
     publish:
       - "CallEstablished"
     description: "Call established after ACK"
@@ -1034,22 +1042,30 @@ transitions:
       - type: "ClearPendingReinvite"
     description: "Clear in-flight builder-API re-INVITE tracker on Timer B (RFC 3261 §14.1)"
 
-  # RFC 3311 / RFC 4028 §9 — UPDATE for session-timer refresh carries no
-  # SDP, so we skip NegotiateSDPAsUAS. If a future UPDATE body is
-  # present for mid-dialog modification, the executor has already
-  # stashed it into session.remote_sdp; extending this transition to
-  # renegotiate is a future enhancement.
+  # RFC 3311 / RFC 4028 §9. A bodyless UPDATE (the common session-timer
+  # refresh case) skips NegotiateSDPAsUAS entirely, since there's no
+  # offer to negotiate against, and SendSIPResponse omits the body for
+  # this specific triggering event so the 200 OK doesn't turn into an
+  # unsolicited offer with no way to carry an answer back. An UPDATE that
+  # does carry SDP (RFC 3311 mid-dialog modification) gets negotiated
+  # automatically by the same NegotiateSDPAsUAS action re-INVITE uses;
+  # RFC 3311 recommends UPDATE be resolved promptly without deferring to
+  # application/user interaction, so unlike re-INVITE, an UPDATE offer
+  # never goes through ReinvitePolicy or IncomingReinvite. A genuine
+  # negotiation failure gets the same 488 + Warning response
+  # NegotiateSDPAsUAS already sends for re-INVITE.
   - role: "Both"
     state: "Active"
     event:
       type: "UpdateReceived"
     next_state: "Active"
     actions:
+      - type: "NegotiateSDPAsUAS"
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
       - type: "ArmSessionRefreshTimer"
-    description: "UAS answers UPDATE (session-timer refresh) while Active"
+    description: "UAS answers UPDATE (session-timer refresh, or negotiates SDP if present) while Active"
 
   - role: "Both"
     state: "OnHold"
@@ -1057,6 +1073,7 @@ transitions:
       type: "UpdateReceived"
     next_state: "OnHold"
     actions:
+      - type: "NegotiateSDPAsUAS"
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"

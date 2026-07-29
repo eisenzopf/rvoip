@@ -2840,18 +2840,44 @@ impl DialogManager {
             .and_then(|g| g.as_ref().and_then(|c| c.tls_advertised_local_address()))
     }
 
+    /// Configured WS advertised sent-by address, if supplied.
+    pub fn ws_advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.ws_advertised_local_address()))
+    }
+
+    /// Configured WSS advertised sent-by address, if supplied.
+    pub fn wss_advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.wss_advertised_local_address()))
+    }
+
     /// Local sent-by address for an outbound request targeting `uri`.
     /// TLS requests prefer the configured TLS advertised address, then the
     /// TLS bind address, then the base bind address. Other transports prefer
     /// the configured SIP advertised address, then the base bind address.
     pub fn local_address_for_uri(&self, uri: &Uri) -> SocketAddr {
-        if select_transport_for_uri(uri) == TransportType::Tls {
-            self.tls_advertised_local_address()
+        match select_transport_for_uri(uri) {
+            TransportType::Tls => self
+                .tls_advertised_local_address()
                 .or_else(|| self.tls_local_address())
-                .unwrap_or(self.local_address)
-        } else {
-            self.advertised_local_address()
-                .unwrap_or(self.local_address)
+                .unwrap_or(self.local_address),
+            TransportType::Ws => self
+                .ws_advertised_local_address()
+                .or_else(|| self.advertised_local_address())
+                .unwrap_or(self.local_address),
+            TransportType::Wss => self
+                .wss_advertised_local_address()
+                .or_else(|| self.tls_advertised_local_address())
+                .or_else(|| self.tls_local_address())
+                .unwrap_or(self.local_address),
+            _ => self
+                .advertised_local_address()
+                .unwrap_or(self.local_address),
         }
     }
 
@@ -4078,8 +4104,26 @@ impl DialogManager {
         remote_uri: rvoip_sip_core::Uri,
         call_id: Option<String>,
     ) -> DialogResult<DialogId> {
+        self.create_outgoing_dialog_with_tls_identity(local_uri, remote_uri, call_id, None)
+            .await
+    }
+
+    /// Same as [`Self::create_outgoing_dialog`] but with a per-call
+    /// outbound TLS/WSS client identity override. `None` behaves
+    /// identically to the identity-less method.
+    pub async fn create_outgoing_dialog_with_tls_identity(
+        &self,
+        local_uri: rvoip_sip_core::Uri,
+        remote_uri: rvoip_sip_core::Uri,
+        call_id: Option<String>,
+        tls_override: Option<rvoip_sip_transport::OutboundTlsConfig>,
+    ) -> DialogResult<DialogId> {
         <Self as super::dialog_operations::DialogStore>::create_outgoing_dialog(
-            self, local_uri, remote_uri, call_id,
+            self,
+            local_uri,
+            remote_uri,
+            call_id,
+            tls_override,
         )
         .await
     }

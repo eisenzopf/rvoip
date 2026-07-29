@@ -43,6 +43,8 @@ use crate::relay::controller::codec_fallback::CodecFallbackManager;
 use crate::types::conference::{ConferenceMixingConfig, ConferenceMixingEvent};
 use crate::types::{AudioFrame, DialogId, MediaDirection, MediaSessionId};
 
+#[cfg(feature = "ice")]
+use rvoip_nat_core as nat_core;
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::transport::{
     AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig, SymmetricRtpPolicy,
@@ -83,6 +85,19 @@ impl Drop for MediaPortReservationGuard {
             });
         }
     }
+}
+
+/// Which side of the DTLS handshake a dialog plays, per RFC 4145/5763's
+/// `a=setup` active/passive mapping (the caller resolves the SDP
+/// `a=setup` role to this before calling
+/// [`MediaSessionController::run_dtls_handshake_and_install`]).
+#[cfg(feature = "dtls-srtp")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DtlsRole {
+    /// Initiates the handshake (`a=setup:active`).
+    Client,
+    /// Accepts the handshake (`a=setup:passive`).
+    Server,
 }
 
 #[cfg(feature = "g729")]
@@ -1084,6 +1099,206 @@ impl MediaSessionController {
             })?;
         udp_transport.set_srtp_contexts(send_ctx, recv_ctx).await;
         info!("Installed SDES-SRTP contexts on dialog {}", dialog_id);
+        Ok(())
+    }
+
+    /// Run a real DTLS-SRTP handshake (RFC 5764) for a dialog's RTP session
+    /// and install the resulting keys the same way [`Self::install_srtp_contexts`]
+    /// installs SDES ones — this is the DTLS-SRTP equivalent of that call,
+    /// sharing the same underlying `UdpRtpTransport::set_srtp_contexts`.
+    ///
+    /// Must be called after [`Self::start_media`], with `remote_addr` set to
+    /// the peer's RTP address from its SDP answer/offer (the handshake runs
+    /// over the same socket RTP/RTCP already use, demultiplexed by the
+    /// first byte of each datagram — see `rvoip_rtp_core::transport::dtls_bridge`).
+    /// The caller is responsible for checking the returned
+    /// `remote_fingerprint_sha256` against the SDP `a=fingerprint` the peer
+    /// advertised; this function only runs the handshake, it has no notion
+    /// of SDP or which fingerprint was promised.
+    #[cfg(feature = "dtls-srtp")]
+    pub async fn run_dtls_handshake_and_install(
+        &self,
+        dialog_id: &DialogId,
+        identity: rtp_core::dtls_srtp::DtlsIdentity,
+        role: DtlsRole,
+        remote_addr: std::net::SocketAddr,
+        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
+        timeout: std::time::Duration,
+    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let conn = {
+            let session_guard = session_arc.lock().await;
+            let transport = session_guard.transport();
+            let udp_transport = transport
+                .as_any()
+                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+                .ok_or_else(|| {
+                    Error::config(
+                        "run_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
+                            .to_string(),
+                    )
+                })?;
+            udp_transport.set_remote_rtp_addr(remote_addr).await;
+            udp_transport
+                .dtls_conn_adapter()
+                .map_err(|e| Error::config(format!("dtls_conn_adapter: {e}")))?
+        };
+
+        let handshake = async {
+            match role {
+                DtlsRole::Client => {
+                    rtp_core::dtls_srtp::handshake_client(conn, identity, srtp_profiles).await
+                }
+                DtlsRole::Server => {
+                    rtp_core::dtls_srtp::handshake_server(conn, identity, srtp_profiles).await
+                }
+            }
+        };
+
+        let result = tokio::time::timeout(timeout, handshake)
+            .await
+            .map_err(|_| Error::config("DTLS-SRTP handshake timed out".to_string()))?
+            .map_err(|e| Error::config(format!("DTLS-SRTP handshake failed: {e}")))?;
+
+        let (send_key, recv_key) = match role {
+            DtlsRole::Client => (
+                result.client_write_key.clone(),
+                result.server_write_key.clone(),
+            ),
+            DtlsRole::Server => (
+                result.server_write_key.clone(),
+                result.client_write_key.clone(),
+            ),
+        };
+        let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
+        let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
+
+        self.install_srtp_contexts(dialog_id, send_ctx, recv_ctx)
+            .await?;
+        info!("Installed DTLS-SRTP contexts on dialog {}", dialog_id);
+
+        Ok(result)
+    }
+
+    /// Create a real ICE (RFC 8445) agent bound to a dialog's shared RTP
+    /// socket and start pumping the socket's demuxed STUN datagrams into
+    /// it — the ICE equivalent of [`Self::run_dtls_handshake_and_install`]'s
+    /// scope: this is the one step that needs the live transport, so it
+    /// lives here rather than in `rvoip-sip` directly.
+    ///
+    /// `ip_filter`, when set, restricts host candidate gathering to IP
+    /// addresses it accepts — the caller passes one derived from
+    /// `Config::local_ip` when that's a concrete (non-unspecified)
+    /// address, so an operator who explicitly bound to one interface
+    /// doesn't have unrelated interfaces' addresses advertised to peers.
+    ///
+    /// The returned agent is otherwise driven entirely by its own public
+    /// API (`gather_candidates`, `add_remote_candidate`, `connect`) —
+    /// none of those need the transport, so the caller (`rvoip-sip`'s
+    /// `MediaAdapter`) calls them directly rather than routing back
+    /// through this controller, mirroring how DTLS identity generation
+    /// (`rtp_core::dtls_srtp::generate_identity`) is also called directly
+    /// by `rvoip-sip` rather than through a controller method.
+    #[cfg(feature = "ice")]
+    pub async fn create_ice_agent(
+        &self,
+        dialog_id: &DialogId,
+        role: nat_core::IceRole,
+        stun_servers: Vec<String>,
+        ip_filter: Option<Arc<dyn Fn(std::net::IpAddr) -> bool + Send + Sync>>,
+    ) -> Result<Arc<nat_core::IceAgent>> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let (socket_adapter, mut stun_rx) = {
+            let session_guard = session_arc.lock().await;
+            let transport = session_guard.transport();
+            let udp_transport = transport
+                .as_any()
+                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+                .ok_or_else(|| {
+                    Error::config(
+                        "create_ice_agent: RTP session is not a UdpRtpTransport".to_string(),
+                    )
+                })?;
+            (
+                udp_transport.ice_conn_adapter(),
+                udp_transport.subscribe_stun_datagrams(),
+            )
+        };
+
+        let agent = Arc::new(
+            nat_core::IceAgent::new_with_shared_socket_and_ip_filter(
+                role,
+                &stun_servers,
+                socket_adapter,
+                ip_filter,
+            )
+            .await
+            .map_err(|e| Error::config(format!("create_ice_agent: {e}")))?,
+        );
+
+        // Feed inbound STUN datagrams the transport's own demux loop
+        // has already classified into the agent for the life of the
+        // dialog's socket — same "pump a channel into the agent"
+        // pattern `ice_transport_bridge_test.rs` proves works, just
+        // driven from inside the controller instead of a test body.
+        let pump_agent = agent.clone();
+        tokio::spawn(async move {
+            while let Some((buf, addr)) = stun_rx.recv().await {
+                pump_agent.handle_incoming_stun(&buf, addr).await;
+            }
+        });
+
+        info!(
+            "Created ICE agent (role {:?}) for dialog {}",
+            role, dialog_id
+        );
+        Ok(agent)
+    }
+
+    /// Override a dialog's RTP remote address with an ICE-selected
+    /// candidate pair, once [`nat_core::IceAgent::connect`] resolves.
+    /// Safe to call after [`Self::establish_media_flow`] has already set
+    /// the SDP-derived address — same idempotent re-call pattern
+    /// [`Self::run_dtls_handshake_and_install`] already relies on.
+    #[cfg(feature = "ice")]
+    pub async fn update_ice_selected_addr(
+        &self,
+        dialog_id: &DialogId,
+        addr: std::net::SocketAddr,
+    ) -> Result<()> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| r.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "update_ice_selected_addr: RTP session is not a UdpRtpTransport".to_string(),
+                )
+            })?;
+        udp_transport.set_remote_rtp_addr(addr).await;
+        info!(
+            "ICE selected address {} applied to dialog {}",
+            addr, dialog_id
+        );
         Ok(())
     }
 

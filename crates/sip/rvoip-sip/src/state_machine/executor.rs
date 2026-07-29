@@ -1385,7 +1385,7 @@ fn state_machine_event_name(event: &EventType) -> &'static str {
         EventType::InternalCheckReady => "InternalCheckReady",
         EventType::DialogCreated { .. } => "DialogCreated",
         EventType::Dialog200OK => "Dialog200OK",
-        EventType::DialogACK => "DialogACK",
+        EventType::DialogACK { .. } => "DialogACK",
         EventType::DialogCANCEL => "DialogCANCEL",
         EventType::ReceiveNOTIFY => "ReceiveNOTIFY",
         _ => "Other",
@@ -2991,24 +2991,79 @@ impl StateMachine {
                         events_published: vec![],
                     });
                 }
-                // Stash the peer's new SDP offer so NegotiateSDPAsUAS
-                // picks it up when it fires later in this transition.
-                // Force renegotiation — the peer's offer supersedes any
-                // previously negotiated remote SDP.
+                // Stash the peer's new SDP offer as pending so
+                // NegotiateSDPAsUAS picks it up when it fires later in
+                // this transition. This is deliberately not written to
+                // `remote_sdp` here, since that field holds the last
+                // committed SDP, and a re-INVITE that turns out to fail
+                // negotiation, or that gets rejected on the app-controlled
+                // path, must leave the call running on its previous media
+                // untouched. RFC 3264 doesn't tear down the session just
+                // because an offer/answer exchange failed.
                 if let Some(sdp_data) = sdp {
-                    session.remote_sdp = Some(sdp_data.clone());
+                    session.pending_remote_offer = Some(sdp_data.clone());
+                    // This isn't a rollback-relevant field the way
+                    // remote_sdp is, since it doesn't hold committed data,
+                    // but it still needs resetting so NegotiateSDPAsUAS's
+                    // pre-set-SDP shortcut (meant for e.g.
+                    // `accept_call_with_sdp` staging an answer ahead of
+                    // this transition) can't misfire by reusing a stale
+                    // `true` left over from the call's last successful
+                    // negotiation.
                     session.sdp_negotiated = false;
                 }
             }
             EventType::UpdateReceived {
                 sdp: Some(sdp_data),
             } => {
+                // RFC 6337 only allows one active offer/answer exchange per
+                // dialog. Same UAS-side glare check as ReinviteReceived
+                // above, extended to a peer UPDATE that carries an offer of
+                // its own while we already have an outbound builder-API
+                // re-INVITE in flight.
+                if session.pending_reinvite.is_some() {
+                    info!(
+                        "RFC 6337 UAS-side glare: peer UPDATE arrived while our \
+                         builder-API re-INVITE is in flight on session {} — \
+                         responding 491 Request Pending",
+                        session.session_id
+                    );
+                    let terminal = actions::send_exact_inbound_final_response(
+                        &session.session_id,
+                        inbound_response_input.as_mut(),
+                        &self.dialog_adapter,
+                        491,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    if let Some(error) = terminal.terminal_error {
+                        return Err(error);
+                    }
+                    return Ok(ProcessEventResult {
+                        old_state,
+                        next_state: None,
+                        transition: None,
+                        actions_executed: vec![],
+                        events_published: vec![],
+                    });
+                }
                 // RFC 4028 UPDATE for session-timer refresh carries no SDP,
                 // but if a peer sends an UPDATE body (RFC 3311 session
-                // modification), record it so a future transition with
+                // modification), record it as pending for the same reason
+                // as ReinviteReceived above, so a future transition with
                 // NegotiateSDPAsUAS can act on it.
-                session.remote_sdp = Some(sdp_data.clone());
+                session.pending_remote_offer = Some(sdp_data.clone());
                 session.sdp_negotiated = false;
+            }
+            EventType::DialogACK { sdp } => {
+                // Stash the ACK's answer (if any) so `CompleteAckNegotiation`
+                // can consume it later in this same transition. Only
+                // meaningful when a delayed-offer exchange is actually
+                // pending (`pending_local_offer.is_some()`); harmless
+                // otherwise since nothing reads this field unless that's
+                // set.
+                session.ack_answer_sdp = sdp.clone();
             }
             _ => {}
         }

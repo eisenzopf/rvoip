@@ -62,6 +62,7 @@
 mod error;
 
 // Main modules
+pub mod dtmf;
 pub mod packet;
 pub mod session;
 pub mod srtp;
@@ -74,6 +75,8 @@ pub mod api;
 pub mod buffer;
 pub mod csrc;
 pub mod dtls;
+#[cfg(feature = "dtls-webrtc")]
+pub mod dtls_srtp;
 pub mod events;
 pub mod feedback;
 pub mod network;
@@ -104,6 +107,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 // Re-export core types
 pub use error::Error;
 
+// Re-export the RFC 4733 telephone-event codec
+pub use dtmf::{DtmfEvent, TelephoneEvent};
+
 // Re-export common types from packet module
 pub use packet::extension::{
     ids::AUDIO_LEVEL, ids::FRAME_MARKING, ids::SDES, ids::TRANSPORT_CC, ids::VIDEO_ORIENTATION,
@@ -113,10 +119,11 @@ pub use packet::extension::{
 pub use packet::header::RtpHeader;
 pub use packet::rtcp::{
     NtpTimestamp, RtcpApplicationDefined, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye,
-    RtcpPacket, RtcpReceiverReport, RtcpReportBlock, RtcpSenderReport, RtcpSourceDescription,
-    RtcpXrBlock, VoipMetricsBlock,
+    RtcpPacket, RtcpPacketItem, RtcpPacketIter, RtcpReceiverReport, RtcpReportBlock,
+    RtcpSenderReport, RtcpSourceDescription, RtcpXrBlock, VoipMetricsBlock,
 };
 pub use packet::rtp::RtpPacket;
+pub use packet::sequencer::{RtpPacketSequencer, SharedRtpPacketSequencer};
 
 // Re-export session types
 pub use session::{
@@ -170,8 +177,9 @@ pub use api::server::{
 /// Prelude module with commonly used types
 pub mod prelude {
     pub use crate::{
-        Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpSequenceNumber, RtpSession,
-        RtpSessionConfig, RtpSsrc, RtpTimestamp,
+        DtmfEvent, Error, Result, RtpCsrc, RtpHeader, RtpPacket, RtpPacketSequencer,
+        RtpSequenceNumber, RtpSession, RtpSessionConfig, RtpSsrc, RtpTimestamp,
+        SharedRtpPacketSequencer, TelephoneEvent,
     };
 
     pub use crate::packet::rtcp::{
