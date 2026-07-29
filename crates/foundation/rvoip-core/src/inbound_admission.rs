@@ -13,7 +13,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 use crate::adapter::{InboundConnectionContext, RejectReason};
 use crate::connection::Transport;
@@ -203,6 +203,22 @@ pub(crate) struct InboundAdmissionDecision {
     pub(crate) completion: Option<oneshot::Sender<bool>>,
 }
 
+/// Sanitized terminal outcome for one exact inbound connection lifecycle.
+///
+/// This signal is private to the admission ticket and receivers cloned from
+/// it. It does not traverse the normalized observational event bus and
+/// therefore remains available while that connection is still unpublished.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum InboundAdmissionTermination {
+    /// The remote peer cancelled setup before the admission completed.
+    Cancelled,
+    /// The remote peer ended the connection without reporting a failure.
+    RemoteEnded,
+    /// Setup ended because of a transport, adapter, policy, or owner failure.
+    Failed,
+}
+
 /// Installed bounded admission channel and its independent waiter budget.
 pub(crate) struct InboundAdmissionGate {
     pub(crate) sender: mpsc::Sender<InboundAdmission>,
@@ -241,6 +257,7 @@ pub struct InboundAdmission {
     lifecycle_generation: u64,
     orchestrator: Weak<Orchestrator>,
     decision: Option<oneshot::Sender<InboundAdmissionDecision>>,
+    termination: watch::Receiver<Option<InboundAdmissionTermination>>,
     context_taken: bool,
     provisional_media_started: bool,
     staged_data_opened: bool,
@@ -254,6 +271,7 @@ impl InboundAdmission {
         lifecycle_generation: u64,
         orchestrator: Weak<Orchestrator>,
         decision: oneshot::Sender<InboundAdmissionDecision>,
+        termination: watch::Receiver<Option<InboundAdmissionTermination>>,
     ) -> Self {
         Self {
             connection_id,
@@ -262,6 +280,7 @@ impl InboundAdmission {
             lifecycle_generation,
             orchestrator,
             decision: Some(decision),
+            termination,
             context_taken: false,
             provisional_media_started: false,
             staged_data_opened: false,
@@ -281,6 +300,31 @@ impl InboundAdmission {
     /// Adapter observation time retained for diagnostics and policy deadlines.
     pub const fn observed_at(&self) -> DateTime<Utc> {
         self.observed_at
+    }
+
+    /// Subscribe to the terminal outcome of this exact lifecycle generation.
+    ///
+    /// The returned watch is initialized to `None`. The first lifecycle
+    /// retirement changes it exactly once and retains that value, so callers
+    /// cannot miss a terminal event that wins before they begin waiting.
+    pub fn termination_receiver(&self) -> watch::Receiver<Option<InboundAdmissionTermination>> {
+        self.termination.clone()
+    }
+
+    /// Wait for this exact lifecycle generation to terminate.
+    ///
+    /// If the orchestrator itself disappears before it can publish a terminal
+    /// outcome, the lost owner is reported as [`InboundAdmissionTermination::Failed`].
+    pub async fn wait_terminated(&self) -> InboundAdmissionTermination {
+        let mut termination = self.termination.clone();
+        loop {
+            if let Some(outcome) = *termination.borrow_and_update() {
+                return outcome;
+            }
+            if termination.changed().await.is_err() {
+                return InboundAdmissionTermination::Failed;
+            }
+        }
     }
 
     /// Return the complete principal still bound to this live generation.
@@ -409,6 +453,12 @@ impl InboundAdmission {
         let decision = self.decision.take().ok_or(RvoipError::InvalidState(
             "inbound admission was already resolved",
         ))?;
+        if self.termination.borrow().is_some() {
+            drop(decision);
+            return Err(RvoipError::AdmissionRejected(
+                "inbound connection ended during admission",
+            ));
+        }
         let (completion, completed) = oneshot::channel();
         decision
             .send(InboundAdmissionDecision {
@@ -435,6 +485,7 @@ impl fmt::Debug for InboundAdmission {
             .field("context_taken", &self.context_taken)
             .field("provisional_media_started", &self.provisional_media_started)
             .field("staged_data_opened", &self.staged_data_opened)
+            .field("terminated", &self.termination.borrow().is_some())
             .field("resolved", &self.decision.is_none())
             .finish()
     }
@@ -498,6 +549,13 @@ impl Drop for InboundAdmission {
         let Some(decision) = self.decision.take() else {
             return;
         };
+        if self.termination.borrow().is_some() {
+            // The authoritative lifecycle terminal already won. Closing the
+            // decision channel lets the waiter converge without replacing the
+            // retained terminal reason with a policy-generated ServerError.
+            drop(decision);
+            return;
+        }
         let _ = decision.send(InboundAdmissionDecision {
             disposition: InboundAdmissionDisposition::Reject(RejectReason::ServerError),
             completion: None,

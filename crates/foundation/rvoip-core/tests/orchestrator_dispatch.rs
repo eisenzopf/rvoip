@@ -27,7 +27,7 @@ use rvoip_core::operational_events::{
 };
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_core::stream::{MediaStream, QualitySnapshot};
-use rvoip_core::DataMessage;
+use rvoip_core::{DataMessage, InboundAdmissionTermination};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::{
@@ -1544,6 +1544,24 @@ async fn wait_for_admission_outcomes(adapter: &StubAdapter, expected: usize) {
     .expect("admission outcome count reached expected value");
 }
 
+async fn wait_for_admission_termination(
+    mut terminal: tokio::sync::watch::Receiver<Option<InboundAdmissionTermination>>,
+) -> InboundAdmissionTermination {
+    tokio::time::timeout(Duration::from_secs(1), async move {
+        loop {
+            if let Some(termination) = *terminal.borrow_and_update() {
+                return termination;
+            }
+            terminal
+                .changed()
+                .await
+                .expect("admission terminal sender remains live until retirement");
+        }
+    })
+    .await
+    .expect("admission terminal signal deadline")
+}
+
 async fn start_voice_session(orchestrator: &Arc<Orchestrator>) -> SessionId {
     let conversation_id = orchestrator
         .open_conversation(
@@ -2439,6 +2457,113 @@ async fn admission_confirmation_reports_malformed_and_cross_transport_collision(
 }
 
 #[tokio::test]
+async fn pending_admission_terminal_is_retained_before_wait_and_late_accept_fails() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) =
+        prepare_atomic_inbound(&adapter, "tenant-terminal", "cancel-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let admission = admissions.recv().await.unwrap();
+    assert_eq!(*admission.termination_receiver().borrow(), None);
+
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Cancelled,
+        })
+        .await;
+
+    // Subscribe after the adapter terminal has completed. Watch retention
+    // closes the response-before-wait race without a public event subscriber.
+    assert_eq!(
+        admission.wait_terminated().await,
+        InboundAdmissionTermination::Cancelled
+    );
+    assert!(admission.accept().await.is_err());
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id, 1, false)]
+    );
+}
+
+#[tokio::test]
+async fn dropping_ticket_after_cancel_cannot_replace_the_terminal_reason() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, counts) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) = prepare_atomic_inbound(&adapter, "tenant-drop", "drop-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let admission = admissions.recv().await.unwrap();
+    let terminal = admission.termination_receiver();
+
+    adapter.mark_ended(&connection_id);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Cancelled,
+        })
+        .await;
+    drop(admission);
+
+    assert_eq!(
+        wait_for_admission_termination(terminal).await,
+        InboundAdmissionTermination::Cancelled
+    );
+    tokio::task::yield_now().await;
+    assert_eq!(counts.reject.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        adapter.admission_outcomes(),
+        vec![(connection_id, 1, false)]
+    );
+}
+
+#[tokio::test]
+async fn admission_terminal_watch_is_nonblocking_for_unpolled_observers() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut admissions = orchestrator
+        .install_inbound_admission_gate(1, Duration::from_secs(2))
+        .unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let (connection, principal) = prepare_atomic_inbound(&adapter, "tenant-watch", "watch-secret");
+    let connection_id = connection.id.clone();
+    announce_atomic_inbound(&sender, connection, principal).await;
+    let admission = admissions.recv().await.unwrap();
+    let observers: Vec<_> = (0..256).map(|_| admission.termination_receiver()).collect();
+    let witness = admission.termination_receiver();
+
+    adapter.mark_ended(&connection_id);
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        adapter.deliver_terminal(AdapterEvent::Failed {
+            connection_id,
+            detail: "sanitized adapter failure".into(),
+        }),
+    )
+    .await
+    .expect("unpolled watch observers cannot backpressure lifecycle retirement");
+
+    assert_eq!(
+        wait_for_admission_termination(witness).await,
+        InboundAdmissionTermination::Failed
+    );
+    assert!(observers
+        .iter()
+        .all(|observer| { *observer.borrow() == Some(InboundAdmissionTermination::Failed) }));
+}
+
+#[tokio::test]
 async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe() {
     let orchestrator = Orchestrator::new(Config::default());
     let mut admissions = orchestrator
@@ -2451,6 +2576,7 @@ async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe
     let connection_id = connection.id.clone();
     announce_atomic_inbound(&sender, connection, principal).await;
     let stale_ticket = admissions.recv().await.unwrap();
+    let stale_terminal = stale_ticket.termination_receiver();
     adapter.mark_ended(&connection_id);
     adapter
         .deliver_terminal(AdapterEvent::Ended {
@@ -2461,6 +2587,10 @@ async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe
     assert_eq!(
         adapter.admission_outcomes(),
         vec![(connection_id.clone(), 1, false)]
+    );
+    assert_eq!(
+        *stale_terminal.borrow(),
+        Some(InboundAdmissionTermination::RemoteEnded)
     );
     assert!(stale_ticket.accept().await.is_err());
     assert_eq!(
@@ -2490,6 +2620,11 @@ async fn admission_confirmation_terminal_and_stale_decisions_are_generation_safe
     assert_eq!(
         adapter.admission_outcomes(),
         vec![(connection_id.clone(), 1, false), (connection_id, 2, false)]
+    );
+    assert_eq!(
+        *stale_terminal.borrow(),
+        Some(InboundAdmissionTermination::RemoteEnded),
+        "a rejected identifier-reuse attempt cannot rewrite generation one"
     );
 }
 

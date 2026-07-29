@@ -178,9 +178,9 @@ pub use ids::{
     StreamId, TenantId, TranscriptionId,
 };
 pub use inbound_admission::{
-    InboundAdmission, ProvisionalMediaRoute, StagedInboundDataChannel, StagedInboundDataPolicy,
-    StagedInboundDataReceiver, StagedInboundDataSender, MAX_STAGED_INBOUND_DATA_CAPACITY,
-    MAX_STAGED_INBOUND_DATA_LABELS,
+    InboundAdmission, InboundAdmissionTermination, ProvisionalMediaRoute, StagedInboundDataChannel,
+    StagedInboundDataPolicy, StagedInboundDataReceiver, StagedInboundDataSender,
+    MAX_STAGED_INBOUND_DATA_CAPACITY, MAX_STAGED_INBOUND_DATA_LABELS,
 };
 pub use media_graph::{
     start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,

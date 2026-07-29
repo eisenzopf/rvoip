@@ -32,7 +32,7 @@ use crate::ids::{
 };
 use crate::inbound_admission::{
     InboundAdmission, InboundAdmissionDecision, InboundAdmissionDisposition, InboundAdmissionGate,
-    ProvisionalMediaRoute, StagedInboundDataPolicy,
+    InboundAdmissionTermination, ProvisionalMediaRoute, StagedInboundDataPolicy,
 };
 use crate::media_graph::{
     start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
@@ -69,7 +69,7 @@ use std::sync::Weak;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::sync::{
-    broadcast, mpsc, oneshot, Mutex as TokioMutex, Notify, OwnedSemaphorePermit,
+    broadcast, mpsc, oneshot, watch, Mutex as TokioMutex, Notify, OwnedSemaphorePermit,
     RwLock as TokioRwLock, Semaphore,
 };
 use tracing::{debug, instrument, warn};
@@ -189,6 +189,9 @@ struct ConnectionEntry {
     inbound_context: Option<InboundConnectionContext>,
     inbound_context_retired: bool,
     inbound_publication: InboundPublicationState,
+    /// Exact-generation terminal signal installed only for gated inbound
+    /// admission. Lifecycle retirement completes it before route erasure.
+    inbound_admission_terminal: Option<InboundAdmissionTerminalSignal>,
     /// Exact-generation, reserved-label control path available only while an
     /// inbound admission remains pending. Removed before final publication or
     /// rejection and never consulted by ordinary application data routing.
@@ -199,6 +202,21 @@ struct ConnectionEntry {
     normalized_lifecycle_was_visible: bool,
     deferred_authentication: Option<DeferredAuthentication>,
     deferred_principal_authentication: Option<DeferredPrincipalAuthentication>,
+}
+
+struct InboundAdmissionTerminalSignal {
+    lifecycle_generation: u64,
+    sender: watch::Sender<Option<InboundAdmissionTermination>>,
+}
+
+impl std::fmt::Debug for InboundAdmissionTerminalSignal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InboundAdmissionTerminalSignal")
+            .field("lifecycle_generation", &self.lifecycle_generation)
+            .field("completed", &self.sender.borrow().is_some())
+            .finish()
+    }
 }
 
 struct StagedInboundDataEntry {
@@ -3070,6 +3088,7 @@ impl Orchestrator {
                     inbound_context,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    inbound_admission_terminal: None,
                     staged_inbound_data: None,
                     normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
@@ -3242,6 +3261,7 @@ impl Orchestrator {
                     inbound_context: None,
                     inbound_context_retired: false,
                     inbound_publication: InboundPublicationState::NotInbound,
+                    inbound_admission_terminal: None,
                     staged_inbound_data: None,
                     normalized_lifecycle_was_visible: false,
                     deferred_authentication: None,
@@ -3485,6 +3505,7 @@ impl Orchestrator {
                 inbound_context: None,
                 inbound_context_retired: true,
                 inbound_publication: InboundPublicationState::NotInbound,
+                inbound_admission_terminal: None,
                 staged_inbound_data: None,
                 normalized_lifecycle_was_visible: false,
                 deferred_authentication: None,
@@ -3608,6 +3629,38 @@ impl Orchestrator {
         }
     }
 
+    fn complete_inbound_admission_terminal(
+        entry: &ConnectionEntry,
+        lifecycle_generation: u64,
+        termination: InboundAdmissionTermination,
+    ) {
+        let Some(signal) = entry.inbound_admission_terminal.as_ref() else {
+            return;
+        };
+        if signal.lifecycle_generation != lifecycle_generation {
+            return;
+        }
+        if signal.sender.send_if_modified(|current| {
+            if current.is_some() {
+                false
+            } else {
+                *current = Some(termination);
+                true
+            }
+        }) {
+            let result = match termination {
+                InboundAdmissionTermination::Cancelled => "cancelled",
+                InboundAdmissionTermination::RemoteEnded => "remote_ended",
+                InboundAdmissionTermination::Failed => "failed",
+            };
+            metrics::counter!(
+                "rvoip_core_inbound_admission_terminal_total",
+                "result" => result
+            )
+            .increment(1);
+        }
+    }
+
     fn begin_ticketed_connection_teardown(
         &self,
         ticket: &ConnectionLifecycleTicket,
@@ -3627,6 +3680,13 @@ impl Orchestrator {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             if !lifecycle.active || lifecycle.retired || lifecycle.generation != ticket.generation {
                 return None;
+            }
+            if let Some(entry) = self.connections.get(&ticket.connection_id) {
+                Self::complete_inbound_admission_terminal(
+                    &entry,
+                    ticket.generation,
+                    InboundAdmissionTermination::Failed,
+                );
             }
             let removed = self.connections.remove(&ticket.connection_id)?;
             lifecycle.active = false;
@@ -4311,7 +4371,11 @@ impl Orchestrator {
         }
     }
 
-    fn begin_connection_teardown(&self, conn: &ConnectionId) -> ForgottenConnection {
+    fn begin_connection_teardown(
+        &self,
+        conn: &ConnectionId,
+        termination: InboundAdmissionTermination,
+    ) -> ForgottenConnection {
         let removed = {
             let _registry = self
                 .connection_registry_lock
@@ -4324,8 +4388,16 @@ impl Orchestrator {
                 let mut state = state
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let lifecycle_generation = state.generation;
                 state.active = false;
                 state.retired = true;
+                if let Some(entry) = self.connections.get(conn) {
+                    Self::complete_inbound_admission_terminal(
+                        &entry,
+                        lifecycle_generation,
+                        termination,
+                    );
+                }
                 state.generation = state.generation.saturating_add(1);
             } else if self.connection_lifecycles.len()
                 < self.connection_id_budget.load(Ordering::Relaxed)
@@ -4389,6 +4461,18 @@ impl Orchestrator {
             {
                 return None;
             }
+            let entry = self.connections.get(&claimed.connection_id)?;
+            if entry.inbound_publication
+                != InboundPublicationState::Rejecting(claimed.lifecycle.generation)
+            {
+                return None;
+            }
+            Self::complete_inbound_admission_terminal(
+                &entry,
+                claimed.lifecycle.generation,
+                InboundAdmissionTermination::Failed,
+            );
+            drop(entry);
             let removed = self
                 .connections
                 .remove_if(&claimed.connection_id, |_, entry| {
@@ -4418,10 +4502,11 @@ impl Orchestrator {
         &self,
         conn: &ConnectionId,
         transport: Transport,
+        termination: InboundAdmissionTermination,
     ) -> ForgottenConnection {
         let admission_notification =
             self.claim_current_inbound_admission_notification(conn, transport, false, true);
-        let forgotten = self.begin_connection_teardown(conn);
+        let forgotten = self.begin_connection_teardown(conn, termination);
         if let Some(notification) = admission_notification {
             notification.deliver();
         }
@@ -5873,7 +5958,7 @@ impl Orchestrator {
             return;
         };
 
-        let pending_committed = {
+        let termination = {
             let _registry = self
                 .connection_registry_lock
                 .lock()
@@ -5901,16 +5986,21 @@ impl Orchestrator {
             if entry.transport != pending.transport
                 || entry.inbound_publication != InboundPublicationState::Unseen
             {
-                false
+                None
             } else {
+                let (sender, receiver) = watch::channel(None);
                 entry.inbound_publication =
                     InboundPublicationState::Pending(pending.lifecycle.generation);
-                true
+                entry.inbound_admission_terminal = Some(InboundAdmissionTerminalSignal {
+                    lifecycle_generation: pending.lifecycle.generation,
+                    sender,
+                });
+                Some(receiver)
             }
         };
-        if !pending_committed {
+        let Some(termination) = termination else {
             return;
-        }
+        };
 
         let permit = match Arc::clone(&gate.permits).try_acquire_owned() {
             Ok(permit) => permit,
@@ -5932,6 +6022,7 @@ impl Orchestrator {
             pending.lifecycle.generation,
             Arc::downgrade(self),
             decision,
+            termination,
         );
         if let Err(error) = gate.sender.try_send(admission) {
             drop(resolved);
@@ -6515,8 +6606,12 @@ impl Orchestrator {
                     return;
                 }
                 if !self.adapter_connection_is_live(transport, &connection.id) {
-                    self.forget_inbound_connection(&connection.id, transport)
-                        .await;
+                    self.forget_inbound_connection(
+                        &connection.id,
+                        transport,
+                        InboundAdmissionTermination::RemoteEnded,
+                    )
+                    .await;
                     return;
                 }
                 let at = Utc::now();
@@ -6750,8 +6845,12 @@ impl Orchestrator {
                     return;
                 }
                 if !self.adapter_connection_is_live(transport, &connection.id) {
-                    self.forget_inbound_connection(&connection.id, transport)
-                        .await;
+                    self.forget_inbound_connection(
+                        &connection.id,
+                        transport,
+                        InboundAdmissionTermination::RemoteEnded,
+                    )
+                    .await;
                     return;
                 }
                 let observed_at = Utc::now();
@@ -6874,8 +6973,15 @@ impl Orchestrator {
                     .operational_event_stream
                     .get()
                     .map(OperationalEventStream::delivery_guard);
+                let termination = match &reason {
+                    EndReason::Cancelled => InboundAdmissionTermination::Cancelled,
+                    EndReason::Normal => InboundAdmissionTermination::RemoteEnded,
+                    EndReason::Failed { .. } | EndReason::Timeout | EndReason::BridgeTorn => {
+                        InboundAdmissionTermination::Failed
+                    }
+                };
                 let forgotten = self
-                    .forget_inbound_connection(&connection_id, transport)
+                    .forget_inbound_connection(&connection_id, transport, termination)
                     .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
@@ -6913,7 +7019,11 @@ impl Orchestrator {
                     .get()
                     .map(OperationalEventStream::delivery_guard);
                 let forgotten = self
-                    .forget_inbound_connection(&connection_id, transport)
+                    .forget_inbound_connection(
+                        &connection_id,
+                        transport,
+                        InboundAdmissionTermination::Failed,
+                    )
                     .await;
                 self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
                 if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
