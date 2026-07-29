@@ -1,6 +1,6 @@
 # rvoip-sip
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/sip/rvoip-sip)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/rvoip-sip)
 [![docs.rs](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
 [![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
@@ -13,10 +13,12 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-This crate is currently a **beta candidate** for bounded SIP client, server,
-PBX, gateway, and B2BUA scenarios. It is intended for developers who want a
-Rust-native SIP control surface with runnable examples and explicit interop
-evidence.
+The `0.3.2` crate is a **beta release approved with one documented performance
+exception** for bounded SIP client, server, PBX, gateway, and B2BUA scenarios.
+The strict automated result remains NON-RC; see the
+[release exception](docs/BETA_RELEASE_EXCEPTION.md). It is intended for
+developers who want a Rust-native SIP control surface with runnable examples
+and explicit interop evidence.
 
 ## At a glance
 
@@ -27,6 +29,8 @@ evidence.
 | Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.CallbackPeer.html) |
 | Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.UnifiedCoordinator.html) |
 | Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/latest/rvoip_sip/struct.SessionHandle.html) |
+| Check Asterisk, FreeSWITCH, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
+| Bridge a SIP caller to a native Vapi WebSocket agent | [`rvoip-vapi`](#extensions-and-native-vapi-websocket-agents) |
 
 Start with `Endpoint` unless you already know you need event-stream ownership,
 callback dispatch, or custom multi-leg orchestration. The higher-level surfaces
@@ -40,7 +44,7 @@ is **Rust 1.88**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.2"
+rvoip-sip = "0.3.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -124,11 +128,34 @@ The examples are organized by developer surface in
 | Callback IVR pair | `./crates/sip/rvoip-sip/examples/callback_peer/03_builder_ivr/run.sh` |
 | Unified B2BUA bridge | `./crates/sip/rvoip-sip/examples/unified/04_b2bua_bridge/run.sh` |
 | Terminal softphone | `cargo run -p rvoip-sip --example sip_client` |
-| Asterisk/FreeSWITCH interop | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx asterisk --api all --scenario registration` |
+| Asterisk interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx asterisk --api all --scenario all` |
+| FreeSWITCH interop matrix | `./crates/sip/rvoip-sip/examples/pbx/run.sh --pbx freeswitch --api all --scenario all` |
 
 PBX interop setup, environment variables, and scenario coverage are documented
 in [`examples/pbx/README.md`](examples/pbx/README.md). The terminal softphone
 is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md).
+
+## Interoperability status
+
+The 0.3.2 full release run passed all 16 selected PBX and interoperability
+gates. Asterisk and FreeSWITCH were executed as external PBX peers; Kamailio
+and OpenSIPS were named and audited, but their proxy/RTPengine topology was
+explicitly de-scoped rather than silently presented as tested.
+
+| Peer/tool | 0.3.2 status | Executed scope |
+| --- | --- | --- |
+| **Asterisk** | **Interop matrix passed** | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
+| **FreeSWITCH** | **Interop matrix passed** | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
+| **SIPp** | **Standalone matrix passed** | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
+| **baresip** | **Strict-UA check passed** | External user-agent call against the rvoip SIP listener |
+| **Kamailio** | **Not release-tested** | Proxy/RTPengine investigation track; only the explicit de-scope audit passed |
+| **OpenSIPS** | **Not release-tested** | Proxy/RTPengine investigation track; only the explicit de-scope audit passed |
+
+The machine-bound [0.3.2 gate
+record](docs/BETA_GATE_EXCEPTION.md), [compatibility
+matrix](docs/COMPATIBILITY_MATRIX.md), and [topology
+profiles](docs/TOPOLOGY_PROFILES.md) define the exact claim. These results do
+not imply carrier certification or untested peer-version/topology coverage.
 
 ## Capabilities
 
@@ -148,35 +175,70 @@ is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## Beta-candidate evidence
+## 0.3.2 release evidence
 
-The beta-candidate gate completed with 0 failures and 0 skips from a clean tree
-with Rust/Cargo `1.88.0`. The full evidence bundle is generated locally under
-`beta-report/` by the gate script (an untracked artifact directory, not part of
-the repository); the committed performance summary lives in
-[`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md).
+The clean, unchanged full run recorded 106 PASS, 2 FAIL, and 0 SKIP results.
+The project owner accepted one root policy deviation: high-density full-media
+burst ASR was 0.9928 against the 0.995 requirement. The second failed record is
+the reporting roll-up of that same miss, not an independent product failure.
+All 16 selected PBX and interoperability gates passed.
 
 | Area | Evidence |
 | --- | --- |
-| Gate result | `0` failures, `0` skips |
-| PBX interop | `192 / 192` Asterisk and FreeSWITCH rows passed |
-| Strict UA | baresip strict-UA evidence archived |
-| SIPp standalone | 30, 100, 300, 1,000, and 2,000 CPS matrix passed |
+| Full gate | `106 / 108` PASS, `2` FAIL, `0` SKIP; strict status NON-RC, release disposition APPROVED-WITH-EXCEPTION |
+| PBX interop | Asterisk and FreeSWITCH all-API/all-scenario UDP/TLS matrices passed |
+| Proxy targets | Kamailio/OpenSIPS de-scope audit passed; external proxy interop was not executed |
+| Strict UA | baresip strict-UA matrix passed |
+| SIPp standalone | 30, 100, 300, 1,000, and 2,000 CPS passed with 100% configured call completion |
 | Security | dependency advisory audit and parser fuzz smoke passed |
-| Soak | `35,109 / 35,109` calls, ASR `1.0`, retained objects `0`, Bob active audio receivers `0` |
-| Memory | peak RSS `292.1 MB`, post-drain RSS slope `1.5 MB/hr` against a `10 MB/hr` gate |
+| Canonical 2K | Three source-identical passes; `65,000 / 65,000` calls and ASR `1.0` in each run |
+| Monolithic soak | 3,600 seconds, `587 / 587` calls, retained objects `0`, active audio receivers `0`, RSS gate `12.7 MB/hr` against `15 MB/hr` |
+| Accepted deviation | High-density full-media burst `17,871 / 18,000`, ASR `0.9928`; all 129 failures were answer timeouts and non-timeout errors were zero |
 
-The 24-hour soak is explicitly waived for the beta candidate; the archived
-30-minute soak is the accepted beta-candidate bar. For the exact claim
-boundaries, see:
+For the exact claim boundaries and immutable evidence, see:
 
+- [`docs/BETA_RELEASE_EXCEPTION.md`](docs/BETA_RELEASE_EXCEPTION.md)
+- [`docs/BETA_GATE_EXCEPTION.md`](docs/BETA_GATE_EXCEPTION.md)
+- [`docs/BETA_PERFORMANCE_EXCEPTION.md`](docs/BETA_PERFORMANCE_EXCEPTION.md)
 - [`docs/BETA_RELEASE_CHECKLIST.md`](docs/BETA_RELEASE_CHECKLIST.md)
 - [`docs/COMPATIBILITY_MATRIX.md`](docs/COMPATIBILITY_MATRIX.md)
 - [`docs/RFC_COMPLIANCE_MATRIX.md`](docs/RFC_COMPLIANCE_MATRIX.md)
 - [`docs/SECURITY_POSTURE.md`](docs/SECURITY_POSTURE.md)
-- [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md)
 - [`docs/TOPOLOGY_PROFILES.md`](docs/TOPOLOGY_PROFILES.md)
 - [`docs/INTEROP_CI_PLAN.md`](docs/INTEROP_CI_PLAN.md)
+
+## Extensions and native Vapi WebSocket agents
+
+`rvoip-sip` stays focused on the SIP product, but it composes with all 14
+optional workspace extension crates through the `rvoip` facade and shared
+orchestrator.
+
+| Group | Companion extensions |
+| --- | --- |
+| AI and conversation data | [`rvoip-harness`](../../extensions/rvoip-harness), [`rvoip-vapi`](../../extensions/rvoip-vapi), [`rvoip-vcon`](../../extensions/rvoip-vcon), [`rvoip-vcon-postgres`](../../extensions/rvoip-vcon-postgres) |
+| Caller trust | [`rvoip-stir-shaken`](../../extensions/rvoip-stir-shaken) |
+| Authentication providers | [`rvoip-oidc`](../../extensions/rvoip-oidc), [`rvoip-keycloak`](../../extensions/rvoip-keycloak), [`rvoip-ldap`](../../extensions/rvoip-ldap), [`rvoip-redis`](../../extensions/rvoip-redis), [`rvoip-ims-aka`](../../extensions/rvoip-ims-aka) |
+| User lifecycle | [`rvoip-saml`](../../extensions/rvoip-saml), [`rvoip-scim`](../../extensions/rvoip-scim), [`rvoip-webauthn`](../../extensions/rvoip-webauthn) |
+| Audit and observability | [`rvoip-audit`](../../extensions/rvoip-audit) |
+
+New in 0.3.2, `rvoip-vapi` is a native Rust `ConnectionAdapter` for Vapi's
+bidirectional raw-audio WebSocket transport. It can attach directly to an
+active SIP or WebRTC caller connection, originate the Vapi agent, bridge
+full-duplex μ-law 8 kHz or PCM 16 kHz audio, expose typed events and
+control/context messages, and supervise both sides of teardown. No
+third-party telephony intermediary is required between rvoip and Vapi.
+
+Enable the facade integration with:
+
+```toml
+rvoip = { version = "0.3.2", features = ["sip", "vapi"] }
+```
+
+See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),
+the runnable [`14-vapi-agent`](../../../examples/14-vapi-agent) server, and the
+[full extension catalog](../../../README.md#extensions). The adapter and other
+extensions remain developer-preview unless their own documentation states a
+narrower qualification.
 
 ## Validation and operations
 
@@ -213,7 +275,7 @@ Operational references:
 
 | Flag | Status |
 | --- | --- |
-| default | Empty default feature set used by the beta-candidate baseline. |
+| default | Empty default feature set used by the beta release baseline. |
 | `event-history` | Optional retained event inspection for debugging and tests. |
 | `persistence` | Experimental persistence hooks; applications must validate their own storage behavior. |
 | `generated-validation` | Development and CI validation for generated SIP messages. |
@@ -225,14 +287,15 @@ Operational references:
 
 ## Known limits
 
-- This is a beta candidate, not a broad production-readiness claim.
+- This is a beta release approved with one performance exception, not a broad
+  production-readiness claim.
 - Carrier SBC readiness is partial and not certified.
-- Kamailio/OpenSIPS plus RTPengine are planned validation targets, not release
-  claims for this beta candidate.
+- Kamailio/OpenSIPS plus RTPengine were explicitly de-scoped; they are named
+  validation targets, not 0.3.2 interoperability claims.
 - WebRTC/browser interop, ICE, TURN, DTLS-SRTP, and WSS outbound are outside
-  the beta-candidate claim unless separately completed and tested.
+  the SIP beta claim unless separately completed and tested.
 - The default full-media performance claim is bounded to the documented
-  beta-candidate profiles and artifacts. Higher tuned-profile results need
+  beta release profiles and artifacts. Higher tuned-profile results need
   their own topology, hardware, configuration, and caveats.
 - Blind transfer is validated; attended transfer is exposed as primitives
   rather than a full consultation-call workflow.
