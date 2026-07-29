@@ -1,4 +1,4 @@
-//! Stateful SIP proxy primitives — RFC 3261 §16.
+//! Transaction-stateful SIP proxy primitives.
 //!
 //! `rvoip-sip-proxy` rides on the `TransactionManager` primitives from
 //! `rvoip-sip-dialog` but deliberately does NOT consume `DialogManager`.
@@ -6,34 +6,41 @@
 //! server-transaction (the leg facing the originating UAC) with one or
 //! more downstream client-transactions (the legs facing the target
 //! UAS), and forwards requests downstream + responses upstream while
-//! enforcing the §16.6 / §16.7 processing rules.
+//! implementing a bounded subset of the RFC 3261 §16 processing model.
 //!
-//! ## Scope (Phase 6)
+//! ## Scope
 //!
-//! - **Single-target stateful proxy.** One inbound INVITE / non-INVITE
-//!   request fans to exactly one downstream client transaction.
-//!   Multi-target forking lives in `forking` in Phase 7.
-//! - **Timer C** (§16.8) — INVITE proxy transaction times out at 3 min
-//!   by default; app-overridable.
+//! - **Transaction-stateful proxy.** An inbound request may fan out
+//!   sequentially or in parallel to downstream client transactions.
+//! - **Timer C candidate** (§16.8) — tracked per downstream INVITE
+//!   branch and greater than three minutes by default.
 //! - **§16.6 request processing**: decrement `Max-Forwards`, push own
 //!   `Via` with a fresh `z9hG4bK…` branch, leave the route set / body
 //!   intact.
-//! - **§16.7 response processing**: pop the top `Via` (the proxy's
-//!   own), forward the rest verbatim upstream.
+//! - **§16.7 response-processing candidate**: pop the top `Via` (the
+//!   proxy's own), aggregate failures, and forward matched INVITE 2xx.
 //!
-//! ## What's NOT in Phase 6
+//! ## Conformance status
 //!
-//! - Forking + 3xx redirect-set (Phase 7).
-//! - Per-flow STIR/SHAKEN re-signing (rides on the existing Phase 2
-//!   `pre_send_request` hook on the downstream client transaction).
-//! - Recursive routing / DNS lookup (callers supply the destination —
-//!   typically via [`rvoip_sip_transport::resolver::Resolver`]).
+//! The implementation is **partial**, not an RFC-conformance claim.
+//! See `docs/RFC3261_CONFORMANCE.md` and
+//! `docs/CONFORMANCE_STATUS.md` in the crate source for the normative
+//! matrix, known gaps, isolated baseline, and required qualification
+//! evidence.
 
 pub mod error;
+pub mod local_response;
 pub mod proxy;
+pub mod routing;
 
-pub use error::{ProxyError, ProxyResult};
+pub use error::{ProxyBuildError, ProxyError, ProxyResult};
+pub use local_response::local_response_from_request;
 pub use proxy::{
-    ForkMode, ProxyConfig, ProxyEvent, RedirectDecision, RedirectInfo, RedirectInterceptor,
-    RouteDecision, RouteFn, StatefulProxy,
+    ForkMode, ProxyConfig, ProxyEvent, ProxyRetentionSnapshot, ProxyRuntimeOptions,
+    RedirectDecision, RedirectInfo, RedirectInterceptor, RouteDecision, RouteFn, StatefulProxy,
+    UriRouteDecision, UriRouteFn,
+};
+pub use routing::{
+    DefaultProxyResolver, PreparedTarget, ProxyRoutingPolicy, ProxyTarget, RecordRoutePolicy,
+    RequestRejection, RoutingPolicyError,
 };

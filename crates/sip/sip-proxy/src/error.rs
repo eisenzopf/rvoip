@@ -3,6 +3,19 @@ use thiserror::Error;
 
 pub type ProxyResult<T> = std::result::Result<T, ProxyError>;
 
+/// Errors produced while constructing a stateful proxy.
+///
+/// This is separate from [`ProxyError`] so the exhaustive 0.3.1 runtime-error
+/// enum remains source-compatible in the 0.3.2 patch release.
+#[derive(Debug, Error)]
+pub enum ProxyBuildError {
+    #[error("invalid proxy configuration: {0}")]
+    InvalidConfiguration(String),
+
+    #[error("transaction-manager claim failed: {0}")]
+    Transaction(String),
+}
+
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("transaction error: {0}")]
