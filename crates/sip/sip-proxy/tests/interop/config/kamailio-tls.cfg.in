@@ -10,8 +10,11 @@ enable_tls=yes
 
 listen=tls:0.0.0.0:__PUBLIC_PORT__ advertise __PUBLIC_HOST__:__PUBLIC_PORT__
 # Keep the plaintext side of the hostname-verifying mTLS boundary on a
-# separately tracked socket. request_route rejects inbound non-TLS SIP.
-listen=tcp:0.0.0.0:__TCP_EGRESS_PORT__
+# separately tracked socket. Advertise the peer's public identity so Kamailio
+# does not place the wildcard bind address in its Via sent-by. Responses on
+# this composed profile remain bound to the existing reliable connection.
+# request_route rejects inbound non-TLS SIP.
+listen=tcp:0.0.0.0:__TCP_EGRESS_PORT__ advertise __PUBLIC_HOST__:__PUBLIC_PORT__
 alias="tls:__PUBLIC_HOST__:__PUBLIC_PORT__"
 
 # The TLS module must be loaded before modules which share OpenSSL state.

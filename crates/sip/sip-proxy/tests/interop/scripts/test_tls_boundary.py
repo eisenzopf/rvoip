@@ -54,6 +54,16 @@ class FakeTlsSocket:
 
 
 class TlsBoundaryTests(unittest.TestCase):
+    def test_kamailio_boundary_socket_never_advertises_wildcard_via(self) -> None:
+        template = (
+            SCRIPT_DIR.parent / "config/kamailio-tls.cfg.in"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "listen=tcp:0.0.0.0:__TCP_EGRESS_PORT__ "
+            "advertise __PUBLIC_HOST__:__PUBLIC_PORT__",
+            template,
+        )
+
     def test_client_relay_survives_more_than_ten_seconds_idle(self) -> None:
         application, inbound = socket.socketpair()
         outbound, remote = socket.socketpair()
