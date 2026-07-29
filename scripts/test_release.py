@@ -239,6 +239,9 @@ package = "rvoip-rtc"
 
 [dependencies.serde_json]
 version = "1.0"
+
+[dev-dependencies]
+rvoip-rtc = { path = "../rvoip-rtc" }
 """
             )
             packages = {
@@ -256,7 +259,13 @@ version = "1.0"
                                 "rename": "rtc",
                                 "req": "^0.3.3",
                                 "kind": None,
-                            }
+                            },
+                            {
+                                "name": "rvoip-rtc",
+                                "rename": None,
+                                "req": "*",
+                                "kind": "dev",
+                            },
                         ],
                     ),
                     "manifest_path": str(stack_manifest),
@@ -275,6 +284,10 @@ version = "1.0"
             )
             self.assertIn(
                 '[dependencies.serde_json]\nversion = "1.0"',
+                edits[stack_manifest].decode(),
+            )
+            self.assertIn(
+                'rvoip-rtc = { path = "../rvoip-rtc" }',
                 edits[stack_manifest].decode(),
             )
 

@@ -364,7 +364,9 @@ def update_member_dependency_versions(
     active_dependency: str | None = None
     version_field = re.compile(r'(version\s*=\s*")[^"]+(")')
     table_version = re.compile(r'^(\s*version\s*=\s*")[^"]+(")')
-    simple_version = re.compile(r'(\s*=\s*")[^"]+(")')
+    simple_version = re.compile(
+        r'^(\s*[A-Za-z0-9_-]+\s*=\s*")[^"]+(")'
+    )
 
     for index, line in enumerate(lines):
         stripped = line.strip()
