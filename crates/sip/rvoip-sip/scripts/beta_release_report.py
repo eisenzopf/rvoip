@@ -9,11 +9,14 @@ configuration and per-gate recording commands so Markdown is not an input.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -23,10 +26,13 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_EVIDENCE = "rvoip-sip-release-evidence-v1"
+SCHEMA_EVIDENCE_LEGACY = "rvoip-sip-release-evidence-v1"
+SCHEMA_EVIDENCE = "rvoip-sip-release-evidence-v2"
 SCHEMA_CONFIG = "rvoip-sip-effective-gate-config-v1"
 SCHEMA_RESULTS = "rvoip-sip-gate-results-v1"
-SCHEMA_REPORT_ATTESTATION = "rvoip-sip-report-attestation-v1"
+SCHEMA_REPORT_ATTESTATION_LEGACY = "rvoip-sip-report-attestation-v1"
+SCHEMA_REPORT_ATTESTATION = "rvoip-sip-report-attestation-v2"
+SCHEMA_INTEROP_ATTESTATION = "rvoip-sip-interop-peer-attestation-v1"
 EXPECTED_SOURCE_SCHEMAS = {
     "rvoip-sip-beta-attestation-v1",
     "rvoip-sip-beta-attestation-v2",
@@ -68,6 +74,343 @@ ABSOLUTE_USER_PATH_RE = re.compile(r"/Users/[^/\s`\"']+")
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 LATENCY_FAMILIES = ("setup_latency", "full_cycle")
 LATENCY_PERCENTILES = ("p50", "p95", "p99")
+PROXY_INTEROP_GATE_NAME = "Kamailio/OpenSIPS stateful-proxy interoperability matrix"
+INTEROP_ATTESTATION_SPECS = {
+    "asterisk": {
+        "display_name": "Asterisk",
+        "gate_id": "interop.asterisk-matrix",
+        "identity_evidence_prefix": "environment/local-pbx/asterisk",
+        "scope": (
+            "PBX call-control and RTP media interoperability for the recorded "
+            "API, scenario, codec, and security matrix"
+        ),
+    },
+    "freeswitch": {
+        "display_name": "FreeSWITCH",
+        "gate_id": "interop.freeswitch-matrix",
+        "identity_evidence_prefix": "environment/local-pbx/freeswitch",
+        "scope": (
+            "PBX call-control and RTP media interoperability for the recorded "
+            "API, scenario, codec, and security matrix"
+        ),
+    },
+    "kamailio": {
+        "display_name": "Kamailio",
+        "gate_id": "interop.proxy-stateful-matrix",
+        "identity_evidence_prefix": "proxy-interop/",
+        "scope": (
+            "RFC 3261 transaction-stateful proxy interoperability in both hop "
+            "orders over UDP, TCP, and TLS"
+        ),
+    },
+    "opensips": {
+        "display_name": "OpenSIPS",
+        "gate_id": "interop.proxy-stateful-matrix",
+        "identity_evidence_prefix": "proxy-interop/",
+        "scope": (
+            "RFC 3261 transaction-stateful proxy interoperability in both hop "
+            "orders over UDP, TCP, and TLS"
+        ),
+    },
+}
+INTEROP_ATTESTATION_NON_CLAIM = (
+    "PASS is limited to the exact peer versions, configurations, transports, "
+    "codecs, scenarios, source tree, and evidence recorded here."
+)
+PROXY_INTEROP_ANCILLARY_EVIDENCE = (
+    "proxy-interop/cargo-build.log",
+    "proxy-interop/cargo-build-command.txt",
+    "proxy-interop/environment.txt",
+    "proxy-interop/matrix.tsv",
+    "proxy-interop/proxy-binary-check.txt",
+    "proxy-interop/proxy-binary.path",
+    "proxy-interop/proxy-binary.sha256",
+    "proxy-interop/runtime-state-check.json",
+    "proxy-interop/runtime-state-end.json",
+    "proxy-interop/runtime-state-start.json",
+    "proxy-interop/source-check.txt",
+    "proxy-interop/summary.json",
+    "proxy-interop/summary.md",
+)
+PROXY_INTEROP_IMAGES = {
+    "kamailio": (
+        "ghcr.io/kamailio/kamailio:6.1.3-bookworm@"
+        "sha256:26b26c61801d679ffbe54ea3597c38964a46c4bfe60fb6537c7eeacc576b0c92"
+    ),
+    "opensips": (
+        "opensips/opensips:3.6@"
+        "sha256:eba1396b438a7f8a9d33c17017aae4670cb43361eb7130359240cf85fc3e6979"
+    ),
+}
+PROXY_INTEROP_PEERS = frozenset(PROXY_INTEROP_IMAGES)
+PROXY_INTEROP_PEER_VERSION_RE = {
+    "kamailio": re.compile(r"(?im)^version:\s*kamailio\s+6\.1\.3(?:\s|$|\()"),
+    "opensips": re.compile(r"(?im)^version:\s*opensips\s+3\.6\.7(?:\s|$|\()"),
+}
+PROXY_INTEROP_BINARY_PATH = "target/release/examples/stateful_proxy_interop"
+PROXY_INTEROP_ENVIRONMENT_TOOL_KEYS = frozenset(
+    {
+        "cargo",
+        "cargo_path",
+        "docker",
+        "docker_path",
+        "rustc",
+        "rustc_path",
+        "sipp",
+        "sipp_path",
+        "tcpdump",
+        "tcpdump_path",
+        "tshark",
+        "tshark_path",
+    }
+)
+PROXY_INTEROP_ORDERS = frozenset({"rvoip-first", "peer-first"})
+PROXY_INTEROP_TRANSPORTS = frozenset({"udp", "tcp", "tls"})
+PROXY_INTEROP_SCENARIOS = frozenset(
+    {
+        "options-readiness",
+        "invite-success",
+        "matched-cancel-before-provisional",
+        "matched-cancel-after-provisional",
+        "cancel-retransmission",
+        "unmatched-cancel",
+        "ack-non2xx",
+        "sequential-fork",
+        "parallel-fork",
+        "multiple-2xx",
+        "late-2xx",
+        "sixxx-cancel",
+        "timer-c-calling",
+        "timer-c-proceeding",
+        "transport-failure",
+        "rfc3263-failover",
+        "via-response-destination",
+        "route-strict",
+        "route-loose-record-route",
+        "sips-routing",
+        "auth-aggregation",
+        "message-body-content-length",
+        "stray-response-drop",
+        "capacity-overload",
+        "retention-cleanup",
+    }
+)
+PROXY_INTEROP_EVERY_ROW_SCENARIOS = frozenset(
+    {
+        "options-readiness",
+        "invite-success",
+        "matched-cancel-before-provisional",
+        "matched-cancel-after-provisional",
+        "cancel-retransmission",
+        "unmatched-cancel",
+        "ack-non2xx",
+        "via-response-destination",
+        "message-body-content-length",
+        "retention-cleanup",
+    }
+)
+PROXY_INTEROP_UDP_ADVANCED_SCENARIOS = frozenset(
+    {
+        "sequential-fork",
+        "parallel-fork",
+        "multiple-2xx",
+        "late-2xx",
+        "sixxx-cancel",
+        "stray-response-drop",
+    }
+)
+PROXY_INTEROP_TCP_ADVANCED_SCENARIOS = frozenset(
+    {
+        "timer-c-calling",
+        "timer-c-proceeding",
+        "transport-failure",
+        "rfc3263-failover",
+        "capacity-overload",
+        "route-strict",
+        "route-loose-record-route",
+        "auth-aggregation",
+    }
+)
+PROXY_INTEROP_SCENARIO_SCHEMA = "rvoip-sip-proxy-interop-scenario-v1"
+PROXY_INTEROP_EXTERNAL_EVIDENCE_KINDS = frozenset(
+    {
+        "external-sipp-and-packet-observation",
+        "external-raw-wire-and-packet-observation",
+        "retention-phase-snapshots",
+        "verified-external-tls",
+    }
+)
+PROXY_INTEROP_RAW_EVIDENCE_KIND = "external-raw-wire-and-packet-observation"
+PROXY_INTEROP_RAW_SCHEMAS = {
+    "udp": "rvoip-sip-proxy-interop-raw-wire-v1",
+    "tcp": "rvoip-sip-proxy-interop-advanced-raw-wire-v1",
+}
+PROXY_INTEROP_PACKET_REQUIREMENTS = {
+    "options-readiness": ({"OPTIONS"}, {200}),
+    "invite-success": ({"INVITE", "ACK", "BYE"}, {180, 200}),
+    "matched-cancel-before-provisional": (
+        {"INVITE", "CANCEL", "ACK"},
+        {200, 487},
+    ),
+    "matched-cancel-after-provisional": (
+        {"INVITE", "CANCEL", "ACK"},
+        {180, 200, 487},
+    ),
+    "cancel-retransmission": (
+        {"INVITE", "CANCEL", "ACK"},
+        {180, 200, 487},
+    ),
+    "unmatched-cancel": ({"CANCEL"}, {481}),
+    "ack-non2xx": ({"INVITE", "ACK"}, {486}),
+    "via-response-destination": ({"OPTIONS"}, {200}),
+    "message-body-content-length": ({"MESSAGE"}, {200}),
+    "sequential-fork": ({"INVITE", "ACK"}, {180, 200, 486}),
+    "parallel-fork": ({"INVITE", "ACK"}, {180, 200, 480, 486}),
+    "multiple-2xx": ({"INVITE", "ACK"}, {200, 486}),
+    "late-2xx": ({"INVITE", "ACK"}, {200, 480, 486}),
+    "sixxx-cancel": (
+        {"INVITE", "CANCEL", "ACK"},
+        {180, 200, 487, 603},
+    ),
+    "stray-response-drop": ({"OPTIONS"}, {200}),
+    "timer-c-calling": ({"INVITE"}, {408}),
+    "timer-c-proceeding": ({"INVITE", "CANCEL"}, {180, 200, 487}),
+    "transport-failure": ({"OPTIONS", "INVITE"}, {200, 503}),
+    "rfc3263-failover": ({"INVITE"}, {200}),
+    "route-strict": ({"INVITE"}, {200}),
+    "route-loose-record-route": ({"INVITE"}, {200}),
+    "auth-aggregation": ({"INVITE"}, {401, 407}),
+    "capacity-overload": ({"INVITE"}, {486, 503}),
+    "sips-routing": ({"OPTIONS"}, {200}),
+}
+PROXY_INTEROP_SIP_PACKET_ASSERTIONS = frozenset(
+    {
+        "scenario-call-id-observed",
+        "required-methods-observed",
+        "required-statuses-observed",
+        "rvoip-via-observed",
+        "peer-via-observed",
+    }
+)
+PROXY_INTEROP_TLS_PACKET_ASSERTIONS = frozenset(
+    {
+        "tls-packets-observed",
+        "tls-application-data-on-every-encrypted-hop",
+        "tls-handshake-sni-valid-when-observed",
+        "tls-handshake-certificates-observed-when-initiated",
+    }
+)
+PROXY_INTEROP_INVITE_DIALOG_PACKET_ASSERTIONS = frozenset(
+    {
+        "invite-dialog-response-contact-and-record-route-set",
+        "invite-dialog-uac-ack-bye-use-contact-and-reversed-route-set",
+        "invite-dialog-downstream-ack-bye-reach-contact-with-routes-consumed",
+    }
+)
+PROXY_INTEROP_STRAY_PACKET_ASSERTIONS = frozenset(
+    {
+        "one-true-stray-call-observed",
+        "true-stray-arrived-at-rvoip",
+        "true-stray-had-zero-rvoip-egress",
+    }
+)
+PROXY_INTEROP_SIPS_PACKET_ASSERTIONS = frozenset(
+    {
+        "sips-request-uri-at-uac-boundary",
+        "sips-request-uri-at-uas-boundary",
+        "sips-request-preserved-end-to-end",
+        "sips-both-proxy-vias-observed",
+        "no-plaintext-sip-on-external-tls-ports",
+        "sips-options-success-observed",
+    }
+)
+PROXY_INTEROP_SIPS_RESULT_ASSERTIONS = frozenset(
+    {
+        "actual-sips-request-on-boundary-plaintext",
+        "sips-request-uri-preserved",
+        "both-real-proxy-vias",
+        "sipp-full-path-success",
+        "external-proxy-hops-mtls-only",
+        "independent-tls-verifier",
+        "scenario-owned-packet-capture",
+    }
+)
+PROXY_INTEROP_SUPPLEMENTAL_EVIDENCE_KIND = "in-process-rust-conformance-test"
+PROXY_INTEROP_RETENTION_PHASES = (
+    "pre_zero",
+    "activity",
+    "cooldown",
+    "post_retention",
+    "pre_shutdown",
+    "post_shutdown",
+)
+PROXY_INTEROP_TLS_RESULT_SCHEMA = "rvoip-sip-proxy-interop-tls-evidence-v2"
+PROXY_INTEROP_TLS_PACKET_SCENARIOS = (
+    "options-readiness",
+    "invite-success",
+    "matched-cancel-before-provisional",
+    "matched-cancel-after-provisional",
+    "cancel-retransmission",
+    "unmatched-cancel",
+    "ack-non2xx",
+    "via-response-destination",
+    "message-body-content-length",
+    "sips-routing",
+)
+PROXY_INTEROP_RUNTIME_STATE_SCHEMA = "rvoip-sip-proxy-interop-runtime-state-v1"
+PROXY_INTEROP_PROHIBITED_RAW_FILES = {
+    "container-inspect.json",
+    "image-inspect.json",
+}
+PROXY_INTEROP_PRIVATE_KEY_PEM = re.compile(
+    rb"-----BEGIN (?:RSA |EC |ENCRYPTED |OPENSSH )?PRIVATE KEY-----"
+)
+PROXY_INTEROP_PEER_RUNTIME_SCHEMA = "rvoip-docker-peer-snapshot-v1"
+PROXY_INTEROP_OPENSIPS_TLS_REFERENCE = "rvoip/opensips-tls-interop:3.6.7-1"
+PROXY_INTEROP_OPENSIPS_TLS_PROVENANCE_SCHEMA = (
+    "rvoip-sip-proxy-interop-opensips-tls-image-v1"
+)
+PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE = (
+    "crates/sip/sip-proxy/tests/interop/images/opensips-tls/Dockerfile"
+)
+PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE_SHA256 = (
+    "0093ff1117307b11db1d3783b54f01ea63c3c016c3993e2bf4ec52100aebf312"
+)
+PROXY_INTEROP_OPENSIPS_TLS_PACKAGES = {
+    "opensips": {"version": "3.6.7-1"},
+    "opensips-tls-module": {
+        "version": "3.6.7-1",
+        "deb_sha256": (
+            "685f704faf2ce6b9015a0c059a32333bf789cabd8a467c7068aa1cea363de799"
+        ),
+    },
+    "opensips-tlsmgm-module": {
+        "version": "3.6.7-1",
+        "deb_sha256": (
+            "20d83193399a9ee02b8c3f1cc2fbe311231ec22c0b43656add63f77110a68545"
+        ),
+    },
+    "opensips-tls-openssl-module": {
+        "version": "3.6.7-1",
+        "deb_sha256": (
+            "05e0c80de73b352390981352f08183f9acc3dd0187577688c4c174f94fd9bc68"
+        ),
+    },
+}
+PROXY_INTEROP_OPENSIPS_TLS_MODULES = {
+    "proto_tls.so": {
+        "path": "/usr/lib/x86_64-linux-gnu/opensips/modules/proto_tls.so",
+        "sha256": ("c0a3b92a2d64fc58c8d015338f8016d8fe59e9cc131b91f2774f07281349f7f3"),
+    },
+    "tls_mgm.so": {
+        "path": "/usr/lib/x86_64-linux-gnu/opensips/modules/tls_mgm.so",
+        "sha256": ("f2726bc731dbdf840bd40dbc7209eded8f16899034177b8dabed481da60662d2"),
+    },
+    "tls_openssl.so": {
+        "path": "/usr/lib/x86_64-linux-gnu/opensips/modules/tls_openssl.so",
+        "sha256": ("ec8dbf7164f48b8ae6298f4d014980f567ef4d7cc426ce39d83071b4a4ca956e"),
+    },
+}
 
 
 class ReportError(RuntimeError):
@@ -75,7 +418,9 @@ class ReportError(RuntimeError):
 
 
 def canonical_json(value: Any) -> bytes:
-    return (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    return (
+        json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    ).encode()
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -99,7 +444,9 @@ def read_json(path: Path) -> Any:
 
 def write_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as tmp:
+    with tempfile.NamedTemporaryFile(
+        dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as tmp:
         tmp.write(data)
         temporary = Path(tmp.name)
     os.replace(temporary, path)
@@ -191,7 +538,9 @@ def validate_policy(policy: dict[str, Any]) -> None:
             raise ReportError(f"invalid or unreachable modes for {gate['id']}")
         validators = set(gate.get("validators", []))
         if not validators or not validators <= KNOWN_VALIDATORS:
-            raise ReportError(f"unknown or missing validators for {gate['id']}: {validators}")
+            raise ReportError(
+                f"unknown or missing validators for {gate['id']}: {validators}"
+            )
         for key in (
             "purpose",
             "components",
@@ -211,7 +560,9 @@ def validate_policy(policy: dict[str, Any]) -> None:
         for operator in ("when", "unless"):
             key = gate["condition"].get(operator)
             if key and key not in definitions:
-                raise ReportError(f"catalog gate {gate['id']} uses unknown condition {key}")
+                raise ReportError(
+                    f"catalog gate {gate['id']} uses unknown condition {key}"
+                )
     current = policy.get("current_candidate", {})
     if current.get("expected_selected_gate_count", 0) <= 0:
         raise ReportError("policy lacks a current-candidate gate count")
@@ -284,8 +635,12 @@ def convert_typed(value: Any, definition: dict[str, Any] | None) -> Any:
 def effective_configuration(
     report_root: Path, attestation: dict[str, Any], policy: dict[str, Any]
 ) -> dict[str, Any]:
-    raw_attested = dict(attestation.get("configuration", {}).get("effective_gate_config", {}))
-    raw_environment = parse_redacted_environment(report_root / "environment/beta-env-redacted.txt")
+    raw_attested = dict(
+        attestation.get("configuration", {}).get("effective_gate_config", {})
+    )
+    raw_environment = parse_redacted_environment(
+        report_root / "environment/beta-env-redacted.txt"
+    )
     raw_attested["beta_gate_mode"] = attestation.get("run", {}).get("mode")
     definitions = policy["configuration"]
     keys = set(raw_attested) | set(raw_environment) | set(definitions)
@@ -327,7 +682,9 @@ def effective_configuration(
     for key, expected in required_release_values.items():
         actual = typed_by_key.get(key)
         if actual != expected:
-            raise ReportError(f"release configuration {key}={actual!r}, expected {expected!r}")
+            raise ReportError(
+                f"release configuration {key}={actual!r}, expected {expected!r}"
+            )
     return {
         "schema": SCHEMA_CONFIG,
         "policy_version": policy["policy_version"],
@@ -411,9 +768,24 @@ def relevant_configuration(category: str, config: dict[str, Any]) -> list[str]:
     elif category == "Security":
         prefixes = ("beta_gate_require_external", "beta_fuzz", "beta_run_fuzz")
     elif category == "PBX and interoperability":
-        prefixes = ("beta_pbx_", "beta_run_", "beta_restore_", "beta_sipp_")
-    elif category == "Performance and resiliency" or category == "Reporting and regression":
-        prefixes = ("beta_perf_", "beta_profile_", "beta_run_", "beta_burst_", "rvoip_perf_")
+        prefixes = (
+            "beta_pbx_",
+            "beta_proxy_interop_",
+            "beta_run_",
+            "beta_restore_",
+            "beta_sipp_",
+        )
+    elif (
+        category == "Performance and resiliency"
+        or category == "Reporting and regression"
+    ):
+        prefixes = (
+            "beta_perf_",
+            "beta_profile_",
+            "beta_run_",
+            "beta_burst_",
+            "rvoip_perf_",
+        )
     else:
         prefixes = ("beta_attestation_", "beta_deny_", "rvoip_require_api_tools")
     selected = [key for key in keys if key.startswith(prefixes)]
@@ -442,6 +814,8 @@ def ancillary_gate_evidence(name: str) -> list[str]:
         return ["sipp/runs.tsv", "sipp/run_summary.md"]
     if name == "baresip strict-UA matrix":
         return ["strict-ua/matrix.tsv", "strict-ua/summary.md"]
+    if name == PROXY_INTEROP_GATE_NAME:
+        return list(PROXY_INTEROP_ANCILLARY_EVIDENCE)
     if name == "dependency advisory audit":
         return [
             "security/cargo-audit.txt",
@@ -455,6 +829,2125 @@ def ancillary_gate_evidence(name: str) -> list[str]:
             f"security/fuzz/{match.group(1)}.version.txt",
         ]
     return []
+
+
+def _proxy_interop_artifact_dir(root: Path, relative: Any) -> Path:
+    if not isinstance(relative, str) or not safe_relative(relative):
+        raise ReportError(
+            f"unsafe stateful proxy interoperability artifact: {relative!r}"
+        )
+    proxy_root = (root / "proxy-interop").resolve()
+    candidate = (proxy_root / relative).resolve()
+    try:
+        candidate.relative_to(proxy_root)
+    except ValueError as exc:
+        raise ReportError(
+            f"stateful proxy interoperability artifact escapes its root: {relative!r}"
+        ) from exc
+    if not candidate.is_dir() or candidate.is_symlink():
+        raise ReportError(
+            f"stateful proxy interoperability row artifact is missing: {relative}"
+        )
+    return candidate
+
+
+def _required_proxy_interop_file(path: Path, label: str) -> Path:
+    if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+        raise ReportError(f"stateful proxy interoperability {label} is missing: {path}")
+    return path
+
+
+def _proxy_interop_relative_file(directory: Path, relative: Any, label: str) -> Path:
+    if not isinstance(relative, str) or not safe_relative(relative):
+        raise ReportError(
+            f"stateful proxy interoperability {label} has an unsafe path: {relative!r}"
+        )
+    unresolved = directory / relative
+    current = directory
+    for part in Path(relative).parts:
+        current /= part
+        if current.is_symlink():
+            raise ReportError(
+                f"stateful proxy interoperability {label} may not use symlinks: "
+                f"{relative!r}"
+            )
+    root = directory.resolve()
+    candidate = unresolved.resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ReportError(
+            f"stateful proxy interoperability {label} escapes its root: {relative!r}"
+        ) from exc
+    return _required_proxy_interop_file(candidate, label)
+
+
+def _proxy_interop_exact_keys(
+    value: Any, expected: set[str], label: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected:
+        actual = sorted(value) if isinstance(value, dict) else type(value).__name__
+        raise ReportError(
+            f"stateful proxy interoperability {label} fields are invalid; "
+            f"expected={sorted(expected)}, actual={actual}"
+        )
+    return value
+
+
+def _validate_proxy_interop_assertions(value: Any, label: str) -> None:
+    if not isinstance(value, list) or not value:
+        raise ReportError(f"stateful proxy interoperability {label} has no assertions")
+    names: set[str] = set()
+    for item in value:
+        assertion = _proxy_interop_exact_keys(
+            item, {"name", "passed", "observed"}, f"{label} assertion"
+        )
+        name = assertion.get("name")
+        if (
+            not isinstance(name, str)
+            or not name
+            or name in names
+            or assertion.get("passed") is not True
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} assertion failed: {name!r}"
+            )
+        names.add(name)
+
+
+def _proxy_interop_assertions_by_name(
+    value: Any, required: set[str] | frozenset[str], label: str
+) -> dict[str, dict[str, Any]]:
+    _validate_proxy_interop_assertions(value, label)
+    assertions = {item["name"]: item for item in value}
+    missing = set(required) - set(assertions)
+    if missing:
+        raise ReportError(
+            f"stateful proxy interoperability {label} is missing required "
+            f"assertions: {sorted(missing)}"
+        )
+    return assertions
+
+
+def _validate_proxy_interop_inputs(
+    scenario_dir: Path, value: Any, label: str
+) -> dict[str, Path]:
+    if not isinstance(value, dict) or not value:
+        raise ReportError(f"stateful proxy interoperability {label} has no inputs")
+    validated: dict[str, Path] = {}
+    for relative, raw_record in value.items():
+        if not isinstance(relative, str):
+            raise ReportError(
+                f"stateful proxy interoperability {label} input name is invalid"
+            )
+        record = _proxy_interop_exact_keys(
+            raw_record, {"sha256", "bytes"}, f"{label} input {relative!r}"
+        )
+        expected_hash = record.get("sha256")
+        expected_bytes = record.get("bytes")
+        if (
+            not isinstance(expected_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
+            or not isinstance(expected_bytes, int)
+            or isinstance(expected_bytes, bool)
+            or expected_bytes <= 0
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} input metadata is invalid: "
+                f"{relative!r}"
+            )
+        path = _proxy_interop_relative_file(scenario_dir, relative, f"{label} input")
+        if path.stat().st_size != expected_bytes or sha256_path(path) != expected_hash:
+            raise ReportError(
+                f"stateful proxy interoperability {label} input hash drift: "
+                f"{relative!r}"
+            )
+        validated[relative] = path
+    return validated
+
+
+def _validate_proxy_interop_identity(
+    payload: dict[str, Any],
+    scenario: str,
+    combination: tuple[str, str, str],
+    label: str,
+) -> None:
+    if (
+        payload.get("scenario") != scenario
+        or (
+            payload.get("peer"),
+            payload.get("order"),
+            payload.get("transport"),
+        )
+        != combination
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} identity mismatch: "
+            f"{combination!r}/{scenario}"
+        )
+
+
+def _expected_proxy_interop_scenarios(
+    combination: tuple[str, str, str],
+) -> frozenset[str]:
+    _peer, order, transport = combination
+    expected = set(PROXY_INTEROP_EVERY_ROW_SCENARIOS)
+    if order == "peer-first" and transport == "udp":
+        expected.update(PROXY_INTEROP_UDP_ADVANCED_SCENARIOS)
+    if order == "peer-first" and transport == "tcp":
+        expected.update(PROXY_INTEROP_TCP_ADVANCED_SCENARIOS)
+    if transport == "tls":
+        expected.add("sips-routing")
+    return frozenset(expected)
+
+
+def _validate_proxy_interop_retention(
+    payload: dict[str, Any], label: str, log_path: Path
+) -> None:
+    phases = payload.get("phases")
+    if not isinstance(phases, dict) or set(phases) != set(
+        PROXY_INTEROP_RETENTION_PHASES
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} retention phases are incomplete"
+        )
+    parsed: dict[str, dict[str, int]] = {}
+    for phase in PROXY_INTEROP_RETENTION_PHASES:
+        phase_record = _proxy_interop_exact_keys(
+            phases[phase], {"counters", "nonzero"}, f"{label} phase {phase}"
+        )
+        counters = phase_record.get("counters")
+        nonzero = phase_record.get("nonzero")
+        if not isinstance(counters, dict) or not isinstance(nonzero, dict):
+            raise ReportError(
+                f"stateful proxy interoperability {label} phase {phase} is invalid"
+            )
+        for field, values in (("counters", counters), ("nonzero", nonzero)):
+            if any(
+                not isinstance(name, str)
+                or not name
+                or not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                for name, value in values.items()
+            ):
+                raise ReportError(
+                    f"stateful proxy interoperability {label} phase {phase} "
+                    f"{field} is invalid"
+                )
+        expected_nonzero = {
+            name: value for name, value in counters.items() if value != 0
+        }
+        if nonzero != expected_nonzero:
+            raise ReportError(
+                f"stateful proxy interoperability {label} phase {phase} "
+                "nonzero counters disagree"
+            )
+        parsed[phase] = counters
+    if (
+        any(parsed["pre_zero"].values())
+        or not any(parsed["activity"].values())
+        or any(parsed["post_retention"].values())
+        or any(parsed["pre_shutdown"].values())
+        or any(parsed["post_shutdown"].values())
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} retention did not converge"
+        )
+    observed_phases: list[str] = []
+    observed_counters: dict[str, dict[str, int]] = {}
+    for raw_line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not raw_line.startswith("RVOIP_PROXY_RETENTION "):
+            continue
+        fields: dict[str, str] = {}
+        for raw_field in raw_line.split()[1:]:
+            key, separator, value = raw_field.partition("=")
+            if not separator or not key or key in fields:
+                raise ReportError(
+                    f"stateful proxy interoperability {label} retention log "
+                    "contains an invalid field"
+                )
+            fields[key] = value
+        phase = fields.pop("phase", None)
+        if phase not in PROXY_INTEROP_RETENTION_PHASES or phase in observed_counters:
+            raise ReportError(
+                f"stateful proxy interoperability {label} retention log "
+                "contains an invalid phase"
+            )
+        try:
+            counters = {name: int(value) for name, value in fields.items()}
+        except ValueError as exc:
+            raise ReportError(
+                f"stateful proxy interoperability {label} retention log "
+                "contains a non-integer counter"
+            ) from exc
+        if any(value < 0 for value in counters.values()):
+            raise ReportError(
+                f"stateful proxy interoperability {label} retention log "
+                "contains a negative counter"
+            )
+        observed_phases.append(phase)
+        observed_counters[phase] = counters
+    if (
+        tuple(observed_phases) != PROXY_INTEROP_RETENTION_PHASES
+        or observed_counters != parsed
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} retention phases are "
+            "not bound to the raw log"
+        )
+
+
+def _validate_proxy_interop_packet_evidence(
+    scenario_dir: Path,
+    scenario: str,
+    combination: tuple[str, str, str],
+    inputs: dict[str, Path],
+    label: str,
+    claimed_captures: dict[tuple[str, Any], str],
+) -> None:
+    packet_entries = [
+        (relative, path)
+        for relative, path in inputs.items()
+        if path.name == "packet-evidence.json"
+    ]
+    if len(packet_entries) != 1:
+        raise ReportError(
+            f"stateful proxy interoperability {label} is not packet-evidence bound"
+        )
+    _relative, packet_path = packet_entries[0]
+    payload = read_json(packet_path)
+    common_keys = {
+        "schema",
+        "scenario",
+        "status",
+        "peer",
+        "order",
+        "transport",
+        "analyzer",
+        "captures",
+        "display_filter",
+        "selected_packet_count",
+        "assertions",
+    }
+    is_sips_routing = scenario == "sips-routing"
+    if combination[2] == "tls":
+        expected_keys = common_keys | {
+            "selected_call_ids",
+            "selected_tls_packet_count",
+            "selected_sip_packet_count",
+            "observed_methods",
+            "observed_statuses",
+            "via_sent_by_addresses",
+            "via_sent_by_ports",
+            "observed_sni",
+            "observed_handshake_types",
+            "observed_certificate_sha256",
+            "observed_tls_application_listener_ports",
+            "observed_alerts",
+        }
+        if is_sips_routing:
+            expected_keys |= {
+                "observed_sips_request_uris",
+                "plaintext_sip_endpoints",
+                "insecure_external_sip_packet_count",
+            }
+    else:
+        expected_keys = common_keys | {
+            "selected_call_ids",
+            "observed_methods",
+            "observed_statuses",
+            "via_sent_by_addresses",
+            "via_sent_by_ports",
+        }
+    packet = _proxy_interop_exact_keys(
+        payload, expected_keys, f"{label} packet evidence"
+    )
+    analyzer = packet.get("analyzer")
+    captures = packet.get("captures")
+    packet_count = packet.get("selected_packet_count")
+    if (
+        packet.get("schema") != "rvoip-sip-proxy-interop-packet-evidence-v1"
+        or packet.get("scenario") != scenario
+        or packet.get("status") != "PASS"
+        or (
+            packet.get("peer"),
+            packet.get("order"),
+            packet.get("transport"),
+        )
+        != combination
+        or packet.get("display_filter")
+        != ("sip or tls" if combination[2] == "tls" else "sip")
+        or not isinstance(analyzer, dict)
+        or set(analyzer) != {"tshark", "libpcap"}
+        or any(
+            not isinstance(analyzer.get(name), str) or not analyzer[name]
+            for name in analyzer
+        )
+        or not isinstance(captures, list)
+        or not captures
+        or not isinstance(packet_count, int)
+        or isinstance(packet_count, bool)
+        or packet_count <= 0
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} packet evidence is invalid"
+        )
+    required_assertions = (
+        PROXY_INTEROP_TLS_PACKET_ASSERTIONS | PROXY_INTEROP_SIP_PACKET_ASSERTIONS
+        if combination[2] == "tls"
+        else PROXY_INTEROP_SIP_PACKET_ASSERTIONS
+    )
+    if is_sips_routing:
+        required_assertions = (
+            required_assertions
+            | PROXY_INTEROP_SIP_PACKET_ASSERTIONS
+            | PROXY_INTEROP_SIPS_PACKET_ASSERTIONS
+        )
+    if scenario == "stray-response-drop":
+        required_assertions = (
+            required_assertions | PROXY_INTEROP_STRAY_PACKET_ASSERTIONS
+        )
+    if combination[2] == "tls" and scenario == "invite-success":
+        required_assertions = (
+            required_assertions | PROXY_INTEROP_INVITE_DIALOG_PACKET_ASSERTIONS
+        )
+    packet_assertions = _proxy_interop_assertions_by_name(
+        packet.get("assertions"),
+        required_assertions,
+        f"{label} packet evidence",
+    )
+    row_dir = scenario_dir.parents[1]
+    observed_captures: set[str] = set()
+    for raw_capture in captures:
+        capture = _proxy_interop_exact_keys(
+            raw_capture,
+            {"filename", "sha256", "bytes"},
+            f"{label} packet capture",
+        )
+        filename = capture.get("filename")
+        expected_hash = capture.get("sha256")
+        expected_bytes = capture.get("bytes")
+        if (
+            not isinstance(filename, str)
+            or Path(filename).name != filename
+            or filename in observed_captures
+            or not filename.startswith(f"{scenario}--")
+            or not filename.endswith(".pcap")
+            or not isinstance(expected_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
+            or not isinstance(expected_bytes, int)
+            or isinstance(expected_bytes, bool)
+            or expected_bytes <= 24
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} packet capture is invalid"
+            )
+        capture_path = _proxy_interop_relative_file(
+            row_dir, filename, f"{label} row packet capture"
+        )
+        if (
+            capture_path.stat().st_size != expected_bytes
+            or sha256_path(capture_path) != expected_hash
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} packet capture hash drift"
+            )
+        capture_identity = capture_path.stat()
+        ownership_keys: tuple[tuple[str, Any], ...] = (
+            ("path", str(capture_path.resolve())),
+            ("inode", (capture_identity.st_dev, capture_identity.st_ino)),
+            ("sha256", expected_hash),
+        )
+        for ownership_key in ownership_keys:
+            owner = claimed_captures.get(ownership_key)
+            if owner is not None and owner != label:
+                raise ReportError(
+                    "stateful proxy interoperability packet capture is reused "
+                    f"across scenarios: {owner!r} and {label!r}"
+                )
+            claimed_captures[ownership_key] = label
+        observed_captures.add(filename)
+    list_fields = (
+        {
+            "observed_sni",
+            "observed_handshake_types",
+            "observed_certificate_sha256",
+            "observed_tls_application_listener_ports",
+            "observed_alerts",
+            "selected_call_ids",
+            "observed_methods",
+            "observed_statuses",
+            "via_sent_by_addresses",
+            "via_sent_by_ports",
+        }
+        if combination[2] == "tls"
+        else {
+            "selected_call_ids",
+            "observed_methods",
+            "observed_statuses",
+            "via_sent_by_addresses",
+            "via_sent_by_ports",
+        }
+    )
+    if is_sips_routing:
+        list_fields |= {
+            "selected_call_ids",
+            "observed_methods",
+            "observed_statuses",
+            "via_sent_by_addresses",
+            "via_sent_by_ports",
+            "observed_sips_request_uris",
+            "plaintext_sip_endpoints",
+        }
+    if any(not isinstance(packet.get(field), list) for field in list_fields):
+        raise ReportError(
+            f"stateful proxy interoperability {label} packet observations are invalid"
+        )
+    if combination[2] == "tls":
+        handshake_types = packet["observed_handshake_types"]
+        snis = packet["observed_sni"]
+        certificates = packet["observed_certificate_sha256"]
+        application_ports = packet["observed_tls_application_listener_ports"]
+        tls_packet_count = packet.get("selected_tls_packet_count")
+        sip_packet_count = packet.get("selected_sip_packet_count")
+        application_assertion = packet_assertions[
+            "tls-application-data-on-every-encrypted-hop"
+        ].get("observed")
+        sni_assertion = packet_assertions["tls-handshake-sni-valid-when-observed"].get(
+            "observed"
+        )
+        certificate_assertion = packet_assertions[
+            "tls-handshake-certificates-observed-when-initiated"
+        ].get("observed")
+        if (
+            not isinstance(application_assertion, dict)
+            or set(application_assertion)
+            != {
+                "required_listener_ports",
+                "observed_ports",
+                "application_record_count",
+            }
+            or not isinstance(sni_assertion, dict)
+            or set(sni_assertion) != {"allowed", "observed", "client_hello_observed"}
+            or not isinstance(certificate_assertion, dict)
+            or set(certificate_assertion)
+            != {"client_hello_observed", "certificate_sha256"}
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} TLS packet "
+                "assertions have invalid observations"
+            )
+        required_application_ports = application_assertion["required_listener_ports"]
+        observed_application_ports = application_assertion["observed_ports"]
+        application_record_count = application_assertion["application_record_count"]
+        allowed_sni = sni_assertion["allowed"]
+        assertion_sni = sni_assertion["observed"]
+        client_hello_observed = sni_assertion["client_hello_observed"]
+        assertion_certificates = certificate_assertion["certificate_sha256"]
+        certificate_client_hello = certificate_assertion["client_hello_observed"]
+        string_lists = (
+            handshake_types,
+            snis,
+            certificates,
+            application_ports,
+            required_application_ports,
+            observed_application_ports,
+            allowed_sni,
+            assertion_sni,
+            assertion_certificates,
+        )
+        if (
+            not isinstance(tls_packet_count, int)
+            or isinstance(tls_packet_count, bool)
+            or tls_packet_count <= 0
+            or not isinstance(sip_packet_count, int)
+            or isinstance(sip_packet_count, bool)
+            or sip_packet_count <= 0
+            or packet_count != tls_packet_count + sip_packet_count
+            or any(not isinstance(items, list) for items in string_lists)
+            or any(
+                not isinstance(item, str) or not item
+                for items in string_lists
+                for item in items
+            )
+            or any(
+                re.fullmatch(r"[0-9a-f]{64}", item) is None
+                for item in (*certificates, *assertion_certificates)
+            )
+            or packet_assertions["tls-packets-observed"].get("observed")
+            != tls_packet_count
+            or not required_application_ports
+            or not set(required_application_ports) <= set(observed_application_ports)
+            or set(application_ports) != set(required_application_ports)
+            or not isinstance(application_record_count, int)
+            or isinstance(application_record_count, bool)
+            or application_record_count <= 0
+            or not allowed_sni
+            or set(snis) - set(allowed_sni)
+            or assertion_sni != snis
+            or not isinstance(client_hello_observed, bool)
+            or not isinstance(certificate_client_hello, bool)
+            or certificate_client_hello != client_hello_observed
+            or client_hello_observed != ("1" in handshake_types)
+            or (client_hello_observed and not snis)
+            or assertion_certificates != certificates
+            or (client_hello_observed and not certificates)
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} TLS packet "
+                "assertions disagree with packet observations"
+            )
+
+    selected_call_ids = packet["selected_call_ids"]
+    observed_methods = packet["observed_methods"]
+    observed_statuses = packet["observed_statuses"]
+    if (
+        any(not isinstance(item, str) or not item for item in selected_call_ids)
+        or any(not isinstance(item, str) or not item for item in observed_methods)
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 100
+            for item in observed_statuses
+        )
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} SIP packet observations "
+            "have invalid value types"
+        )
+    via_observation = {
+        "addresses": packet["via_sent_by_addresses"],
+        "ports": packet["via_sent_by_ports"],
+    }
+    required_methods, required_statuses = PROXY_INTEROP_PACKET_REQUIREMENTS[scenario]
+    method_assertion = packet_assertions["required-methods-observed"].get("observed")
+    status_assertion = packet_assertions["required-statuses-observed"].get("observed")
+    if (
+        not selected_call_ids
+        or packet_assertions["scenario-call-id-observed"].get("observed")
+        != selected_call_ids
+        or not isinstance(method_assertion, dict)
+        or set(method_assertion) != {"required", "observed"}
+        or not isinstance(method_assertion["required"], list)
+        or not isinstance(method_assertion["observed"], list)
+        or any(
+            not isinstance(item, str) or not item
+            for item in method_assertion["required"]
+        )
+        or set(method_assertion["required"]) != required_methods
+        or method_assertion["observed"] != observed_methods
+        or not required_methods <= set(observed_methods)
+        or not isinstance(status_assertion, dict)
+        or set(status_assertion) != {"required", "observed"}
+        or not isinstance(status_assertion["required"], list)
+        or not isinstance(status_assertion["observed"], list)
+        or any(
+            not isinstance(item, int) or isinstance(item, bool)
+            for item in status_assertion["required"]
+        )
+        or set(status_assertion["required"]) != required_statuses
+        or status_assertion["observed"] != observed_statuses
+        or not required_statuses <= set(observed_statuses)
+        or not via_observation["addresses"]
+        or not via_observation["ports"]
+        or packet_assertions["rvoip-via-observed"].get("observed") != via_observation
+        or packet_assertions["peer-via-observed"].get("observed") != via_observation
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} SIP packet assertions "
+            "disagree with scenario requirements or packet observations"
+        )
+    if is_sips_routing:
+        sip_packet_count = packet.get("selected_sip_packet_count")
+        request_uris = packet.get("observed_sips_request_uris")
+        plaintext_endpoints = packet.get("plaintext_sip_endpoints")
+        insecure_count = packet.get("insecure_external_sip_packet_count")
+        if (
+            not isinstance(sip_packet_count, int)
+            or isinstance(sip_packet_count, bool)
+            or sip_packet_count <= 0
+            or packet_count != packet["selected_tls_packet_count"] + sip_packet_count
+            or request_uris != ["sips:probe@example.test"]
+            or not isinstance(plaintext_endpoints, list)
+            or not plaintext_endpoints
+            or any(
+                not isinstance(endpoint_record, dict)
+                or set(endpoint_record) != {"source", "destination"}
+                or any(
+                    not isinstance(endpoint_record.get(field), str)
+                    or not endpoint_record[field]
+                    for field in ("source", "destination")
+                )
+                for endpoint_record in plaintext_endpoints
+            )
+            or insecure_count != 0
+            or packet_assertions["no-plaintext-sip-on-external-tls-ports"].get(
+                "observed"
+            )
+            != 0
+            or packet_assertions["sips-request-preserved-end-to-end"].get("observed")
+            != request_uris
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} SIPS packet "
+                "observations do not prove end-to-end secure routing"
+            )
+    if scenario == "stray-response-drop":
+        true_stray = [
+            item
+            for item in selected_call_ids
+            if isinstance(item, str) and item.startswith("true-stray-")
+        ]
+        if (
+            len(true_stray) != 1
+            or packet_assertions["one-true-stray-call-observed"].get("observed")
+            != true_stray
+            or not isinstance(
+                packet_assertions["true-stray-arrived-at-rvoip"].get("observed"),
+                int,
+            )
+            or isinstance(
+                packet_assertions["true-stray-arrived-at-rvoip"].get("observed"),
+                bool,
+            )
+            or packet_assertions["true-stray-arrived-at-rvoip"]["observed"] <= 0
+            or packet_assertions["true-stray-had-zero-rvoip-egress"].get("observed")
+            != 0
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} stray-response "
+                "packet assertions are invalid"
+            )
+
+
+def _validate_proxy_interop_raw_evidence(
+    scenario: str,
+    combination: tuple[str, str, str],
+    inputs: dict[str, Path],
+    label: str,
+) -> None:
+    raw_entries = [path for path in inputs.values() if path.name == "raw-wire.json"]
+    if len(raw_entries) != 1:
+        raise ReportError(
+            f"stateful proxy interoperability {label} is not raw-wire bound"
+        )
+    payload = read_json(raw_entries[0])
+    transport = combination[2]
+    external_key = (
+        "external_peer_path_observed"
+        if transport == "udp"
+        else "external_peer_exercised"
+    )
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != PROXY_INTEROP_RAW_SCHEMAS.get(transport)
+        or payload.get("scenario") != scenario
+        or payload.get("status") != "PASS"
+        or payload.get("transport") != transport
+        or payload.get(external_key) is not True
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} raw-wire identity is invalid"
+        )
+
+
+def _validate_proxy_interop_scenario_result(
+    scenario_dir: Path,
+    scenario: str,
+    combination: tuple[str, str, str],
+    claimed_captures: dict[tuple[str, Any], str],
+) -> dict[str, Any]:
+    label = f"scenario {combination!r}/{scenario}"
+    result_path = _required_proxy_interop_file(
+        scenario_dir / "result.json", f"{label} result.json"
+    )
+    payload = read_json(result_path)
+    common_keys = {
+        "schema",
+        "scenario",
+        "status",
+        "evidence_kind",
+        "external_peer_exercised",
+        "peer",
+        "order",
+        "transport",
+        "assertions",
+        "inputs",
+    }
+    evidence_kind = payload.get("evidence_kind") if isinstance(payload, dict) else None
+    expected_keys = (
+        common_keys | {"phases"}
+        if evidence_kind == "retention-phase-snapshots"
+        else common_keys
+    )
+    payload = _proxy_interop_exact_keys(payload, expected_keys, label)
+    if (
+        payload.get("schema") != PROXY_INTEROP_SCENARIO_SCHEMA
+        or payload.get("status") != "PASS"
+        or payload.get("external_peer_exercised") is not True
+        or evidence_kind not in PROXY_INTEROP_EXTERNAL_EVIDENCE_KINDS
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} is not valid external evidence"
+        )
+    _validate_proxy_interop_identity(payload, scenario, combination, label)
+    if scenario == "sips-routing":
+        _proxy_interop_assertions_by_name(
+            payload.get("assertions"),
+            PROXY_INTEROP_SIPS_RESULT_ASSERTIONS,
+            label,
+        )
+    else:
+        _validate_proxy_interop_assertions(payload.get("assertions"), label)
+    inputs = _validate_proxy_interop_inputs(scenario_dir, payload.get("inputs"), label)
+    expected_evidence_kind = "external-sipp-and-packet-observation"
+    if scenario in (
+        PROXY_INTEROP_UDP_ADVANCED_SCENARIOS | PROXY_INTEROP_TCP_ADVANCED_SCENARIOS
+    ):
+        expected_evidence_kind = PROXY_INTEROP_RAW_EVIDENCE_KIND
+    if scenario == "retention-cleanup":
+        expected_evidence_kind = "retention-phase-snapshots"
+    if scenario == "sips-routing":
+        expected_evidence_kind = "verified-external-tls"
+    if evidence_kind != expected_evidence_kind:
+        raise ReportError(
+            f"stateful proxy interoperability {label} has evidence kind "
+            f"{evidence_kind!r}, expected {expected_evidence_kind!r}"
+        )
+
+    if (
+        evidence_kind
+        in {
+            "external-sipp-and-packet-observation",
+            PROXY_INTEROP_RAW_EVIDENCE_KIND,
+        }
+        or scenario == "sips-routing"
+    ):
+        _validate_proxy_interop_packet_evidence(
+            scenario_dir,
+            scenario,
+            combination,
+            inputs,
+            label,
+            claimed_captures,
+        )
+    if evidence_kind == PROXY_INTEROP_RAW_EVIDENCE_KIND:
+        _validate_proxy_interop_raw_evidence(scenario, combination, inputs, label)
+
+    if scenario == "retention-cleanup":
+        if evidence_kind != "retention-phase-snapshots":
+            raise ReportError(
+                f"stateful proxy interoperability {label} lacks retention evidence"
+            )
+        retention_logs = [path for path in inputs.values() if path.name == "rvoip.log"]
+        if len(retention_logs) != 1:
+            raise ReportError(
+                f"stateful proxy interoperability {label} lacks its retention log"
+            )
+        _validate_proxy_interop_retention(payload, label, retention_logs[0])
+    elif evidence_kind == "retention-phase-snapshots":
+        raise ReportError(
+            f"stateful proxy interoperability {label} has unexpected retention evidence"
+        )
+
+    if scenario == "sips-routing":
+        if evidence_kind != "verified-external-tls" or combination[2] != "tls":
+            raise ReportError(
+                f"stateful proxy interoperability {label} lacks verified TLS evidence"
+            )
+    elif evidence_kind == "verified-external-tls":
+        raise ReportError(
+            f"stateful proxy interoperability {label} has unexpected TLS evidence"
+        )
+    return payload
+
+
+def _validate_proxy_interop_supplemental_result(
+    result_path: Path,
+    scenario: str,
+    combination: tuple[str, str, str],
+    source: dict[str, Any],
+) -> None:
+    label = f"supplemental scenario {combination!r}/{scenario}"
+    payload = read_json(_required_proxy_interop_file(result_path, f"{label} result"))
+    payload = _proxy_interop_exact_keys(
+        payload,
+        {
+            "schema",
+            "scenario",
+            "status",
+            "evidence_kind",
+            "external_peer_exercised",
+            "limitation",
+            "peer_row",
+            "source",
+            "commands",
+        },
+        label,
+    )
+    peer_row = payload.get("peer_row")
+    source_record = payload.get("source")
+    commands = payload.get("commands")
+    if (
+        payload.get("schema") != PROXY_INTEROP_SCENARIO_SCHEMA
+        or payload.get("scenario") != scenario
+        or payload.get("status") != "PASS"
+        or payload.get("evidence_kind") != PROXY_INTEROP_SUPPLEMENTAL_EVIDENCE_KIND
+        or payload.get("external_peer_exercised") is not False
+        or not isinstance(payload.get("limitation"), str)
+        or not payload["limitation"].strip()
+        or not isinstance(peer_row, dict)
+        or set(peer_row) != {"peer", "order", "transport"}
+        or (
+            peer_row.get("peer"),
+            peer_row.get("order"),
+            peer_row.get("transport"),
+        )
+        != combination
+        or not isinstance(source_record, dict)
+        or set(source_record) != {"sha", "fingerprint_sha256"}
+        or source_record.get("sha") != source.get("start_sha")
+        or source_record.get("fingerprint_sha256")
+        != source.get("start_fingerprint_sha256")
+        or not isinstance(commands, list)
+        or not commands
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability {label} contract is invalid"
+        )
+
+    scenario_dir = result_path.parent
+    observed_logs: set[str] = set()
+    for command in commands:
+        record = _proxy_interop_exact_keys(
+            command,
+            {
+                "argv",
+                "exit_code",
+                "one_exact_test_passed",
+                "log",
+                "log_sha256",
+            },
+            f"{label} command",
+        )
+        argv = record.get("argv")
+        log = record.get("log")
+        log_sha256 = record.get("log_sha256")
+        if (
+            not isinstance(argv, list)
+            or len(argv) != 10
+            or argv[:5] != ["cargo", "test", "--package", "rvoip-sip-proxy", "--test"]
+            or not isinstance(argv[5], str)
+            or not argv[5]
+            or not isinstance(argv[6], str)
+            or not argv[6]
+            or argv[7:] != ["--", "--exact", "--test-threads=1"]
+            or record.get("exit_code") != 0
+            or isinstance(record.get("exit_code"), bool)
+            or record.get("one_exact_test_passed") is not True
+            or not isinstance(log, str)
+            or Path(log).name != log
+            or log in observed_logs
+            or not isinstance(log_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", log_sha256) is None
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} command is not exact"
+            )
+        log_path = _proxy_interop_relative_file(
+            scenario_dir, log, f"{label} exact-test log"
+        )
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        if (
+            sha256_path(log_path) != log_sha256
+            or re.search(r"test result: ok\.\s+1 passed;\s+0 failed", log_text) is None
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability {label} exact-test log is invalid"
+            )
+        observed_logs.add(log)
+    expected_files = {"result.json", *observed_logs}
+    actual_files: set[str] = set()
+    for path in scenario_dir.iterdir():
+        if not path.is_file() or path.is_symlink():
+            raise ReportError(
+                f"stateful proxy interoperability {label} has an undeclared entry"
+            )
+        actual_files.add(path.name)
+    if actual_files != expected_files:
+        raise ReportError(
+            f"stateful proxy interoperability {label} file inventory is invalid"
+        )
+
+
+def _validate_proxy_interop_supplemental(
+    row_dir: Path,
+    combination: tuple[str, str, str],
+    source: dict[str, Any],
+) -> None:
+    supplemental_root = row_dir / "supplemental"
+    if not supplemental_root.exists():
+        return
+    if not supplemental_root.is_dir() or supplemental_root.is_symlink():
+        raise ReportError(
+            "stateful proxy interoperability supplemental evidence root is invalid: "
+            f"{combination!r}"
+        )
+    observed: set[str] = set()
+    for scenario_dir in sorted(supplemental_root.iterdir()):
+        scenario = scenario_dir.name
+        if (
+            not scenario_dir.is_dir()
+            or scenario_dir.is_symlink()
+            or scenario not in PROXY_INTEROP_SCENARIOS
+            or scenario in observed
+        ):
+            raise ReportError(
+                "stateful proxy interoperability supplemental scenario is invalid: "
+                f"{combination!r}/{scenario}"
+            )
+        observed.add(scenario)
+        _validate_proxy_interop_supplemental_result(
+            scenario_dir / "result.json", scenario, combination, source
+        )
+
+
+def _proxy_interop_tls_verifier(verifier_path: Path | None = None) -> Any:
+    verifier_path = verifier_path or (
+        Path(__file__).resolve().parents[2]
+        / "sip-proxy/tests/interop/scripts/verify_tls_evidence.py"
+    )
+    if not verifier_path.is_file() or verifier_path.is_symlink():
+        raise ReportError(
+            "stateful proxy interoperability TLS verifier source is missing"
+        )
+    spec = importlib.util.spec_from_file_location(
+        "rvoip_proxy_interop_tls_verifier", verifier_path
+    )
+    if spec is None or spec.loader is None:
+        raise ReportError(
+            "stateful proxy interoperability TLS verifier cannot be loaded"
+        )
+    module = importlib.util.module_from_spec(spec)
+    previous_dont_write_bytecode = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError) as exc:
+        raise ReportError(
+            f"stateful proxy interoperability TLS verifier cannot be loaded: {exc}"
+        ) from exc
+    finally:
+        sys.dont_write_bytecode = previous_dont_write_bytecode
+    if not callable(getattr(module, "verify_row", None)):
+        raise ReportError(
+            "stateful proxy interoperability TLS verifier has no verify_row"
+        )
+    return module
+
+
+def _validate_proxy_interop_peer_runtime(
+    row_dir: Path,
+    combination: tuple[str, str, str],
+) -> dict[str, Any]:
+    peer, _order, transport = combination
+    runtime = _proxy_interop_exact_keys(
+        read_json(
+            _required_proxy_interop_file(
+                row_dir / "peer-runtime.json", "peer runtime snapshot"
+            )
+        ),
+        {
+            "schema",
+            "product",
+            "container",
+            "image",
+            "configuration",
+            "state",
+            "network",
+        },
+        f"peer runtime {combination!r}",
+    )
+    container = runtime.get("container")
+    image = runtime.get("image")
+    configuration = runtime.get("configuration")
+    state = runtime.get("state")
+    network = runtime.get("network")
+    expected_reference = (
+        PROXY_INTEROP_OPENSIPS_TLS_REFERENCE
+        if peer == "opensips" and transport == "tls"
+        else PROXY_INTEROP_IMAGES[peer]
+    )
+    allowed_state = {
+        "status",
+        "running",
+        "paused",
+        "restarting",
+        "oom_killed",
+        "dead",
+        "exit_code",
+        "started_at",
+        "finished_at",
+        "health_status",
+    }
+    if (
+        runtime.get("schema") != PROXY_INTEROP_PEER_RUNTIME_SCHEMA
+        or runtime.get("product") != peer
+        or not isinstance(container, dict)
+        or set(container) != {"name", "id", "created", "platform"}
+        or any(
+            not isinstance(container.get(field), str) or not container[field]
+            for field in container
+        )
+        or not container["platform"].startswith("linux")
+        or not isinstance(image, dict)
+        or set(image) != {"id", "reference"}
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(image.get("id", ""))) is None
+        or image.get("reference") != expected_reference
+        or not isinstance(configuration, dict)
+        or set(configuration)
+        != {
+            "network_mode",
+            "published_ports",
+            "exposed_ports",
+            "restart_policy",
+        }
+        or not isinstance(configuration.get("network_mode"), str)
+        or not isinstance(configuration.get("published_ports"), dict)
+        or not isinstance(configuration.get("exposed_ports"), list)
+        or any(
+            not isinstance(port, str) for port in configuration.get("exposed_ports", [])
+        )
+        or not isinstance(configuration.get("restart_policy"), dict)
+        or set(configuration.get("restart_policy", {}))
+        != {"name", "maximum_retry_count"}
+        or not isinstance(configuration["restart_policy"].get("name"), str)
+        or not isinstance(
+            configuration["restart_policy"].get("maximum_retry_count"), int
+        )
+        or isinstance(configuration["restart_policy"].get("maximum_retry_count"), bool)
+        or not isinstance(state, dict)
+        or not {
+            "status",
+            "running",
+            "paused",
+            "restarting",
+            "oom_killed",
+            "dead",
+            "exit_code",
+        }
+        <= set(state)
+        or not set(state) <= allowed_state
+        or state.get("status") != "running"
+        or state.get("running") is not True
+        or state.get("paused") is not False
+        or state.get("restarting") is not False
+        or state.get("oom_killed") is not False
+        or state.get("dead") is not False
+        or not isinstance(state.get("exit_code"), int)
+        or isinstance(state.get("exit_code"), bool)
+        or state.get("exit_code") != 0
+        or not isinstance(network, dict)
+        or set(network) != {"published_ports", "networks"}
+        or not isinstance(network.get("published_ports"), dict)
+        or not isinstance(network.get("networks"), dict)
+        or not network.get("networks")
+        or any(
+            not isinstance(name, str) or not name or not isinstance(details, dict)
+            for name, details in network.get("networks", {}).items()
+        )
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability peer runtime is invalid: {combination!r}"
+        )
+    return runtime
+
+
+def _validate_proxy_interop_opensips_provenance(
+    row_dir: Path,
+    runtime: dict[str, Any],
+    combination: tuple[str, str, str],
+) -> Path:
+    provenance_path = _required_proxy_interop_file(
+        row_dir / "opensips-tls-image-provenance.json",
+        "OpenSIPS TLS image provenance",
+    )
+    provenance = _proxy_interop_exact_keys(
+        read_json(provenance_path),
+        {"schema", "result", "image", "dockerfile", "packages", "modules"},
+        f"OpenSIPS TLS provenance {combination!r}",
+    )
+    image = provenance.get("image")
+    dockerfile = provenance.get("dockerfile")
+    workspace_dockerfile = (
+        Path(__file__).resolve().parents[4] / PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE
+    )
+    if (
+        provenance.get("schema") != PROXY_INTEROP_OPENSIPS_TLS_PROVENANCE_SCHEMA
+        or provenance.get("result") != "PASS"
+        or not isinstance(image, dict)
+        or set(image) != {"reference", "id", "platform", "base_digest"}
+        or image.get("reference") != PROXY_INTEROP_OPENSIPS_TLS_REFERENCE
+        or image.get("id") != runtime.get("image", {}).get("id")
+        or image.get("platform") != "linux/amd64"
+        or image.get("base_digest") != PROXY_INTEROP_IMAGES["opensips"].split("@", 1)[1]
+        or not isinstance(dockerfile, dict)
+        or set(dockerfile) != {"relative_path", "sha256"}
+        or dockerfile.get("relative_path") != PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE
+        or dockerfile.get("sha256") != PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE_SHA256
+        or not workspace_dockerfile.is_file()
+        or workspace_dockerfile.is_symlink()
+        or sha256_path(workspace_dockerfile)
+        != PROXY_INTEROP_OPENSIPS_TLS_DOCKERFILE_SHA256
+        or provenance.get("packages") != PROXY_INTEROP_OPENSIPS_TLS_PACKAGES
+        or provenance.get("modules") != PROXY_INTEROP_OPENSIPS_TLS_MODULES
+    ):
+        raise ReportError(
+            "stateful proxy interoperability OpenSIPS TLS provenance does not "
+            f"match the reviewed image: {combination!r}"
+        )
+    return provenance_path
+
+
+def _validate_proxy_interop_tls_packet_aggregate(
+    result: dict[str, Any],
+    combination: tuple[str, str, str],
+) -> dict[str, Any]:
+    peer, _order, _transport = combination
+    aggregate = _proxy_interop_exact_keys(
+        result.get("packet_aggregate"),
+        {
+            "scenarios",
+            "expected_sni",
+            "observed_sni",
+            "expected_leaf_certificate_sha256",
+            "observed_certificate_sha256",
+            "capture_count",
+        },
+        f"TLS packet aggregate {combination!r}",
+    )
+    certificates = result.get("certificates")
+    if not isinstance(certificates, dict):
+        raise ReportError(
+            f"stateful proxy interoperability TLS certificates are invalid: "
+            f"{combination!r}"
+        )
+    expected_sni = sorted(
+        {
+            "rvoip.proxy.test",
+            f"{peer}.proxy.test",
+            "sipp.proxy.test",
+        }
+    )
+    try:
+        expected_leaf_hashes = sorted(
+            certificates[name]["der_sha256"] for name in ("rvoip", "peer", "sipp")
+        )
+    except (KeyError, TypeError):
+        raise ReportError(
+            f"stateful proxy interoperability TLS leaf certificates are invalid: "
+            f"{combination!r}"
+        ) from None
+    scenarios = aggregate.get("scenarios")
+    expected_scenarios = set(PROXY_INTEROP_TLS_PACKET_SCENARIOS)
+    if (
+        aggregate.get("expected_sni") != expected_sni
+        or aggregate.get("observed_sni") != expected_sni
+        or aggregate.get("expected_leaf_certificate_sha256") != expected_leaf_hashes
+        or not isinstance(aggregate.get("observed_certificate_sha256"), list)
+        or not set(expected_leaf_hashes)
+        <= set(aggregate["observed_certificate_sha256"])
+        or not isinstance(aggregate.get("capture_count"), int)
+        or isinstance(aggregate.get("capture_count"), bool)
+        or aggregate["capture_count"] <= 0
+        or not isinstance(scenarios, dict)
+        or set(scenarios) != expected_scenarios
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability TLS packet aggregate is invalid: "
+            f"{combination!r}"
+        )
+
+    observed_sni: set[str] = set()
+    observed_certificates: set[str] = set()
+    observed_captures: set[str] = set()
+    for scenario in PROXY_INTEROP_TLS_PACKET_SCENARIOS:
+        record = _proxy_interop_exact_keys(
+            scenarios[scenario],
+            {
+                "packet_evidence_sha256",
+                "observed_sni",
+                "observed_certificate_sha256",
+                "captures",
+            },
+            f"TLS packet aggregate {combination!r}/{scenario}",
+        )
+        packet_hash = record.get("packet_evidence_sha256")
+        scenario_sni = record.get("observed_sni")
+        scenario_certificates = record.get("observed_certificate_sha256")
+        captures = record.get("captures")
+        if (
+            not isinstance(packet_hash, str)
+            or re.fullmatch(r"[0-9a-f]{64}", packet_hash) is None
+            or not isinstance(scenario_sni, list)
+            or scenario_sni != sorted(set(scenario_sni))
+            or any(
+                not isinstance(value, str) or value not in expected_sni
+                for value in scenario_sni
+            )
+            or not isinstance(scenario_certificates, list)
+            or scenario_certificates != sorted(set(scenario_certificates))
+            or any(
+                not isinstance(value, str)
+                or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                for value in scenario_certificates
+            )
+            or not isinstance(captures, list)
+            or not captures
+        ):
+            raise ReportError(
+                "stateful proxy interoperability TLS packet aggregate scenario "
+                f"is invalid: {combination!r}/{scenario}"
+            )
+        observed_sni.update(scenario_sni)
+        observed_certificates.update(scenario_certificates)
+        for raw_capture in captures:
+            capture = _proxy_interop_exact_keys(
+                raw_capture,
+                {"filename", "sha256", "bytes"},
+                f"TLS packet aggregate capture {combination!r}/{scenario}",
+            )
+            filename = capture.get("filename")
+            if (
+                not isinstance(filename, str)
+                or Path(filename).name != filename
+                or not filename.startswith(f"{scenario}--")
+                or not filename.endswith(".pcap")
+                or filename in observed_captures
+                or not isinstance(capture.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", capture["sha256"]) is None
+                or not isinstance(capture.get("bytes"), int)
+                or isinstance(capture.get("bytes"), bool)
+                or capture["bytes"] <= 24
+            ):
+                raise ReportError(
+                    "stateful proxy interoperability TLS packet aggregate "
+                    f"capture is invalid: {combination!r}/{scenario}"
+                )
+            observed_captures.add(filename)
+    if (
+        sorted(observed_sni) != aggregate["observed_sni"]
+        or sorted(observed_certificates) != aggregate["observed_certificate_sha256"]
+        or len(observed_captures) != aggregate["capture_count"]
+    ):
+        raise ReportError(
+            "stateful proxy interoperability TLS packet aggregate disagrees "
+            f"with its scenario records: {combination!r}"
+        )
+    return {
+        "expected_sni": expected_sni,
+        "observed_sni": aggregate["observed_sni"],
+        "expected_leaf_certificate_sha256": expected_leaf_hashes,
+        "observed_certificate_sha256": aggregate["observed_certificate_sha256"],
+        "capture_count": aggregate["capture_count"],
+    }
+
+
+def _validate_proxy_interop_tls(
+    row_dir: Path,
+    scenario_dir: Path,
+    combination: tuple[str, str, str],
+    scenario_payload: dict[str, Any],
+    runtime: dict[str, Any],
+) -> dict[str, Any]:
+    peer, order, transport = combination
+    if transport != "tls":
+        raise ReportError(
+            f"stateful proxy interoperability TLS row is invalid: {combination!r}"
+        )
+    stored_path = _required_proxy_interop_file(
+        row_dir / "tls-verifier-result.json", "TLS verifier result"
+    )
+    stored = read_json(stored_path)
+    if (
+        not isinstance(stored, dict)
+        or stored.get("schema") != PROXY_INTEROP_TLS_RESULT_SCHEMA
+        or stored.get("result") != "PASS"
+        or (
+            stored.get("peer"),
+            stored.get("order"),
+            stored.get("transport"),
+        )
+        != combination
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability TLS result is invalid: {combination!r}"
+        )
+    packet_aggregate = _validate_proxy_interop_tls_packet_aggregate(stored, combination)
+    inputs = scenario_payload.get("inputs")
+    assert isinstance(inputs, dict)
+    input_paths = {
+        Path(relative).name: _proxy_interop_relative_file(
+            scenario_dir,
+            relative,
+            f"TLS scenario {combination!r} input",
+        )
+        for relative in inputs
+    }
+    verifier_copy = input_paths.get("verify_tls_evidence.py")
+    workspace_verifier = (
+        Path(__file__).resolve().parents[2]
+        / "sip-proxy/tests/interop/scripts/verify_tls_evidence.py"
+    )
+    if (
+        verifier_copy is None
+        or not workspace_verifier.is_file()
+        or workspace_verifier.is_symlink()
+        or sha256_path(verifier_copy) != sha256_path(workspace_verifier)
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability TLS verifier source is not bound: "
+            f"{combination!r}"
+        )
+    verifier = _proxy_interop_tls_verifier(workspace_verifier)
+    try:
+        recomputed = verifier.verify_row(row_dir, peer, order)
+    except Exception as exc:
+        raise ReportError(
+            f"stateful proxy interoperability TLS verification failed: "
+            f"{combination!r}: {exc}"
+        ) from exc
+    if canonical_json(stored) != canonical_json(recomputed):
+        raise ReportError(
+            f"stateful proxy interoperability TLS verifier result drifted: "
+            f"{combination!r}"
+        )
+    if (
+        _validate_proxy_interop_tls_packet_aggregate(recomputed, combination)
+        != packet_aggregate
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability TLS packet aggregate drifted: "
+            f"{combination!r}"
+        )
+
+    required_logs = {
+        "rvoip.log",
+        "peer.log",
+        "tls-rvoip-to-peer-positive.log",
+        "tls-peer-to-rvoip-positive.log",
+        "tls-rvoip-to-peer-wrong-name.log",
+        "tls-rvoip-to-peer-wrong-ca.log",
+        "tls-peer-to-rvoip-wrong-name.log",
+        "tls-peer-to-rvoip-wrong-ca.log",
+        "tls-peer-rejects-untrusted-client.log",
+        "tls-rvoip-rejects-untrusted-client.log",
+        "tls-boundary-client.log",
+        "tls-boundary-server.log",
+    }
+    required_logs.add(f"tls-{peer}-outbound-boundary.log")
+    required_live_sips = {
+        "packet-evidence.json",
+        "uac-messages.log",
+        "uas-messages.log",
+        "uac-stats.csv",
+        "uas-stats.csv",
+    }
+    input_by_name = {Path(relative).name: record for relative, record in inputs.items()}
+    runtime_path = _required_proxy_interop_file(
+        row_dir / "peer-runtime.json", "peer runtime snapshot"
+    )
+    if (
+        "tls-verifier-result.json" not in input_by_name
+        or "verify_tls_evidence.py" not in input_by_name
+        or "peer-runtime.json" not in input_by_name
+        or not required_logs <= set(input_by_name)
+        or not required_live_sips <= set(input_by_name)
+        or input_by_name["tls-verifier-result.json"].get("sha256")
+        != sha256_path(stored_path)
+        or input_by_name["peer-runtime.json"].get("sha256") != sha256_path(runtime_path)
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability TLS scenario is not verifier-bound: "
+            f"{combination!r}"
+        )
+    source_hashes = stored.get("source_files_sha256")
+    if not isinstance(source_hashes, dict):
+        raise ReportError(
+            f"stateful proxy interoperability TLS source hashes are missing: "
+            f"{combination!r}"
+        )
+    for basename in required_logs:
+        expected = source_hashes.get(basename)
+        if (
+            not isinstance(expected, str)
+            or input_by_name[basename].get("sha256") != expected
+        ):
+            raise ReportError(
+                "stateful proxy interoperability TLS raw evidence is not bound: "
+                f"{combination!r}/{basename}"
+            )
+    if peer == "opensips":
+        provenance_name = "opensips-tls-image-provenance.json"
+        provenance_path = _validate_proxy_interop_opensips_provenance(
+            row_dir, runtime, combination
+        )
+        if (
+            provenance_name not in input_by_name
+            or input_by_name[provenance_name].get("sha256")
+            != sha256_path(provenance_path)
+            or source_hashes.get(provenance_name) != sha256_path(provenance_path)
+        ):
+            raise ReportError(
+                "stateful proxy interoperability OpenSIPS TLS provenance is not "
+                f"scenario-bound: {combination!r}"
+            )
+    return packet_aggregate
+
+
+def _validate_proxy_interop_runtime_snapshot(value: Any, label: str) -> dict[str, Any]:
+    snapshot = _proxy_interop_exact_keys(
+        value,
+        {
+            "schema",
+            "kind",
+            "captured_at_utc",
+            "ports",
+            "collectors",
+            "docker",
+            "listeners",
+        },
+        f"runtime {label} snapshot",
+    )
+    ports = snapshot.get("ports")
+    collectors = snapshot.get("collectors")
+    docker = snapshot.get("docker")
+    listeners = snapshot.get("listeners")
+    if (
+        snapshot.get("schema") != PROXY_INTEROP_RUNTIME_STATE_SCHEMA
+        or snapshot.get("kind") != "snapshot"
+        or not isinstance(snapshot.get("captured_at_utc"), str)
+        or re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            snapshot["captured_at_utc"],
+        )
+        is None
+        or not isinstance(ports, list)
+        or not ports
+        or ports != sorted(set(ports))
+        or any(
+            not isinstance(port, int)
+            or isinstance(port, bool)
+            or port < 1
+            or port > 65535
+            for port in ports
+        )
+        or collectors
+        not in (
+            {"docker": "docker-list-json", "listeners": "lsof"},
+            {"docker": "docker-list-json", "listeners": "ss"},
+        )
+        or not isinstance(docker, dict)
+        or set(docker) != {"containers", "networks", "volumes"}
+        or not isinstance(listeners, list)
+    ):
+        raise ReportError(
+            f"stateful proxy interoperability runtime {label} snapshot is invalid"
+        )
+
+    record_contracts = {
+        "containers": {"id", "name", "image", "state"},
+        "networks": {"id", "name", "driver", "scope"},
+        "volumes": {"name", "driver", "scope"},
+    }
+    identity_fields = {"containers": "id", "networks": "id", "volumes": "name"}
+    for category, fields in record_contracts.items():
+        records = docker.get(category)
+        if not isinstance(records, list):
+            raise ReportError(
+                f"stateful proxy interoperability runtime {label} "
+                f"{category} inventory is invalid"
+            )
+        identities: set[str] = set()
+        for raw_record in records:
+            record = _proxy_interop_exact_keys(
+                raw_record,
+                fields,
+                f"runtime {label} {category} record",
+            )
+            if any(
+                not isinstance(record.get(field), str) or not record[field]
+                for field in fields
+            ):
+                raise ReportError(
+                    f"stateful proxy interoperability runtime {label} "
+                    f"{category} record is incomplete"
+                )
+            identity = record[identity_fields[category]]
+            if identity in identities:
+                raise ReportError(
+                    f"stateful proxy interoperability runtime {label} "
+                    f"{category} identity is duplicated"
+                )
+            identities.add(identity)
+
+    listener_identities: set[tuple[Any, ...]] = set()
+    for raw_record in listeners:
+        record = _proxy_interop_exact_keys(
+            raw_record,
+            {"transport", "port", "pid", "process", "endpoint"},
+            f"runtime {label} listener",
+        )
+        identity = (
+            record.get("transport"),
+            record.get("port"),
+            record.get("pid"),
+            record.get("process"),
+            record.get("endpoint"),
+        )
+        if (
+            record.get("transport") not in {"tcp", "udp"}
+            or record.get("port") not in ports
+            or not all(isinstance(value, str) for value in identity[2:])
+            or not record.get("endpoint")
+            or identity in listener_identities
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability runtime {label} listener is invalid"
+            )
+        listener_identities.add(identity)
+    return snapshot
+
+
+def _validate_proxy_interop_runtime_state(proxy_root: Path) -> None:
+    start = _validate_proxy_interop_runtime_snapshot(
+        read_json(
+            _required_proxy_interop_file(
+                proxy_root / "runtime-state-start.json", "runtime start snapshot"
+            )
+        ),
+        "start",
+    )
+    end = _validate_proxy_interop_runtime_snapshot(
+        read_json(
+            _required_proxy_interop_file(
+                proxy_root / "runtime-state-end.json", "runtime end snapshot"
+            )
+        ),
+        "end",
+    )
+    check = _proxy_interop_exact_keys(
+        read_json(
+            _required_proxy_interop_file(
+                proxy_root / "runtime-state-check.json", "runtime state check"
+            )
+        ),
+        {
+            "schema",
+            "kind",
+            "compared_at_utc",
+            "ports",
+            "clean",
+            "preexisting_state_preserved",
+            "no_added_leftovers",
+            "added_leftovers",
+            "removed_preexisting",
+            "changed_preexisting",
+            "differences",
+        },
+        "runtime state check",
+    )
+    differences = check.get("differences")
+    if (
+        start.get("ports") != end.get("ports")
+        or check.get("ports") != start.get("ports")
+        or start.get("docker") != end.get("docker")
+        or start.get("listeners") != end.get("listeners")
+        or check.get("schema") != PROXY_INTEROP_RUNTIME_STATE_SCHEMA
+        or check.get("kind") != "comparison"
+        or not isinstance(check.get("compared_at_utc"), str)
+        or re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
+            check["compared_at_utc"],
+        )
+        is None
+        or check.get("clean") is not True
+        or check.get("preexisting_state_preserved") is not True
+        or check.get("no_added_leftovers") is not True
+        or check.get("added_leftovers") != {}
+        or check.get("removed_preexisting") != {}
+        or check.get("changed_preexisting") != {}
+        or not isinstance(differences, dict)
+        or set(differences) != {"containers", "networks", "volumes", "listeners"}
+    ):
+        raise ReportError(
+            "stateful proxy interoperability runtime state did not converge"
+        )
+    for category, raw_difference in differences.items():
+        difference = _proxy_interop_exact_keys(
+            raw_difference,
+            {"added", "removed", "changed"},
+            f"runtime state {category} difference",
+        )
+        if any(difference[field] != [] for field in difference):
+            raise ReportError(
+                "stateful proxy interoperability runtime difference is nonempty: "
+                f"{category}"
+            )
+
+
+def proxy_interop_evidence_paths(report_root: Path) -> list[str]:
+    proxy_root = report_root / "proxy-interop"
+    if not proxy_root.is_dir() or proxy_root.is_symlink():
+        raise ReportError("stateful proxy interoperability evidence root is missing")
+    paths: list[str] = []
+    for path in sorted(proxy_root.rglob("*")):
+        if path.is_symlink():
+            raise ReportError(
+                f"stateful proxy interoperability evidence may not be a symlink: {path}"
+            )
+        if path.is_file():
+            lowered = path.name.lower()
+            if (
+                lowered in PROXY_INTEROP_PROHIBITED_RAW_FILES
+                or lowered.endswith((".key", ".key.pem", ".p12", ".pfx"))
+                or "private-key" in lowered
+                or (
+                    path.stat().st_size <= 2 * 1024 * 1024
+                    and PROXY_INTEROP_PRIVATE_KEY_PEM.search(path.read_bytes())
+                    is not None
+                )
+            ):
+                raise ReportError(
+                    "stateful proxy interoperability evidence contains prohibited "
+                    f"sensitive or raw state: {path}"
+                )
+            paths.append(path.relative_to(report_root).as_posix())
+    if not paths:
+        raise ReportError("stateful proxy interoperability evidence root is empty")
+    return paths
+
+
+def _validate_proxy_interop_build_evidence(
+    proxy_root: Path, summary: dict[str, Any]
+) -> None:
+    _required_proxy_interop_file(proxy_root / "cargo-build.log", "Cargo build log")
+    command_text = (
+        _required_proxy_interop_file(
+            proxy_root / "cargo-build-command.txt", "Cargo build command"
+        )
+        .read_text(encoding="utf-8", errors="strict")
+        .strip()
+    )
+    binary_sha = (
+        _required_proxy_interop_file(
+            proxy_root / "proxy-binary.sha256", "proxy binary digest"
+        )
+        .read_text(encoding="utf-8", errors="strict")
+        .strip()
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", binary_sha) is None:
+        raise ReportError(
+            "stateful proxy interoperability proxy binary digest is invalid"
+        )
+
+    binary_path = (
+        _required_proxy_interop_file(
+            proxy_root / "proxy-binary.path", "proxy binary path"
+        )
+        .read_text(encoding="utf-8", errors="strict")
+        .strip()
+    )
+    if binary_path != PROXY_INTEROP_BINARY_PATH:
+        raise ReportError(
+            "stateful proxy interoperability proxy binary path is not exact"
+        )
+
+    check_path = _required_proxy_interop_file(
+        proxy_root / "proxy-binary-check.txt", "proxy binary revalidation"
+    )
+    check: dict[str, str] = {}
+    for raw in check_path.read_text(encoding="utf-8", errors="strict").splitlines():
+        if not raw or "=" not in raw:
+            raise ReportError(
+                "stateful proxy interoperability proxy binary revalidation is invalid"
+            )
+        key, value = raw.split("=", 1)
+        if key in check:
+            raise ReportError(
+                "stateful proxy interoperability proxy binary revalidation "
+                f"duplicates {key}"
+            )
+        check[key] = value
+    if (
+        set(check) != {"start_sha256", "end_sha256", "unchanged"}
+        or check["start_sha256"] != binary_sha
+        or check["end_sha256"] != binary_sha
+        or check["unchanged"] != "true"
+    ):
+        raise ReportError(
+            "stateful proxy interoperability proxy binary changed during the run"
+        )
+
+    environment_path = _required_proxy_interop_file(
+        proxy_root / "environment.txt", "environment"
+    )
+    environment: dict[str, str] = {}
+    for raw in environment_path.read_text(
+        encoding="utf-8", errors="strict"
+    ).splitlines():
+        if not raw or ": " not in raw:
+            raise ReportError(
+                "stateful proxy interoperability environment provenance is invalid"
+            )
+        key, value = raw.split(": ", 1)
+        if not key or not value or key in environment:
+            raise ReportError(
+                "stateful proxy interoperability environment provenance is invalid"
+            )
+        environment[key] = value
+    missing_tools = PROXY_INTEROP_ENVIRONMENT_TOOL_KEYS - set(environment)
+    if missing_tools:
+        raise ReportError(
+            "stateful proxy interoperability tool provenance is incomplete: "
+            f"{sorted(missing_tools)}"
+        )
+    for key in PROXY_INTEROP_ENVIRONMENT_TOOL_KEYS:
+        if key.endswith("_path") and not Path(environment[key]).is_absolute():
+            raise ReportError(
+                f"stateful proxy interoperability tool path is not absolute: {key}"
+            )
+    try:
+        command = shlex.split(command_text)
+    except ValueError as exc:
+        raise ReportError(
+            "stateful proxy interoperability Cargo build command is invalid"
+        ) from exc
+    if (
+        len(command) != 9
+        or command[0] != environment["cargo_path"]
+        or command[1:3] != ["build", "--manifest-path"]
+        or not Path(command[3]).is_absolute()
+        or Path(command[3]).name != "Cargo.toml"
+        or command[4:]
+        != [
+            "--release",
+            "--package",
+            "rvoip-sip-proxy",
+            "--example",
+            "stateful_proxy_interop",
+        ]
+    ):
+        raise ReportError(
+            "stateful proxy interoperability Cargo build command is not exact"
+        )
+    source = summary["source"]
+    configuration = summary["configuration"]
+    expected_environment = {
+        "source_sha": source["start_sha"],
+        "source_fingerprint": source["start_fingerprint_sha256"],
+        "source_dirty": "false",
+        "peers": "kamailio opensips",
+        "orders": "rvoip-first peer-first",
+        "transports": "udp tcp tls",
+        "kamailio_image": configuration["kamailio_image"],
+        "kamailio_platform": configuration["kamailio_platform"],
+        "opensips_image": configuration["opensips_image"],
+        "opensips_platform": configuration["opensips_platform"],
+        "retention_drain_seconds": str(configuration["retention_drain_seconds"]),
+    }
+    if any(
+        environment.get(key) != value for key, value in expected_environment.items()
+    ):
+        raise ReportError(
+            "stateful proxy interoperability environment disagrees with its summary"
+        )
+
+
+def _validate_proxy_interop_peer_version(
+    row_dir: Path, peer: str, combination: tuple[Any, Any, Any]
+) -> None:
+    version = _required_proxy_interop_file(
+        row_dir / "peer-version.txt", "peer version"
+    ).read_text(encoding="utf-8", errors="replace")
+    if PROXY_INTEROP_PEER_VERSION_RE[peer].search(version) is None:
+        raise ReportError(
+            f"stateful proxy interoperability peer version drifted: {combination!r}"
+        )
+
+
+def validate_proxy_interop_result(report_root: Path) -> dict[str, Any]:
+    proxy_root = report_root / "proxy-interop"
+    proxy_interop_evidence_paths(report_root)
+    summary = read_json(proxy_root / "summary.json")
+    if summary.get("schema") != "rvoip-sip-proxy-interop-v1":
+        raise ReportError("stateful proxy interoperability summary schema is invalid")
+    result = summary.get("result")
+    source = summary.get("source")
+    configuration = summary.get("configuration")
+    rows = summary.get("rows")
+    if not all(
+        isinstance(value, dict) for value in (result, source, configuration)
+    ) or not isinstance(rows, list):
+        raise ReportError("stateful proxy interoperability summary is incomplete")
+
+    if (
+        result.get("status") != "PASS"
+        or result.get("passed_rows") != 12
+        or result.get("failed_rows") != 0
+        or result.get("gate_failures") != 0
+    ):
+        raise ReportError("stateful proxy interoperability result is not a 12-row PASS")
+    if (
+        source.get("dirty_at_start") is not False
+        or source.get("unchanged") is not True
+        or source.get("start_sha") != source.get("end_sha")
+        or source.get("start_fingerprint_sha256")
+        != source.get("end_fingerprint_sha256")
+        or not re.fullmatch(r"[0-9a-f]{40}", str(source.get("start_sha", "")))
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(source.get("start_fingerprint_sha256", ""))
+        )
+    ):
+        raise ReportError(
+            "stateful proxy interoperability source is not clean and unchanged"
+        )
+
+    for peer, expected_image in PROXY_INTEROP_IMAGES.items():
+        if configuration.get(f"{peer}_image") != expected_image:
+            raise ReportError(f"stateful proxy interoperability {peer} image drifted")
+        if configuration.get(f"{peer}_platform") != "linux/amd64":
+            raise ReportError(
+                f"stateful proxy interoperability {peer} platform drifted"
+            )
+    drain = configuration.get("retention_drain_seconds")
+    if not isinstance(drain, int) or isinstance(drain, bool) or drain < 130:
+        raise ReportError(
+            "stateful proxy interoperability retention drain is below 130 seconds"
+        )
+    _validate_proxy_interop_build_evidence(proxy_root, summary)
+
+    expected_combinations = {
+        (peer, order, transport)
+        for peer in PROXY_INTEROP_PEERS
+        for order in PROXY_INTEROP_ORDERS
+        for transport in PROXY_INTEROP_TRANSPORTS
+    }
+    observed_combinations: set[tuple[str, str, str]] = set()
+    observed_scenarios: set[str] = set()
+    observed_scenarios_by_peer: defaultdict[str, set[str]] = defaultdict(set)
+    row_artifacts: list[str] = []
+    tls_packet_aggregates: dict[str, dict[str, Any]] = {}
+    claimed_captures: dict[tuple[str, Any], str] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ReportError("stateful proxy interoperability row is not an object")
+        combination = (
+            row.get("peer"),
+            row.get("order"),
+            row.get("transport"),
+        )
+        if combination not in expected_combinations:
+            raise ReportError(
+                f"unexpected stateful proxy interoperability row: {combination!r}"
+            )
+        if combination in observed_combinations:
+            raise ReportError(
+                f"duplicate stateful proxy interoperability row: {combination!r}"
+            )
+        observed_combinations.add(combination)
+        if row.get("status") != "PASS":
+            raise ReportError(
+                f"stateful proxy interoperability row did not pass: {combination!r}"
+            )
+        duration = row.get("duration_seconds")
+        if (
+            not isinstance(duration, (str, int))
+            or isinstance(duration, bool)
+            or not str(duration).isdigit()
+            or int(duration) < drain
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability row lacks a duration: {combination!r}"
+            )
+        scenarios = row.get("scenarios")
+        if (
+            not isinstance(scenarios, list)
+            or not scenarios
+            or not all(isinstance(item, str) and item for item in scenarios)
+            or len(scenarios) != len(set(scenarios))
+        ):
+            raise ReportError(
+                f"stateful proxy interoperability row lacks scenario coverage: {combination!r}"
+            )
+        scenario_set = set(scenarios)
+        expected_row_scenarios = _expected_proxy_interop_scenarios(combination)
+        missing_row_scenarios = expected_row_scenarios - scenario_set
+        misplaced_row_scenarios = scenario_set - expected_row_scenarios
+        if missing_row_scenarios or misplaced_row_scenarios:
+            raise ReportError(
+                "stateful proxy interoperability row scenario contract failed: "
+                f"{combination!r}; missing={sorted(missing_row_scenarios)}, "
+                f"misplaced={sorted(misplaced_row_scenarios)}"
+            )
+        observed_scenarios.update(scenario_set)
+        observed_scenarios_by_peer[str(row.get("peer"))].update(scenario_set)
+        row_artifact = row.get("artifact")
+        row_dir = _proxy_interop_artifact_dir(report_root, row_artifact)
+        row_artifacts.append(str(row_artifact))
+        peer_runtime = _validate_proxy_interop_peer_runtime(row_dir, combination)
+        scenarios_root = row_dir / "scenarios"
+        if not scenarios_root.is_dir() or scenarios_root.is_symlink():
+            raise ReportError(
+                f"stateful proxy interoperability scenarios root is missing: "
+                f"{combination!r}"
+            )
+        actual_scenario_dirs: set[str] = set()
+        for path in scenarios_root.iterdir():
+            if not path.is_dir() or path.is_symlink():
+                raise ReportError(
+                    "stateful proxy interoperability scenarios root has an "
+                    f"undeclared entry: {combination!r}/{path.name}"
+                )
+            actual_scenario_dirs.add(path.name)
+        if actual_scenario_dirs != scenario_set:
+            raise ReportError(
+                "stateful proxy interoperability scenario inventory disagrees "
+                f"with its row: {combination!r}"
+            )
+        scenario_results: dict[str, dict[str, Any]] = {}
+        for scenario in scenarios:
+            scenario_dir = row_dir / "scenarios" / scenario
+            if not scenario_dir.is_dir() or scenario_dir.is_symlink():
+                raise ReportError(
+                    "stateful proxy interoperability scenario evidence is missing: "
+                    f"{combination!r}/{scenario}"
+                )
+            scenario_results[scenario] = _validate_proxy_interop_scenario_result(
+                scenario_dir,
+                scenario,
+                combination,
+                claimed_captures,
+            )
+        _validate_proxy_interop_supplemental(row_dir, combination, source)
+        _validate_proxy_interop_peer_version(row_dir, str(row.get("peer")), combination)
+        retention = _required_proxy_interop_file(
+            row_dir / "retention-check.txt", "retention check"
+        ).read_text(encoding="utf-8", errors="replace")
+        if "nonzero={}" not in retention:
+            raise ReportError(
+                f"stateful proxy interoperability retention did not converge: {combination!r}"
+            )
+        pcaps = [
+            path
+            for path in row_dir.glob("*.pcap")
+            if path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+        ]
+        if not pcaps:
+            raise ReportError(
+                f"stateful proxy interoperability packet capture is missing: {combination!r}"
+            )
+        if row.get("transport") == "tls":
+            tls_packet_aggregates[str(row_artifact)] = _validate_proxy_interop_tls(
+                row_dir,
+                row_dir / "scenarios/sips-routing",
+                combination,
+                scenario_results["sips-routing"],
+                peer_runtime,
+            )
+
+    if observed_combinations != expected_combinations:
+        missing = sorted(expected_combinations - observed_combinations)
+        raise ReportError(
+            f"stateful proxy interoperability matrix is incomplete; missing={missing}"
+        )
+    if observed_scenarios != PROXY_INTEROP_SCENARIOS:
+        raise ReportError(
+            "stateful proxy interoperability scenario coverage is incomplete; "
+            f"missing={sorted(PROXY_INTEROP_SCENARIOS - observed_scenarios)}, "
+            f"unknown={sorted(observed_scenarios - PROXY_INTEROP_SCENARIOS)}"
+        )
+    for peer in sorted(PROXY_INTEROP_PEERS):
+        peer_scenarios = observed_scenarios_by_peer[peer]
+        if peer_scenarios != PROXY_INTEROP_SCENARIOS:
+            raise ReportError(
+                "stateful proxy peer scenario coverage is incomplete; "
+                f"peer={peer!r}, "
+                f"missing={sorted(PROXY_INTEROP_SCENARIOS - peer_scenarios)}, "
+                f"unknown={sorted(peer_scenarios - PROXY_INTEROP_SCENARIOS)}"
+            )
+
+    with (proxy_root / "matrix.tsv").open(newline="", encoding="utf-8") as stream:
+        matrix_reader = csv.DictReader(stream, delimiter="\t")
+        matrix_rows = list(matrix_reader)
+    if matrix_reader.fieldnames != [
+        "peer",
+        "order",
+        "transport",
+        "status",
+        "duration_seconds",
+        "artifact",
+        "scenarios",
+    ]:
+        raise ReportError("stateful proxy interoperability TSV schema is invalid")
+    matrix_combinations = {
+        (row.get("peer"), row.get("order"), row.get("transport"))
+        for row in matrix_rows
+        if row.get("status") == "PASS"
+    }
+    if (
+        len(matrix_rows) != 12
+        or matrix_combinations != expected_combinations
+        or any(row.get("status") != "PASS" for row in matrix_rows)
+    ):
+        raise ReportError(
+            "stateful proxy interoperability TSV disagrees with the machine summary"
+        )
+    summary_by_combination = {
+        (row["peer"], row["order"], row["transport"]): row for row in rows
+    }
+    for matrix_row in matrix_rows:
+        combination = (
+            matrix_row.get("peer"),
+            matrix_row.get("order"),
+            matrix_row.get("transport"),
+        )
+        summary_row = summary_by_combination[combination]
+        if (
+            matrix_row.get("status") != summary_row.get("status")
+            or matrix_row.get("duration_seconds")
+            != str(summary_row.get("duration_seconds"))
+            or matrix_row.get("artifact") != summary_row.get("artifact")
+            or [
+                item for item in str(matrix_row.get("scenarios", "")).split(",") if item
+            ]
+            != summary_row.get("scenarios")
+        ):
+            raise ReportError(
+                "stateful proxy interoperability TSV row drifted from its "
+                f"machine summary: {combination!r}"
+            )
+
+    _validate_proxy_interop_runtime_state(proxy_root)
+
+    return {
+        "rows": len(rows),
+        "peers": sorted(PROXY_INTEROP_PEERS),
+        "orders": sorted(PROXY_INTEROP_ORDERS),
+        "transports": sorted(PROXY_INTEROP_TRANSPORTS),
+        "scenarios": sorted(observed_scenarios),
+        "scenarios_by_peer": {
+            peer: sorted(observed_scenarios_by_peer[peer])
+            for peer in sorted(PROXY_INTEROP_PEERS)
+        },
+        "row_artifacts": sorted(row_artifacts),
+        "tls_packet_aggregates": {
+            artifact: tls_packet_aggregates[artifact]
+            for artifact in sorted(tls_packet_aggregates)
+        },
+        "retention_drain_seconds": drain,
+        "source_clean": True,
+        "source_unchanged": True,
+    }
 
 
 def interop_observed_check(report_root: Path, name: str) -> dict[str, Any] | None:
@@ -489,7 +2982,429 @@ def interop_observed_check(report_root: Path, name: str) -> dict[str, Any] | Non
             "observed": counts,
             "passed": counts.get("rows") == 7 and counts.get("PASS") == 7,
         }
+    if name == PROXY_INTEROP_GATE_NAME:
+        observed = validate_proxy_interop_result(report_root)
+        return {
+            "check": "real Kamailio/OpenSIPS stateful-proxy matrix",
+            "observed": observed,
+            "passed": True,
+        }
     return None
+
+
+def _normalized_interop_identity(
+    peer: dict[str, Any], display_name: str, *, require_image: bool
+) -> dict[str, Any]:
+    version = peer.get("version")
+    image_digest = peer.get("image_digest")
+    config_sha256 = peer.get("config_sha256")
+    evidence_paths = peer.get("evidence_paths")
+    if (
+        not isinstance(config_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", config_sha256) is None
+        or not isinstance(evidence_paths, list)
+        or not evidence_paths
+        or not all(
+            isinstance(path, str) and safe_relative(path) for path in evidence_paths
+        )
+        or not isinstance(version, str)
+        or not version.strip()
+    ):
+        raise ReportError(
+            f"{display_name} interoperability identity evidence is incomplete"
+        )
+    if require_image and (
+        not isinstance(image_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None
+    ):
+        raise ReportError(f"{display_name} interoperability image is not digest pinned")
+    return {
+        "version": version,
+        "image_digest": image_digest,
+        "config_sha256": config_sha256,
+        "evidence_paths": sorted(evidence_paths),
+    }
+
+
+def _interop_attestation_identity(
+    attestation: dict[str, Any],
+    product: str,
+    *,
+    require_pbx_source: bool,
+) -> dict[str, Any]:
+    spec = INTEROP_ATTESTATION_SPECS[product]
+    candidates = [
+        peer
+        for peer in attestation.get("peers", [])
+        if isinstance(peer, dict) and peer.get("product") == product
+    ]
+    if product in PROXY_INTEROP_PEERS:
+        runtime = [
+            peer
+            for peer in candidates
+            if any(
+                isinstance(path, str)
+                and path.startswith(spec["identity_evidence_prefix"])
+                for path in peer.get("evidence_paths", [])
+            )
+        ]
+        if len(runtime) != 1:
+            raise ReportError(
+                f"{spec['display_name']} interoperability identity must resolve "
+                f"to exactly one attested runtime peer; found {len(runtime)}"
+            )
+        return {
+            "runtime": _normalized_interop_identity(
+                runtime[0], spec["display_name"], require_image=True
+            ),
+            "source_checkout": None,
+        }
+
+    runtime = [
+        peer
+        for peer in candidates
+        if isinstance(peer.get("image_digest"), str)
+        and any(
+            isinstance(path, str) and path.startswith("environment/docker-")
+            for path in peer.get("evidence_paths", [])
+        )
+    ]
+    source = [
+        peer
+        for peer in candidates
+        if any(
+            isinstance(path, str) and path.startswith(spec["identity_evidence_prefix"])
+            for path in peer.get("evidence_paths", [])
+        )
+    ]
+    if len(runtime) != 1:
+        raise ReportError(
+            f"{spec['display_name']} interoperability identity must resolve "
+            f"to exactly one running image/configuration; found {len(runtime)}"
+        )
+    if len(source) > 1 or (require_pbx_source and len(source) != 1):
+        raise ReportError(
+            f"{spec['display_name']} interoperability identity must resolve "
+            f"to exactly one local source revision; found {len(source)}"
+        )
+    source_identity = None
+    if source:
+        source_identity = _normalized_interop_identity(
+            source[0], spec["display_name"], require_image=False
+        )
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", source_identity["version"]) is None
+            or source_identity["image_digest"] is not None
+        ):
+            raise ReportError(
+                f"{spec['display_name']} local source identity is not a full "
+                "40-character Git revision"
+            )
+    return {
+        "runtime": _normalized_interop_identity(
+            runtime[0], spec["display_name"], require_image=True
+        ),
+        "source_checkout": source_identity,
+    }
+
+
+def _interop_attestation_evidence(
+    gate: dict[str, Any], product: str
+) -> list[dict[str, Any]]:
+    evidence = gate.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise ReportError(
+            f"{INTEROP_ATTESTATION_SPECS[product]['display_name']} "
+            "interoperability gate has no evidence"
+        )
+    selected: list[dict[str, Any]] = []
+    for index, item in enumerate(evidence):
+        if not isinstance(item, dict):
+            raise ReportError("interoperability gate evidence entry is invalid")
+        path = item.get("path")
+        sha256 = item.get("sha256")
+        if (
+            not isinstance(path, str)
+            or not safe_relative(path)
+            or not isinstance(sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", sha256) is None
+        ):
+            raise ReportError("interoperability gate evidence binding is invalid")
+        include = product in {"asterisk", "freeswitch"}
+        if product in PROXY_INTEROP_PEERS:
+            include = (
+                index == 0
+                or path in PROXY_INTEROP_ANCILLARY_EVIDENCE
+                or path.startswith(f"proxy-interop/{product}/")
+            )
+        if include:
+            selected.append(
+                {
+                    "path": path,
+                    "sha256": sha256,
+                    "bytes": item.get("bytes"),
+                }
+            )
+    unique = {item["path"]: item for item in selected}
+    if not unique:
+        raise ReportError(
+            f"{INTEROP_ATTESTATION_SPECS[product]['display_name']} "
+            "interoperability evidence selection is empty"
+        )
+    return [unique[path] for path in sorted(unique)]
+
+
+def _interop_attestation_coverage(gate: dict[str, Any], product: str) -> dict[str, Any]:
+    spec = INTEROP_ATTESTATION_SPECS[product]
+    if gate.get("status") != "PASS":
+        raise ReportError(f"{spec['display_name']} interoperability gate is not PASS")
+    observed_checks = gate.get("observed_checks")
+    if not isinstance(observed_checks, list):
+        raise ReportError(f"{spec['display_name']} interoperability checks are missing")
+    if product in PROXY_INTEROP_PEERS:
+        check_name = "real Kamailio/OpenSIPS stateful-proxy matrix"
+    else:
+        check_name = f"{product} PBX matrix rows"
+    checks = [
+        check
+        for check in observed_checks
+        if isinstance(check, dict) and check.get("check") == check_name
+    ]
+    if len(checks) != 1 or checks[0].get("passed") is not True:
+        raise ReportError(
+            f"{spec['display_name']} interoperability PASS check is missing"
+        )
+    observed = checks[0].get("observed")
+    if not isinstance(observed, dict):
+        raise ReportError(
+            f"{spec['display_name']} interoperability coverage is invalid"
+        )
+    if product in PROXY_INTEROP_PEERS:
+        if (
+            product not in observed.get("peers", [])
+            or set(observed.get("orders", [])) != PROXY_INTEROP_ORDERS
+            or set(observed.get("transports", [])) != PROXY_INTEROP_TRANSPORTS
+            or not isinstance(observed.get("scenarios_by_peer", {}).get(product), list)
+            or not observed["scenarios_by_peer"][product]
+        ):
+            raise ReportError(
+                f"{spec['display_name']} stateful-proxy coverage is incomplete"
+            )
+        return {
+            "kind": "stateful-proxy-matrix",
+            "matrix_rows": len(PROXY_INTEROP_ORDERS) * len(PROXY_INTEROP_TRANSPORTS),
+            "orders": sorted(PROXY_INTEROP_ORDERS),
+            "transports": sorted(PROXY_INTEROP_TRANSPORTS),
+            "scenarios": observed["scenarios_by_peer"][product],
+            "retention_drain_seconds": observed.get("retention_drain_seconds"),
+        }
+    rows = observed.get("rows")
+    passed = observed.get("pass")
+    if (
+        not isinstance(rows, int)
+        or isinstance(rows, bool)
+        or rows <= 0
+        or passed != rows
+    ):
+        raise ReportError(f"{spec['display_name']} PBX matrix coverage is incomplete")
+    return {
+        "kind": "pbx-call-and-media-matrix",
+        "matrix_rows": rows,
+        "passed_rows": passed,
+    }
+
+
+def build_interop_peer_attestation(
+    attestation: dict[str, Any], gates: dict[str, Any]
+) -> dict[str, Any]:
+    records = gates.get("records")
+    if not isinstance(records, list):
+        raise ReportError("gate results are missing interoperability records")
+    by_id = {
+        record.get("id"): record
+        for record in records
+        if isinstance(record, dict) and isinstance(record.get("id"), str)
+    }
+    required_products = sorted(
+        product
+        for product, spec in INTEROP_ATTESTATION_SPECS.items()
+        if spec["gate_id"] in by_id
+    )
+    if not required_products:
+        raise ReportError("release report has no peer interoperability gates")
+    if "interop.proxy-stateful-matrix" in by_id and required_products != sorted(
+        INTEROP_ATTESTATION_SPECS
+    ):
+        raise ReportError(
+            "stateful-proxy release reporting requires the Asterisk, FreeSWITCH, "
+            "Kamailio, and OpenSIPS interoperability gates"
+        )
+    require_pbx_source = "interop.proxy-stateful-matrix" in by_id
+
+    peer_records: list[dict[str, Any]] = []
+    for product in required_products:
+        spec = INTEROP_ATTESTATION_SPECS[product]
+        gate = by_id[spec["gate_id"]]
+        coverage = _interop_attestation_coverage(gate, product)
+        peer_record = {
+            "product": product,
+            "display_name": spec["display_name"],
+            "status": "PASS",
+            "scope": spec["scope"],
+            "gate": {"id": gate["id"], "name": gate["name"]},
+            "identity": _interop_attestation_identity(
+                attestation,
+                product,
+                require_pbx_source=require_pbx_source,
+            ),
+            "coverage": coverage,
+            "evidence": _interop_attestation_evidence(gate, product),
+        }
+        peer_record["attestation_sha256"] = sha256_bytes(canonical_json(peer_record))
+        peer_records.append(peer_record)
+
+    attested_products = [record["product"] for record in peer_records]
+    complete = attested_products == required_products
+    if not complete:
+        raise ReportError(
+            "peer interoperability attestation does not cover every required product"
+        )
+    source = attestation.get("source", {}).get("start", {})
+    source_binding = {
+        "git_commit": source.get("git_commit"),
+        "git_tree": source.get("git_tree"),
+        "source_fingerprint_sha256": source.get("source_fingerprint_sha256"),
+    }
+    if (
+        not isinstance(source_binding["git_commit"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", source_binding["git_commit"]) is None
+        or not isinstance(source_binding["git_tree"], str)
+        or re.fullmatch(r"[0-9a-f]{40}", source_binding["git_tree"]) is None
+        or not isinstance(source_binding["source_fingerprint_sha256"], str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_binding["source_fingerprint_sha256"])
+        is None
+    ):
+        raise ReportError("peer interoperability attestation lacks a source binding")
+    return {
+        "schema": SCHEMA_INTEROP_ATTESTATION,
+        "status": "PASS",
+        "complete": True,
+        "required_products": required_products,
+        "attested_products": attested_products,
+        "source": source_binding,
+        "records": peer_records,
+        "non_claim": INTEROP_ATTESTATION_NON_CLAIM,
+    }
+
+
+def validate_interop_peer_attestation(
+    value: Any,
+    gates: dict[str, Any],
+    peers: list[dict[str, Any]] | None = None,
+    binding: dict[str, Any] | None = None,
+) -> None:
+    if not isinstance(value, dict) or value.get("schema") != SCHEMA_INTEROP_ATTESTATION:
+        raise ReportError("peer interoperability attestation schema is invalid")
+    if value.get("status") != "PASS" or value.get("complete") is not True:
+        raise ReportError("peer interoperability attestation is not a complete PASS")
+    if value.get("non_claim") != INTEROP_ATTESTATION_NON_CLAIM:
+        raise ReportError("peer interoperability attestation non-claim is invalid")
+    records = value.get("records")
+    if not isinstance(records, list) or not records:
+        raise ReportError("peer interoperability attestation has no records")
+    products = [record.get("product") for record in records if isinstance(record, dict)]
+    expected = sorted(
+        product
+        for product, spec in INTEROP_ATTESTATION_SPECS.items()
+        if any(
+            gate.get("id") == spec["gate_id"]
+            for gate in gates.get("records", [])
+            if isinstance(gate, dict)
+        )
+    )
+    if (
+        products != expected
+        or value.get("required_products") != expected
+        or value.get("attested_products") != expected
+        or len(products) != len(set(products))
+    ):
+        raise ReportError("peer interoperability attestation product set is invalid")
+    proxy_gate_present = "interop.proxy-stateful-matrix" in {
+        gate.get("id") for gate in gates.get("records", []) if isinstance(gate, dict)
+    }
+    if proxy_gate_present and products != sorted(INTEROP_ATTESTATION_SPECS):
+        raise ReportError(
+            "stateful-proxy release attestation must cover Asterisk, FreeSWITCH, "
+            "Kamailio, and OpenSIPS"
+        )
+    if binding is not None:
+        expected_source = {
+            "git_commit": binding.get("tested_commit"),
+            "git_tree": binding.get("tested_tree"),
+            "source_fingerprint_sha256": binding.get("source_fingerprint_sha256"),
+        }
+        if value.get("source") != expected_source:
+            raise ReportError(
+                "peer interoperability attestation source binding is invalid"
+            )
+    gates_by_id = {
+        gate.get("id"): gate
+        for gate in gates.get("records", [])
+        if isinstance(gate, dict) and isinstance(gate.get("id"), str)
+    }
+    for record in records:
+        product = record.get("product")
+        if product not in INTEROP_ATTESTATION_SPECS:
+            raise ReportError(
+                f"peer interoperability attestation product is invalid: {product!r}"
+            )
+        if (
+            record.get("status") != "PASS"
+            or record.get("display_name")
+            != INTEROP_ATTESTATION_SPECS[product]["display_name"]
+            or record.get("scope") != INTEROP_ATTESTATION_SPECS[product]["scope"]
+            or record.get("gate", {}).get("id")
+            != INTEROP_ATTESTATION_SPECS[product]["gate_id"]
+            or record.get("gate", {}).get("name")
+            != gates_by_id.get(INTEROP_ATTESTATION_SPECS[product]["gate_id"], {}).get(
+                "name"
+            )
+            or not record.get("coverage")
+            or not record.get("evidence")
+            or not record.get("identity", {}).get("runtime", {}).get("config_sha256")
+        ):
+            raise ReportError(
+                f"peer interoperability attestation record is incomplete: "
+                f"{record.get('product')!r}"
+            )
+        gate = gates_by_id.get(INTEROP_ATTESTATION_SPECS[product]["gate_id"])
+        if (
+            gate is None
+            or record.get("coverage") != _interop_attestation_coverage(gate, product)
+            or record.get("evidence") != _interop_attestation_evidence(gate, product)
+        ):
+            raise ReportError(
+                f"peer interoperability attestation disagrees with its gate: {product}"
+            )
+        if peers is not None and record.get(
+            "identity"
+        ) != _interop_attestation_identity(
+            {"peers": peers},
+            product,
+            require_pbx_source=proxy_gate_present,
+        ):
+            raise ReportError(
+                f"peer interoperability attestation identity drifted: {product}"
+            )
+        unsigned_record = {
+            key: value for key, value in record.items() if key != "attestation_sha256"
+        }
+        if record.get("attestation_sha256") != sha256_bytes(
+            canonical_json(unsigned_record)
+        ):
+            raise ReportError(
+                f"peer interoperability attestation hash is invalid: {product}"
+            )
 
 
 def build_gate_results(
@@ -514,7 +3429,9 @@ def build_gate_results(
     missing = sorted(selected_names - set(captured_names))
     extra = sorted(set(captured_names) - selected_names)
     if missing or extra:
-        raise ReportError(f"gate selection mismatch; missing={missing}, unselected={extra}")
+        raise ReportError(
+            f"gate selection mismatch; missing={missing}, unselected={extra}"
+        )
     expected = policy["current_candidate"]["expected_selected_gate_count"]
     if len(selected) != expected or len(source_gates) != expected:
         raise ReportError(
@@ -587,6 +3504,14 @@ def build_gate_results(
             if not interop_check["passed"]:
                 raise ReportError(f"interop matrix did not pass for {recorded['name']}")
             observed.append(interop_check)
+            if recorded["name"] == PROXY_INTEROP_GATE_NAME:
+                captured = {item["path"] for item in evidence}
+                for relative in proxy_interop_evidence_paths(report_root):
+                    if relative not in captured:
+                        evidence.append(
+                            verify_artifact(report_root, artifacts, relative)
+                        )
+                        captured.add(relative)
         records.append(
             {
                 "sequence": sequence,
@@ -602,7 +3527,9 @@ def build_gate_results(
                 "sanitized_argv": sanitize_text(command),
                 "components": gate["components"],
                 "purpose": gate["purpose"],
-                "relevant_configuration": relevant_configuration(gate["category"], config),
+                "relevant_configuration": relevant_configuration(
+                    gate["category"], config
+                ),
                 "expected_checks": gate["validators"],
                 "observed_checks": observed,
                 "evidence": evidence,
@@ -650,9 +3577,13 @@ def load_native_gate_results(
     missing = sorted(selected_ids - set(recorded_ids))
     extra = sorted(set(recorded_ids) - selected_ids)
     if missing or extra:
-        raise ReportError(f"native gate selection mismatch; missing={missing}, extra={extra}")
+        raise ReportError(
+            f"native gate selection mismatch; missing={missing}, extra={extra}"
+        )
     if native.get("failed") or native.get("skipped"):
-        raise ReportError("native release reporting requires zero failed and zero skipped gates")
+        raise ReportError(
+            "native release reporting requires zero failed and zero skipped gates"
+        )
     artifacts = artifact_index(attestation)
     records: list[dict[str, Any]] = []
     for sequence, source in enumerate(source_records, 1):
@@ -672,12 +3603,30 @@ def load_native_gate_results(
             if item.get("sha256") != verified["sha256"]:
                 raise ReportError(f"native gate evidence hash drift: {gate['id']}")
             evidence.append(verified)
+        captured_evidence = {item["path"] for item in evidence}
+        for relative in ancillary_gate_evidence(gate["name"]):
+            if relative not in captured_evidence:
+                evidence.append(verify_artifact(report_root, artifacts, relative))
+                captured_evidence.add(relative)
         argv = source.get("sanitized_argv")
         if not isinstance(argv, list) or not argv:
             raise ReportError(f"native gate {gate['id']} has no structured argv")
         checks = source.get("checks", [])
         if not checks or not all(check.get("passed") for check in checks):
             raise ReportError(f"native gate {gate['id']} has missing or failed checks")
+        checks = list(checks)
+        interop_check = interop_observed_check(report_root, gate["name"])
+        if interop_check:
+            if not interop_check["passed"]:
+                raise ReportError(f"interop matrix did not pass for {gate['name']}")
+            checks.append(interop_check)
+            if gate["name"] == PROXY_INTEROP_GATE_NAME:
+                for relative in proxy_interop_evidence_paths(report_root):
+                    if relative not in captured_evidence:
+                        evidence.append(
+                            verify_artifact(report_root, artifacts, relative)
+                        )
+                        captured_evidence.add(relative)
         records.append(
             {
                 "sequence": sequence,
@@ -697,7 +3646,9 @@ def load_native_gate_results(
                 "sanitized_argv": argv,
                 "components": gate["components"],
                 "purpose": gate["purpose"],
-                "relevant_configuration": relevant_configuration(gate["category"], config),
+                "relevant_configuration": relevant_configuration(
+                    gate["category"], config
+                ),
                 "expected_checks": gate["validators"],
                 "observed_checks": checks,
                 "evidence": evidence,
@@ -720,7 +3671,9 @@ def load_native_gate_results(
     }
 
 
-def latency_percentiles(report: dict[str, Any], context: str) -> dict[str, dict[str, int | float]]:
+def latency_percentiles(
+    report: dict[str, Any], context: str
+) -> dict[str, dict[str, int | float]]:
     latency = report.get("latency_ns")
     if not isinstance(latency, dict):
         raise ReportError(f"{context} is missing latency_ns")
@@ -732,7 +3685,11 @@ def latency_percentiles(report: dict[str, Any], context: str) -> dict[str, dict[
         values: dict[str, int | float] = {}
         for percentile in LATENCY_PERCENTILES:
             value = source.get(percentile)
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or value < 0
+            ):
                 raise ReportError(
                     f"{context} has invalid latency_ns.{family}.{percentile}"
                 )
@@ -749,11 +3706,17 @@ def canonical_latency_limits(policy: dict[str, Any]) -> dict[str, dict[str, floa
     for family in LATENCY_FAMILIES:
         family_source = source.get(family)
         if not isinstance(family_source, dict):
-            raise ReportError(f"policy is missing canonical latency limits for {family}")
+            raise ReportError(
+                f"policy is missing canonical latency limits for {family}"
+            )
         family_limits: dict[str, float] = {}
         for percentile in LATENCY_PERCENTILES:
             value = family_source.get(percentile)
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or value <= 0
+            ):
                 raise ReportError(
                     f"policy has invalid canonical latency limit for {family}.{percentile}"
                 )
@@ -875,7 +3838,9 @@ def performance_inventory(
                     "achieved_cps": endpoint.get("results", {}).get("achieved_cps"),
                     "asr": endpoint.get("results", {}).get("asr"),
                     "calls_offered": endpoint.get("results", {}).get("calls_offered"),
-                    "calls_succeeded": endpoint.get("results", {}).get("calls_succeeded"),
+                    "calls_succeeded": endpoint.get("results", {}).get(
+                        "calls_succeeded"
+                    ),
                     "latency_ns": latency_percentiles(endpoint, endpoint_relative),
                 }
             ],
@@ -885,8 +3850,14 @@ def performance_inventory(
     tolerance = effective.get("values_by_key", {}).get(
         "beta_perf_latency_tolerance_pct"
     )
-    if not isinstance(tolerance, (int, float)) or isinstance(tolerance, bool) or tolerance < 0:
-        raise ReportError("effective configuration has invalid latency regression tolerance")
+    if (
+        not isinstance(tolerance, (int, float))
+        or isinstance(tolerance, bool)
+        or tolerance < 0
+    ):
+        raise ReportError(
+            "effective configuration has invalid latency regression tolerance"
+        )
     regression_latency: list[dict[str, Any]] = []
     comparison_paths = attestation.get("performance_regression_baseline", {}).get(
         "comparison_paths", []
@@ -975,7 +3946,11 @@ def count_tsv_results(path: Path) -> dict[str, int]:
         return {}
     header = lines[0].split("\t")
     status_index = next(
-        (index for index, name in enumerate(header) if name.lower() in {"status", "result"}),
+        (
+            index
+            for index, name in enumerate(header)
+            if name.lower() in {"status", "result"}
+        ),
         None,
     )
     if status_index is None:
@@ -1010,6 +3985,7 @@ def build_evidence_model(
     generator_hash = sha256_path(Path(__file__).resolve())
     catalog_hash = sha256_path(policy_path)
     categories = Counter(record["category"] for record in gates["records"])
+    interop_peer_attestation = build_interop_peer_attestation(attestation, gates)
     return sanitize_text(
         {
             "schema": SCHEMA_EVIDENCE,
@@ -1045,30 +4021,45 @@ def build_evidence_model(
                 "attested_count": artifacts.get("count"),
                 "attested_bytes": sum(item.get("bytes", 0) for item in artifact_files),
                 "counts_by_kind": dict(sorted(kinds.items())),
-                "json_evidence_count": len(attestation.get("results", {}).get("json", [])),
+                "json_evidence_count": len(
+                    attestation.get("results", {}).get("json", [])
+                ),
                 "performance_json_count": performance["json_artifact_count"],
             },
             "peers": attestation.get("peers", []),
             "interop": {
+                "peer_attestation": interop_peer_attestation,
                 "pbx_matrix": {
                     "results": count_tsv_results(report_root / "pbx/matrix.tsv"),
                     "evidence": [
-                        verify_artifact(report_root, indexed_artifacts, "pbx/matrix.tsv"),
-                        verify_artifact(report_root, indexed_artifacts, "pbx/summary.md"),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "pbx/matrix.tsv"
+                        ),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "pbx/summary.md"
+                        ),
                     ],
                 },
                 "sipp_matrix": {
                     "results": count_tsv_results(report_root / "sipp/runs.tsv"),
                     "evidence": [
-                        verify_artifact(report_root, indexed_artifacts, "sipp/runs.tsv"),
-                        verify_artifact(report_root, indexed_artifacts, "sipp/run_summary.md"),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "sipp/runs.tsv"
+                        ),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "sipp/run_summary.md"
+                        ),
                     ],
                 },
                 "strict_ua_matrix": {
                     "results": count_tsv_results(report_root / "strict-ua/matrix.tsv"),
                     "evidence": [
-                        verify_artifact(report_root, indexed_artifacts, "strict-ua/matrix.tsv"),
-                        verify_artifact(report_root, indexed_artifacts, "strict-ua/summary.md"),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "strict-ua/matrix.tsv"
+                        ),
+                        verify_artifact(
+                            report_root, indexed_artifacts, "strict-ua/summary.md"
+                        ),
                     ],
                 },
             },
@@ -1108,6 +4099,35 @@ def md_escape(value: Any) -> str:
 
 def format_ms(value: int | float) -> str:
     return f"{float(value):.3f}"
+
+
+def render_interop_attestation_rows(value: dict[str, Any]) -> list[str]:
+    lines: list[str] = []
+    for record in value["records"]:
+        identity = record["identity"]
+        runtime = identity["runtime"]
+        identity_value = runtime.get("version") or runtime.get("image_digest")
+        if identity.get("source_checkout"):
+            identity_value += f"; source {identity['source_checkout']['version']}"
+        coverage = record["coverage"]
+        if coverage["kind"] == "stateful-proxy-matrix":
+            coverage_text = (
+                f"{coverage['matrix_rows']} rows; "
+                f"{'/'.join(coverage['orders'])}; "
+                f"{'/'.join(coverage['transports'])}; "
+                f"{len(coverage['scenarios'])} scenarios"
+            )
+        else:
+            coverage_text = (
+                f"{coverage['passed_rows']}/{coverage['matrix_rows']} matrix rows"
+            )
+        lines.append(
+            f"| {record['display_name']} | **{record['status']}** | "
+            f"{record['scope']} | `{md_escape(identity_value)}` | "
+            f"`{md_escape(coverage_text)}` | `{record['gate']['id']}` | "
+            f"`{record['attestation_sha256']}` |"
+        )
+    return lines
 
 
 def render_release_report(evidence: dict[str, Any]) -> str:
@@ -1183,6 +4203,7 @@ def render_release_report(evidence: dict[str, Any]) -> str:
             f"| {peer.get('product')} | `{md_escape(peer.get('version'))}` | `{digest}` |"
         )
     artifact = evidence["artifacts"]
+    interop_attestation = evidence["interop"]["peer_attestation"]
     lines += [
         "",
         "## Evidence package",
@@ -1197,6 +4218,24 @@ def render_release_report(evidence: dict[str, Any]) -> str:
         f"- Correction record SHA-256: `{binding['correction_record_sha256']}`.",
         f"- Policy catalog SHA-256: `{binding['catalog_sha256']}`.",
         f"- Report generator SHA-256: `{binding['generator_sha256']}`.",
+        "",
+        "## Interoperability attestation",
+        "",
+        "Each row is a source-, peer-identity-, configuration-, and evidence-bound "
+        "attestation. A missing, skipped, ambiguous, unpinned, or failing required "
+        "peer prevents report generation.",
+        "",
+        "| Peer | Status | Qualified scope | Version/image | Coverage | Gate | Attestation SHA-256 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    lines.extend(render_interop_attestation_rows(interop_attestation))
+    lines += [
+        "",
+        f"Attested source: commit `{interop_attestation['source']['git_commit']}`, "
+        f"tree `{interop_attestation['source']['git_tree']}`, fingerprint "
+        f"`{interop_attestation['source']['source_fingerprint_sha256']}`.",
+        "",
+        f"> {interop_attestation['non_claim']}",
         "",
         "## Interoperability result counts",
         "",
@@ -1370,7 +4409,9 @@ def render_performance_report(evidence: dict[str, Any]) -> str:
             ("setup_latency", "Call setup"),
             ("full_cycle", "Full call cycle"),
         ):
-            family_checks = [checks[(family, percentile)] for percentile in LATENCY_PERCENTILES]
+            family_checks = [
+                checks[(family, percentile)] for percentile in LATENCY_PERCENTILES
+            ]
             lines.append(
                 f"| {run['sequence']} | {label} | "
                 f"{format_ms(family_checks[0]['observed_ms'])} | "
@@ -1460,7 +4501,9 @@ def render_performance_report(evidence: dict[str, Any]) -> str:
         "|---|---|---|---:|---:|---:|---|",
     ]
     for check in performance["regression"]["latency_checks"]:
-        label = "Call setup" if check["family"] == "setup_latency" else "Full call cycle"
+        label = (
+            "Call setup" if check["family"] == "setup_latency" else "Full call cycle"
+        )
         lines.append(
             f"| `{check['scenario']}` | {label} | {check['percentile']} | "
             f"{format_ms(check['baseline_ms'])} | "
@@ -1534,11 +4577,16 @@ def validate_source_attestation(
     expected = policy["current_candidate"]
     if current_only:
         if attestation.get("run", {}).get("id") != expected["run_id"]:
-            raise ReportError("source run ID does not match the current policy candidate")
-        if attestation.get("source", {}).get("start", {}).get("git_commit") != expected[
-            "tested_commit"
-        ]:
-            raise ReportError("tested commit does not match the current policy candidate")
+            raise ReportError(
+                "source run ID does not match the current policy candidate"
+            )
+        if (
+            attestation.get("source", {}).get("start", {}).get("git_commit")
+            != expected["tested_commit"]
+        ):
+            raise ReportError(
+                "tested commit does not match the current policy candidate"
+            )
     result = attestation.get("result", {})
     actual = (
         len(attestation.get("gates", [])),
@@ -1561,7 +4609,9 @@ def validate_source_attestation(
         or not attestation.get("source", {}).get("clean")
         or not attestation.get("source", {}).get("unchanged")
     ):
-        raise ReportError("native report generation requires a clean, unchanged, zero-skip full PASS")
+        raise ReportError(
+            "native report generation requires a clean, unchanged, zero-skip full PASS"
+        )
     if not attestation.get("qualification", {}).get("release_candidate"):
         raise ReportError("source attestation is not release-candidate qualified")
     return attestation
@@ -1573,7 +4623,9 @@ def generate(report_root: Path, policy_path: Path, output_dir: Path) -> None:
     native = (report_root / "effective-gate-config.json").is_file() and (
         report_root / "gate-results.json"
     ).is_file()
-    attestation = validate_source_attestation(report_root, policy, current_only=not native)
+    attestation = validate_source_attestation(
+        report_root, policy, current_only=not native
+    )
     if native:
         effective = read_json(report_root / "effective-gate-config.json")
         if (
@@ -1605,7 +4657,10 @@ def generate(report_root: Path, policy_path: Path, output_dir: Path) -> None:
     for name, data in payloads.items():
         write_atomic(output_dir / name, data)
     bindings = {
-        name: {"sha256": sha256_path(output_dir / name), "bytes": (output_dir / name).stat().st_size}
+        name: {
+            "sha256": sha256_path(output_dir / name),
+            "bytes": (output_dir / name).stat().st_size,
+        }
         for name in sorted(payloads)
     }
     report_attestation = {
@@ -1623,13 +4678,21 @@ def generate(report_root: Path, policy_path: Path, output_dir: Path) -> None:
         "policy_catalog_sha256": sha256_path(policy_path),
         "generator_sha256": sha256_path(Path(__file__).resolve()),
         "generated_files": bindings,
+        "interop_attestation": {
+            "schema": SCHEMA_INTEROP_ATTESTATION,
+            "status": evidence["interop"]["peer_attestation"]["status"],
+            "products": evidence["interop"]["peer_attestation"]["attested_products"],
+            "release_evidence_sha256": bindings["release-evidence.json"]["sha256"],
+        },
         "assurance": {
             "kind": "integrity-and-reproducibility",
             "cryptographically_signed": False,
             "note": "SHA-256 integrity evidence; not third-party signing.",
         },
     }
-    write_atomic(output_dir / "report-attestation.json", canonical_json(report_attestation))
+    write_atomic(
+        output_dir / "report-attestation.json", canonical_json(report_attestation)
+    )
     checksum = sha256_path(output_dir / "report-attestation.json")
     write_atomic(
         output_dir / "report-attestation.json.sha256",
@@ -1656,15 +4719,35 @@ def verify_markdown_links(directory: Path, path: Path) -> None:
             raise ReportError(f"broken Markdown link {target!r} in {path.name}")
 
 
-def verify_generated(directory: Path, expected_policy: Path | None = None) -> dict[str, Any]:
+def validate_report_schema_scope(report_schema: str, gates: dict[str, Any]) -> None:
+    if report_schema == SCHEMA_REPORT_ATTESTATION_LEGACY and any(
+        isinstance(record, dict) and record.get("id") == "interop.proxy-stateful-matrix"
+        for record in gates.get("records", [])
+    ):
+        raise ReportError(
+            "legacy report schema cannot attest the stateful-proxy release gate; "
+            "four-peer interoperability attestation v2 is required"
+        )
+
+
+def verify_generated(
+    directory: Path, expected_policy: Path | None = None
+) -> dict[str, Any]:
     for name in ALL_GENERATED_FILES:
         if not (directory / name).is_file():
             raise ReportError(f"missing generated report artifact {directory / name}")
     attestation = read_json(directory / "report-attestation.json")
-    if attestation.get("schema") != SCHEMA_REPORT_ATTESTATION:
+    report_schema = attestation.get("schema")
+    if report_schema not in {
+        SCHEMA_REPORT_ATTESTATION_LEGACY,
+        SCHEMA_REPORT_ATTESTATION,
+    }:
         raise ReportError("unsupported report attestation schema")
+    legacy_report = report_schema == SCHEMA_REPORT_ATTESTATION_LEGACY
     checksum_line = (directory / "report-attestation.json.sha256").read_text().strip()
-    expected_checksum = f"{sha256_path(directory / 'report-attestation.json')}  report-attestation.json"
+    expected_checksum = (
+        f"{sha256_path(directory / 'report-attestation.json')}  report-attestation.json"
+    )
     if checksum_line != expected_checksum:
         raise ReportError("report attestation checksum mismatch")
     for name, binding in attestation.get("generated_files", {}).items():
@@ -1689,7 +4772,11 @@ def verify_generated(directory: Path, expected_policy: Path | None = None) -> di
     evidence = read_json(directory / "release-evidence.json")
     config = read_json(directory / "effective-gate-config.json")
     gates = read_json(directory / "gate-results.json")
-    if evidence.get("schema") != SCHEMA_EVIDENCE:
+    validate_report_schema_scope(report_schema, gates)
+    expected_evidence_schema = (
+        SCHEMA_EVIDENCE_LEGACY if legacy_report else SCHEMA_EVIDENCE
+    )
+    if evidence.get("schema") != expected_evidence_schema:
         raise ReportError("invalid release evidence schema")
     if config.get("schema") != SCHEMA_CONFIG or gates.get("schema") != SCHEMA_RESULTS:
         raise ReportError("invalid structured configuration or gate-results schema")
@@ -1702,8 +4789,13 @@ def verify_generated(directory: Path, expected_policy: Path | None = None) -> di
         or gates.get("failed") != 0
         or gates.get("skipped") != 0
     ):
-        raise ReportError("generated gate totals are not an all-required, zero-skip PASS")
-    if len(records) != required_count or len({item.get("id") for item in records}) != required_count:
+        raise ReportError(
+            "generated gate totals are not an all-required, zero-skip PASS"
+        )
+    if (
+        len(records) != required_count
+        or len({item.get("id") for item in records}) != required_count
+    ):
         raise ReportError("generated gates are missing or have duplicate IDs")
     if attestation.get("run_id") == "20260724T231400Z" and required_count != 108:
         raise ReportError("current candidate reporting must contain exactly 108 gates")
@@ -1730,7 +4822,27 @@ def verify_generated(directory: Path, expected_policy: Path | None = None) -> di
     if len(config.get("values", [])) < 50:
         raise ReportError("effective configuration is incomplete")
     if evidence.get("performance", {}).get("json_artifact_count") != 59:
-        raise ReportError("performance inventory does not account for 59 JSON artifacts")
+        raise ReportError(
+            "performance inventory does not account for 59 JSON artifacts"
+        )
+    if not legacy_report:
+        validate_interop_peer_attestation(
+            evidence.get("interop", {}).get("peer_attestation"),
+            gates,
+            evidence.get("peers"),
+            evidence.get("binding"),
+        )
+        interop_summary = attestation.get("interop_attestation")
+        peer_attestation = evidence["interop"]["peer_attestation"]
+        if (
+            not isinstance(interop_summary, dict)
+            or interop_summary.get("schema") != SCHEMA_INTEROP_ATTESTATION
+            or interop_summary.get("status") != "PASS"
+            or interop_summary.get("products") != peer_attestation["attested_products"]
+            or interop_summary.get("release_evidence_sha256")
+            != sha256_path(directory / "release-evidence.json")
+        ):
+            raise ReportError("report interoperability attestation binding is invalid")
     for name in REPORT_FILES + MACHINE_FILES + ("report-attestation.json",):
         assert_no_sensitive_or_absolute_paths(directory / name)
     for name in REPORT_FILES:
@@ -1743,7 +4855,9 @@ def current_snapshot_relative(policy: dict[str, Any]) -> Path:
     run_id = candidate["run_id"]
     revision = candidate.get("report_revision", 1)
     if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
-        raise ReportError("current candidate report_revision must be a positive integer")
+        raise ReportError(
+            "current candidate report_revision must be a positive integer"
+        )
     return Path(run_id) if revision == 1 else Path(run_id) / f"reporting-r{revision}"
 
 
@@ -1777,23 +4891,26 @@ def render_release_index(
     return "\n".join(lines)
 
 
-def promote_docs(
-    report_root: Path, policy_path: Path, docs_root: Path
-) -> None:
+def promote_docs(report_root: Path, policy_path: Path, docs_root: Path) -> None:
     source_verifier(report_root)
     policy = load_policy(policy_path)
     run_id = policy["current_candidate"]["run_id"]
     releases_root = docs_root / "releases/beta"
     snapshot_relative = current_snapshot_relative(policy)
     snapshot = releases_root / snapshot_relative
-    with tempfile.TemporaryDirectory(prefix=".beta-report-", dir=docs_root.parent) as tmp:
+    with tempfile.TemporaryDirectory(
+        prefix=".beta-report-", dir=docs_root.parent
+    ) as tmp:
         generated = Path(tmp)
         generate(report_root, policy_path, generated)
         verify_generated(generated, policy_path)
         if snapshot.exists():
             for name in ALL_GENERATED_FILES:
                 existing = snapshot / name
-                if not existing.is_file() or existing.read_bytes() != (generated / name).read_bytes():
+                if (
+                    not existing.is_file()
+                    or existing.read_bytes() != (generated / name).read_bytes()
+                ):
                     raise ReportError(
                         f"immutable snapshot {snapshot} exists with different content"
                     )
@@ -1801,7 +4918,9 @@ def promote_docs(
             releases_root.mkdir(parents=True, exist_ok=True)
             staged_snapshot = releases_root / f".{run_id}.tmp"
             if staged_snapshot.exists():
-                raise ReportError(f"stale promotion directory exists: {staged_snapshot}")
+                raise ReportError(
+                    f"stale promotion directory exists: {staged_snapshot}"
+                )
             staged_snapshot.mkdir()
             for name in ALL_GENERATED_FILES:
                 destination = staged_snapshot / name
@@ -1833,7 +4952,10 @@ def verify_promoted(
         if (docs_root / name).read_bytes() != (snapshot / name).read_bytes():
             raise ReportError(f"current {name} does not match immutable snapshot")
     index = docs_root / "releases/beta/README.md"
-    if not index.is_file() or f"Current candidate: `{run_id}`." not in index.read_text():
+    if (
+        not index.is_file()
+        or f"Current candidate: `{run_id}`." not in index.read_text()
+    ):
         raise ReportError("release index/current-candidate marker is missing")
     verify_markdown_links(index.parent, index)
     assert_no_sensitive_or_absolute_paths(index)
@@ -1843,7 +4965,9 @@ def verify_promoted(
         if sha256_path(report_root / "attestation.json") != report_attestation.get(
             "source_attestation_sha256"
         ):
-            raise ReportError("promoted report is not bound to the supplied source attestation")
+            raise ReportError(
+                "promoted report is not bound to the supplied source attestation"
+            )
         if source["source"]["start"]["git_commit"] != report_attestation.get(
             "tested_commit"
         ):
@@ -1897,12 +5021,18 @@ def capture_config(
             path = environment_dir / filename
             if path.is_file():
                 derived[key] = next(
-                    (line.strip() for line in path.read_text().splitlines() if line.strip()),
+                    (
+                        line.strip()
+                        for line in path.read_text().splitlines()
+                        if line.strip()
+                    ),
                     None,
                 )
         status_path = environment_dir / "git-status.txt"
         if status_path.is_file():
-            derived["git_status"] = "dirty" if status_path.read_text().strip() else "clean"
+            derived["git_status"] = (
+                "dirty" if status_path.read_text().strip() else "clean"
+            )
         derived["cargo_metadata"] = "environment/cargo-metadata.json"
         derived["source_at_beta_start"] = "environment/source-at-beta-start.json"
         derived["source_at_beta_end"] = "environment/source-at-beta-end.json"
@@ -2055,10 +5185,16 @@ def parser() -> argparse.ArgumentParser:
     validate = commands.add_parser("validate-policy")
     validate.add_argument("--policy", type=Path, default=default_policy)
     validate.add_argument("--report-root", type=Path)
+    validate_proxy = commands.add_parser("validate-proxy-interop")
+    validate_proxy.add_argument("--report-root", required=True, type=Path)
     capture = commands.add_parser("capture-config")
     capture.add_argument("--policy", type=Path, default=default_policy)
     capture.add_argument("--output", required=True, type=Path)
-    capture.add_argument("--mode", required=True, choices=["local", "full", "interop", "perf", "security"])
+    capture.add_argument(
+        "--mode",
+        required=True,
+        choices=["local", "full", "interop", "perf", "security"],
+    )
     capture.add_argument("--environment-dir", type=Path)
     capture.add_argument("--derived", action="append", default=[])
     update = commands.add_parser("update-config")
@@ -2089,11 +5225,19 @@ def main() -> int:
     args = parser().parse_args()
     try:
         if args.command == "generate":
-            generate(args.report_root.resolve(), args.policy.resolve(), args.output_dir.resolve())
+            generate(
+                args.report_root.resolve(),
+                args.policy.resolve(),
+                args.output_dir.resolve(),
+            )
             verify_generated(args.output_dir.resolve(), args.policy.resolve())
             print(f"generated and verified beta reports in {args.output_dir}")
         elif args.command == "promote-docs":
-            promote_docs(args.report_root.resolve(), args.policy.resolve(), args.docs_root.resolve())
+            promote_docs(
+                args.report_root.resolve(),
+                args.policy.resolve(),
+                args.docs_root.resolve(),
+            )
             print(f"promoted verified beta reports into {args.docs_root}")
         elif args.command == "verify":
             if args.generated_dir:
@@ -2108,10 +5252,22 @@ def main() -> int:
         elif args.command == "validate-policy":
             policy = load_policy(args.policy.resolve())
             if args.report_root:
-                attestation = validate_source_attestation(args.report_root.resolve(), policy)
-                effective = effective_configuration(args.report_root.resolve(), attestation, policy)
-                build_gate_results(args.report_root.resolve(), attestation, policy, effective)
+                attestation = validate_source_attestation(
+                    args.report_root.resolve(), policy
+                )
+                effective = effective_configuration(
+                    args.report_root.resolve(), attestation, policy
+                )
+                build_gate_results(
+                    args.report_root.resolve(), attestation, policy, effective
+                )
             print("beta release policy validation: PASS")
+        elif args.command == "validate-proxy-interop":
+            result = validate_proxy_interop_result(args.report_root.resolve())
+            print(
+                "stateful proxy interoperability validation: PASS "
+                f"({result['rows']} rows, {len(result['scenarios'])} scenarios)"
+            )
         elif args.command == "capture-config":
             capture_config(
                 args.policy.resolve(),

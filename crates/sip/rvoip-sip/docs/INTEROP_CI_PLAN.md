@@ -12,9 +12,13 @@ The release-gate entry point is:
 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop
 ```
 
-By default, missing external lab dependencies are recorded as `SKIP` artifacts.
-For a release candidate, run with `BETA_GATE_REQUIRE_EXTERNAL=1` so missing
-SIPp, PBX, or strict-UA evidence fails the gate.
+By default, missing PBX or strict-UA lab dependencies are recorded as `SKIP`
+artifacts. For a release candidate, run with
+`BETA_GATE_REQUIRE_EXTERNAL=1` so those skips fail the gate. The real
+Kamailio/OpenSIPS stateful-proxy matrix is stricter: it is mandatory in both
+`--interop` and `--full`, and missing Docker, either pinned peer, SIPp, packet
+capture, either adjacency order, UDP, TCP, or verified TLS is always a hard
+failure rather than a skip.
 
 ## Required Peers
 
@@ -24,7 +28,8 @@ SIPp, PBX, or strict-UA evidence fails the gate.
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio or OpenSIPS | Proxy/registrar | Investigation track unless automated before beta. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.2` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.2` proxy release gate. |
 
 ## Current Automation Status
 
@@ -34,7 +39,7 @@ SIPp, PBX, or strict-UA evidence fails the gate.
 | Already-running PBX matrix | Scripted; requires PBX containers already running | `BETA_RUN_PBX=1 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` |
 | SIPp standalone | Scripted; requires SIPp and target host/port | `BETA_RUN_SIPP=1 BETA_SIPP_TARGET_HOST=<host> BETA_SIPP_TARGET_PORT=<port> crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` |
 | PJSIP/baresip | Scripted; final gate archived baresip strict-UA evidence | `BETA_RUN_STRICT_UA=1 crates/sip/rvoip-sip/scripts/beta_gate.sh --interop` or the final full gate. |
-| Kamailio/OpenSIPS | Investigation only | Do not block beta unless release notes claim this topology. |
+| Kamailio/OpenSIPS | Mandatory release entry point implemented; the command remains fail-closed until every scenario and verified-TLS row is implemented | `crates/sip/sip-proxy/tests/interop/scripts/beta_gate.sh`; the enclosing beta gate invokes it once with the fixed release matrix. |
 
 The local PBX gate stops Asterisk and FreeSWITCH before switching providers
 because both bind overlapping SIP ports. It restores the PBX that was running
@@ -55,6 +60,19 @@ The beta gate writes audit evidence under `BETA_GATE_ARTIFACT_DIR` or
   listener cert paths where used.
 - `pbx/<provider>/<api>/g729_call/<profile>/<transport>/`: G.729A/G.729AB
   profile-specific logs, WAVs, and analyzer evidence.
+- `proxy-interop/summary.json`, `summary.md`, and `matrix.tsv`: the
+  machine-readable and human-readable 12-row peer/order/transport result.
+- `proxy-interop/<peer>/<order>/<transport>/`: aggregate scenario evidence,
+  peer version, packet captures, retention convergence, and—on TLS
+  rows—`tls-verifier-result.json` plus the three gate-owned boundary logs.
+  The TLS proof binds the CA plus rvoip, peer, and SIPp certificate hashes,
+  expected DNS identities, both directed native-proxy verification legs, and
+  the actual hostname-verifying boundary traffic.
+- `proxy-interop/environment.txt`, `source-check.txt`, and
+  `runtime-state-{start,end,check}.json`: pinned peer identity,
+  clean/unchanged source binding, and proof that pre-existing containers,
+  networks, volumes, and test-port listeners were preserved with no added
+  leftovers.
 
 ## SIPp Matrix
 
@@ -106,11 +124,36 @@ both Asterisk and FreeSWITCH. The G.711 baseline remains the analyzer-enforced
 `basic_call` scenario. Override `BETA_PBX_G729_PROFILES` only for targeted
 reruns.
 
+## Stateful Proxy Matrix
+
+Run the same packet-level scenarios independently against real, pinned
+Kamailio and OpenSIPS processes. The harness follows the local
+Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
+configuration, packet capture, logs, exact version/image provenance, teardown,
+and restoration of any process that was running before the gate.
+
+| Scenario | Required for `0.3.2` |
+|----------|----------------------|
+| UDP, TCP, and TLS/SIPS forwarding | Yes |
+| Matched and unmatched CANCEL | Yes |
+| CANCEL before and after provisional response | Yes |
+| Sequential and parallel forks | Yes |
+| Multiple and late INVITE 2xx | Yes |
+| 2xx and non-2xx ACK routing | Yes |
+| Timer C branch handling | Yes |
+| Via push/pop and response destination | Yes |
+| Route, Record-Route, strict/loose routing, and SIPS | Yes |
+| 401/407 challenge aggregation | Yes |
+| Transport failure and RFC 3263 failover | Yes |
+| True stray-response discard | Yes |
+| State and process cleanup after retention drain | Yes |
+
 ## Result Artifacts
 
 Each interop run should store:
 
-- peer versions, container/image digests, and Docker inspect snapshots
+- peer versions, container/image digests, and allowlisted secret-free Docker
+  snapshots (raw `docker inspect` output is never persisted)
 - exact command line or compose file
 - `rvoip-sip` git revision
 - pass/fail summary
@@ -121,8 +164,14 @@ Each interop run should store:
 
 ## Release-Gate Policy
 
-- A failure in SIPp, Asterisk, or FreeSWITCH blocks beta unless documented as a
-  non-claim with an explicit exclusion.
+- A failure in SIPp, Asterisk, FreeSWITCH, Kamailio, or OpenSIPS blocks the
+  `0.3.2` proxy release candidate.
+- The proxy matrix must contain exactly both pinned peers, both adjacency
+  orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
+  per-row core scenario set are validated independently while generating the
+  release report. Kamailio and OpenSIPS must each independently cover the
+  complete scenario inventory through real external-peer traffic across their
+  six rows; one peer's evidence cannot fill a coverage gap for the other.
+  In-process Rust conformance tests may supplement a row, but do not count as
+  observed Kamailio or OpenSIPS interoperability.
 - Regressions in previously passing beta scenarios block beta.
-- Investigation-track failures do not block beta unless the release notes claim
-  the affected topology.

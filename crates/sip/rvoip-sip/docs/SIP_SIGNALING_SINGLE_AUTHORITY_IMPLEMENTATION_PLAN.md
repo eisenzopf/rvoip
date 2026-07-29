@@ -133,8 +133,8 @@ The existing evidence is useful but narrower than a complete SIP profile:
   and must not be cited as functional evidence for unrelated methods;
 - the baresip run provides one strict-UA baseline, not broad multi-UA
   coverage;
-- the Kamailio/OpenSIPS result is currently a de-scope audit rather than an
-  executed proxy interoperability test; and
+- the archived `0.2.5` Kamailio/OpenSIPS result was only a de-scope audit and
+  is not evidence for the new mandatory `0.3.2` real-peer matrix; and
 - ignored resilience stubs, message-construction tests, and parser tests do
   not by themselves prove an end-to-end lifecycle claim.
 

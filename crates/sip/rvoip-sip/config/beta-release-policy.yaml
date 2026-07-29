@@ -51,6 +51,12 @@
     "beta_sipp_diagnostics": {"type": "boolean", "default": false},
     "beta_sipp_cps": {"type": "integer-list", "default": [30, 100, 300, 1000, 2000]},
     "beta_run_strict_ua": {"type": "boolean", "default": false, "full_default": true},
+    "beta_proxy_interop_peers": {"type": "string-list", "default": ["kamailio", "opensips"], "derived": true},
+    "beta_proxy_interop_orders": {"type": "string-list", "default": ["rvoip-first", "peer-first"], "derived": true},
+    "beta_proxy_interop_transports": {"type": "string-list", "default": ["udp", "tcp", "tls"], "derived": true},
+    "beta_proxy_interop_retention_drain_seconds": {"type": "integer", "default": 130, "minimum": 130, "derived": true},
+    "beta_proxy_interop_require_clean_source": {"type": "boolean", "default": true, "derived": true},
+    "beta_proxy_interop_require_unchanged_source": {"type": "boolean", "default": true, "derived": true},
     "beta_run_fuzz_smoke": {"type": "boolean", "default": true},
     "beta_profile_matrix": {"type": "profile-matrix", "default": "endpoint:30 pbx-media-server:30,100,300,1000,2000 signaling-only-server-high-performance:30,100,300,1000,2000"},
     "beta_run_perf_all": {"type": "boolean", "default": false},
@@ -145,8 +151,8 @@
     },
     "interop": {
       "purpose": "Exercise SIP interoperability or managed peer lifecycle required by the selected full configuration.",
-      "components": ["PBX, SIPp, strict-UA, or proxy-scope command and its captured evidence"],
-      "configuration_scope": ["beta_pbx_provider", "beta_pbx_api", "beta_pbx_scenario", "beta_pbx_g729_profiles", "beta_run_local_pbx", "beta_run_sipp", "beta_run_strict_ua"],
+      "components": ["PBX, SIPp, strict-UA, or real stateful-proxy peer command and its captured evidence"],
+      "configuration_scope": ["beta_pbx_provider", "beta_pbx_api", "beta_pbx_scenario", "beta_pbx_g729_profiles", "beta_run_local_pbx", "beta_run_sipp", "beta_run_strict_ua", "beta_proxy_interop_peers", "beta_proxy_interop_orders", "beta_proxy_interop_transports", "beta_proxy_interop_retention_drain_seconds", "beta_proxy_interop_require_clean_source", "beta_proxy_interop_require_unchanged_source"],
       "required_evidence": ["hashed gate log plus applicable peer matrix, summary, and peer identity"],
       "validators": ["status-pass", "evidence-hash", "interop-result"],
       "pass_meaning": "The named peer, matrix, or lifecycle condition passed with the recorded configuration.",
@@ -285,7 +291,7 @@
         ["interop.sipp-matrix", "SIPp standalone matrix", {"when": "beta_run_sipp"}],
         ["interop.sipp-stop", "SIPp standalone target stop", {"when": "beta_run_sipp"}],
         ["interop.strict-ua", "baresip strict-UA matrix", {"when": "beta_run_strict_ua"}],
-        ["interop.proxy-descope", "Kamailio/OpenSIPS proxy de-scope audit"]
+        ["interop.proxy-stateful-matrix", "Kamailio/OpenSIPS stateful-proxy interoperability matrix"]
       ]
     },
     {

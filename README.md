@@ -334,6 +334,28 @@ product's implementation:
   unified release identity, source compatibility notes, and attestation
   provenance.
 
+### SIP interoperability attestation
+
+Starting with the `0.3.2` qualification gate, a full SIP beta candidate must
+carry an explicit PASS attestation for all four independently managed peers
+below. The report generator binds every row to the tested source tree, exact
+peer identity and configuration, selected matrix, and hashed evidence; it
+refuses to produce a release-candidate report if a required peer is missing,
+skipped, ambiguous, unpinned, or failing.
+
+| Peer | Attested boundary | Required release evidence |
+| --- | --- | --- |
+| **Asterisk** | PBX/B2BUA call control and RTP media | Provider-specific all-PASS rows from the recorded API, scenario, codec, and security matrix, plus the exact local revision and configuration fingerprint |
+| **FreeSWITCH** | PBX/B2BUA call control and RTP media | Provider-specific all-PASS rows from the recorded API, scenario, codec, and security matrix, plus the exact local revision and configuration fingerprint |
+| **Kamailio** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
+| **OpenSIPS** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
+
+The generated [beta release report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)
+is the authority for the exact versions, row counts, scenarios, hashes, and
+PASS status of a particular candidate. This is bounded interoperability
+evidence, not a claim of compatibility with every version, module,
+configuration, transport, codec, or SIP extension.
+
 Developer-preview products document their own supported scope and gaps in
 their crate READMEs. A published crate or Cargo feature is evidence of
 availability, not a blanket production-readiness statement.

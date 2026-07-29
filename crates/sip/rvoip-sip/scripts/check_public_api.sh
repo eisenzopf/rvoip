@@ -13,9 +13,10 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 crate_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 workspace_dir=$(CDPATH= cd -- "$crate_dir/../../.." && pwd)
 baseline="$crate_dir/public-api/rvoip-sip.txt"
-baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-0df3e5ba7b29ce4dc0c641b36381aefcd4b66925}
+baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-v0.3.1}
 require_tools=${RVOIP_REQUIRE_API_TOOLS:-0}
 public_api_version=cargo-public-api\ 0.52.0
+semver_checks_version=cargo-semver-checks\ 0.49.0
 rustdoc_version='rustc 1.97.0-nightly (e22c616e4 2026-04-19)'
 
 cd "$workspace_dir"
@@ -67,14 +68,24 @@ else
 fi
 
 if command -v cargo-semver-checks >/dev/null 2>&1; then
-    if git cat-file -e "$baseline_rev^{commit}" 2>/dev/null; then
-        cargo semver-checks check-release \
-            --package rvoip-sip \
-            --baseline-rev "$baseline_rev" \
-            --features generated-validation,dev-insecure-tls
+    installed_semver_version=$(cargo semver-checks --version)
+    if [[ "$installed_semver_version" == "$semver_checks_version" ]]; then
+        if git cat-file -e "$baseline_rev^{commit}" 2>/dev/null; then
+            cargo semver-checks check-release \
+                --package rvoip-sip \
+                --baseline-rev "$baseline_rev" \
+                --features generated-validation,dev-insecure-tls
+        else
+            printf 'public API: baseline commit %s is unavailable; semver comparison skipped\n' \
+                "$baseline_rev" >&2
+            if [[ "$require_tools" == 1 ]]; then
+                exit 1
+            fi
+        fi
     else
-        printf 'public API: baseline commit %s is unavailable; semver comparison skipped\n' \
-            "$baseline_rev" >&2
+        printf 'public API: semantic toolchain mismatch; semver comparison skipped\n' >&2
+        printf '  expected: %s\n  found:    %s\n' \
+            "$semver_checks_version" "$installed_semver_version" >&2
         if [[ "$require_tools" == 1 ]]; then
             exit 1
         fi

@@ -80,6 +80,19 @@ PBX_EVIDENCE_PATHS = {
     "pbx/summary.md",
 }
 INTEROP_EVIDENCE_PATHS = {
+    "proxy-interop/cargo-build.log",
+    "proxy-interop/cargo-build-command.txt",
+    "proxy-interop/environment.txt",
+    "proxy-interop/matrix.tsv",
+    "proxy-interop/proxy-binary-check.txt",
+    "proxy-interop/proxy-binary.path",
+    "proxy-interop/proxy-binary.sha256",
+    "proxy-interop/runtime-state-check.json",
+    "proxy-interop/runtime-state-end.json",
+    "proxy-interop/runtime-state-start.json",
+    "proxy-interop/source-check.txt",
+    "proxy-interop/summary.json",
+    "proxy-interop/summary.md",
     "sipp/analysis.md",
     "sipp/run_summary.md",
     "strict-ua/matrix.tsv",
@@ -89,7 +102,14 @@ PERFORMANCE_GATE_METRICS_PATHS = {
     "performance-gate-metrics.json",
     "performance-gate-metrics.md",
 }
-REQUIRED_INTEROP_PEER_PRODUCTS = {"asterisk", "baresip", "freeswitch", "sipp"}
+REQUIRED_INTEROP_PEER_PRODUCTS = {
+    "asterisk",
+    "baresip",
+    "freeswitch",
+    "kamailio",
+    "opensips",
+    "sipp",
+}
 STANDARD_PERFORMANCE_RESULT_PATHS = {
     "perf-results/perf_backpressure_step.json",
     "perf-results/perf_call_setup_cps_endpoint.json",
@@ -186,7 +206,7 @@ SECURITY_REQUIRED_GATES = {
 INTEROP_REQUIRED_GATES = {
     "SIPp standalone matrix",
     "baresip strict-UA matrix",
-    "Kamailio/OpenSIPS proxy de-scope audit",
+    "Kamailio/OpenSIPS stateful-proxy interoperability matrix",
 }
 STANDARD_PERFORMANCE_REQUIRED_GATES = {
     "perf results capture boundary",
@@ -857,6 +877,77 @@ def peers_block(
                         sipp_environment.relative_to(root).as_posix(),
                         sipp_input["path"],
                     ],
+                }
+            )
+
+    proxy_summary_path = root / "proxy-interop/summary.json"
+    if proxy_summary_path.is_file():
+        summary = load_json(proxy_summary_path, "stateful proxy interoperability summary")
+        if summary.get("schema") != "rvoip-sip-proxy-interop-v1":
+            raise AttestationError(
+                "unsupported stateful proxy interoperability summary schema"
+            )
+        configuration = summary.get("configuration")
+        rows = summary.get("rows")
+        if not isinstance(configuration, dict) or not isinstance(rows, list):
+            raise AttestationError(
+                "stateful proxy interoperability summary is missing configuration or rows"
+            )
+        tested_products = {
+            row.get("peer")
+            for row in rows
+            if isinstance(row, dict) and row.get("status") == "PASS"
+        }
+        for product in ("kamailio", "opensips"):
+            if product not in tested_products:
+                continue
+            image = configuration.get(f"{product}_image")
+            platform = configuration.get(f"{product}_platform")
+            if (
+                not isinstance(image, str)
+                or "@sha256:" not in image
+                or not isinstance(platform, str)
+                or not platform
+            ):
+                raise AttestationError(
+                    f"{product} interoperability identity is incomplete"
+                )
+            image_digest = image.rsplit("@", 1)[1]
+            if re.fullmatch(r"sha256:[0-9a-f]{64}", image_digest) is None:
+                raise AttestationError(
+                    f"{product} interoperability image is not digest pinned"
+                )
+            evidence_paths = [
+                proxy_summary_path.relative_to(root).as_posix(),
+                "proxy-interop/environment.txt",
+            ]
+            for row in rows:
+                if not isinstance(row, dict) or row.get("peer") != product:
+                    continue
+                artifact = row.get("artifact")
+                if not isinstance(artifact, str):
+                    continue
+                relative = pathlib.PurePosixPath(artifact)
+                if relative.is_absolute() or ".." in relative.parts:
+                    raise AttestationError(
+                        f"unsafe stateful proxy row evidence path: {artifact!r}"
+                    )
+                version_path = root / "proxy-interop" / relative / "peer-version.txt"
+                if version_path.is_file():
+                    evidence_paths.append(version_path.relative_to(root).as_posix())
+            key = (product, image_digest)
+            if key in seen:
+                continue
+            seen.add(key)
+            peers.append(
+                {
+                    "product": product,
+                    "version": image,
+                    "image_digest": image_digest,
+                    "config_sha256": canonical_json_sha256(
+                        {"image": image, "platform": platform}
+                    ),
+                    "evidence_paths": sorted(set(evidence_paths)),
                 }
             )
 
@@ -1532,6 +1623,39 @@ def numeric_config(value: str | None) -> float | None:
     return parsed
 
 
+def proxy_interop_configuration_reasons(
+    gate_config: dict[str, str],
+) -> list[str]:
+    reasons: list[str] = []
+    exact_word_sets = {
+        "beta_proxy_interop_peers": {"kamailio", "opensips"},
+        "beta_proxy_interop_orders": {"rvoip-first", "peer-first"},
+        "beta_proxy_interop_transports": {"udp", "tcp", "tls"},
+    }
+    for key, expected in exact_word_sets.items():
+        actual = set((gate_config.get(key) or "").replace(",", " ").split())
+        if actual != expected:
+            reasons.append(
+                f"stateful proxy interoperability requires {key} "
+                f"{' '.join(sorted(expected))}; found {gate_config.get(key)!r}"
+            )
+    drain = numeric_config(
+        gate_config.get("beta_proxy_interop_retention_drain_seconds")
+    )
+    if drain is None or drain < 130:
+        reasons.append(
+            "stateful proxy interoperability requires at least 130 seconds "
+            "of retention drain"
+        )
+    for key in (
+        "beta_proxy_interop_require_clean_source",
+        "beta_proxy_interop_require_unchanged_source",
+    ):
+        if not enabled_config(gate_config.get(key)):
+            reasons.append(f"stateful proxy interoperability requires {key}=1")
+    return reasons
+
+
 def full_configuration_reasons(gate_config: dict[str, str]) -> list[str]:
     reasons: list[str] = []
     if not enabled_config(gate_config.get("rvoip_require_api_tools")):
@@ -1557,6 +1681,7 @@ def full_configuration_reasons(gate_config: dict[str, str]) -> list[str]:
                 f"full release configuration requires {key} {relation}; "
                 f"found {gate_config.get(key)!r}"
             )
+    reasons.extend(proxy_interop_configuration_reasons(gate_config))
     return reasons
 
 
@@ -1933,8 +2058,10 @@ def pointer_block(
                 "performance result effective settings disagree with the gate: "
                 f"{reconciliation['evidence_path']} ({', '.join(mismatches)})"
             )
-    elif mode == "interop" and not peers:
-        reasons.append("interop evidence has no identified peer")
+    elif mode == "interop":
+        reasons.extend(proxy_interop_configuration_reasons(gate_config))
+        if not peers:
+            reasons.append("interop evidence has no identified peer")
     elif mode == "perf":
         if not executables:
             reasons.append("performance evidence has no captured executable")
