@@ -45,6 +45,7 @@ tracing.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rand.workspace = true
+sha2.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "1"

@@ -22,7 +22,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use rvoip_sip_core::{
-    types::uri::Host, HeaderName, HeaderValue, Message, Method, Request, TypedHeader, Uri,
+    types::{param::Param, uri::Host},
+    HeaderName, HeaderValue, Message, Method, Request, TypedHeader, Uri,
 };
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
@@ -54,12 +55,16 @@ fn safe_method_label(method: &Method) -> &'static str {
     }
 }
 
-/// Returns the URI that determines the next hop for an outbound request:
-/// the first Route URI when present, otherwise the Request-URI. Route
-/// address parameters are folded back into the URI so `;transport=tls`
-/// on a name-addr Route still affects transport and default-port logic.
+/// Returns the URI that determines the next hop for an outbound request.
+///
+/// A loose (`;lr`) top Route is the next hop. After RFC 3261 strict-routing
+/// postprocessing, however, the strict router is already in the Request-URI
+/// and the top Route contains the original remote target; in that shape the
+/// Request-URI remains the next hop.
 pub fn next_hop_uri_for_request(request: &Request) -> Uri {
-    top_route_uri(request).unwrap_or_else(|| request.uri().clone())
+    top_route_uri(request)
+        .filter(route_is_loose)
+        .unwrap_or_else(|| request.uri().clone())
 }
 
 /// Returns the exact URI that determines the next hop, rejecting a Route
@@ -89,14 +94,25 @@ pub fn exact_next_hop_uri_for_request(request: &Request) -> TransportResult<Uri>
             }),
             _ => None,
         };
-        return next_hop.ok_or_else(|| {
+        let route = next_hop.ok_or_else(|| {
             TransportError::UnsupportedTransport(
                 "outbound request contains an unusable Route header".into(),
             )
+        })?;
+        return Ok(if route_is_loose(&route) {
+            route
+        } else {
+            request.uri().clone()
         });
     }
 
     Ok(request.uri().clone())
+}
+
+fn route_is_loose(uri: &Uri) -> bool {
+    uri.parameters
+        .iter()
+        .any(|parameter| matches!(parameter, Param::Lr))
 }
 
 /// Returns the top Route URI for an outbound request, when a route set is

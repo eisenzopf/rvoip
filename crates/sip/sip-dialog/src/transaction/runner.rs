@@ -240,6 +240,11 @@ pub async fn run_transaction_loop<D, TH, L>(
 
             match command {
                 InternalTransactionCommand::TransitionTo(requested_new_state) => {
+                    let entering_accepted = requested_new_state == TransactionState::Terminated
+                        && data.as_ref_state().take_accepted_request();
+                    let leaving_accepted = requested_new_state == TransactionState::Terminated
+                        && !entering_accepted
+                        && data.as_ref_state().is_accepted();
                     tracing::trace!(
                         "Processing TransitionTo({:?}) current state: {:?}",
                         requested_new_state,
@@ -247,7 +252,10 @@ pub async fn run_transaction_loop<D, TH, L>(
                     );
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
 
-                    if current_state == requested_new_state {
+                    if current_state == requested_new_state
+                        && !entering_accepted
+                        && !leaving_accepted
+                    {
                         tracing::trace!(
                             "Already in requested state, no transition needed: {:?}",
                             current_state
@@ -302,8 +310,16 @@ pub async fn run_transaction_loop<D, TH, L>(
                     }
                     let owns_terminal_batch =
                         terminal_publication.is_none() || terminal_publication_claim.is_some();
-                    let previous_state = data.as_ref_state().set(requested_new_state);
+                    let previous_state = if entering_accepted {
+                        data.as_ref_state().enter_accepted()
+                    } else if leaving_accepted {
+                        data.as_ref_state().leave_accepted();
+                        current_state
+                    } else {
+                        data.as_ref_state().set(requested_new_state)
+                    };
                     let emit_terminal_prefix = requested_new_state == TransactionState::Terminated
+                        && !leaving_accepted
                         && owns_terminal_batch
                         && data.should_emit_events();
                     if emit_terminal_prefix {
@@ -321,7 +337,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "State changed from {:?} to {:?}", previous_state, requested_new_state);
 
                     // Handle lifecycle transition if entering terminal state
-                    if requested_new_state == TransactionState::Terminated {
+                    if requested_new_state == TransactionState::Terminated && !entering_accepted {
                         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Entering terminal state - transitioning to Terminating lifecycle");
                         data.set_lifecycle(TransactionLifecycle::Terminating);
                     }
@@ -370,6 +386,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     // preserves the lifecycle fence without spawning a sleeper
                     // task (and two Tokio timer entries) per transaction.
                     if requested_new_state == TransactionState::Terminated
+                        && !entering_accepted
                         && data.get_lifecycle() == TransactionLifecycle::Terminating
                     {
                         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Scheduling consolidated grace period for terminated transaction");
@@ -519,26 +536,42 @@ pub async fn run_transaction_loop<D, TH, L>(
                     }
                 }
                 InternalTransactionCommand::TransportError => {
-                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transport error occurred, terminating transaction");
+                    let retain_invite_server = logic.kind()
+                        == crate::transaction::TransactionKind::InviteServer
+                        && (matches!(
+                            current_state,
+                            TransactionState::Proceeding | TransactionState::Completed
+                        ) || data.as_ref_state().is_accepted());
+                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), retain_invite_server, "Transport error occurred");
 
                     data.record_completion_failure(
                         crate::transaction::ClientTransactionFailure::Transport,
                     );
 
                     let sender = data.get_tu_event_sender();
-                    if sender
+                    let observer_closed = sender
                         .send(TransactionEvent::TransportError {
                             transaction_id: tx_id_clone.clone(),
                         })
                         .await
-                        .is_err()
-                    {
+                        .is_err();
+                    if observer_closed {
                         if !is_test_mode {
-                            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send transport error to TU, initiating graceful shutdown");
-                            logic.cancel_all_specific_timers(&mut timer_handles);
-                            data.as_ref_state().set(TransactionState::Terminated);
-                            break;
+                            if !retain_invite_server {
+                                debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Cannot send transport error to TU, initiating graceful shutdown");
+                                logic.cancel_all_specific_timers(&mut timer_handles);
+                                data.as_ref_state().set(TransactionState::Terminated);
+                                break;
+                            }
                         }
+                    }
+
+                    // RFC 6026 §7.1: an INVITE server transaction MUST NOT
+                    // discard state solely because sending a response hit an
+                    // unrecoverable transport error. Existing RFC timers
+                    // remain responsible for eventual termination.
+                    if retain_invite_server {
+                        continue;
                     }
 
                     if let Err(e) = data
@@ -562,6 +595,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     data.record_completion_failure(
                         crate::transaction::ClientTransactionFailure::Cancelled,
                     );
+                    let was_accepted = data.as_ref_state().is_accepted();
                     if current_state != TransactionState::Terminated {
                         let terminal_publication = data.terminal_event_publication();
                         if terminal_publication_claim.is_none() {
@@ -600,12 +634,20 @@ pub async fn run_transaction_loop<D, TH, L>(
                             }
                         }
                     } else {
+                        if was_accepted {
+                            data.as_ref_state().leave_accepted();
+                            data.record_completion_state(TransactionState::Terminated);
+                        }
                         data.await_protocol_writes().await;
                     }
                     data.set_lifecycle(TransactionLifecycle::Destroyed);
                     break;
                 }
                 InternalTransactionCommand::CompactRetire => {
+                    if data.as_ref_state().is_accepted() {
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Ignoring compact retirement while RFC 6026 Accepted retention is active");
+                        continue;
+                    }
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Retiring completed transaction into compact manager tombstone");
                     logic.cancel_all_specific_timers(&mut timer_handles);
                     data.set_lifecycle(TransactionLifecycle::Destroyed);
@@ -641,6 +683,10 @@ pub async fn run_transaction_loop<D, TH, L>(
         }
     }
 
+    // A closed command stream or another exceptional runner exit is an
+    // explicit shutdown fence. It must not leave private Accepted ownership
+    // behind after the sole protocol-processing task has gone away.
+    data.as_ref_state().leave_accepted();
     let final_state = data.as_ref_state().get();
     tracing::trace!(
         transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(data.as_ref_key()),

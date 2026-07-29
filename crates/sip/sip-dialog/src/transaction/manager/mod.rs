@@ -220,18 +220,25 @@ use crate::transaction::transport::{
 };
 use crate::transaction::utils::transaction_key_from_message;
 use crate::transaction::{
-    InternalTransactionCommand, SipRequestIngressAuthorizer, SipRequestIngressContext, Transaction,
-    TransactionEvent, TransactionKey, TransactionKind, TransactionState,
-    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+    InternalTransactionCommand, SipRequestIngressAuthorizer, SipRequestIngressContext,
+    StatefulProxyIngressEvent, Transaction, TransactionEvent, TransactionKey, TransactionKind,
+    TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
 /// Internal first-write classification for one exact CANCEL generation.
-/// Composition and route-preparation failures are safe to retry; once the
-/// transport write boundary is crossed, the caller must retain teardown
-/// ownership and must not manufacture a second CANCEL.
+/// Composition failures are immediately safe to retry. A route-preparation
+/// failure is safe after the returned retired generation's terminal event has
+/// drained. Once the transport write boundary is crossed, the caller must
+/// retain teardown ownership and must not manufacture a second CANCEL.
 #[derive(Debug)]
 pub(crate) enum CancelInviteTransactionFailure {
-    ZeroWire(Error),
+    ZeroWire {
+        error: Error,
+        /// Exact internal CANCEL generation when admission succeeded before
+        /// route preparation failed. Its ordered terminal event must drain
+        /// before the RFC transaction key is reused.
+        retired_transaction_id: Option<TransactionKey>,
+    },
     WireUnknown {
         error: Error,
         transaction_id: TransactionKey,
@@ -241,14 +248,69 @@ pub(crate) enum CancelInviteTransactionFailure {
 impl CancelInviteTransactionFailure {
     pub(crate) fn into_error(self) -> Error {
         match self {
-            Self::ZeroWire(error) | Self::WireUnknown { error, .. } => error,
+            Self::ZeroWire { error, .. } | Self::WireUnknown { error, .. } => error,
         }
     }
 
     pub(crate) fn wire_unknown_transaction(&self) -> Option<&TransactionKey> {
         match self {
-            Self::ZeroWire(_) => None,
+            Self::ZeroWire { .. } => None,
             Self::WireUnknown { transaction_id, .. } => Some(transaction_id),
+        }
+    }
+}
+
+/// Conservative first-transport-write result for one exact generated CANCEL.
+///
+/// This type is intentionally narrow and hidden from the ordinary dialog API.
+/// Transaction users that coordinate an independently retained response
+/// context (for example, a transaction-stateful proxy) need to distinguish a
+/// proven pre-wire failure from a write whose outcome is unknown:
+///
+/// - [`Self::Success`] owns the returned transaction generation.
+/// - [`Self::ZeroWire`] proves that no SIP bytes were offered to the
+///   transport, so an owner may safely retry.
+/// - [`Self::WireUnknown`] owns the returned transaction generation because
+///   some or all bytes may have reached the peer; retrying would risk a second
+///   wire generation.
+///
+/// Public transaction events remain observational. The caller must retain the
+/// exact transaction ID returned by `Success` or `WireUnknown` until its own
+/// protocol context is safe to release.
+#[doc(hidden)]
+#[derive(Debug)]
+pub enum CancelInviteTransactionDispatch {
+    /// The first transport write completed successfully.
+    Success {
+        /// Exact generated CANCEL client transaction.
+        transaction_id: TransactionKey,
+    },
+    /// Route preparation failed before the first transport write boundary.
+    ZeroWire {
+        /// Failure that prevented the write.
+        error: Error,
+        /// Exact internally retired zero-wire generation, when transaction
+        /// admission occurred before route preparation failed. A protocol
+        /// owner must consume that generation's terminal event before
+        /// reusing its RFC transaction key. `None` means failure happened
+        /// before a CANCEL transaction was admitted.
+        retired_transaction_id: Option<TransactionKey>,
+    },
+    /// The transport returned an error after crossing the write boundary.
+    WireUnknown {
+        /// Exact generated CANCEL client transaction that owns the ambiguous
+        /// wire attempt.
+        transaction_id: TransactionKey,
+        /// Transport or transaction failure returned by the write.
+        error: Error,
+    },
+}
+
+impl CancelInviteTransactionDispatch {
+    fn into_result(self) -> Result<TransactionKey> {
+        match self {
+            Self::Success { transaction_id } => Ok(transaction_id),
+            Self::ZeroWire { error, .. } | Self::WireUnknown { error, .. } => Err(error),
         }
     }
 }
@@ -1141,8 +1203,387 @@ struct TransactionAdmissionRegistry {
     /// owns the wire key. The dialog layer uses this as a backstop when its
     /// authoritative terminal event cannot be observed (for example, because
     /// the primary event receiver closed).
-    final_release_hook:
-        std::sync::RwLock<Option<Arc<dyn Fn(&TransactionKey) + Send + Sync + 'static>>>,
+    final_release_hooks:
+        std::sync::RwLock<Vec<Arc<dyn Fn(&TransactionKey) + Send + Sync + 'static>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum NormalizedViaSentByHost {
+    Domain(String),
+    Address(std::net::IpAddr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct NormalizedViaSentBy {
+    host: NormalizedViaSentByHost,
+    port: u16,
+    transport: String,
+}
+
+impl NormalizedViaSentBy {
+    fn from_request(request: &Request) -> Option<Self> {
+        let via = request.first_via()?;
+        let top = via.0.first()?;
+        let transport = top.transport().to_ascii_uppercase();
+        let host = match top.host() {
+            Host::Domain(domain) => {
+                NormalizedViaSentByHost::Domain(domain.trim_end_matches('.').to_ascii_lowercase())
+            }
+            Host::Address(address) => NormalizedViaSentByHost::Address(*address),
+        };
+        let default_port = if matches!(transport.as_str(), "TLS" | "WSS") {
+            5061
+        } else {
+            5060
+        };
+        Some(Self {
+            host,
+            port: top.port().unwrap_or(default_port),
+            transport,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ServerIngressPeerBinding {
+    source: SocketAddr,
+    destination: SocketAddr,
+    transport_type: TransportType,
+    flow_id: Option<rvoip_sip_transport::TransportFlowId>,
+    tls_leaf_sha256: Option<String>,
+}
+
+impl ServerIngressPeerBinding {
+    fn from_context(context: &SipRequestIngressContext) -> Self {
+        Self {
+            source: context.source,
+            destination: context.destination,
+            transport_type: context.transport_type,
+            flow_id: context.flow_id,
+            tls_leaf_sha256: context.connection_metadata.as_ref().map(|metadata| {
+                metadata
+                    .tls_peer_identity
+                    .leaf_certificate_sha256
+                    .to_ascii_lowercase()
+            }),
+        }
+    }
+}
+
+/// RFC 3261 §17.2.3 server matching plus the transport-authenticated ingress
+/// binding. `TransactionKey` remains the public identifier; this private key
+/// prevents a repeated wire branch from cross-dispatching between legitimate
+/// peers or co-addressed stream flows.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ServerTransactionMatchKey {
+    branch: String,
+    method: Method,
+    sent_by: NormalizedViaSentBy,
+    peer: ServerIngressPeerBinding,
+}
+
+impl ServerTransactionMatchKey {
+    fn from_request(request: &Request, context: &SipRequestIngressContext) -> Option<Self> {
+        let transaction = TransactionKey::from_request(request)?;
+        Some(Self {
+            branch: transaction.branch,
+            method: request.method().clone(),
+            sent_by: NormalizedViaSentBy::from_request(request)?,
+            peer: ServerIngressPeerBinding::from_context(context),
+        })
+    }
+
+    fn with_method(&self, method: Method) -> Self {
+        Self {
+            branch: self.branch.clone(),
+            method,
+            sent_by: self.sent_by.clone(),
+            peer: self.peer.clone(),
+        }
+    }
+
+    fn wire_identity(&self) -> ServerTransactionWireIdentity {
+        ServerTransactionWireIdentity {
+            branch: self.branch.clone(),
+            method: self.method.clone(),
+            sent_by: self.sent_by.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ServerTransactionWireIdentity {
+    branch: String,
+    method: Method,
+    sent_by: NormalizedViaSentBy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ServerAuthenticatedOwner {
+    issuer: Option<String>,
+    tenant: Option<String>,
+    subject: String,
+}
+
+impl std::convert::From<&AuthenticatedPrincipal> for ServerAuthenticatedOwner {
+    fn from(principal: &AuthenticatedPrincipal) -> Self {
+        Self {
+            issuer: principal.issuer.clone(),
+            tenant: principal.tenant.clone(),
+            subject: principal.subject.clone(),
+        }
+    }
+}
+
+impl ServerAuthenticatedOwner {
+    fn transport_tls(fingerprint: &str) -> Self {
+        Self {
+            issuer: Some("transport-mtls".into()),
+            tenant: None,
+            subject: fingerprint.to_ascii_lowercase(),
+        }
+    }
+}
+
+const SERVER_MATCH_PENDING: u8 = 0;
+const SERVER_MATCH_PUBLISHED: u8 = 1;
+const SERVER_MATCH_FAILED: u8 = 2;
+
+struct ServerTransactionMatchRegistration {
+    transaction_id: TransactionKey,
+    state: AtomicU8,
+    changed: tokio::sync::Notify,
+    authenticated_owner: std::sync::OnceLock<Option<ServerAuthenticatedOwner>>,
+}
+
+impl ServerTransactionMatchRegistration {
+    fn new(transaction_id: TransactionKey) -> Arc<Self> {
+        Arc::new(Self {
+            transaction_id,
+            state: AtomicU8::new(SERVER_MATCH_PENDING),
+            changed: tokio::sync::Notify::new(),
+            authenticated_owner: std::sync::OnceLock::new(),
+        })
+    }
+
+    async fn wait_published(&self) -> bool {
+        loop {
+            let notified = self.changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            match self.state.load(Ordering::Acquire) {
+                SERVER_MATCH_PUBLISHED => return true,
+                SERVER_MATCH_FAILED => return false,
+                _ => notified.await,
+            }
+        }
+    }
+
+    fn authenticated_owner(&self) -> Option<&ServerAuthenticatedOwner> {
+        self.authenticated_owner.get().and_then(Option::as_ref)
+    }
+}
+
+struct ServerTransactionMatchRegistry {
+    by_match: DashMap<ServerTransactionMatchKey, Arc<ServerTransactionMatchRegistration>>,
+    by_wire_identity: DashMap<ServerTransactionWireIdentity, Vec<ServerTransactionMatchKey>>,
+    by_transaction: DashMap<TransactionKey, ServerTransactionMatchKey>,
+    next_collision: AtomicU64,
+    claim_lock: std::sync::Mutex<()>,
+}
+
+enum ServerTransactionMatchClaim {
+    Existing(Arc<ServerTransactionMatchRegistration>),
+    Reserved(ServerTransactionMatchReservation),
+    PendingCollision(Vec<Arc<ServerTransactionMatchRegistration>>),
+    ConflictingOwner,
+}
+
+struct ServerTransactionMatchReservation {
+    registry: Arc<ServerTransactionMatchRegistry>,
+    match_key: ServerTransactionMatchKey,
+    registration: Arc<ServerTransactionMatchRegistration>,
+    authenticated_owner: Option<ServerAuthenticatedOwner>,
+    committed: bool,
+}
+
+impl ServerTransactionMatchReservation {
+    fn transaction_id(&self) -> &TransactionKey {
+        &self.registration.transaction_id
+    }
+
+    fn commit(mut self) {
+        let _ = self
+            .registration
+            .authenticated_owner
+            .set(self.authenticated_owner.take());
+        self.registration
+            .state
+            .store(SERVER_MATCH_PUBLISHED, Ordering::Release);
+        self.registration.changed.notify_waiters();
+        self.committed = true;
+    }
+}
+
+impl Drop for ServerTransactionMatchReservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        self.registration
+            .state
+            .store(SERVER_MATCH_FAILED, Ordering::Release);
+        self.registration.changed.notify_waiters();
+        self.registry
+            .remove_exact(&self.match_key, &self.registration.transaction_id);
+    }
+}
+
+impl ServerTransactionMatchRegistry {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            by_match: DashMap::new(),
+            by_wire_identity: DashMap::new(),
+            by_transaction: DashMap::new(),
+            next_collision: AtomicU64::new(1),
+            claim_lock: std::sync::Mutex::new(()),
+        })
+    }
+
+    fn registration(
+        &self,
+        key: &ServerTransactionMatchKey,
+    ) -> Option<Arc<ServerTransactionMatchRegistration>> {
+        self.by_match
+            .get(key)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
+    fn claim(
+        self: &Arc<Self>,
+        match_key: ServerTransactionMatchKey,
+        wire_key: &TransactionKey,
+        wire_key_is_available: bool,
+        authenticated_owner: Option<ServerAuthenticatedOwner>,
+    ) -> ServerTransactionMatchClaim {
+        let _guard = self
+            .claim_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = self.registration(&match_key) {
+            return ServerTransactionMatchClaim::Existing(existing);
+        }
+        let wire_identity = match_key.wire_identity();
+        let collisions: Vec<_> = self
+            .by_wire_identity
+            .get(&wire_identity)
+            .map(|matches| {
+                matches
+                    .iter()
+                    .filter_map(|stored| self.registration(stored))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !collisions.is_empty() {
+            if collisions.iter().any(|registration| {
+                registration.state.load(Ordering::Acquire) == SERVER_MATCH_PENDING
+            }) {
+                return ServerTransactionMatchClaim::PendingCollision(collisions);
+            }
+            let Some(owner) = authenticated_owner.as_ref() else {
+                return ServerTransactionMatchClaim::ConflictingOwner;
+            };
+            if collisions.iter().any(|registration| {
+                registration.authenticated_owner() == Some(owner)
+                    || registration.authenticated_owner().is_none()
+            }) {
+                return ServerTransactionMatchClaim::ConflictingOwner;
+            }
+        }
+        let transaction_id = if wire_key_is_available && !self.by_transaction.contains_key(wire_key)
+        {
+            wire_key.clone()
+        } else {
+            loop {
+                let generation = self.next_collision.fetch_add(1, Ordering::Relaxed);
+                let candidate = TransactionKey::new(
+                    format!("{}~rvoip-server-{generation}", wire_key.branch()),
+                    wire_key.method().clone(),
+                    true,
+                );
+                if !self.by_transaction.contains_key(&candidate) {
+                    break candidate;
+                }
+            }
+        };
+        let registration = ServerTransactionMatchRegistration::new(transaction_id.clone());
+        self.by_transaction
+            .insert(transaction_id, match_key.clone());
+        self.by_wire_identity
+            .entry(wire_identity)
+            .or_default()
+            .push(match_key.clone());
+        self.by_match
+            .insert(match_key.clone(), Arc::clone(&registration));
+        ServerTransactionMatchClaim::Reserved(ServerTransactionMatchReservation {
+            registry: Arc::clone(self),
+            match_key,
+            registration,
+            authenticated_owner,
+            committed: false,
+        })
+    }
+
+    fn remove_transaction(&self, transaction_id: &TransactionKey) {
+        if let Some((_, match_key)) = self.by_transaction.remove(transaction_id) {
+            self.remove_match_registration(&match_key, transaction_id);
+        }
+    }
+
+    fn remove_exact(&self, match_key: &ServerTransactionMatchKey, transaction_id: &TransactionKey) {
+        self.by_transaction
+            .remove_if(transaction_id, |_, stored| stored == match_key);
+        self.remove_match_registration(match_key, transaction_id);
+    }
+
+    fn remove_match_registration(
+        &self,
+        match_key: &ServerTransactionMatchKey,
+        transaction_id: &TransactionKey,
+    ) {
+        self.by_match.remove_if(match_key, |_, registration| {
+            registration.transaction_id == *transaction_id
+        });
+        let wire_identity = match_key.wire_identity();
+        if let Some(mut matches) = self.by_wire_identity.get_mut(&wire_identity) {
+            matches.retain(|stored| stored != match_key);
+            let empty = matches.is_empty();
+            drop(matches);
+            if empty {
+                self.by_wire_identity
+                    .remove_if(&wire_identity, |_, stored| stored.is_empty());
+            }
+        }
+    }
+
+    fn clear(&self) {
+        self.by_match.clear();
+        self.by_wire_identity.clear();
+        self.by_transaction.clear();
+    }
+}
+
+fn new_server_transaction_registries() -> (
+    Arc<TransactionAdmissionRegistry>,
+    Arc<ServerTransactionMatchRegistry>,
+) {
+    let admissions = TransactionAdmissionRegistry::new();
+    let matches = ServerTransactionMatchRegistry::new();
+    admissions.install_final_release_hook(Arc::new({
+        let matches = Arc::clone(&matches);
+        move |transaction_id| matches.remove_transaction(transaction_id)
+    }));
+    (admissions, matches)
 }
 
 const MANAGER_ADMISSION_RUNNING: u8 = 0;
@@ -1304,7 +1745,7 @@ impl TransactionAdmissionRegistry {
         Arc::new(Self {
             entries: DashMap::new(),
             next_generation: AtomicU64::new(1),
-            final_release_hook: std::sync::RwLock::new(None),
+            final_release_hooks: std::sync::RwLock::new(Vec::new()),
         })
     }
 
@@ -1312,10 +1753,10 @@ impl TransactionAdmissionRegistry {
         &self,
         hook: Arc<dyn Fn(&TransactionKey) + Send + Sync + 'static>,
     ) {
-        *self
-            .final_release_hook
+        self.final_release_hooks
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(hook);
     }
 
     fn try_claim(self: &Arc<Self>, key: &TransactionKey) -> Option<TransactionAdmissionOwner> {
@@ -1355,13 +1796,13 @@ impl Drop for TransactionAdmissionOwnerInner {
             if *entry.get() != self.generation {
                 return;
             }
-            let hook = self
+            let hooks = self
                 .registry
-                .final_release_hook
+                .final_release_hooks
                 .read()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
-            if let Some(hook) = hook {
+            for hook in hooks {
                 hook(&self.key);
             }
             entry.remove();
@@ -1451,6 +1892,10 @@ pub struct TransactionManager {
     retained_client_deadline_worker: Option<RetainedClientDeadlineWorker>,
     /// Active server transactions. Same pattern as `client_transactions`.
     server_transactions: Arc<DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
+    /// Private RFC 3261 server-match identity. It includes normalized top-Via
+    /// sent-by and the exact transport-authenticated ingress peer, allowing
+    /// colliding wire branches to coexist without changing `TransactionKey`.
+    server_transaction_matches: Arc<ServerTransactionMatchRegistry>,
     /// Indexed queue of transactions that reached `Terminated`.
     /// Runtime cleanup drains this bounded index instead of scanning either
     /// active transaction table. The public full-scan repair API is reserved
@@ -1564,6 +2009,15 @@ pub struct TransactionManager {
     /// before the transaction user sees it. `None` preserves the historical
     /// unauthenticated-listener behavior.
     request_ingress_authorizer: Option<Arc<dyn SipRequestIngressAuthorizer>>,
+    /// A proxy transaction user forwards an unmatched CANCEL statelessly
+    /// instead of applying the UAS default (481). Disabled unless the sole TU
+    /// explicitly opts into proxy semantics.
+    forward_unmatched_cancel_to_tu: Arc<AtomicBool>,
+    /// Lossless, exact-transport ingress reserved for the sole stateful-proxy
+    /// transaction user. Proxy-only routing metadata stays off the stable
+    /// public `TransactionEvent` surface.
+    stateful_proxy_ingress_tx:
+        Arc<std::sync::Mutex<Option<mpsc::Sender<StatefulProxyIngressEvent>>>>,
     /// Successful ingress identities awaiting dialog/session consumption.
     pending_inbound_principals: Arc<DashMap<TransactionKey, InboundPrincipalBinding>>,
     pending_inbound_principal_inserted_at: Arc<DashMap<TransactionKey, InboundPrincipalLease>>,
@@ -1583,6 +2037,25 @@ enum TransactionIngressKind {
     Bye,
     Cancel,
     Other,
+}
+
+/// Selects transaction-user behavior where RFC 3261 assigns different
+/// responsibilities to a user agent and a transaction-stateful proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionUserMode {
+    /// Preserve rvoip's UA-core safety features, including bounded retired
+    /// INVITE response authentication and TU-owned 2xx retransmission cache.
+    UserAgent,
+    /// Apply RFC 6026 proxy behavior: unmatched CANCEL reaches the proxy TU,
+    /// true stray INVITE responses are dropped, and the manager does not act
+    /// as a UAS core by proactively retransmitting INVITE 2xx responses.
+    StatefulProxy,
+}
+
+impl Default for TransactionUserMode {
+    fn default() -> Self {
+        Self::UserAgent
+    }
 }
 
 impl TransactionIngressKind {
@@ -2334,6 +2807,30 @@ impl TransactionManager {
         }
     }
 
+    /// Distinguish the legacy public `Terminated` projection from actual
+    /// protocol termination. RFC 6026 INVITE transactions remain retained in
+    /// private Accepted until Timer M/L even though their public state matches
+    /// 0.3.1. A destroyed runner is also authoritative: compact UDP Timer J/K
+    /// retirement intentionally leaves the public state at `Completed` after
+    /// transferring protocol ownership to the manager tombstone.
+    fn transaction_protocol_terminated(&self, transaction_id: &TransactionKey) -> bool {
+        if let Some(transaction) = self.client_transactions.get(transaction_id) {
+            if transaction.value().data().get_lifecycle() != TransactionLifecycle::Destroyed
+                && !transaction.value().is_protocol_terminated()
+            {
+                return false;
+            }
+        }
+        if let Some(transaction) = self.server_transactions.get(transaction_id) {
+            if transaction.value().data().get_lifecycle() != TransactionLifecycle::Destroyed
+                && !transaction.value().is_protocol_terminated()
+            {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Enable or disable the INVITE server transaction automatic `100 Trying`
     /// timer used by newly-created server transactions.
     pub fn set_auto_100_trying(&mut self, enabled: bool) {
@@ -2360,6 +2857,122 @@ impl TransactionManager {
     /// Return the currently installed listener authorizer.
     pub fn request_ingress_authorizer(&self) -> Option<Arc<dyn SipRequestIngressAuthorizer>> {
         self.request_ingress_authorizer.clone()
+    }
+
+    /// Monotonically claim this manager for one transaction-stateful proxy TU.
+    ///
+    /// The claim cannot be reverted or shared. It must happen before any
+    /// transaction is active, preventing a proxy from changing the semantics
+    /// of an already-running UA manager.
+    pub fn try_claim_stateful_proxy_mode(&self) -> Result<()> {
+        if !self.client_transactions.is_empty() || !self.server_transactions.is_empty() {
+            return Err(Error::Other(
+                "stateful-proxy TU mode must be claimed before transactions are active".into(),
+            ));
+        }
+        self.forward_unmatched_cancel_to_tu
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                Error::Other("transaction manager is already claimed by a stateful proxy TU".into())
+            })?;
+        // Close the admission/check race fail-closed. The mode remains
+        // monotonic even when an already-running transport won the race.
+        if !self.client_transactions.is_empty() || !self.server_transactions.is_empty() {
+            return Err(Error::Other(
+                "a transaction became active while stateful-proxy TU mode was claimed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Claim this manager for one stateful-proxy TU and install its exact,
+    /// transport-bound ingress channel.
+    ///
+    /// This is an additive implementation hook for `rvoip-sip-proxy`. Normal
+    /// applications continue to consume the source-compatible
+    /// [`TransactionEvent`] receiver returned by the constructor.
+    #[doc(hidden)]
+    pub fn try_claim_stateful_proxy_ingress(
+        &self,
+        capacity: usize,
+    ) -> Result<mpsc::Receiver<StatefulProxyIngressEvent>> {
+        if !self.client_transactions.is_empty() || !self.server_transactions.is_empty() {
+            return Err(Error::Other(
+                "stateful-proxy TU mode must be claimed before transactions are active".into(),
+            ));
+        }
+
+        let mut ingress_slot = self
+            .stateful_proxy_ingress_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if ingress_slot.is_some() {
+            return Err(Error::Other(
+                "stateful-proxy exact ingress is already claimed".into(),
+            ));
+        }
+
+        let (ingress_tx, ingress_rx) = mpsc::channel(capacity.max(1));
+        *ingress_slot = Some(ingress_tx);
+        if self
+            .forward_unmatched_cancel_to_tu
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            ingress_slot.take();
+            return Err(Error::Other(
+                "transaction manager is already claimed by a stateful proxy TU".into(),
+            ));
+        }
+
+        // Keep the mode monotonic but close the admission/check race
+        // fail-closed, matching `try_claim_stateful_proxy_mode`.
+        if !self.client_transactions.is_empty() || !self.server_transactions.is_empty() {
+            ingress_slot.take();
+            return Err(Error::Other(
+                "a transaction became active while stateful-proxy TU mode was claimed".into(),
+            ));
+        }
+        drop(ingress_slot);
+        Ok(ingress_rx)
+    }
+
+    pub(crate) async fn send_stateful_proxy_ingress_event(
+        &self,
+        event: StatefulProxyIngressEvent,
+    ) -> Result<()> {
+        let sender = self
+            .stateful_proxy_ingress_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .ok_or_else(|| {
+                Error::Other(
+                    "stateful-proxy mode has no exact ingress receiver; claim through rvoip-sip-proxy"
+                        .into(),
+                )
+            })?;
+        sender
+            .send(event)
+            .await
+            .map_err(|_| Error::Other("stateful-proxy exact ingress receiver is closed".into()))
+    }
+
+    /// Return the configured transaction-user mode.
+    pub fn transaction_user_mode(&self) -> TransactionUserMode {
+        if self.forward_unmatched_cancel_to_tu.load(Ordering::Acquire) {
+            TransactionUserMode::StatefulProxy
+        } else {
+            TransactionUserMode::UserAgent
+        }
+    }
+
+    pub(crate) fn forward_unmatched_cancel_to_tu(&self) -> bool {
+        self.transaction_user_mode() == TransactionUserMode::StatefulProxy
+    }
+
+    pub(crate) fn stateful_proxy_tu_mode(&self) -> bool {
+        self.transaction_user_mode() == TransactionUserMode::StatefulProxy
     }
 
     /// Set the maximum number of consecutive priority-lane ACK/BYE events a
@@ -3153,10 +3766,12 @@ impl TransactionManager {
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
 
+        let (transaction_admissions, server_transaction_matches) =
+            new_server_transaction_registries();
         let manager = Self {
             transport,
             client_transactions,
-            transaction_admissions: TransactionAdmissionRegistry::new(),
+            transaction_admissions,
             admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
             operation_cancellation: TransactionManagerOperationCancellation::new(),
             shutdown_gate: Arc::new(Mutex::new(())),
@@ -3169,6 +3784,7 @@ impl TransactionManager {
             client_completion_capacity: retired_client_transaction_capacity(index_capacity),
             retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
             server_transactions,
+            server_transaction_matches,
             terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
             server_invite_dialog_index: Arc::new(DashMap::new()),
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
@@ -3219,6 +3835,8 @@ impl TransactionManager {
                 index_initial_capacity,
             )),
             request_ingress_authorizer: None,
+            forward_unmatched_cancel_to_tu: Arc::new(AtomicBool::new(false)),
+            stateful_proxy_ingress_tx: Arc::new(std::sync::Mutex::new(None)),
             pending_inbound_principals,
             pending_inbound_principal_inserted_at,
             pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
@@ -3348,10 +3966,12 @@ impl TransactionManager {
 
         // Create the timer manager with custom config
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
+        let (transaction_admissions, server_transaction_matches) =
+            new_server_transaction_registries();
         let manager = Self {
             transport,
             client_transactions,
-            transaction_admissions: TransactionAdmissionRegistry::new(),
+            transaction_admissions,
             admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
             operation_cancellation: TransactionManagerOperationCancellation::new(),
             shutdown_gate: Arc::new(Mutex::new(())),
@@ -3364,6 +3984,7 @@ impl TransactionManager {
             client_completion_capacity: retired_client_transaction_capacity(index_capacity),
             retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
             server_transactions,
+            server_transaction_matches,
             terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
             server_invite_dialog_index: Arc::new(DashMap::new()),
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
@@ -3414,6 +4035,8 @@ impl TransactionManager {
                 index_initial_capacity,
             )),
             request_ingress_authorizer: None,
+            forward_unmatched_cancel_to_tu: Arc::new(AtomicBool::new(false)),
+            stateful_proxy_ingress_tx: Arc::new(std::sync::Mutex::new(None)),
             pending_inbound_principals,
             pending_inbound_principal_inserted_at,
             pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
@@ -3796,10 +4419,12 @@ impl TransactionManager {
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
 
+        let (transaction_admissions, server_transaction_matches) =
+            new_server_transaction_registries();
         let manager = Self {
             transport: default_transport,
             client_transactions,
-            transaction_admissions: TransactionAdmissionRegistry::new(),
+            transaction_admissions,
             admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
             operation_cancellation: TransactionManagerOperationCancellation::new(),
             shutdown_gate: Arc::new(Mutex::new(())),
@@ -3812,6 +4437,7 @@ impl TransactionManager {
             client_completion_capacity: retired_client_transaction_capacity(index_capacity),
             retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
             server_transactions,
+            server_transaction_matches,
             terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
             server_invite_dialog_index: Arc::new(DashMap::new()),
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
@@ -3862,6 +4488,8 @@ impl TransactionManager {
                 index_initial_capacity,
             )),
             request_ingress_authorizer,
+            forward_unmatched_cancel_to_tu: Arc::new(AtomicBool::new(false)),
+            stateful_proxy_ingress_tx: Arc::new(std::sync::Mutex::new(None)),
             pending_inbound_principals,
             pending_inbound_principal_inserted_at,
             pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
@@ -3971,10 +4599,12 @@ impl TransactionManager {
 
         // Create the timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
+        let (transaction_admissions, server_transaction_matches) =
+            new_server_transaction_registries();
         let manager = Self {
             transport,
             client_transactions,
-            transaction_admissions: TransactionAdmissionRegistry::new(),
+            transaction_admissions,
             admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
             operation_cancellation: TransactionManagerOperationCancellation::new(),
             shutdown_gate: Arc::new(Mutex::new(())),
@@ -3987,6 +4617,7 @@ impl TransactionManager {
             client_completion_capacity: retired_client_transaction_capacity(index_capacity),
             retained_client_deadline_worker: Some(RetainedClientDeadlineWorker::new()),
             server_transactions,
+            server_transaction_matches,
             terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
             server_invite_dialog_index: Arc::new(DashMap::new()),
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
@@ -4037,6 +4668,8 @@ impl TransactionManager {
                 index_initial_capacity,
             )),
             request_ingress_authorizer: None,
+            forward_unmatched_cancel_to_tu: Arc::new(AtomicBool::new(false)),
+            stateful_proxy_ingress_tx: Arc::new(std::sync::Mutex::new(None)),
             pending_inbound_principals,
             pending_inbound_principal_inserted_at,
             pending_inbound_principal_generation: Arc::new(AtomicU64::new(0)),
@@ -4105,12 +4738,14 @@ impl TransactionManager {
         );
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
 
+        let (transaction_admissions, server_transaction_matches) =
+            new_server_transaction_registries();
         let manager = Self {
             transport,
             events_tx,
             event_subscribers,
             client_transactions,
-            transaction_admissions: TransactionAdmissionRegistry::new(),
+            transaction_admissions,
             admission_lifecycle: TransactionManagerAdmissionLifecycle::new(),
             operation_cancellation: TransactionManagerOperationCancellation::new(),
             shutdown_gate: Arc::new(Mutex::new(())),
@@ -4123,6 +4758,7 @@ impl TransactionManager {
             client_completion_capacity: retired_client_transaction_capacity(index_capacity),
             retained_client_deadline_worker: None,
             server_transactions,
+            server_transaction_matches,
             terminated_transactions: Arc::new(DashMap::with_capacity(index_initial_capacity)),
             server_invite_dialog_index: Arc::new(DashMap::new()),
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(
@@ -4171,6 +4807,8 @@ impl TransactionManager {
                 index_initial_capacity,
             )),
             request_ingress_authorizer: None,
+            forward_unmatched_cancel_to_tu: Arc::new(AtomicBool::new(false)),
+            stateful_proxy_ingress_tx: Arc::new(std::sync::Mutex::new(None)),
             pending_inbound_principals: Arc::new(dashmap::DashMap::with_capacity(
                 index_initial_capacity,
             )),
@@ -4367,7 +5005,8 @@ impl TransactionManager {
     /// runner-owned write rather than either losing completion or following a
     /// later retry generation. Absence of the transaction is terminal because
     /// the exact generation can no longer be retried safely.
-    pub(crate) async fn classify_final_response_completion(
+    #[doc(hidden)]
+    pub async fn classify_final_response_completion(
         &self,
         transaction_id: &TransactionKey,
     ) -> crate::transaction::server::FinalResponseCompletionDisposition {
@@ -4749,6 +5388,24 @@ impl TransactionManager {
         self.transport.clone()
     }
 
+    /// Return the exact ingress route retained by an active server
+    /// transaction for responses. Transaction users that must forward
+    /// additional end-to-end responses after the server transaction
+    /// terminates (notably a forking stateful proxy forwarding every
+    /// INVITE 2xx) can snapshot this route while the transaction is active.
+    ///
+    /// The returned route preserves the concrete transport, authenticated
+    /// authority, and opaque stream flow rather than reconstructing routing
+    /// from a bare socket address.
+    pub fn server_transaction_response_route(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<TransportRoute> {
+        self.server_transactions
+            .get(transaction_id)
+            .map(|transaction| transaction.value().data().response_route.clone())
+    }
+
     /// Look up the destination `SocketAddr` a given transaction's
     /// request was originally sent to. Used by dialog-layer features
     /// that need to talk to the same peer outside the transaction
@@ -5053,6 +5710,16 @@ impl TransactionManager {
         transaction_id: &TransactionKey,
         transaction: &ArcClientTransaction,
     ) -> bool {
+        // RFC 6026 requires a transaction-stateful proxy to drop responses
+        // once Timer M destroys the matching transaction. Do not retain the
+        // UA-core late-2xx route beyond that authoritative state-machine
+        // horizon.
+        if self.stateful_proxy_tu_mode() && transaction_id.method() == &Method::Invite {
+            self.transaction_destinations
+                .remove_if(transaction_id, |_, state| state.is_active());
+            return false;
+        }
+
         // Completed UDP non-INVITE transactions have already published a
         // compact Timer K tombstone. Keep the exact active response route
         // through T4 so retransmitted final responses remain authenticated;
@@ -5744,6 +6411,7 @@ impl TransactionManager {
         // non-reentrant and safe even when caller-held transaction Arcs later
         // drop their external owners. Stopped managers never admit reuse.
         self.transaction_admissions.entries.clear();
+        self.server_transaction_matches.clear();
         debug_assert_eq!(self.transaction_admissions.entries.len(), 0);
         self.admission_lifecycle.mark_stopped();
 
@@ -5803,8 +6471,23 @@ impl TransactionManager {
                     transaction_id,
                     new_state: TransactionState::Terminated,
                     ..
+                } if manager_instance.transaction_protocol_terminated(transaction_id) => {
+                    manager_instance.mark_transaction_terminated_indexed(transaction_id);
+                    manager_instance
+                        .pending_inbound_bytes
+                        .remove(transaction_id);
+                    manager_instance
+                        .pending_inbound_inserted_at
+                        .remove(transaction_id);
+                    manager_instance
+                        .pending_inbound_transport
+                        .remove(transaction_id);
+                    manager_instance
+                        .pending_inbound_timing
+                        .remove(transaction_id);
+                    manager_instance.enqueue_terminated_transaction_cleanup(transaction_id.clone());
                 }
-                | TransactionEvent::TransactionTerminated { transaction_id } => {
+                TransactionEvent::TransactionTerminated { transaction_id } => {
                     manager_instance.mark_transaction_terminated_indexed(transaction_id);
                     manager_instance
                         .pending_inbound_bytes
@@ -5832,6 +6515,11 @@ impl TransactionManager {
     /// Actually remove a terminated transaction from all maps
     async fn remove_terminated_transaction(&self, transaction_id: &TransactionKey) {
         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&transaction_id), "Removing terminated transaction after grace period");
+
+        if !self.transaction_protocol_terminated(transaction_id) {
+            debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), "Retaining RFC 6026 Accepted transaction despite public Terminated projection");
+            return;
+        }
 
         let mut terminated = false;
         self.request_transaction_runner_stop(transaction_id);
@@ -6782,8 +7470,10 @@ impl TransactionManager {
     ) -> Result<Arc<dyn ServerTransaction>> {
         self.create_server_transaction_inner(
             request,
+            remote_addr,
             TransportRoute::new(remote_addr).with_transport_type(TransportType::Udp),
             true,
+            None,
         )
         .await
     }
@@ -6794,8 +7484,14 @@ impl TransactionManager {
         request: Request,
         response_route: TransportRoute,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        self.create_server_transaction_inner(request, response_route, true)
-            .await
+        self.create_server_transaction_inner(
+            request,
+            response_route.destination,
+            response_route,
+            true,
+            None,
+        )
+        .await
     }
 
     /// Transaction-ingress variant used while listener authorization is still
@@ -6808,30 +7504,59 @@ impl TransactionManager {
     ) -> Result<Arc<dyn ServerTransaction>> {
         self.create_server_transaction_inner(
             request,
+            remote_addr,
             TransportRoute::new(remote_addr).with_transport_type(TransportType::Udp),
             false,
+            None,
         )
         .await
     }
 
     /// Create a server transaction bound to the exact ingress route while TU
     /// publication remains deferred behind authorization.
+    #[cfg(test)]
     pub(crate) async fn create_server_transaction_deferred_events_on_route(
         &self,
         request: Request,
         response_route: TransportRoute,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        self.create_server_transaction_inner(request, response_route, false)
-            .await
+        self.create_server_transaction_inner(
+            request,
+            response_route.destination,
+            response_route,
+            false,
+            None,
+        )
+        .await
+    }
+
+    /// Ingress-only creation using a collision-safe private storage identity.
+    /// The public wire key remains represented by the match registry.
+    pub(crate) async fn create_server_transaction_deferred_events_on_route_with_id(
+        &self,
+        request: Request,
+        remote_addr: SocketAddr,
+        response_route: TransportRoute,
+        transaction_id: TransactionKey,
+    ) -> Result<Arc<dyn ServerTransaction>> {
+        self.create_server_transaction_inner(
+            request,
+            remote_addr,
+            response_route,
+            false,
+            Some(transaction_id),
+        )
+        .await
     }
 
     async fn create_server_transaction_inner(
         &self,
         request: Request,
+        remote_addr: SocketAddr,
         response_route: TransportRoute,
         publish_cancel_event: bool,
+        transaction_id: Option<TransactionKey>,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        let remote_addr = response_route.destination;
         // Extract branch parameter from the top Via header
         let branch = match request.first_via() {
             Some(via) => match via.branch() {
@@ -6846,7 +7571,8 @@ impl TransactionManager {
         };
 
         // Create the transaction key directly with is_server: true
-        let key = TransactionKey::new(branch, request.method().clone(), true);
+        let wire_key = TransactionKey::new(branch, request.method().clone(), true);
+        let key = transaction_id.unwrap_or(wire_key);
         let _admission_guard = self.admission_lifecycle.try_enter().ok_or_else(|| {
             Error::Other("transaction manager is draining; new transactions are closed".into())
         })?;
@@ -6931,6 +7657,7 @@ impl TransactionManager {
                     ServerInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
+                        remote_addr,
                         response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone_for_transaction(),
@@ -6971,6 +7698,7 @@ impl TransactionManager {
                     ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
+                        remote_addr,
                         response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone_for_transaction(),
@@ -6995,6 +7723,7 @@ impl TransactionManager {
                     ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
+                        remote_addr,
                         response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone_for_transaction(),
@@ -7012,6 +7741,7 @@ impl TransactionManager {
                     ServerNonInviteTransaction::new_with_response_route_command_capacity_and_timer_manager(
                         key.clone(),
                         request.clone(),
+                        remote_addr,
                         response_route.clone(),
                         self.transport.clone(),
                         self.events_tx.clone_for_transaction(),
@@ -7306,6 +8036,12 @@ impl TransactionManager {
     }
 
     pub(crate) async fn cache_invite_2xx_response_for(&self, transaction_id: &TransactionKey) {
+        // RFC 6026 assigns 2xx retransmission to a UAS core, not the INVITE
+        // server transaction or a transaction-stateful proxy TU.
+        if self.stateful_proxy_tu_mode() {
+            return;
+        }
+
         let Some(tx) = self
             .server_transactions
             .get(transaction_id)
@@ -7388,6 +8124,10 @@ impl TransactionManager {
         transaction_id: &TransactionKey,
         ingress_route: TransportRoute,
     ) -> Result<bool> {
+        if self.stateful_proxy_tu_mode() {
+            return Ok(false);
+        }
+
         let entry = self
             .invite_2xx_response_cache
             .get(transaction_id)
@@ -7634,6 +8374,10 @@ impl TransactionManager {
     }
 
     async fn retransmit_due_invite_2xx_responses(&self) -> usize {
+        if self.stateful_proxy_tu_mode() {
+            return 0;
+        }
+
         let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let cache_len = self.invite_2xx_response_cache.len();
         let now = Instant::now();
@@ -7918,8 +8662,43 @@ impl TransactionManager {
         &self,
         invite_tx_id: &TransactionKey,
     ) -> Result<TransactionKey> {
-        self.cancel_invite_transaction_with_extras(invite_tx_id, Vec::new())
+        self.cancel_invite_transaction_classified(invite_tx_id)
             .await
+            .into_result()
+    }
+
+    /// Dispatch a generated CANCEL while preserving the conservative
+    /// first-transport-write classification and exact transaction ID.
+    ///
+    /// Ordinary user-agent callers should use
+    /// [`Self::cancel_invite_transaction`]. This protocol-owner API exists for
+    /// components that must retain an independently coordinated response
+    /// context across an ambiguous transport result.
+    #[doc(hidden)]
+    pub async fn cancel_invite_transaction_classified(
+        &self,
+        invite_tx_id: &TransactionKey,
+    ) -> CancelInviteTransactionDispatch {
+        match self
+            .cancel_invite_transaction_with_extras_classified(invite_tx_id, Vec::new())
+            .await
+        {
+            Ok(transaction_id) => CancelInviteTransactionDispatch::Success { transaction_id },
+            Err(CancelInviteTransactionFailure::ZeroWire {
+                error,
+                retired_transaction_id,
+            }) => CancelInviteTransactionDispatch::ZeroWire {
+                error,
+                retired_transaction_id,
+            },
+            Err(CancelInviteTransactionFailure::WireUnknown {
+                error,
+                transaction_id,
+            }) => CancelInviteTransactionDispatch::WireUnknown {
+                transaction_id,
+                error,
+            },
+        }
     }
 
     /// CANCEL with caller-supplied `extra_headers` (RFC 3326 `Reason:`,
@@ -7947,10 +8726,9 @@ impl TransactionManager {
         let _operation = self
             .admission_lifecycle
             .try_enter_existing()
-            .ok_or_else(|| {
-                CancelInviteTransactionFailure::ZeroWire(Error::Other(
-                    "transaction manager is stopping".into(),
-                ))
+            .ok_or_else(|| CancelInviteTransactionFailure::ZeroWire {
+                error: Error::Other("transaction manager is stopping".into()),
+                retired_transaction_id: None,
             })?;
         self.cancel_invite_transaction_with_extras_within_operation_classified(
             invite_tx_id,
@@ -7966,7 +8744,10 @@ impl TransactionManager {
     ) -> std::result::Result<TransactionKey, CancelInviteTransactionFailure> {
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Canceling invite transaction");
 
-        let zero_wire = CancelInviteTransactionFailure::ZeroWire;
+        let zero_wire = |error| CancelInviteTransactionFailure::ZeroWire {
+            error,
+            retired_transaction_id: None,
+        };
 
         // Check that this is an INVITE client transaction
         if invite_tx_id.method() != &Method::Invite || invite_tx_id.is_server() {
@@ -8042,13 +8823,18 @@ impl TransactionManager {
                     .value()
                     .as_client_transaction()
                     .map(|transaction| transaction.data().clone())
-            })
-            .ok_or_else(|| {
-                zero_wire(Error::transaction_not_found(
-                    cancel_tx_id.clone(),
-                    "new CANCEL transaction generation is unavailable",
-                ))
-            })?;
+            });
+        let Some(cancel_data) = cancel_data else {
+            let error = Error::transaction_not_found(
+                cancel_tx_id.clone(),
+                "new CANCEL transaction generation is unavailable",
+            );
+            let _ = self.terminate_transaction(&cancel_tx_id).await;
+            return Err(CancelInviteTransactionFailure::ZeroWire {
+                error,
+                retired_transaction_id: Some(cancel_tx_id),
+            });
+        };
 
         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&cancel_tx_id), original_id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&invite_tx_id), "Created CANCEL transaction");
 
@@ -8065,7 +8851,10 @@ impl TransactionManager {
             // boundary. Force exact transaction retirement before returning
             // so an immediate retry can claim the same RFC CANCEL key.
             let _ = self.terminate_transaction(&cancel_tx_id).await;
-            return Err(zero_wire(error));
+            return Err(CancelInviteTransactionFailure::ZeroWire {
+                error,
+                retired_transaction_id: Some(cancel_tx_id),
+            });
         }
 
         Ok(cancel_tx_id)

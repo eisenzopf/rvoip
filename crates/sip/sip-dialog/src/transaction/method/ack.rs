@@ -392,6 +392,7 @@ pub fn create_ack_for_error_response(
 mod tests {
     use super::*;
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+    use rvoip_sip_core::types::param::Param;
     use rvoip_sip_core::types::status::StatusCode;
     use std::net::SocketAddr;
     use std::str::FromStr;
@@ -496,24 +497,36 @@ mod tests {
             "ACK must not copy Record-Route"
         );
 
-        let route_uris: Vec<String> = ack
+        let routes: Vec<&Route> = ack
             .headers
             .iter()
             .filter_map(|header| {
                 if let TypedHeader::Route(route) = header {
-                    Some(route.to_string())
+                    Some(route)
                 } else {
                     None
                 }
             })
             .collect();
+        let route_uris: Vec<String> = routes.iter().map(|route| route.to_string()).collect();
         assert_eq!(
             route_uris,
             vec![
-                "<sips:proxy2.example.com>;lr;transport=tls".to_string(),
-                "<sip:proxy1.example.com>;lr".to_string(),
+                "<sips:proxy2.example.com;lr;transport=tls>".to_string(),
+                "<sip:proxy1.example.com;lr>".to_string(),
             ]
         );
+        assert!(routes.iter().all(|route| {
+            route
+                .0
+                .first()
+                .is_some_and(|entry| entry.0.uri.parameters.contains(&Param::Lr))
+        }));
+        assert!(routes[0].0[0]
+            .0
+            .uri
+            .parameters
+            .contains(&Param::Transport("tls".to_string())));
     }
 
     #[test]

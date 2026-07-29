@@ -175,7 +175,7 @@ use crate::transaction::TransactionKind;
 /// 1. The `TransactionState` enum representing the possible states
 /// 2. The `AtomicTransactionState` struct for thread-safe state management
 /// 3. Functions to validate state transitions according to RFC 3261 rules
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use tokio::sync::watch;
 
 /// Represents the state of a SIP transaction, aligned with the state machines
@@ -410,6 +410,11 @@ impl From<u8> for StateValue {
 #[derive(Debug)]
 pub struct AtomicTransactionState {
     value: AtomicU8,
+    // RFC 6026 adds an Accepted state to INVITE client and server
+    // transactions. Keep that state private so the patch release preserves
+    // the exhaustive public TransactionState enum exposed by 0.3.1.
+    accepted_requested: AtomicBool,
+    accepted_active: AtomicBool,
     changes: watch::Sender<TransactionState>,
 }
 
@@ -419,6 +424,8 @@ impl AtomicTransactionState {
         let (changes, _receiver) = watch::channel(state);
         Self {
             value: AtomicU8::new(StateValue::from(state) as u8),
+            accepted_requested: AtomicBool::new(false),
+            accepted_active: AtomicBool::new(false),
             changes,
         }
     }
@@ -436,6 +443,8 @@ impl AtomicTransactionState {
     /// both an acquire operation (for the read part) and a release operation (for the write part),
     /// synchronizing memory with other threads.
     pub fn set(&self, new_state: TransactionState) -> TransactionState {
+        self.accepted_requested.store(false, Ordering::Release);
+        self.accepted_active.store(false, Ordering::Release);
         let prev_value = self
             .value
             .swap(StateValue::from(new_state) as u8, Ordering::AcqRel);
@@ -444,6 +453,57 @@ impl AtomicTransactionState {
             self.changes.send_replace(new_state);
         }
         previous
+    }
+
+    /// Requests that the runner enter RFC 6026's private Accepted state while
+    /// projecting the legacy public `Terminated` state.
+    pub(crate) fn request_accepted(&self) {
+        self.accepted_requested.store(true, Ordering::Release);
+    }
+
+    /// Consumes a pending private Accepted transition request.
+    pub(crate) fn take_accepted_request(&self) -> bool {
+        self.accepted_requested.swap(false, Ordering::AcqRel)
+    }
+
+    /// Enters private Accepted and returns the previously projected state.
+    ///
+    /// Public state observers continue to see the 0.3.1 transition to
+    /// `Terminated`, but protocol ownership is retained until Timer M/L or an
+    /// explicit termination.
+    pub(crate) fn enter_accepted(&self) -> TransactionState {
+        self.accepted_active.store(true, Ordering::Release);
+        let prev_value = self
+            .value
+            .swap(StateValue::Terminated as u8, Ordering::AcqRel);
+        let previous = TransactionState::from(StateValue::from(prev_value));
+        if previous != TransactionState::Terminated {
+            self.changes.send_replace(TransactionState::Terminated);
+        }
+        previous
+    }
+
+    /// Returns whether this INVITE transaction is internally in RFC 6026
+    /// Accepted even though public observers see `Terminated`.
+    pub(crate) fn is_accepted(&self) -> bool {
+        self.accepted_active.load(Ordering::Acquire)
+    }
+
+    /// Returns whether private Accepted is active or its serialized runner
+    /// transition has already been requested.
+    pub(crate) fn is_accepting(&self) -> bool {
+        self.is_accepted() || self.accepted_requested.load(Ordering::Acquire)
+    }
+
+    /// Leaves private Accepted. Returns whether it had been active.
+    pub(crate) fn leave_accepted(&self) -> bool {
+        self.accepted_requested.store(false, Ordering::Release);
+        self.accepted_active.swap(false, Ordering::AcqRel)
+    }
+
+    /// Returns whether protocol processing and retention have actually ended.
+    pub(crate) fn is_protocol_terminated(&self) -> bool {
+        self.get() == TransactionState::Terminated && !self.is_accepted()
     }
 
     /// Subscribe to exact state changes without using the public transaction
@@ -485,6 +545,10 @@ impl AtomicTransactionState {
         current_state: TransactionState,
         new_state: TransactionState,
     ) -> bool {
+        if new_state == TransactionState::Terminated {
+            self.accepted_requested.store(false, Ordering::Release);
+            self.accepted_active.store(false, Ordering::Release);
+        }
         let current_value = StateValue::from(current_state) as u8;
         let new_value = StateValue::from(new_state) as u8;
 
@@ -556,22 +620,14 @@ impl AtomicTransactionState {
                             return Ok(());
                         }
                     }
-                    TransactionState::Calling => {
-                        // Calling can transition to Proceeding, Completed, or Terminated
-                        match new_state {
-                            TransactionState::Proceeding | TransactionState::Completed => {
-                                return Ok(())
-                            }
-                            _ => {}
-                        }
-                    }
-                    TransactionState::Proceeding => {
-                        // Proceeding can transition to Completed or Terminated
-                        match new_state {
-                            TransactionState::Completed => return Ok(()),
-                            _ => {}
-                        }
-                    }
+                    TransactionState::Calling => match new_state {
+                        TransactionState::Proceeding | TransactionState::Completed => return Ok(()),
+                        _ => {}
+                    },
+                    TransactionState::Proceeding => match new_state {
+                        TransactionState::Completed => return Ok(()),
+                        _ => {}
+                    },
                     TransactionState::Completed => {
                         // Completed can only transition to Terminated
                         // Handled above
@@ -631,15 +687,10 @@ impl AtomicTransactionState {
                             _ => {}
                         }
                     }
-                    TransactionState::Proceeding => {
-                        // Proceeding can transition to Completed, Confirmed, or Terminated
-                        match new_state {
-                            TransactionState::Completed | TransactionState::Confirmed => {
-                                return Ok(())
-                            }
-                            _ => {}
-                        }
-                    }
+                    TransactionState::Proceeding => match new_state {
+                        TransactionState::Completed | TransactionState::Confirmed => return Ok(()),
+                        _ => {}
+                    },
                     TransactionState::Completed => {
                         // Completed can transition to Confirmed or Terminated
                         match new_state {
@@ -722,6 +773,26 @@ mod tests {
         assert!(!TransactionState::Confirmed.is_terminated());
     }
 
+    fn exhaustive_public_state_fixture(state: TransactionState) -> u8 {
+        match state {
+            TransactionState::Initial => 0,
+            TransactionState::Calling => 1,
+            TransactionState::Trying => 2,
+            TransactionState::Proceeding => 3,
+            TransactionState::Completed => 4,
+            TransactionState::Confirmed => 5,
+            TransactionState::Terminated => 6,
+        }
+    }
+
+    #[test]
+    fn public_transaction_state_remains_exhaustive_and_source_compatible() {
+        assert_eq!(
+            exhaustive_public_state_fixture(TransactionState::Terminated),
+            6
+        );
+    }
+
     #[test]
     fn state_value_from_transaction_state() {
         assert_eq!(
@@ -795,8 +866,39 @@ mod tests {
         assert_eq!(StateValue::from(4u8), StateValue::Completed);
         assert_eq!(StateValue::from(5u8), StateValue::Confirmed);
         assert_eq!(StateValue::from(6u8), StateValue::Terminated);
-        assert_eq!(StateValue::from(7u8), StateValue::Terminated); // Test default for unknown
+        assert_eq!(StateValue::from(7u8), StateValue::Terminated);
+        assert_eq!(StateValue::from(8u8), StateValue::Terminated); // Test default for unknown
         assert_eq!(StateValue::from(255u8), StateValue::Terminated); // Test default for unknown
+    }
+
+    #[test]
+    fn private_accepted_projects_terminated_without_ending_protocol_lifetime() {
+        let atomic_state = AtomicTransactionState::new(TransactionState::Proceeding);
+        let mut changes = atomic_state.subscribe();
+
+        atomic_state.request_accepted();
+        assert!(atomic_state.take_accepted_request());
+        assert_eq!(atomic_state.enter_accepted(), TransactionState::Proceeding);
+        assert_eq!(atomic_state.get(), TransactionState::Terminated);
+        assert_eq!(*changes.borrow_and_update(), TransactionState::Terminated);
+        assert!(atomic_state.is_accepted());
+        assert!(!atomic_state.is_protocol_terminated());
+
+        assert!(atomic_state.leave_accepted());
+        assert!(!atomic_state.is_accepted());
+        assert!(atomic_state.is_protocol_terminated());
+    }
+
+    #[test]
+    fn explicit_public_termination_clears_private_accepted() {
+        let atomic_state = AtomicTransactionState::new(TransactionState::Proceeding);
+        atomic_state.request_accepted();
+        assert!(atomic_state.take_accepted_request());
+        atomic_state.enter_accepted();
+
+        atomic_state.set(TransactionState::Terminated);
+        assert!(!atomic_state.is_accepted());
+        assert!(atomic_state.is_protocol_terminated());
     }
 
     #[test]
@@ -934,6 +1036,7 @@ mod tests {
         assert_invalid_transition!(kind, Initial, Calling); // Calling is for InviteClient
         assert_invalid_transition!(kind, Initial, Completed);
         assert_invalid_transition!(kind, Trying, Initial);
+        assert_invalid_transition!(kind, Proceeding, Confirmed);
     }
 
     #[test]
@@ -945,9 +1048,8 @@ mod tests {
         assert_valid_transition!(kind, Initial, Proceeding);
         assert_valid_transition!(kind, Initial, Completed); // e.g. send 4xx immediately
         assert_valid_transition!(kind, Proceeding, Completed);
-        assert_valid_transition!(kind, Proceeding, Terminated); // e.g. send 2xx
         assert_valid_transition!(kind, Completed, Confirmed); // Sent non-2xx, got ACK
-        assert_valid_transition!(kind, Completed, Terminated); // Timer H for non-2xx, or after 2xx+Timer G
+        assert_valid_transition!(kind, Completed, Terminated); // Timer H for non-2xx
         assert_valid_transition!(kind, Confirmed, Terminated); // Timer I after ACK for non-2xx
 
         assert_valid_transition!(kind, Initial, Terminated); // Always valid

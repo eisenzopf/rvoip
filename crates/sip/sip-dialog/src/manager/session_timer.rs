@@ -200,7 +200,7 @@ async fn wait_for_refresh_task_completion_until(
     if *completion.borrow() {
         return true;
     }
-    match tokio::time::timeout_at(deadline, async {
+    (tokio::time::timeout_at(deadline, async {
         loop {
             if *completion.borrow() {
                 return true;
@@ -210,11 +210,8 @@ async fn wait_for_refresh_task_completion_until(
             }
         }
     })
-    .await
-    {
-        Ok(completed) => completed,
-        Err(_) => false,
-    }
+    .await)
+        .unwrap_or_default()
 }
 
 async fn wait_for_refresh_task_completion(task: &SessionRefreshTask) -> bool {

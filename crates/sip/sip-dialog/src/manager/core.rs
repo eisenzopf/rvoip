@@ -2344,7 +2344,7 @@ impl DialogManager {
                     dialog_id
                 );
             }
-        } else if matches!(&event, TransactionEvent::AckReceived { .. }) {
+        } else if matches!(&event, TransactionEvent::AckRequest { .. }) {
             // A 2xx ACK is emitted by transaction-core with the exact matched
             // server INVITE key. Never recover a missing authoritative binding
             // by independently matching request tags: that could route a stale
@@ -7963,9 +7963,10 @@ mod outbound_flow_handler_tests {
         let invite_tx =
             TransactionKey::new("z9hG4bK-ack-cleanup".to_string(), Method::Invite, true);
 
-        let ack = TransactionEvent::AckReceived {
+        let ack = TransactionEvent::AckRequest {
             transaction_id: invite_tx.clone(),
             request: dispatch_request(Method::Ack, "z9hG4bK-ack-cleanup", 1),
+            source: dest_addr(5070),
         };
         manager.dialog_event_dispatch_worker_index(&ack, 8, &fallback);
         assert!(manager
@@ -8042,9 +8043,10 @@ mod outbound_flow_handler_tests {
             .max_forwards(70)
             .build();
         manager
-            .process_global_transaction_event(TransactionEvent::AckReceived {
+            .process_global_transaction_event(TransactionEvent::AckRequest {
                 transaction_id: invite_tx.clone(),
                 request: ack,
+                source: dest_addr(5070),
             })
             .await;
 
@@ -8058,6 +8060,45 @@ mod outbound_flow_handler_tests {
         assert!(
             manager.find_dialog_for_transaction(&invite_tx).is_err(),
             "authoritatively delivered ACK retires the server INVITE binding"
+        );
+    }
+
+    #[tokio::test]
+    async fn transaction_owned_non_2xx_ack_does_not_start_uas_media() {
+        let (manager, mut session_events) = make_manager().await;
+        let dialog = Dialog::new(
+            "non-2xx-ack".to_string(),
+            "sip:bob@example.com".parse().unwrap(),
+            "sip:alice@example.com".parse().unwrap(),
+            Some("bob-tag".to_string()),
+            Some("alice-tag".to_string()),
+            false,
+        );
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let invite_tx =
+            TransactionKey::new("z9hG4bK-non-2xx-ack".to_string(), Method::Invite, true);
+        manager.link_transaction_to_dialog_indexed(&invite_tx, &dialog_id);
+
+        manager
+            .process_global_transaction_event(TransactionEvent::AckReceived {
+                transaction_id: invite_tx.clone(),
+                request: dispatch_request(Method::Ack, "z9hG4bK-non-2xx-ack", 1),
+            })
+            .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), session_events.recv())
+                .await
+                .is_err(),
+            "a hop-by-hop non-2xx ACK must not emit the 2xx media-start event"
+        );
+        assert_eq!(
+            manager
+                .find_dialog_for_transaction(&invite_tx)
+                .expect("non-2xx observation retains binding"),
+            dialog_id
         );
     }
 

@@ -6262,9 +6262,21 @@ impl DialogManager {
                 Ok(()) // Most timer events don't require dialog-level action
             }
 
-            TransactionEvent::AckReceived { request, .. } => {
+            TransactionEvent::AckRequest { request, .. } => {
                 self.handle_ack_received_event(dialog_id, transaction_id, request)
                     .await
+            }
+
+            TransactionEvent::AckReceived { .. } => {
+                // Non-2xx ACK is transaction-owned and only confirms receipt
+                // of a failed final response. It must not start UAS media or
+                // emit the session-layer 2xx ACK notification.
+                debug!(
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    %dialog_id,
+                    "Observed transaction-owned non-2xx ACK"
+                );
+                Ok(())
             }
 
             TransactionEvent::CancelReceived { .. } => {
@@ -7265,9 +7277,9 @@ impl DialogManager {
                         return Ok(cancel_transaction);
                     }
                     Ok(Err(
-                        crate::transaction::manager::CancelInviteTransactionFailure::ZeroWire(
-                            _error,
-                        ),
+                        crate::transaction::manager::CancelInviteTransactionFailure::ZeroWire {
+                            ..
+                        },
                     )) => {
                         plan.cancel_dispatch_state = InviteCancelDispatchState::Idle;
                         plan.cancel_transaction = None;

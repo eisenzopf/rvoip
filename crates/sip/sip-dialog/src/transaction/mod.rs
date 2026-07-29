@@ -137,7 +137,8 @@ pub use authorization::{
     SipRequestRejection,
 };
 pub use manager::{
-    TransactionManager, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+    CancelInviteTransactionDispatch, TransactionManager, TransactionUserMode,
+    DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
     DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MAX_TRANSACTION_DISPATCH_WORKERS,
 };
 
@@ -252,6 +253,17 @@ pub trait Transaction: Send + Sync + fmt::Debug {
 
     /// Returns the current [`TransactionState`] of this transaction (e.g., Trying, Proceeding, Completed).
     fn state(&self) -> TransactionState;
+
+    /// Reports whether protocol processing and RFC retention have actually
+    /// ended.
+    ///
+    /// The default preserves the 0.3.1 trait contract. INVITE implementations
+    /// override it while RFC 6026 Accepted is retained privately behind the
+    /// legacy public `Terminated` projection.
+    #[doc(hidden)]
+    fn is_protocol_terminated(&self) -> bool {
+        self.state().is_terminated()
+    }
 
     /// Returns the network [`SocketAddr`] of the remote party involved in this transaction.
     /// For client transactions, this is the destination address. For server transactions, it's the source address.

@@ -28,7 +28,7 @@
 //! source IP differs from the Via host (the RFC 3261 §18.2.1
 //! always-stamp condition).
 
-use rvoip_sip_core::types::via::Via;
+use rvoip_sip_core::types::{param::Param, via::Via};
 use std::net::SocketAddr;
 
 /// Stamp the top `Via` header with RFC 3581 `received=` / `rport=`
@@ -48,15 +48,39 @@ use std::net::SocketAddr;
 ///
 /// Returns `true` when at least one parameter was added or replaced.
 pub fn stamp_received_rport(via: &mut Via, source: SocketAddr) -> bool {
-    let inbound_rport_present = via.rport().is_some();
-    via.set_received(source.ip());
-
-    if inbound_rport_present {
-        via.set_rport(Some(source.port()));
+    let Some(top_via) = via.0.first_mut() else {
+        return false;
+    };
+    let inbound_rport_present = top_via.params.iter().any(|parameter| {
+        matches!(parameter, Param::Rport(_))
+            || matches!(
+                parameter,
+                Param::Other(name, _) if name.eq_ignore_ascii_case("rport")
+            )
+    });
+    if let Some(position) = top_via
+        .params
+        .iter()
+        .position(|parameter| matches!(parameter, Param::Received(_)))
+    {
+        top_via.params[position] = Param::Received(source.ip());
+    } else {
+        top_via.params.push(Param::Received(source.ip()));
     }
 
-    // `set_received` is unconditional; we always changed at least one
-    // parameter on the Via header.
+    if inbound_rport_present {
+        if let Some(position) = top_via.params.iter().position(|parameter| {
+            matches!(parameter, Param::Rport(_))
+                || matches!(
+                    parameter,
+                    Param::Other(name, _) if name.eq_ignore_ascii_case("rport")
+                )
+        }) {
+            top_via.params[position] = Param::Rport(Some(source.port()));
+        }
+    }
+
+    // `received` is unconditional; we always changed the topmost Via.
     true
 }
 
@@ -240,5 +264,42 @@ mod tests {
             other => panic!("expected IPv6 received, got {:?}", other),
         }
         assert_eq!(via.rport(), Some(Some(44000)));
+    }
+
+    #[test]
+    fn packed_header_stamps_only_the_topmost_via_value() {
+        let top = make_via_with_rport_flag().0.remove(0);
+        let lower_source: SocketAddr = "203.0.113.20:25090".parse().unwrap();
+        let lower = Via::new(
+            "SIP",
+            "2.0",
+            "UDP",
+            "203.0.113.20",
+            Some(25090),
+            vec![
+                Param::branch("z9hG4bK-lower"),
+                Param::Received(lower_source.ip()),
+                Param::Rport(Some(lower_source.port())),
+            ],
+        )
+        .expect("valid lower Via")
+        .0
+        .remove(0);
+        let mut packed = Via(vec![top, lower.clone()]);
+        let proxy_source: SocketAddr = "198.51.100.10:60564".parse().unwrap();
+
+        assert!(stamp_received_rport(&mut packed, proxy_source));
+        assert_eq!(
+            packed.headers()[0].received(),
+            Some(proxy_source.ip().to_string())
+        );
+        assert!(packed.headers()[0]
+            .params
+            .contains(&Param::Rport(Some(proxy_source.port()))));
+        assert_eq!(
+            packed.headers()[1],
+            lower,
+            "a server may only modify the topmost Via value"
+        );
     }
 }

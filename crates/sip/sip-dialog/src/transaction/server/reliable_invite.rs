@@ -335,7 +335,7 @@ async fn wait_for_task_completion_until(
         return true;
     }
 
-    match tokio::time::timeout_at(deadline, async {
+    (tokio::time::timeout_at(deadline, async {
         loop {
             if *completion.borrow() {
                 return true;
@@ -345,11 +345,8 @@ async fn wait_for_task_completion_until(
             }
         }
     })
-    .await
-    {
-        Ok(completed) => completed,
-        Err(_) => false,
-    }
+    .await)
+        .unwrap_or_default()
 }
 
 async fn wait_for_task_completion(task: &ReliableProvisionalTask) -> bool {

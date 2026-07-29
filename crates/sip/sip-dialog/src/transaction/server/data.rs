@@ -133,7 +133,12 @@ pub struct ServerTransactionData {
     pub(crate) final_response_supervision_state: AtomicU64,
     pub(crate) final_response_supervision_notify: tokio::sync::Notify,
 
-    /// Remote address to which responses are sent
+    /// Transport source that delivered the request.
+    ///
+    /// This remains distinct from `response_route`: RFC 3261 §18.2.2 may send
+    /// a UDP response to the Via sent-by port rather than the packet source
+    /// port, while `received`/`rport` stamping and ingress events still require
+    /// the transport-truth source tuple.
     pub remote_addr: SocketAddr,
 
     /// Exact route back to the ingress flow. Connection-oriented responses
@@ -650,7 +655,11 @@ impl SupervisedServerResponse {
         response: Response,
     ) -> crate::transaction::error::Result<Arc<Self>> {
         let final_response = !response.status().is_provisional();
-        let supervision_generation = if final_response {
+        let accepted_invite_2xx = final_response
+            && data.request.method() == Method::Invite
+            && response.status().is_success()
+            && data.state.is_accepted();
+        let supervision_generation = if final_response && !accepted_invite_2xx {
             Some(data.pending_final_response_generation().ok_or_else(|| {
                 crate::transaction::error::Error::Other(
                     "final response has no active supervision generation".to_string(),
@@ -659,8 +668,10 @@ impl SupervisedServerResponse {
         } else {
             None
         };
-        let wire_unknown_transition = final_response.then(|| {
+        let wire_unknown_transition = supervision_generation.map(|_| {
             if data.request.method() == Method::Invite && response.status().is_success() {
+                // RFC 6026 retains an INVITE server transaction after a 2xx,
+                // including when the transport result is wire-unknown.
                 TransactionState::Terminated
             } else {
                 TransactionState::Completed

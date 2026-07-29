@@ -899,31 +899,32 @@ impl TransactionManager {
             let Some(publication_claim) = publication_claim else {
                 return Ok(());
             };
-            let mut delivery = std::pin::pin!(self.events_tx.send_terminal(
-                crate::transaction::TransactionEvent::TransactionTerminated {
-                    transaction_id: tx_id.clone(),
-                },
-                None,
-                terminal_owner,
-            ));
-            let delivered = tokio::select! {
-                result = &mut delivery => {
-                    if result.is_err() {
+            let delivered = {
+                let mut delivery = std::pin::pin!(self.events_tx.send_terminal(
+                    crate::transaction::TransactionEvent::TransactionTerminated {
+                        transaction_id: tx_id.clone(),
+                    },
+                    None,
+                    terminal_owner,
+                ));
+                tokio::select! {
+                    result = &mut delivery => {
+                        if result.is_err() {
+                            self.events_tx.fail_closed_terminal_batch();
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                        // `delivery` still owns its exact sidecar/admission owner
+                        // while this closes admission. The enclosing scope drops
+                        // the future before the publication claim is completed.
                         self.events_tx.fail_closed_terminal_batch();
                         false
-                    } else {
-                        true
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                    // `delivery` still owns its exact sidecar/admission owner
-                    // while this closes admission. It is dropped only after
-                    // the select branch completes, eliminating the ABA gap.
-                    self.events_tx.fail_closed_terminal_batch();
-                    false
-                }
             };
-            drop(delivery);
             if delivered {
                 publication_claim.mark_delivered();
             } else {
@@ -1024,7 +1025,7 @@ impl TransactionManager {
         let terminated_client_keys: Vec<TransactionKey> = self
             .client_transactions
             .iter()
-            .filter(|r| r.value().state() == TransactionState::Terminated)
+            .filter(|r| r.value().is_protocol_terminated())
             .map(|r| r.key().clone())
             .collect();
         let terminated_client_count = terminated_client_keys.len();
@@ -1040,7 +1041,7 @@ impl TransactionManager {
         let terminated_server_keys: Vec<TransactionKey> = self
             .server_transactions
             .iter()
-            .filter(|r| r.value().state() == TransactionState::Terminated)
+            .filter(|r| r.value().is_protocol_terminated())
             .map(|r| r.key().clone())
             .collect();
         let terminated_server_count = terminated_server_keys.len();
@@ -1080,9 +1081,7 @@ impl TransactionManager {
                 .iter()
                 .filter_map(|r| {
                     let tx = r.value();
-                    if tx.as_client_transaction().is_some()
-                        && tx.state() == TransactionState::Terminated
-                    {
+                    if tx.as_client_transaction().is_some() && tx.is_protocol_terminated() {
                         Some(r.key().clone())
                     } else {
                         None
@@ -1121,7 +1120,7 @@ impl TransactionManager {
             let remove_client = self
                 .client_transactions
                 .get(&key)
-                .map(|entry| entry.value().state() == TransactionState::Terminated)
+                .map(|entry| entry.value().is_protocol_terminated())
                 .unwrap_or(false);
             if remove_client {
                 self.request_transaction_runner_stop(&key);
@@ -1134,7 +1133,7 @@ impl TransactionManager {
             let remove_server = self
                 .server_transactions
                 .get(&key)
-                .map(|entry| entry.value().state() == TransactionState::Terminated)
+                .map(|entry| entry.value().is_protocol_terminated())
                 .unwrap_or(false);
             if remove_server {
                 self.request_transaction_runner_stop(&key);

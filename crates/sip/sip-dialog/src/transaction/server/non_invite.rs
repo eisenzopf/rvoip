@@ -362,6 +362,7 @@ impl ServerNonInviteTransaction {
         Self::new_with_response_route_command_capacity_and_timer_manager(
             id,
             request,
+            response_route.destination,
             response_route,
             transport,
             events_tx,
@@ -375,6 +376,7 @@ impl ServerNonInviteTransaction {
     pub(crate) fn new_with_response_route_command_capacity_and_timer_manager(
         id: TransactionKey,
         request: Request,
+        remote_addr: SocketAddr,
         response_route: TransportRoute,
         transport: Arc<dyn Transport>,
         events_tx: impl Into<crate::transaction::event_sender::TransactionEventSender>,
@@ -390,7 +392,6 @@ impl ServerNonInviteTransaction {
 
         let timer_config = timer_config_override.unwrap_or_default();
         let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
-        let remote_addr = response_route.destination;
 
         let data = Arc::new(ServerTransactionData {
             id: id.clone(),

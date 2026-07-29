@@ -27,7 +27,9 @@ use std::time::Instant;
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
-use rvoip_sip_transport::{Transport, TransportEvent, TransportFlowId, TransportRoute};
+use rvoip_sip_transport::{
+    Transport, TransportEvent, TransportFlowId, TransportReceiveTiming, TransportRoute,
+};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -74,6 +76,22 @@ fn bind_client_response_route(
     Some(bound)
 }
 
+fn server_request_route_matches(
+    expected_source: SocketAddr,
+    expected_response_route: &TransportRoute,
+    ingress_context: &SipRequestIngressContext,
+) -> bool {
+    let actual = ingress_context.response_route();
+    expected_source == actual.destination
+        && expected_response_route.transport_type == actual.transport_type
+        && expected_response_route.flow_id == actual.flow_id
+}
+
+fn top_via_sent_by_matches(invite: &Request, cancel: &Request) -> bool {
+    super::NormalizedViaSentBy::from_request(invite)
+        == super::NormalizedViaSentBy::from_request(cancel)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientResponseRouteAuthentication {
     Authenticated,
@@ -87,19 +105,28 @@ enum ClientResponseRouteAuthentication {
 struct StagedServerPublicationGuard {
     manager: TransactionManager,
     transaction: Arc<dyn ServerTransaction>,
+    match_reservation: Option<super::ServerTransactionMatchReservation>,
     committed: bool,
 }
 
 impl StagedServerPublicationGuard {
-    fn new(manager: &TransactionManager, transaction: Arc<dyn ServerTransaction>) -> Self {
+    fn new(
+        manager: &TransactionManager,
+        transaction: Arc<dyn ServerTransaction>,
+        match_reservation: Option<super::ServerTransactionMatchReservation>,
+    ) -> Self {
         Self {
             manager: manager.clone(),
             transaction,
+            match_reservation,
             committed: false,
         }
     }
 
     fn commit(mut self) {
+        if let Some(reservation) = self.match_reservation.take() {
+            reservation.commit();
+        }
         self.committed = true;
     }
 }
@@ -114,6 +141,231 @@ impl Drop for StagedServerPublicationGuard {
 }
 
 impl TransactionManager {
+    async fn registered_server_transaction_id(
+        &self,
+        match_key: &super::ServerTransactionMatchKey,
+    ) -> Option<TransactionKey> {
+        let registration = self.server_transaction_matches.registration(match_key)?;
+        registration
+            .wait_published()
+            .await
+            .then(|| registration.transaction_id.clone())
+    }
+
+    async fn legacy_server_transaction_matches(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> bool {
+        let route_matches =
+            self.server_transactions
+                .get(transaction_id)
+                .is_some_and(|transaction| {
+                    let data = transaction.value().data();
+                    server_request_route_matches(
+                        data.remote_addr,
+                        &data.response_route,
+                        ingress_context,
+                    )
+                });
+        if !route_matches {
+            return false;
+        }
+        match self.original_request(transaction_id).await {
+            Ok(Some(original)) => top_via_sent_by_matches(&original, request),
+            Ok(None) | Err(_) => false,
+        }
+    }
+
+    async fn matching_server_transaction_id(
+        &self,
+        match_key: &super::ServerTransactionMatchKey,
+        wire_key: &TransactionKey,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Option<TransactionKey> {
+        if let Some(transaction_id) = self.registered_server_transaction_id(match_key).await {
+            return Some(transaction_id);
+        }
+        self.legacy_server_transaction_matches(wire_key, request, ingress_context)
+            .await
+            .then(|| wire_key.clone())
+    }
+
+    async fn authorize_unmatched_cancel_without_challenge(
+        &self,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> bool {
+        let Some(authorizer) = self.request_ingress_authorizer() else {
+            return true;
+        };
+        match authorizer.authorize(request, ingress_context).await {
+            SipRequestAuthorization::Authorized { .. } => true,
+            SipRequestAuthorization::Rejected(rejection) => {
+                warn!(
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                    source=%ingress_context.source,
+                    status=%rejection.status.as_u16(),
+                    "Dropping unmatched proxy CANCEL denied by listener admission"
+                );
+                false
+            }
+        }
+    }
+
+    fn cache_new_server_ingress(
+        &self,
+        transaction_id: &TransactionKey,
+        request: &Request,
+        ingress_context: &SipRequestIngressContext,
+        raw_bytes: Option<bytes::Bytes>,
+        timing: Option<TransportReceiveTiming>,
+    ) {
+        if !matches!(request.method(), Method::Ack | Method::Bye) {
+            if let Some(value) = raw_bytes {
+                self.pending_inbound_inserted_at
+                    .insert(transaction_id.clone(), Instant::now());
+                self.pending_inbound_bytes
+                    .insert(transaction_id.clone(), value);
+            }
+        }
+        self.pending_inbound_transport.insert(
+            transaction_id.clone(),
+            rvoip_infra_common::events::cross_crate::SipTransportContext::new(
+                ingress_context.transport_type.to_string(),
+                ingress_context.destination.to_string(),
+                ingress_context.source.to_string(),
+                matches!(
+                    ingress_context.transport_type,
+                    TransportType::Tls | TransportType::Wss
+                ),
+            ),
+        );
+        if matches!(request.method(), Method::Invite | Method::Bye) {
+            if let Some(value) = timing {
+                self.pending_inbound_timing
+                    .insert(transaction_id.clone(), value);
+            }
+        }
+    }
+
+    async fn dispatch_matching_server_request(
+        &self,
+        transaction_id: &TransactionKey,
+        request: Request,
+        ingress_context: &SipRequestIngressContext,
+    ) -> Result<bool> {
+        let existing = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone());
+        if let Some(transaction) = existing {
+            if request.method() == Method::Invite {
+                diagnostics::record_duplicate_invite_existing_transaction();
+            } else if request.method() == Method::Bye {
+                diagnostics::record_duplicate_bye_existing_transaction();
+            }
+            if self.request_ingress_authorizer().is_some() {
+                if self.peek_inbound_principal(transaction_id).is_some()
+                    && self
+                        .inbound_principal_for_context(transaction_id, ingress_context)
+                        .is_none()
+                {
+                    warn!(
+                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                        source=%ingress_context.source,
+                        "Dropping transaction replay from a different authenticated peer binding"
+                    );
+                    return Ok(true);
+                }
+                if self.peek_inbound_principal(transaction_id).is_none() {
+                    let last_response = transaction.data().last_response.lock().await.clone();
+                    if let Some(response) = last_response {
+                        let wire_bytes =
+                            bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
+                        self.send_cached_response(
+                            response,
+                            wire_bytes,
+                            ingress_context.response_route_for_request(&request),
+                            "Failed to retransmit listener authorization response",
+                        )
+                        .await
+                        .map_err(|error| {
+                            Error::transport_error(
+                                error,
+                                "Failed to retransmit listener authorization response",
+                            )
+                        })?;
+                    }
+                    return Ok(true);
+                }
+            }
+
+            let lifecycle = transaction.data().get_lifecycle();
+            if !matches!(lifecycle, TransactionLifecycle::Active) {
+                if request.method() == Method::Invite {
+                    if self
+                        .retransmit_cached_invite_2xx_response_on_route(
+                            transaction_id,
+                            ingress_context.response_route_for_request(&request),
+                        )
+                        .await?
+                    {
+                        return Ok(true);
+                    }
+                    diagnostics::record_duplicate_invite_cache_miss();
+                }
+                debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), ?lifecycle, "Skipping request processing for non-active transaction");
+                return Ok(true);
+            }
+            if request.method() == Method::Invite
+                && transaction.state() == TransactionState::Terminated
+            {
+                if self
+                    .retransmit_cached_invite_2xx_response_on_route(
+                        transaction_id,
+                        ingress_context.response_route_for_request(&request),
+                    )
+                    .await?
+                {
+                    return Ok(true);
+                }
+                diagnostics::record_duplicate_invite_cache_miss();
+            }
+            let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
+            transaction.process_request(request).await?;
+            if let Some(started) = dispatch_started {
+                diagnostics::record_existing_transaction_dispatch(started.elapsed());
+            }
+            return Ok(true);
+        }
+
+        if request.method() != Method::Invite
+            && self
+                .replay_compact_non_invite_server_response(
+                    transaction_id,
+                    &request,
+                    ingress_context,
+                )
+                .await?
+        {
+            return Ok(true);
+        }
+        if request.method() == Method::Invite
+            && self
+                .retransmit_cached_invite_2xx_response_on_route(
+                    transaction_id,
+                    ingress_context.response_route_for_request(&request),
+                )
+                .await?
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     fn absorb_compact_non_invite_client_response(&self, transaction_id: &TransactionKey) -> bool {
         self.compact_non_invite_tombstones
             .get(transaction_id)
@@ -123,6 +375,7 @@ impl TransactionManager {
     pub(super) async fn replay_compact_non_invite_server_response(
         &self,
         transaction_id: &TransactionKey,
+        request: &Request,
         ingress_context: &SipRequestIngressContext,
     ) -> Result<bool> {
         let replay = self
@@ -158,12 +411,13 @@ impl TransactionManager {
         }
 
         let expected_transport = route.transport_type.unwrap_or(TransportType::Udp);
-        let ingress_route = ingress_context.response_route();
-        let ingress_transport = ingress_route.transport_type.unwrap_or(TransportType::Udp);
+        let peer_route = ingress_context.response_route();
+        let response_route = ingress_context.response_route_for_request(request);
+        let ingress_transport = peer_route.transport_type.unwrap_or(TransportType::Udp);
         if expected_transport != TransportType::Udp
             || ingress_transport != TransportType::Udp
-            || route.destination != ingress_route.destination
-            || ingress_route.flow_id.is_some()
+            || route.destination != response_route.destination
+            || peer_route.flow_id.is_some()
         {
             warn!(
                 transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
@@ -425,6 +679,19 @@ impl TransactionManager {
                             return Ok(());
                         }
                         ClientResponseRouteAuthentication::UnknownTransaction => {
+                            let mut response_route =
+                                TransportRoute::new(source).with_transport_type(transport_type);
+                            response_route.flow_id = flow_id;
+                            if self.stateful_proxy_tu_mode() {
+                                self.send_stateful_proxy_ingress_event(
+                                    crate::transaction::StatefulProxyIngressEvent::StrayResponse {
+                                        response: response.clone(),
+                                        source,
+                                        response_route: Some(response_route),
+                                    },
+                                )
+                                .await?;
+                            }
                             Self::broadcast_event(
                                 TransactionEvent::StrayResponse {
                                     response: response.clone(),
@@ -443,9 +710,7 @@ impl TransactionManager {
                 }
                 if let Some(bytes) = raw_bytes.as_ref() {
                     let cache_raw_bytes = match &message {
-                        Message::Request(request) => {
-                            !matches!(request.method(), Method::Ack | Method::Bye)
-                        }
+                        Message::Request(_) => false,
                         Message::Response(_) => transaction_key
                             .as_ref()
                             .is_some_and(|key| self.client_transactions.contains_key(key)),
@@ -462,7 +727,14 @@ impl TransactionManager {
                 }
                 if let Some(key) = transaction_key.as_ref() {
                     let cache_transport = match &message {
-                        Message::Request(_) => true,
+                        // Requests with transactions are cached only after
+                        // successful transaction admission in
+                        // `cache_new_server_ingress`. ACK has no standalone
+                        // server transaction: a non-2xx ACK belongs to the
+                        // INVITE transaction and a 2xx ACK is end-to-end.
+                        // Caching it under the ACK wire key would therefore
+                        // create metadata with no lifecycle owner.
+                        Message::Request(_) => false,
                         Message::Response(_) => self.client_transactions.contains_key(key),
                     };
                     if cache_transport {
@@ -481,16 +753,6 @@ impl TransactionManager {
                         );
                     }
                 }
-                if let (Some(key), Some(timing)) = (transaction_key.as_ref(), timing) {
-                    let cache_timing = matches!(
-                        &message,
-                        Message::Request(request)
-                            if matches!(request.method(), Method::Invite | Method::Bye)
-                    );
-                    if cache_timing {
-                        self.pending_inbound_timing.insert(key.clone(), timing);
-                    }
-                }
                 let ingress_context =
                     SipRequestIngressContext::new(source, destination, transport_type);
                 let ingress_context = match flow_id {
@@ -501,8 +763,15 @@ impl TransactionManager {
                     Some(metadata) => ingress_context.with_connection_metadata(metadata),
                     None => ingress_context,
                 };
-                self.handle_message(message, source, destination, &ingress_context)
-                    .await
+                self.handle_message(
+                    message,
+                    source,
+                    destination,
+                    &ingress_context,
+                    raw_bytes,
+                    timing,
+                )
+                .await
             }
             TransportEvent::KeepAlivePongReceived {
                 source, flow_id, ..
@@ -568,6 +837,8 @@ impl TransactionManager {
         source: SocketAddr,
         _destination: SocketAddr,
         ingress_context: &SipRequestIngressContext,
+        raw_bytes: Option<bytes::Bytes>,
+        timing: Option<TransportReceiveTiming>,
     ) -> Result<()> {
         match message {
             Message::Request(request) => {
@@ -579,7 +850,8 @@ impl TransactionManager {
                         .await;
                 }
 
-                self.handle_request(request, source, ingress_context).await
+                self.handle_request(request, source, ingress_context, raw_bytes, timing)
+                    .await
             }
             Message::Response(response) => self.handle_response(response, source).await,
         }
@@ -591,14 +863,16 @@ impl TransactionManager {
         request: &Request,
         ingress_context: &SipRequestIngressContext,
         inherited_principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
+        preauthorized: Option<SipRequestAuthorization>,
     ) -> Result<bool> {
         let Some(authorizer) = self.request_ingress_authorizer() else {
             return Ok(true);
         };
 
-        let decision = match inherited_principal {
-            Some(principal) => SipRequestAuthorization::Authorized { principal },
-            None => authorizer.authorize(request, ingress_context).await,
+        let decision = match (inherited_principal, preauthorized) {
+            (Some(principal), _) => SipRequestAuthorization::Authorized { principal },
+            (None, Some(decision)) => decision,
+            (None, None) => authorizer.authorize(request, ingress_context).await,
         };
 
         match decision {
@@ -611,8 +885,28 @@ impl TransactionManager {
                 headers,
                 reason,
             }) => {
-                let mut response =
-                    crate::transaction::utils::response_builders::create_response(request, status);
+                let admission_generation = transaction
+                    .data()
+                    .transaction_admission_owner()
+                    .map(|owner| owner.generation());
+                let mut response = match admission_generation {
+                    Some(generation) => crate::transaction::utils::response_builders::
+                        create_response_for_transaction_generation(
+                            request,
+                            status,
+                            transaction.id(),
+                            generation,
+                        ),
+                    None => {
+                        debug_assert!(
+                            false,
+                            "an admitted server transaction must retain its exact generation"
+                        );
+                        crate::transaction::utils::response_builders::create_response(
+                            request, status,
+                        )
+                    }
+                };
                 response.headers.extend(headers);
                 if let Some(reason) = reason {
                     warn!(
@@ -647,138 +941,97 @@ impl TransactionManager {
         request: Request,
         source: SocketAddr,
         ingress_context: &SipRequestIngressContext,
+        raw_bytes: Option<bytes::Bytes>,
+        timing: Option<TransportReceiveTiming>,
     ) -> Result<()> {
-        // Try to find a matching transaction
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
-            &Message::Request(request.clone()),
-        ) {
-            // Check for existing server transaction. Clone the Arc
-            // out of the DashMap shard so we don't hold the shard
-            // guard across `process_request().await`.
-            let existing = self
-                .server_transactions
-                .get(&key)
-                .map(|r| r.value().clone());
-            if let Some(transaction) = existing {
-                if request.method() == Method::Invite {
-                    diagnostics::record_duplicate_invite_existing_transaction();
-                } else if request.method() == Method::Bye {
-                    diagnostics::record_duplicate_bye_existing_transaction();
-                }
-                // A rejected request deliberately has no retained principal.
-                // Retransmit its last transaction response without invoking
-                // the authorizer again or publishing a TU event. This covers
-                // both UDP retransmissions and duplicates racing a slow auth
-                // provider.
-                if self.request_ingress_authorizer().is_some() {
-                    if self.peek_inbound_principal(&key).is_some()
-                        && self
-                            .inbound_principal_for_context(&key, ingress_context)
-                            .is_none()
-                    {
-                        warn!(
-                            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
-                            source = %ingress_context.source,
-                            "Dropping transaction replay from a different authenticated peer binding"
-                        );
-                        return Ok(());
-                    }
-                    if self.peek_inbound_principal(&key).is_none() {
-                        let last_response = transaction.data().last_response.lock().await.clone();
-                        if let Some(response) = last_response {
-                            let wire_bytes =
-                                bytes::Bytes::from(Message::Response(response.clone()).to_bytes());
-                            self.send_cached_response(
-                                response,
-                                wire_bytes,
-                                ingress_context.response_route(),
-                                "Failed to retransmit listener authorization response",
-                            )
-                            .await
-                            .map_err(|error| {
-                                Error::transport_error(
-                                    error,
-                                    "Failed to retransmit listener authorization response",
-                                )
-                            })?;
-                        }
-                        return Ok(());
-                    }
-                }
-                let lifecycle = transaction.data().get_lifecycle();
-                if !matches!(lifecycle, TransactionLifecycle::Active) {
-                    if request.method() == Method::Invite {
-                        if self
-                            .retransmit_cached_invite_2xx_response_on_route(
-                                &key,
-                                ingress_context.response_route(),
-                            )
-                            .await?
-                        {
-                            return Ok(());
-                        }
-                        diagnostics::record_duplicate_invite_cache_miss();
-                    }
-                    debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping request processing for non-active transaction");
-                    return Ok(());
-                }
-                if request.method() == Method::Invite
-                    && transaction.state() == TransactionState::Terminated
-                {
-                    if self
-                        .retransmit_cached_invite_2xx_response_on_route(
-                            &key,
-                            ingress_context.response_route(),
-                        )
-                        .await?
-                    {
-                        return Ok(());
-                    }
-                    diagnostics::record_duplicate_invite_cache_miss();
-                }
-                let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
-                let result = transaction.process_request(request).await;
-                if let Some(started) = dispatch_started {
-                    diagnostics::record_existing_transaction_dispatch(started.elapsed());
-                }
-                return result;
-            }
+        let wire_key = crate::transaction::utils::transaction_key_from_message(&Message::Request(
+            request.clone(),
+        ));
+        let match_key = super::ServerTransactionMatchKey::from_request(&request, ingress_context);
 
-            if request.method() != Method::Invite
-                && self
-                    .replay_compact_non_invite_server_response(&key, ingress_context)
-                    .await?
+        // An independently completed CANCEL transaction owns its retransmits.
+        // Resolve it before proxy unmatched-CANCEL handling so a late duplicate
+        // replays the cached 200 and cannot create a second downstream CANCEL.
+        if let (Some(wire_key), Some(match_key)) = (&wire_key, &match_key) {
+            if let Some(transaction_id) = self
+                .matching_server_transaction_id(match_key, wire_key, &request, ingress_context)
+                .await
             {
-                return Ok(());
-            }
-
-            if request.method() == Method::Invite
-                && self
-                    .retransmit_cached_invite_2xx_response_on_route(
-                        &key,
-                        ingress_context.response_route(),
+                if self
+                    .dispatch_matching_server_request(
+                        &transaction_id,
+                        request.clone(),
+                        ingress_context,
                     )
                     .await?
-            {
-                return Ok(());
+                {
+                    return Ok(());
+                }
             }
         }
 
-        // ACK and CANCEL are not independently challenged. A matching CANCEL
-        // inherits the principal of the INVITE transaction it terminates.
-        // When listener authorization is enabled, an unmatched CANCEL is
-        // rejected with 481 and never reaches the TU.
-        let inherited_cancel_principal = if request.method() == Method::Cancel
-            && self.request_ingress_authorizer().is_some()
-        {
-            crate::transaction::utils::transaction_key_from_message(&Message::Request(
-                request.clone(),
-            ))
-            .map(|key| key.with_method(Method::Invite))
-            .and_then(|invite_key| self.inbound_principal_for_context(&invite_key, ingress_context))
+        // CANCEL is a separate transaction, but it matches its target INVITE
+        // with the INVITE method exception from RFC 3261 §§9.2 and 17.2.3.
+        let matching_invite = if request.method() == Method::Cancel {
+            match (&wire_key, &match_key) {
+                (Some(wire_key), Some(match_key)) => {
+                    let invite_wire_key = wire_key.with_method(Method::Invite);
+                    let invite_match_key = match_key.with_method(Method::Invite);
+                    self.matching_server_transaction_id(
+                        &invite_match_key,
+                        &invite_wire_key,
+                        &request,
+                        ingress_context,
+                    )
+                    .await
+                    .filter(|transaction_id| {
+                        self.request_ingress_authorizer().is_none()
+                            || self
+                                .inbound_principal_for_context(transaction_id, ingress_context)
+                                .is_some()
+                    })
+                }
+                _ => None,
+            }
         } else {
             None
         };
+
+        // RFC 3261 §16.10 gives an unmatched proxy CANCEL stateless handling,
+        // but listener admission still applies. A denial is dropped silently:
+        // the proxy must not challenge the CANCEL or manufacture a UAS 481.
+        if request.method() == Method::Cancel
+            && self.forward_unmatched_cancel_to_tu()
+            && matching_invite.is_none()
+        {
+            if !self
+                .authorize_unmatched_cancel_without_challenge(&request, ingress_context)
+                .await
+            {
+                return Ok(());
+            }
+            let response_route = ingress_context.response_route_for_request(&request);
+            self.send_stateful_proxy_ingress_event(
+                crate::transaction::StatefulProxyIngressEvent::UnmatchedCancelRequest {
+                    request,
+                    source,
+                    response_route,
+                },
+            )
+            .await
+            .map_err(|error| {
+                Error::Other(format!(
+                    "failed to publish unmatched CANCEL to exact proxy ingress: {error}"
+                ))
+            })?;
+            return Ok(());
+        }
+
+        // ACK and CANCEL are not independently challenged. A matching CANCEL
+        // inherits the exact transport-bound principal of its target INVITE.
+        let inherited_cancel_principal = matching_invite
+            .as_ref()
+            .and_then(|invite_key| self.inbound_principal_for_context(invite_key, ingress_context));
 
         // Reject an unmatched or differently bound CANCEL before allocating a
         // server transaction. Otherwise an attacker that guesses the INVITE
@@ -787,8 +1040,10 @@ impl TransactionManager {
         if request.method() == Method::Cancel
             && self.request_ingress_authorizer().is_some()
             && inherited_cancel_principal.is_none()
+            && !self.forward_unmatched_cancel_to_tu()
         {
-            handle_stray_cancel(request, ingress_context.response_route(), &self.transport).await?;
+            let response_route = ingress_context.response_route_for_request(&request);
+            handle_stray_cancel(request, response_route, &self.transport).await?;
             return Ok(());
         }
 
@@ -800,12 +1055,98 @@ impl TransactionManager {
             Error::Other("transaction manager is draining; inbound request rejected".into())
         })?;
 
+        let wire_key = wire_key.ok_or_else(|| {
+            Error::Other("Missing RFC 3261 transaction key in inbound request".into())
+        })?;
+        let match_key = match_key.ok_or_else(|| {
+            Error::Other("Missing valid top Via sent-by in inbound request".into())
+        })?;
+        let mut preauthorization = None;
+        let authenticated_owner = if let Some(principal) = inherited_cancel_principal.as_ref() {
+            Some(super::ServerAuthenticatedOwner::from(principal))
+        } else if let Some(authorizer) = self.request_ingress_authorizer() {
+            let decision = authorizer.authorize(&request, ingress_context).await;
+            let owner = match &decision {
+                SipRequestAuthorization::Authorized { principal } => {
+                    Some(super::ServerAuthenticatedOwner::from(principal))
+                }
+                SipRequestAuthorization::Rejected(_) => None,
+            };
+            preauthorization = Some(decision);
+            owner
+        } else {
+            match_key
+                .peer
+                .tls_leaf_sha256
+                .as_deref()
+                .map(super::ServerAuthenticatedOwner::transport_tls)
+        };
+        let wire_key_is_available = !self.server_transactions.contains_key(&wire_key)
+            && !self.compact_non_invite_tombstones.contains_key(&wire_key)
+            && !self.transaction_admissions.entries.contains_key(&wire_key);
+        let match_reservation = match self.server_transaction_matches.claim(
+            match_key,
+            &wire_key,
+            wire_key_is_available,
+            authenticated_owner,
+        ) {
+            super::ServerTransactionMatchClaim::Reserved(reservation) => reservation,
+            super::ServerTransactionMatchClaim::Existing(registration) => {
+                let published = registration.wait_published().await;
+                drop(_staged_operation);
+                if published
+                    && self
+                        .dispatch_matching_server_request(
+                            &registration.transaction_id,
+                            request.clone(),
+                            ingress_context,
+                        )
+                        .await?
+                {
+                    return Ok(());
+                }
+                return Box::pin(self.handle_request(
+                    request,
+                    source,
+                    ingress_context,
+                    raw_bytes,
+                    timing,
+                ))
+                .await;
+            }
+            super::ServerTransactionMatchClaim::PendingCollision(registrations) => {
+                for registration in registrations {
+                    let _ = registration.wait_published().await;
+                }
+                drop(_staged_operation);
+                return Box::pin(self.handle_request(
+                    request,
+                    source,
+                    ingress_context,
+                    raw_bytes,
+                    timing,
+                ))
+                .await;
+            }
+            super::ServerTransactionMatchClaim::ConflictingOwner => {
+                warn!(
+                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                    source=%ingress_context.source,
+                    "Dropping transaction identity collision without a distinct authenticated owner"
+                );
+                return Ok(());
+            }
+        };
+        let transaction_id = match_reservation.transaction_id().clone();
+
         // No existing transaction found, create a new one
         let create_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let transaction = match self
-            .create_server_transaction_deferred_events_on_route(
+            .create_server_transaction_deferred_events_on_route_with_id(
                 request.clone(),
-                ingress_context.response_route(),
+                ingress_context.source,
+                ingress_context.response_route_for_request(&request),
+                transaction_id.clone(),
             )
             .await
         {
@@ -817,7 +1158,7 @@ impl TransactionManager {
                 );
                 send_stateless_transaction_overload(
                     &request,
-                    ingress_context.response_route(),
+                    ingress_context.response_route_for_request(&request),
                     &self.transport,
                 )
                 .await?;
@@ -828,7 +1169,15 @@ impl TransactionManager {
         if let Some(started) = create_started {
             diagnostics::record_server_transaction_create(started.elapsed());
         }
-        let publication = StagedServerPublicationGuard::new(self, transaction.clone());
+        self.cache_new_server_ingress(
+            &transaction_id,
+            &request,
+            ingress_context,
+            raw_bytes,
+            timing,
+        );
+        let publication =
+            StagedServerPublicationGuard::new(self, transaction.clone(), Some(match_reservation));
 
         if !self
             .enforce_ingress_authorization(
@@ -836,6 +1185,7 @@ impl TransactionManager {
                 &request,
                 ingress_context,
                 inherited_cancel_principal,
+                preauthorization,
             )
             .await?
         {
@@ -862,8 +1212,7 @@ impl TransactionManager {
                 // For non-INVITE requests, notify based on the method
                 match request.method() {
                     Method::Cancel => {
-                        let invite_tx_id = transaction.id().with_method(Method::Invite);
-                        if self.server_transactions.contains_key(&invite_tx_id) {
+                        if let Some(invite_tx_id) = matching_invite {
                             send_transaction_event(
                                 &self.events_tx,
                                 crate::transaction::TransactionEvent::CancelRequest {
@@ -986,19 +1335,17 @@ impl TransactionManager {
             if !processed {
                 if let Some(transaction) = tx_arc {
                     debug!(
-                    "🔍 RESPONSE HANDLER: Found matching client transaction, processing response"
-                );
+                        "🔍 RESPONSE HANDLER: Found matching client transaction, processing response"
+                    );
 
                     let lifecycle = transaction.data().get_lifecycle();
                     if !matches!(lifecycle, TransactionLifecycle::Active) {
                         debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), ?lifecycle, "Skipping response processing for non-active transaction");
-                        // Preserve the historical suppression of every retired
-                        // response except INVITE 2xx. A late/forked INVITE 2xx
-                        // must reach the TU for ACK/cleanup, while replaying a
-                        // retired provisional or failure response would repeat
-                        // application state transitions.
-                        processed =
-                            !(key.method() == &Method::Invite && response.status().is_success());
+                        // UA mode retains its bounded late-2xx safety path.
+                        // RFC 6026 proxy mode drops every response after Timer
+                        // M destroys the matching client transaction.
+                        processed = self.stateful_proxy_tu_mode()
+                            || !(key.method() == &Method::Invite && response.status().is_success());
                     } else {
                         let dispatch_started =
                             diagnostics::transaction_timing_enabled().then(Instant::now);
@@ -1010,8 +1357,8 @@ impl TransactionManager {
                             warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error processing response");
                         } else {
                             debug!(
-                            "🔍 RESPONSE HANDLER: Successfully processed response in transaction"
-                        );
+                                "🔍 RESPONSE HANDLER: Successfully processed response in transaction"
+                            );
                             processed = true;
                         }
                     }
@@ -1027,6 +1374,10 @@ impl TransactionManager {
                 // Deliver to the transaction user anyway
                 let status = response.status();
                 if key.method() == &Method::Invite && status.is_success() {
+                    if self.stateful_proxy_tu_mode() {
+                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Dropping RFC 6026 stray INVITE response in stateful-proxy mode");
+                        return Ok(());
+                    }
                     // Special handling for 2xx responses to INVITE
                     send_transaction_event(
                         &self.events_tx,
@@ -1092,6 +1443,16 @@ impl TransactionManager {
         // This could be a response for a transaction that has already terminated
         // or a response forwarded by another SIP entity (for proxy scenarios)
         // In any case, deliver it to the transaction user
+        if self.stateful_proxy_tu_mode() {
+            self.send_stateful_proxy_ingress_event(
+                crate::transaction::StatefulProxyIngressEvent::StrayResponse {
+                    response: response.clone(),
+                    source,
+                    response_route: None,
+                },
+            )
+            .await?;
+        }
         send_transaction_event(
             &self.events_tx,
             crate::transaction::TransactionEvent::StrayResponse { response, source },
@@ -1125,7 +1486,10 @@ impl TransactionManager {
     ) -> Result<()> {
         debug!("Processing ACK request with dialog-based matching");
 
-        // First try direct branch-based matching for non-2xx ACKs
+        // First try direct branch-based matching for non-2xx ACKs. Only a
+        // server INVITE in Completed/Confirmed owns such an ACK. Treating an
+        // arbitrary same-branch ACK as transaction-owned can consume a 2xx
+        // ACK before the retained dialog index gets a chance to classify it.
         if let Some(key) = crate::transaction::utils::transaction_key_from_message(
             &Message::Request(request.clone()),
         ) {
@@ -1136,7 +1500,10 @@ impl TransactionManager {
                 .get(&invite_key)
                 .map(|r| r.value().clone());
             if let Some(transaction) = invite_tx {
-                if transaction.state() != TransactionState::Confirmed {
+                if matches!(
+                    transaction.state(),
+                    TransactionState::Completed | TransactionState::Confirmed
+                ) {
                     if self.request_ingress_authorizer().is_some()
                         && self
                             .inbound_principal_for_context(&invite_key, ingress_context)
@@ -1186,19 +1553,23 @@ impl TransactionManager {
             debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Found ACK for 2xx response using dialog-based matching");
             self.mark_invite_2xx_response_cache_acked(&tx_id);
 
-            // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
-            // Instead, emit AckReceived event for dialog-core to handle
+            // RFC 3261: ACK for 2xx responses is end-to-end and is not
+            // processed by the INVITE transaction. Publish the distinct
+            // AckRequest event so a stateful proxy can forward it statelessly
+            // while DialogManager can retain its existing UAS media-start
+            // behavior.
             send_transaction_event(
                 &self.events_tx,
-                crate::transaction::TransactionEvent::AckReceived {
+                crate::transaction::TransactionEvent::AckRequest {
                     transaction_id: tx_id,
                     request,
+                    source,
                 },
             )
             .await
-            .map_err(|e| Error::Other(format!("Failed to emit AckReceived event: {}", e)))?;
+            .map_err(|e| Error::Other(format!("Failed to emit AckRequest event: {}", e)))?;
 
-            debug!("Emitted AckReceived event for dialog-core to handle 2xx ACK");
+            debug!("Emitted AckRequest event for dialog-core to handle 2xx ACK");
             return Ok(());
         }
 

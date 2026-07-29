@@ -42,8 +42,9 @@ pub use response_builders::{
     create_ok_response, create_ok_response_for_bye, create_ok_response_for_cancel,
     create_ok_response_for_message, create_ok_response_for_options,
     create_ok_response_for_register, create_ok_response_with_dialog_info, create_response,
-    create_ringing_response, create_ringing_response_with_dialog_info,
-    create_ringing_response_with_tag, create_trying_response,
+    create_response_for_transaction_generation, create_ringing_response,
+    create_ringing_response_with_dialog_info, create_ringing_response_with_tag,
+    create_trying_response,
 };
 
 // Transaction helpers
@@ -98,7 +99,10 @@ mod tests {
                 to.address().uri.host,
                 Host::Domain("example.net".to_string())
             );
-            assert!(to.tag().is_none(), "To tag should not be present");
+            assert!(
+                to.tag().is_some(),
+                "non-100 local response must contain a To tag"
+            );
         } else {
             panic!("Missing To header in response");
         }

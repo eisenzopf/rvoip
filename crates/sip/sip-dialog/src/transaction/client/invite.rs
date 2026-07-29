@@ -98,7 +98,7 @@ use crate::transaction::validators;
 ///
 /// - Automatic ACK generation for non-2xx responses
 /// - Special handling for 2xx responses (transaction terminates without sending ACK)
-/// - Unique timer requirements (Timers A, B, D)
+/// - Unique timer requirements (Timers A, B, D, and RFC 6026 Timer M)
 ///
 /// Key behaviors:
 /// - In Calling state: Retransmits INVITE periodically until response or timeout
@@ -127,6 +127,9 @@ struct ClientInviteTimerHandles {
 
     /// Handle for Timer D, which controls how long to wait in Completed state
     timer_d: Option<ManagedTimerHandle>,
+
+    /// Handle for RFC 6026 Timer M, which bounds the Accepted state
+    timer_m: Option<ManagedTimerHandle>,
 }
 
 /// Implements the TransactionLogic for Client INVITE transactions.
@@ -249,6 +252,43 @@ impl ClientInviteLogic {
         }
     }
 
+    /// Start RFC 6026 Timer M for exactly 64*T1.  The shared TimerManager
+    /// owns the deadline; this does not allocate a per-transaction sleeper.
+    async fn start_timer_m(
+        &self,
+        data: &Arc<ClientTransactionData>,
+        timer_handles: &mut ClientInviteTimerHandles,
+        command_tx: mpsc::Sender<InternalTransactionCommand>,
+    ) -> Result<()> {
+        let tx_id = &data.id;
+        let interval_m = data.timer_config.t1.saturating_mul(64);
+        let timer_manager = self.timer_factory.timer_manager();
+        match timer_utils::start_timer_with_transition_managed(
+            &timer_manager,
+            tx_id,
+            "M",
+            // Keep RFC 6026's new timer identity private in 0.3.2 so the
+            // exhaustive public TimerType enum remains source-compatible.
+            // The explicit "M" name below is what reaches the transaction.
+            TimerType::Custom,
+            interval_m,
+            command_tx,
+            TransactionState::Terminated,
+        )
+        .await
+        {
+            Ok(handle) => {
+                timer_handles.timer_m = Some(handle);
+                trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx_id), interval=?interval_m, "Started RFC 6026 Timer M for Accepted state");
+                Ok(())
+            }
+            Err(error) => {
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), "Failed to start Timer M");
+                Err(error)
+            }
+        }
+    }
+
     /// Handle initial request sending in Calling state
     ///
     /// This method is called when the transaction enters the Calling state.
@@ -284,10 +324,21 @@ impl ClientInviteLogic {
         data.complete_initial_send(true);
         // `request_guard` is a plain `&Request`, no lock to release.
 
-        // Start timers for Calling state
-        timer_handles.current_timer_a_interval = Some(data.timer_config.t1);
-        self.start_timer_a(data, timer_handles, command_tx.clone())
-            .await;
+        // RFC 3261 section 17.1.1.2: Timer A exists only for unreliable
+        // transports. The selected route is authoritative; a multiplexed
+        // transport's default can remain UDP even when this transaction is
+        // explicitly bound to TCP/TLS/WS/WSS.
+        let unreliable = {
+            let route = data.request_route.lock().await;
+            timer_utils::uses_unreliable_transport(&route, data.transport.default_transport_type())
+        };
+        if unreliable {
+            timer_handles.current_timer_a_interval = Some(data.timer_config.t1);
+            self.start_timer_a(data, timer_handles, command_tx.clone())
+                .await;
+        } else {
+            timer_handles.current_timer_a_interval = None;
+        }
         self.start_timer_b(data, timer_handles, command_tx).await;
 
         Ok(())
@@ -404,6 +455,21 @@ impl ClientInviteLogic {
         }
     }
 
+    async fn handle_timer_m_trigger(
+        &self,
+        data: &Arc<ClientTransactionData>,
+        current_state: TransactionState,
+    ) -> Result<Option<TransactionState>> {
+        if data.state.is_accepted() {
+            debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "RFC 6026 Timer M fired in private Accepted state");
+        } else {
+            trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), state=?current_state, "Timer M fired outside Accepted state; ignoring stale deadline");
+        }
+        // The centralized timer's TransitionTo command follows this Timer
+        // command, so no second state command is needed here.
+        Ok(None)
+    }
+
     /// Create and send an ACK for a non-2xx response
     ///
     /// According to RFC 3261 Section 17.1.1.3, the client transaction must generate an
@@ -471,6 +537,22 @@ impl ClientInviteLogic {
             validators::categorize_response_status(&response);
         let response_source = data.request_route.lock().await.destination;
 
+        if data.state.is_accepting() {
+            if is_success {
+                // Every matching 2xx, including retransmissions and distinct
+                // forked dialogs, reaches the TU while private Timer M
+                // retention is active.
+                common_logic::send_success_response_event(
+                    tx_id,
+                    response,
+                    &data.events_tx,
+                    response_source,
+                )
+                .await;
+            }
+            return Ok(None);
+        }
+
         match current_state {
             TransactionState::Calling => {
                 // Receive any response -> cancel retransmission
@@ -484,7 +566,8 @@ impl ClientInviteLogic {
                         .await;
                     return Ok(Some(TransactionState::Proceeding));
                 } else if is_success {
-                    // 2xx -> Terminated (RFC 3261 17.1.1.2)
+                    // RFC 6026: retain the transaction in private Accepted for
+                    // 64*T1 while projecting the legacy public Terminated state.
                     common_logic::send_success_response_event(
                         tx_id,
                         response,
@@ -492,6 +575,7 @@ impl ClientInviteLogic {
                         response_source,
                     )
                     .await;
+                    data.state.request_accepted();
                     return Ok(Some(TransactionState::Terminated));
                 } else {
                     // 3xx-6xx -> Completed
@@ -513,7 +597,8 @@ impl ClientInviteLogic {
                         .await;
                     return Ok(None); // Stay in Proceeding
                 } else if is_success {
-                    // 2xx responses transition directly to Terminated (RFC 3261 17.1.1.2)
+                    // RFC 6026: retain the transaction in private Accepted for
+                    // 64*T1 while projecting the legacy public Terminated state.
                     common_logic::send_success_response_event(
                         tx_id,
                         response,
@@ -521,6 +606,7 @@ impl ClientInviteLogic {
                         response_source,
                     )
                     .await;
+                    data.state.request_accepted();
                     return Ok(Some(TransactionState::Terminated));
                 } else {
                     // 3xx-6xx transition to Completed
@@ -537,12 +623,11 @@ impl ClientInviteLogic {
             }
             TransactionState::Completed => {
                 if is_success {
-                    // A forked downstream branch can return a 2xx after a
-                    // different branch already produced the non-2xx that put
-                    // this client transaction in Completed. RFC 3261
-                    // §13.2.2.4 requires every such 2xx to reach the TU so it
-                    // can ACK it and terminate any non-selected dialog. Keep
-                    // Timer D/Completed alive for retransmitted non-2xx ACKs.
+                    // Keep Timer D and the Completed state authoritative for
+                    // the already-selected 300-699 response, but surface a
+                    // later matching 2xx to the TU. This is required for the
+                    // UA/proxy core to ACK and clean up a late downstream
+                    // fork; the transaction itself never generates a 2xx ACK.
                     common_logic::send_success_response_event(
                         tx_id,
                         response,
@@ -592,6 +677,9 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
         if let Some(handle) = timer_handles.timer_d.take() {
             handle.abort();
         }
+        if let Some(handle) = timer_handles.timer_m.take() {
+            handle.abort();
+        }
         timer_handles.current_timer_a_interval = None;
     }
 
@@ -623,6 +711,14 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
                 self.start_timer_d(data, timer_handles, command_tx).await;
             }
             TransactionState::Terminated => {
+                if data.state.is_accepted() {
+                    // Calling/Proceeding timers are cancelled by the
+                    // transition. Timer M is not reset by additional matching
+                    // 2xx responses. Propagating installation failure lets the
+                    // runner fence the private Accepted generation.
+                    self.start_timer_m(data, timer_handles, command_tx).await?;
+                    return Ok(());
+                }
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered Terminated state. Specific timers should have been cancelled by runner.");
                 // Unregister from timer manager when terminated
                 let timer_manager = self.timer_factory.timer_manager();
@@ -645,9 +741,20 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
-        if timer_name == "A" {
-            // Clear the timer handle since it fired
-            timer_handles.timer_a.take();
+        match timer_name {
+            "A" => {
+                timer_handles.timer_a.take();
+            }
+            "B" => {
+                timer_handles.timer_b.take();
+            }
+            "D" => {
+                timer_handles.timer_d.take();
+            }
+            "M" => {
+                timer_handles.timer_m.take();
+            }
+            _ => {}
         }
 
         // Send timer triggered event using common logic
@@ -669,6 +776,7 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
                 self.handle_timer_d_trigger(data, current_state, self_command_tx)
                     .await
             }
+            "M" => self.handle_timer_m_trigger(data, current_state).await,
             _ => {
                 warn!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), timer_class=%crate::transaction::safe_diagnostics::SafeTimerName::new(timer_name), timer_len=timer_name.len(), "Unknown timer triggered for ClientInvite");
                 Ok(None)
@@ -969,6 +1077,10 @@ impl Transaction for ClientInviteTransaction {
         self.data.state.get()
     }
 
+    fn is_protocol_terminated(&self) -> bool {
+        self.data.state.is_protocol_terminated()
+    }
+
     fn remote_addr(&self) -> SocketAddr {
         self.data.remote_addr
     }
@@ -1090,6 +1202,7 @@ impl TransactionAsync for ClientInviteTransaction {
 #[allow(unused_assignments, unused_mut, unused_imports, unused_variables)]
 mod tests {
     use super::*;
+    use crate::transaction::runner::HasLifecycle;
     use rvoip_sip_core::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
     use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::Response as SipCoreResponse;
@@ -1301,6 +1414,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reliable_transport_does_not_start_timer_a() {
+        let setup = setup_test_environment("sip:bob@target.com").await;
+        *setup.transaction.data.request_route.lock().await =
+            TransportRoute::new(setup.transaction.remote_addr())
+                .with_transport_type(rvoip_sip_transport::transport::TransportType::Tcp);
+
+        setup.transaction.initiate().await.expect("initiate failed");
+        let initial = setup.mock_transport.get_sent_message().await;
+        assert!(initial.is_some(), "initial INVITE was not sent");
+
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            setup.mock_transport.get_sent_message().await.is_none(),
+            "reliable transport retransmitted INVITE at Timer A"
+        );
+        assert_eq!(setup.transaction.state(), TransactionState::Calling);
+    }
+
+    #[tokio::test]
     async fn test_invite_client_provisional_response() {
         let mut setup = setup_test_environment("sip:bob@target.com").await;
         setup.transaction.initiate().await.expect("initiate failed");
@@ -1399,7 +1531,7 @@ mod tests {
             .await
             .expect("process_response failed");
 
-        // Success response should go directly to Terminated in INVITE
+        // RFC 6026 keeps the transaction in private Accepted through Timer M.
         let mut success_response_received = false;
 
         // Wait for the success response event
@@ -1443,12 +1575,141 @@ mod tests {
             "SuccessResponse event not received"
         );
 
-        // The transaction should already be in Terminated state
+        // Public observers retain the 0.3.1 Terminated projection while the
+        // private Accepted lifetime keeps matching 2xx delivery active.
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(
             setup.transaction.state(),
             TransactionState::Terminated,
-            "State should be Terminated after 2xx response"
+            "public state should preserve the 0.3.1 Terminated projection"
+        );
+        assert!(setup.transaction.data.state.is_accepted());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_client_invite_timer_m_is_exactly_64_t1() {
+        let setup = setup_test_environment("sip:bob@target.com").await;
+        setup.transaction.initiate().await.expect("initiate");
+        tokio::task::yield_now().await;
+        let original_request = (*setup.transaction.data.request).clone();
+        setup
+            .transaction
+            .process_response(build_simple_response(StatusCode::Ok, &original_request))
+            .await
+            .expect("2xx");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            if setup.transaction.data.state.is_accepted() {
+                break;
+            }
+        }
+        assert_eq!(setup.transaction.state(), TransactionState::Terminated);
+        assert!(setup.transaction.data.state.is_accepted());
+
+        tokio::time::advance(Duration::from_millis(3_199)).await;
+        tokio::task::yield_now().await;
+        assert!(setup.transaction.data.state.is_accepted());
+        assert!(!setup.transaction.data.state.is_protocol_terminated());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            if !setup.transaction.data.state.is_accepted() {
+                break;
+            }
+        }
+        assert_eq!(setup.transaction.state(), TransactionState::Terminated);
+        assert!(!setup.transaction.data.state.is_accepted());
+        assert!(setup.transaction.data.state.is_protocol_terminated());
+    }
+
+    #[tokio::test]
+    async fn accepted_client_invite_delivers_every_matching_2xx() {
+        let mut setup = setup_test_environment("sip:bob@target.com").await;
+        setup.transaction.initiate().await.expect("initiate");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .expect("initial INVITE");
+        let _ = setup.mock_transport.get_sent_message().await;
+        let original_request = (*setup.transaction.data.request).clone();
+        let success = build_simple_response(StatusCode::Ok, &original_request);
+
+        setup
+            .transaction
+            .process_response(success.clone())
+            .await
+            .expect("first 2xx");
+        setup
+            .transaction
+            .process_response(success)
+            .await
+            .expect("duplicate 2xx");
+
+        let mut successes = 0usize;
+        TokioTimeout(Duration::from_secs(1), async {
+            while successes < 2 {
+                if matches!(
+                    setup.tu_events_rx.recv().await,
+                    Some(TransactionEvent::SuccessResponse { .. })
+                ) {
+                    successes += 1;
+                }
+            }
+        })
+        .await
+        .expect("both matching 2xx reach TU");
+        assert_eq!(successes, 2);
+        assert_eq!(setup.transaction.state(), TransactionState::Terminated);
+        assert!(setup.transaction.data.state.is_accepted());
+        assert!(
+            setup.mock_transport.get_sent_message().await.is_none(),
+            "the client transaction must not generate ACK for a 2xx"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_shutdown_during_private_accepted_converges_immediately() {
+        let setup = setup_test_environment("sip:bob@target.com").await;
+        setup.transaction.initiate().await.expect("initiate");
+        tokio::task::yield_now().await;
+        let original_request = (*setup.transaction.data.request).clone();
+        setup
+            .transaction
+            .process_response(build_simple_response(StatusCode::Ok, &original_request))
+            .await
+            .expect("2xx");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            if setup.transaction.data.state.is_accepted() {
+                break;
+            }
+        }
+        assert!(setup.transaction.data.state.is_accepted());
+
+        setup
+            .transaction
+            .data
+            .cmd_tx
+            .send(InternalTransactionCommand::Terminate)
+            .await
+            .expect("runner remains available");
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+            if !setup.transaction.data.state.is_accepted()
+                && setup.transaction.data.get_lifecycle()
+                    == crate::transaction::state::TransactionLifecycle::Destroyed
+            {
+                break;
+            }
+        }
+
+        assert!(!setup.transaction.data.state.is_accepted());
+        assert!(setup.transaction.data.state.is_protocol_terminated());
+        assert_eq!(
+            setup.transaction.data.get_lifecycle(),
+            crate::transaction::state::TransactionLifecycle::Destroyed
         );
     }
 
@@ -1769,7 +2030,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_invite_client_delivers_late_success_to_tu() {
+    async fn completed_invite_client_delivers_late_success_without_leaving_completed() {
         let mut setup = setup_test_environment("sip:bob@target.com").await;
         setup.transaction.initiate().await.expect("initiate failed");
         setup
@@ -1794,7 +2055,14 @@ mod tests {
         })
         .await
         .expect("transaction enters Completed");
+        setup
+            .mock_transport
+            .wait_for_message_sent(Duration::from_millis(100))
+            .await
+            .expect("failure response ACK");
+        let _ = setup.mock_transport.get_sent_message().await;
 
+        while setup.tu_events_rx.try_recv().is_ok() {}
         let success_response = build_simple_response(StatusCode::Ok, &original_request);
         setup
             .transaction
@@ -1802,22 +2070,24 @@ mod tests {
             .await
             .expect("late success response");
 
-        let delivered = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if let Some(TransactionEvent::SuccessResponse {
-                    transaction_id,
-                    response,
-                    ..
-                }) = setup.tu_events_rx.recv().await
-                {
-                    break (transaction_id, response.status_code());
+        let delivered = tokio::time::timeout(Duration::from_millis(100), async {
+            while let Some(event) = setup.tu_events_rx.recv().await {
+                if matches!(event, TransactionEvent::SuccessResponse { .. }) {
+                    return true;
                 }
             }
+            false
         })
         .await
-        .expect("late success reaches TU");
-        assert_eq!(delivered.0, *setup.transaction.id());
-        assert_eq!(delivered.1, StatusCode::Ok.as_u16());
+        .expect("matching late 2xx should reach the TU");
+        assert!(
+            delivered,
+            "the TU must ACK and clean up every matching late 2xx"
+        );
+        assert!(
+            setup.mock_transport.get_sent_message().await.is_none(),
+            "the INVITE transaction must not generate an ACK for a 2xx"
+        );
         assert_eq!(setup.transaction.state(), TransactionState::Completed);
     }
 }

@@ -900,11 +900,7 @@ mod tests {
                 r#"debug!(uri = %request.uri(), "u");"#,
                 "uri",
             ),
-            (
-                "transaction/mutant.rs",
-                r#"debug!("Via[{}]", via);"#,
-                "via",
-            ),
+            ("transaction/mutant.rs", r#"debug!("Via[{}]", via);"#, "via"),
             (
                 "transaction/mutant.rs",
                 r#"debug!(route = %route, "r");"#,
@@ -930,11 +926,7 @@ mod tests {
                 r#"debug!(?message, "m");"#,
                 "message",
             ),
-            (
-                "transaction/mutant.rs",
-                r#"debug!(?event, "e");"#,
-                "event",
-            ),
+            ("transaction/mutant.rs", r#"debug!(?event, "e");"#, "event"),
             // A nested call ending on an earlier line must not hide the later
             // unsafe error operand from the balanced macro extractor.
             (

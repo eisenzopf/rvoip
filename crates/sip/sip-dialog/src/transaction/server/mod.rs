@@ -98,7 +98,7 @@ pub trait ServerTransaction:
     ///
     /// - For INVITE server transactions:
     ///   - 1xx responses keep the transaction in Proceeding state
-    ///   - 2xx responses cause transition to Terminated state
+    ///   - 2xx responses cause transition to RFC 6026 Accepted state
     ///   - 3xx-6xx responses cause transition to Completed state
     ///
     /// - For non-INVITE server transactions:

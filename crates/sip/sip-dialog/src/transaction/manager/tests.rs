@@ -11,9 +11,9 @@ mod tests {
         transaction_dispatch_worker_index, transaction_index_capacity,
         transaction_index_initial_capacity, transaction_ingress_kind,
         ClientCompletionDeadlineScheduler, ClientResponseRouteState, Invite2xxDeadlineScheduler,
-        Invite2xxResponseCacheEntry, QueuedTransactionDispatch, RetiredClientDeadlineScheduler,
-        RetiredClientTransaction, TransactionDispatchLane, TransactionIngressKind,
-        DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+        Invite2xxResponseCacheEntry, NormalizedViaSentBy, QueuedTransactionDispatch,
+        RetiredClientDeadlineScheduler, RetiredClientTransaction, TransactionDispatchLane,
+        TransactionIngressKind, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
         DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MANAGER_ADMISSION_STOPPING,
         MAX_EAGER_TRANSACTION_INDEX_CAPACITY, RETAINED_CLIENT_DEADLINE_BATCH_MAX,
         TERMINATED_CLEANUP_BATCH_MAX,
@@ -26,11 +26,13 @@ mod tests {
     use crate::transaction::manager::ClientTransaction;
     use crate::transaction::server::{ServerInviteTransaction, ServerNonInviteTransaction};
     use crate::transaction::InternalTransactionCommand;
+    use crate::transaction::StatefulProxyIngressEvent;
     use crate::transaction::Transaction;
     use crate::transaction::TransactionEvent;
     use crate::transaction::TransactionKey;
     use crate::transaction::TransactionManager;
     use crate::transaction::TransactionState;
+    use crate::transaction::TransactionUserMode;
     use crate::transaction::{
         SipRequestAuthorization, SipRequestIngressAuthorizer, SipRequestIngressContext,
         SipRequestRejection,
@@ -559,6 +561,35 @@ mod tests {
         )
     }
 
+    fn create_dispatch_request_with_via(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+        sent_by: &str,
+        transport: &str,
+    ) -> std::result::Result<Request, Box<dyn std::error::Error>> {
+        Ok(
+            SimpleRequestBuilder::new(method.clone(), "sip:bob@example.com")?
+                .from("Alice", "sip:alice@example.com", Some("alice-dispatch-tag"))
+                .to("Bob", "sip:bob@example.com", Some("bob-dispatch-tag"))
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id("dispatch-collision-call-id")
+                .cseq(cseq)
+                .via(sent_by, transport, Some(branch))
+                .max_forwards(70)
+                .build(),
+        )
+    }
+
+    fn request_event_transaction_id(event: TransactionEvent) -> Option<TransactionKey> {
+        match event {
+            TransactionEvent::InviteRequest { transaction_id, .. }
+            | TransactionEvent::NonInviteRequest { transaction_id, .. }
+            | TransactionEvent::CancelRequest { transaction_id, .. } => Some(transaction_id),
+            _ => None,
+        }
+    }
+
     fn dispatch_event(message: Message) -> TransportEvent {
         dispatch_event_from(message, "127.0.0.1:5060".parse().unwrap())
     }
@@ -665,6 +696,22 @@ mod tests {
         ) -> SipRequestAuthorization {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.authorization.clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct SourcePrincipalAuthorizer;
+
+    #[async_trait::async_trait]
+    impl SipRequestIngressAuthorizer for SourcePrincipalAuthorizer {
+        async fn authorize(
+            &self,
+            _request: &Request,
+            context: &SipRequestIngressContext,
+        ) -> SipRequestAuthorization {
+            SipRequestAuthorization::Authorized {
+                principal: authenticated_test_principal(&context.source.to_string()),
+            }
         }
     }
 
@@ -787,9 +834,20 @@ mod tests {
         );
         assert_eq!(authorizer.calls(), 1);
         let first_messages = transport.get_sent_messages().await;
-        assert!(first_messages.iter().any(|(message, _)| {
-            matches!(message, Message::Response(response) if response.status() == StatusCode::Unauthorized)
-        }));
+        let first_unauthorized = first_messages
+            .iter()
+            .find_map(|(message, _)| match message {
+                Message::Response(response) if response.status() == StatusCode::Unauthorized => {
+                    Some(response)
+                }
+                _ => None,
+            })
+            .expect("authorization rejection response");
+        let first_to_tag = first_unauthorized
+            .to()
+            .and_then(|to| to.tag())
+            .expect("a locally generated 401 must have a To tag")
+            .to_string();
 
         manager.handle_transport_event(event).await?;
         assert_eq!(
@@ -805,6 +863,20 @@ mod tests {
         );
         let second_messages = transport.get_sent_messages().await;
         assert!(second_messages.len() > first_messages.len());
+        let retransmitted_to_tag = second_messages
+            .iter()
+            .rev()
+            .find_map(|(message, _)| match message {
+                Message::Response(response) if response.status() == StatusCode::Unauthorized => {
+                    response.to().and_then(|to| to.tag())
+                }
+                _ => None,
+            })
+            .expect("retransmitted authorization rejection To tag");
+        assert_eq!(
+            retransmitted_to_tag, first_to_tag,
+            "one exact server-transaction generation must reuse its local To tag"
+        );
 
         manager.shutdown().await;
         Ok(())
@@ -877,7 +949,11 @@ mod tests {
                 .is_none(),
             "a replay from a different source must not reach the transaction user"
         );
-        assert_eq!(authorizer.calls(), 1);
+        assert_eq!(
+            authorizer.calls(),
+            2,
+            "a differently bound collision must be re-authorized before it can be classified"
+        );
 
         let cancel = crate::transaction::method::cancel::create_cancel_request(
             &invite,
@@ -914,6 +990,918 @@ mod tests {
         assert!(matches!(
             drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
             Some(TransactionEvent::CancelRequest { source, .. }) if source == source_a
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stateful_proxy_tu_mode_is_a_monotonic_single_owner_claim() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+
+        assert_eq!(
+            manager.transaction_user_mode(),
+            TransactionUserMode::UserAgent
+        );
+        manager.try_claim_stateful_proxy_mode()?;
+        assert_eq!(
+            manager.transaction_user_mode(),
+            TransactionUserMode::StatefulProxy
+        );
+        assert!(
+            manager.try_claim_stateful_proxy_mode().is_err(),
+            "the proxy TU claim must have exactly one owner"
+        );
+        assert_eq!(
+            manager.transaction_user_mode(),
+            TransactionUserMode::StatefulProxy,
+            "a failed duplicate claim must not revert the mode"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stateful_proxy_tu_mode_rejects_an_active_manager() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        let source: SocketAddr = "192.0.2.29:5060".parse().unwrap();
+        let invite = create_dispatch_request(Method::Invite, "z9hG4bK.mode-active", 41)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(invite), source))
+            .await?;
+
+        assert!(
+            manager.try_claim_stateful_proxy_mode().is_err(),
+            "mode must be fixed before the first transaction becomes active"
+        );
+        assert_eq!(
+            manager.transaction_user_mode(),
+            TransactionUserMode::UserAgent
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proxy_unmatched_cancel_is_admitted_without_challenge_and_republished() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let authorizer = Arc::new(CountingIngressAuthorizer::authorized(
+            authenticated_test_principal("proxy-peer"),
+        ));
+        manager.set_request_ingress_authorizer(Some(authorizer.clone()));
+        let mut proxy_ingress = manager
+            .try_claim_stateful_proxy_ingress(32)
+            .expect("claim exact proxy ingress");
+
+        let source: SocketAddr = "192.0.2.30:5060".parse().unwrap();
+        let cancel = create_dispatch_request(Method::Cancel, "z9hG4bK.proxy-unmatched", 42)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let cancel_key = TransactionKey::from_request(&cancel)
+            .ok_or_else(|| Error::Other("CANCEL transaction key missing".to_string()))?;
+        let event = dispatch_event_from(Message::Request(cancel), source);
+
+        for _ in 0..2 {
+            manager.handle_transport_event(event.clone()).await?;
+            match tokio::time::timeout(Duration::from_millis(250), proxy_ingress.recv()).await {
+                Ok(Some(StatefulProxyIngressEvent::UnmatchedCancelRequest {
+                    request,
+                    source: event_source,
+                    response_route,
+                })) => {
+                    assert_eq!(request.method(), Method::Cancel);
+                    assert_eq!(event_source, source);
+                    assert_eq!(response_route.destination, source);
+                }
+                _ => panic!("expected exact unmatched-CANCEL ingress"),
+            }
+        }
+
+        assert_eq!(
+            authorizer.calls(),
+            2,
+            "each stateless CANCEL delivery must pass listener admission"
+        );
+        assert!(
+            !manager.server_transactions.contains_key(&cancel_key),
+            "stateless forwarding must not allocate a CANCEL server transaction"
+        );
+        assert!(
+            transport.get_sent_messages().await.is_empty(),
+            "the transaction layer must not generate a local response"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proxy_unmatched_cancel_denial_is_silent_and_never_challenged() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (mut manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let authorizer = Arc::new(CountingIngressAuthorizer::rejected());
+        manager.set_request_ingress_authorizer(Some(authorizer.clone()));
+        let mut proxy_ingress = manager
+            .try_claim_stateful_proxy_ingress(32)
+            .expect("claim exact proxy ingress");
+
+        let source: SocketAddr = "192.0.2.31:5060".parse().unwrap();
+        let cancel = create_dispatch_request(Method::Cancel, "z9hG4bK.proxy-denied", 43)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let cancel_key = TransactionKey::from_request(&cancel)
+            .ok_or_else(|| Error::Other("CANCEL transaction key missing".to_string()))?;
+
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(cancel), source))
+            .await?;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), proxy_ingress.recv())
+                .await
+                .is_err(),
+            "a denied unmatched CANCEL must not reach the proxy TU"
+        );
+        assert_eq!(authorizer.calls(), 1);
+        assert!(!manager.server_transactions.contains_key(&cancel_key));
+        assert!(
+            transport.get_sent_messages().await.is_empty(),
+            "denial must be silent rather than a Digest challenge or UAS 481"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[test]
+    fn server_sent_by_normalization_is_dns_case_and_default_port_aware() {
+        let request = |sent_by: &str, transport: &str| {
+            create_dispatch_request_with_via(
+                Method::Options,
+                "z9hG4bK.normalize",
+                1,
+                sent_by,
+                transport,
+            )
+            .expect("normalized Via request")
+        };
+
+        assert_eq!(
+            NormalizedViaSentBy::from_request(&request("Proxy.Example.COM", "udp")),
+            NormalizedViaSentBy::from_request(&request("proxy.example.com:5060", "UDP")),
+            "DNS sent-by comparison is case-insensitive and UDP omits port 5060"
+        );
+        assert_eq!(
+            NormalizedViaSentBy::from_request(&request("Proxy.Example.COM.", "TCP")),
+            NormalizedViaSentBy::from_request(&request("proxy.example.com:5060", "tcp")),
+            "an absolute DNS name and its conventional spelling identify one sent-by"
+        );
+        assert_eq!(
+            NormalizedViaSentBy::from_request(&request("Proxy.Example.COM", "TLS")),
+            NormalizedViaSentBy::from_request(&request("proxy.example.com:5061", "tls")),
+            "TLS omitted port normalizes to 5061"
+        );
+        assert_ne!(
+            NormalizedViaSentBy::from_request(&request("proxy.example.com", "TLS")),
+            NormalizedViaSentBy::from_request(&request("proxy.example.com:5060", "TLS")),
+            "an explicit non-default secure port remains distinct"
+        );
+        assert_ne!(
+            NormalizedViaSentBy::from_request(&request("proxy.example.com", "UDP")),
+            NormalizedViaSentBy::from_request(&request("proxy.example.com", "TCP")),
+            "sent-protocol transport remains part of the RFC match identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_server_matching_allows_authenticated_same_wire_collisions_for_all_methods(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(64);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(64)).await?;
+        manager.set_request_ingress_authorizer(Some(Arc::new(SourcePrincipalAuthorizer)));
+        let peer_a: SocketAddr = "192.0.2.60:5060".parse().unwrap();
+        let peer_b: SocketAddr = "192.0.2.61:5060".parse().unwrap();
+
+        for (index, method) in [Method::Invite, Method::Bye, Method::Message]
+            .into_iter()
+            .enumerate()
+        {
+            let branch = format!("z9hG4bK.udp-collision-{index}");
+            let request_a = create_dispatch_request_with_via(
+                method.clone(),
+                &branch,
+                100 + index as u32,
+                "Edge-A.Example.COM",
+                "UDP",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            manager
+                .handle_transport_event(dispatch_event_from(
+                    Message::Request(request_a.clone()),
+                    peer_a,
+                ))
+                .await?;
+            let first_id = request_event_transaction_id(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                    .await
+                    .expect("first request event"),
+            )
+            .expect("first transaction id");
+
+            manager
+                .handle_transport_event(dispatch_event_from(
+                    Message::Request(request_a.clone()),
+                    peer_a,
+                ))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none(),
+                "{method} exact replay must stay in its existing transaction"
+            );
+
+            let request_b = create_dispatch_request_with_via(
+                method.clone(),
+                &branch,
+                100 + index as u32,
+                "edge-a.example.com:5060",
+                "udp",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            manager
+                .handle_transport_event(dispatch_event_from(
+                    Message::Request(request_b.clone()),
+                    peer_b,
+                ))
+                .await?;
+            let second_id = request_event_transaction_id(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                    .await
+                    .expect("colliding request event"),
+            )
+            .expect("colliding transaction id");
+            assert_ne!(
+                first_id, second_id,
+                "{method} peers with distinct authenticated owners need independent transactions"
+            );
+
+            manager
+                .handle_transport_event(dispatch_event_from(Message::Request(request_b), peer_b))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none(),
+                "{method} colliding peer replay must return to its own transaction"
+            );
+        }
+
+        let cancel_branch = "z9hG4bK.udp-cancel-collision";
+        let invite_a = create_dispatch_request_with_via(
+            Method::Invite,
+            cancel_branch,
+            150,
+            "cancel-edge.example.com",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let invite_b = invite_a.clone();
+        for (request, peer) in [(invite_a, peer_a), (invite_b, peer_b)] {
+            manager
+                .handle_transport_event(dispatch_event_from(Message::Request(request), peer))
+                .await?;
+            assert!(matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::InviteRequest { .. })
+            ));
+        }
+        let cancel = create_dispatch_request_with_via(
+            Method::Cancel,
+            cancel_branch,
+            150,
+            "cancel-edge.example.com:5060",
+            "udp",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let mut cancel_ids = Vec::new();
+        for peer in [peer_a, peer_b] {
+            manager
+                .handle_transport_event(dispatch_event_from(Message::Request(cancel.clone()), peer))
+                .await?;
+            let cancel_id =
+                match drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await {
+                    Some(TransactionEvent::CancelRequest { transaction_id, .. }) => transaction_id,
+                    other => panic!("expected peer-bound CANCEL, got {other:?}"),
+                };
+            cancel_ids.push(cancel_id);
+            manager
+                .handle_transport_event(dispatch_event_from(Message::Request(cancel.clone()), peer))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none(),
+                "matched CANCEL replay must remain in its peer-bound transaction"
+            );
+        }
+        assert_ne!(cancel_ids[0], cancel_ids[1]);
+        assert_eq!(manager.server_transactions.len(), 10);
+        manager.shutdown().await;
+        assert!(manager.server_transaction_matches.by_match.is_empty());
+        assert!(manager.server_transaction_matches.by_transaction.is_empty());
+        assert!(manager
+            .server_transaction_matches
+            .by_wire_identity
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_server_matching_allows_authenticated_same_wire_collisions_for_all_methods(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(64);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(64)).await?;
+        manager.set_request_ingress_authorizer(Some(Arc::new(SourcePrincipalAuthorizer)));
+        let peer_a: SocketAddr = "192.0.2.70:5060".parse().unwrap();
+        let peer_b: SocketAddr = "192.0.2.71:5060".parse().unwrap();
+        let (flow_a, flow_b) = two_live_tcp_flow_ids().await;
+
+        for (index, method) in [Method::Invite, Method::Bye, Method::Message]
+            .into_iter()
+            .enumerate()
+        {
+            let branch = format!("z9hG4bK.stream-collision-{index}");
+            let request_a = create_dispatch_request_with_via(
+                method.clone(),
+                &branch,
+                200 + index as u32,
+                "stream-a.example.com",
+                "TCP",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request_a.clone()),
+                    peer_a,
+                    flow_a,
+                ))
+                .await?;
+            let first_id = request_event_transaction_id(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                    .await
+                    .expect("first stream request event"),
+            )
+            .expect("first stream transaction id");
+
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request_a.clone()),
+                    peer_a,
+                    flow_a,
+                ))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none()
+            );
+
+            let request_b = create_dispatch_request_with_via(
+                method.clone(),
+                &branch,
+                200 + index as u32,
+                "stream-a.example.com:5060",
+                "tcp",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request_b.clone()),
+                    peer_b,
+                    flow_b,
+                ))
+                .await?;
+            let second_id = request_event_transaction_id(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                    .await
+                    .expect("colliding stream request event"),
+            )
+            .expect("colliding stream transaction id");
+            assert_ne!(first_id, second_id);
+
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request_b),
+                    peer_b,
+                    flow_b,
+                ))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none()
+            );
+        }
+
+        let cancel_branch = "z9hG4bK.stream-cancel-collision";
+        let invite = create_dispatch_request_with_via(
+            Method::Invite,
+            cancel_branch,
+            250,
+            "cancel-stream.example.com",
+            "TCP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        for (peer, flow) in [(peer_a, flow_a), (peer_b, flow_b)] {
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(invite.clone()),
+                    peer,
+                    flow,
+                ))
+                .await?;
+            assert!(matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::InviteRequest { .. })
+            ));
+        }
+        let cancel = create_dispatch_request_with_via(
+            Method::Cancel,
+            cancel_branch,
+            250,
+            "cancel-stream.example.com:5060",
+            "tcp",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let mut cancel_ids = Vec::new();
+        for (peer, flow) in [(peer_a, flow_a), (peer_b, flow_b)] {
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(cancel.clone()),
+                    peer,
+                    flow,
+                ))
+                .await?;
+            let cancel_id =
+                match drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await {
+                    Some(TransactionEvent::CancelRequest { transaction_id, .. }) => transaction_id,
+                    other => panic!("expected flow-bound CANCEL, got {other:?}"),
+                };
+            cancel_ids.push(cancel_id);
+            manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(cancel.clone()),
+                    peer,
+                    flow,
+                ))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                    .await
+                    .is_none()
+            );
+        }
+        assert_ne!(cancel_ids[0], cancel_ids[1]);
+        assert_eq!(manager.server_transactions.len(), 10);
+        manager.shutdown().await;
+        assert!(manager.server_transaction_matches.by_match.is_empty());
+        assert!(manager.server_transaction_matches.by_transaction.is_empty());
+        assert!(manager
+            .server_transaction_matches
+            .by_wire_identity
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn same_authenticated_owner_cannot_rebind_colliding_udp_or_stream_transactions(
+    ) -> Result<()> {
+        let principal = authenticated_test_principal("same-owner");
+
+        let udp_transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_udp_tx, udp_rx) = mpsc::channel(64);
+        let (mut udp_manager, mut udp_events) =
+            TransactionManager::new(udp_transport, udp_rx, Some(64)).await?;
+        udp_manager.set_request_ingress_authorizer(Some(Arc::new(
+            CountingIngressAuthorizer::authorized(principal.clone()),
+        )));
+        let udp_a: SocketAddr = "192.0.2.72:5060".parse().unwrap();
+        let udp_b: SocketAddr = "192.0.2.73:5060".parse().unwrap();
+
+        for (index, method) in [Method::Invite, Method::Bye, Method::Message]
+            .into_iter()
+            .enumerate()
+        {
+            let request = create_dispatch_request_with_via(
+                method.clone(),
+                &format!("z9hG4bK.udp-spoof-{index}"),
+                400 + index as u32,
+                "same-owner.example.com",
+                "UDP",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            udp_manager
+                .handle_transport_event(dispatch_event_from(
+                    Message::Request(request.clone()),
+                    udp_a,
+                ))
+                .await?;
+            assert!(request_event_transaction_id(
+                drain_for_request_event(&mut udp_events, Duration::from_millis(250))
+                    .await
+                    .expect("authorized UDP request event")
+            )
+            .is_some());
+            udp_manager
+                .handle_transport_event(dispatch_event_from(Message::Request(request), udp_b))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut udp_events, Duration::from_millis(25))
+                    .await
+                    .is_none(),
+                "{method} same-owner UDP rebinding must be dropped"
+            );
+        }
+        assert_eq!(udp_manager.server_transactions.len(), 3);
+        udp_manager.shutdown().await;
+
+        let stream_transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_stream_tx, stream_rx) = mpsc::channel(64);
+        let (mut stream_manager, mut stream_events) =
+            TransactionManager::new(stream_transport, stream_rx, Some(64)).await?;
+        stream_manager.set_request_ingress_authorizer(Some(Arc::new(
+            CountingIngressAuthorizer::authorized(principal),
+        )));
+        let stream_peer: SocketAddr = "192.0.2.74:5060".parse().unwrap();
+        let (flow_a, flow_b) = two_live_tcp_flow_ids().await;
+
+        for (index, method) in [Method::Invite, Method::Bye, Method::Message]
+            .into_iter()
+            .enumerate()
+        {
+            let request = create_dispatch_request_with_via(
+                method.clone(),
+                &format!("z9hG4bK.stream-spoof-{index}"),
+                500 + index as u32,
+                "same-owner.example.com",
+                "TCP",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            stream_manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request.clone()),
+                    stream_peer,
+                    flow_a,
+                ))
+                .await?;
+            assert!(request_event_transaction_id(
+                drain_for_request_event(&mut stream_events, Duration::from_millis(250))
+                    .await
+                    .expect("authorized stream request event")
+            )
+            .is_some());
+            stream_manager
+                .handle_transport_event(dispatch_stream_event_from(
+                    Message::Request(request),
+                    stream_peer,
+                    flow_b,
+                ))
+                .await?;
+            assert!(
+                drain_for_request_event(&mut stream_events, Duration::from_millis(25))
+                    .await
+                    .is_none(),
+                "{method} same-owner stream-flow rebinding must be dropped"
+            );
+        }
+        assert_eq!(stream_manager.server_transactions.len(), 3);
+        stream_manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn simultaneous_collision_keeps_raw_bytes_and_transport_on_exact_internal_ids(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(32);
+        let (mut manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        manager.set_request_ingress_authorizer(Some(Arc::new(SourcePrincipalAuthorizer)));
+
+        let peer_a: SocketAddr = "192.0.2.75:5060".parse().unwrap();
+        let peer_b: SocketAddr = "192.0.2.76:5060".parse().unwrap();
+        let request = create_dispatch_request_with_via(
+            Method::Invite,
+            "z9hG4bK.simultaneous-artifacts",
+            600,
+            "shared-edge.example.com",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let event = |source, raw_bytes| TransportEvent::MessageReceived {
+            message: Message::Request(request.clone()),
+            source,
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            flow_id: None,
+            raw_bytes: Some(raw_bytes),
+            timing: None,
+            connection_metadata: None,
+        };
+
+        let (left, right) = tokio::join!(
+            manager
+                .handle_transport_event(event(peer_a, bytes::Bytes::from_static(b"peer-a-wire"))),
+            manager
+                .handle_transport_event(event(peer_b, bytes::Bytes::from_static(b"peer-b-wire")))
+        );
+        left?;
+        right?;
+
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let transaction_id = request_event_transaction_id(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                    .await
+                    .expect("simultaneous INVITE event"),
+            )
+            .expect("simultaneous transaction id");
+            let context = manager
+                .peek_inbound_transport(&transaction_id)
+                .expect("exact transport context");
+            let raw = manager
+                .peek_inbound_bytes(&transaction_id)
+                .expect("exact raw request");
+            match context.remote_addr.as_str() {
+                "192.0.2.75:5060" => assert_eq!(raw.as_ref(), b"peer-a-wire"),
+                "192.0.2.76:5060" => assert_eq!(raw.as_ref(), b"peer-b-wire"),
+                other => panic!("unexpected retained peer {other}"),
+            }
+            ids.push(transaction_id);
+        }
+        assert_ne!(ids[0], ids[1]);
+
+        manager.shutdown().await;
+        assert!(manager.server_transaction_matches.by_match.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_proxy_cancel_retransmission_replays_200_before_unmatched_path() -> Result<()>
+    {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(32);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let mut proxy_ingress = manager
+            .try_claim_stateful_proxy_ingress(32)
+            .expect("claim exact proxy ingress");
+
+        let source: SocketAddr = "192.0.2.80:5060".parse().unwrap();
+        let branch = "z9hG4bK.proxy-cancel-replay";
+        let invite = create_dispatch_request(Method::Invite, branch, 300)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(invite.clone()),
+                source,
+            ))
+            .await?;
+        let invite_id =
+            match drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await {
+                Some(TransactionEvent::InviteRequest { transaction_id, .. }) => transaction_id,
+                other => panic!("expected INVITE request, got {other:?}"),
+            };
+
+        let cancel = create_dispatch_request(Method::Cancel, branch, 300)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(cancel.clone()),
+                source,
+            ))
+            .await?;
+        let cancel_id =
+            match drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await {
+                Some(TransactionEvent::CancelRequest { transaction_id, .. }) => transaction_id,
+                other => panic!("expected matched CANCEL, got {other:?}"),
+            };
+        manager
+            .send_response(
+                &cancel_id,
+                create_test_response(&cancel, StatusCode::Ok, Some("OK")),
+            )
+            .await?;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !manager.server_transactions.contains_key(&cancel_id)
+                    && manager
+                        .compact_non_invite_tombstones
+                        .contains_key(&cancel_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("CANCEL enters compact Timer J retention");
+
+        manager
+            .send_response(
+                &invite_id,
+                create_test_response(
+                    &invite,
+                    StatusCode::RequestTerminated,
+                    Some("Request Terminated"),
+                ),
+            )
+            .await?;
+        let ack = create_dispatch_request(Method::Ack, branch, 300)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(ack), source))
+            .await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if manager
+                    .server_transactions
+                    .get(&invite_id)
+                    .is_some_and(|transaction| transaction.state() == TransactionState::Confirmed)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("target INVITE enters Confirmed before Timer I");
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !manager.server_transactions.contains_key(&invite_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("target INVITE transaction retires before the late CANCEL replay");
+        assert!(
+            manager
+                .compact_non_invite_tombstones
+                .contains_key(&cancel_id),
+            "CANCEL Timer J replay state must outlive the retired target INVITE"
+        );
+
+        let writes_before_retransmission = transport.raw_send_count();
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(cancel), source))
+            .await?;
+        assert_eq!(
+            transport.raw_send_count(),
+            writes_before_retransmission + 1,
+            "late CANCEL retransmission must replay the retained 200 response"
+        );
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "retransmission must not publish a second downstream CANCEL"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), proxy_ingress.recv())
+                .await
+                .is_err(),
+            "retransmission must not escape through unmatched-CANCEL ingress"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proxy_cancel_match_rejects_wrong_source_and_via_sent_by() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        let mut proxy_ingress = manager
+            .try_claim_stateful_proxy_ingress(32)
+            .expect("claim exact proxy ingress");
+
+        let source: SocketAddr = "192.0.2.40:5060".parse().unwrap();
+        let other_source: SocketAddr = "192.0.2.41:5060".parse().unwrap();
+        let branch = "z9hG4bK.proxy-match-fields";
+        let invite = create_dispatch_request(Method::Invite, branch, 101)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(invite), source))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        let cancel = create_dispatch_request(Method::Cancel, branch, 101)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(cancel), other_source))
+            .await?;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(250), proxy_ingress.recv()).await,
+            Ok(Some(StatefulProxyIngressEvent::UnmatchedCancelRequest { source: observed, .. }))
+                if observed == other_source
+        ));
+
+        let wrong_sent_by = SimpleRequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .map_err(|error| Error::Other(error.to_string()))?
+            .from("Alice", "sip:alice@example.com", Some("alice-dispatch-tag"))
+            .to("Bob", "sip:bob@example.com", Some("bob-dispatch-tag"))
+            .call_id("dispatch-call-id-1234")
+            .cseq(101)
+            .via("198.51.100.77:5090", "UDP", Some(branch))
+            .max_forwards(70)
+            .build();
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(wrong_sent_by), source))
+            .await?;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(250), proxy_ingress.recv()).await,
+            Ok(Some(StatefulProxyIngressEvent::UnmatchedCancelRequest { source: observed, .. }))
+                if observed == source
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn proxy_cancel_match_rejects_a_different_stream_flow() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(32)).await?;
+        let mut proxy_ingress = manager
+            .try_claim_stateful_proxy_ingress(32)
+            .expect("claim exact proxy ingress");
+
+        let source: SocketAddr = "192.0.2.50:5060".parse().unwrap();
+        let branch = "z9hG4bK.proxy-flow-binding";
+        let (invite_flow, forged_flow) = two_live_tcp_flow_ids().await;
+        let invite = create_test_invite_with_identity("proxy-flow-call", branch, "TCP")
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_stream_event_from(
+                Message::Request(invite),
+                source,
+                invite_flow,
+            ))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        let cancel = SimpleRequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .map_err(|error| Error::Other(error.to_string()))?
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id("proxy-flow-call")
+            .cseq(101)
+            .via("127.0.0.1:5060", "TCP", Some(branch))
+            .max_forwards(70)
+            .build();
+        manager
+            .handle_transport_event(dispatch_stream_event_from(
+                Message::Request(cancel),
+                source,
+                forged_flow,
+            ))
+            .await?;
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(250), proxy_ingress.recv()).await,
+            Ok(Some(StatefulProxyIngressEvent::UnmatchedCancelRequest { source: observed, .. }))
+                if observed == source
         ));
 
         manager.shutdown().await;
@@ -2245,7 +3233,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for state to change to Terminated (direct transition for 2xx to INVITE)
+        // Preserve the public 0.3.1 Terminated projection while RFC 6026 keeps
+        // the INVITE client transaction privately retained through Timer M.
         let success = manager
             .wait_for_transaction_state(
                 &tx_id,
@@ -2255,7 +3244,24 @@ mod tests {
             .await?;
         assert!(
             success,
-            "Transaction should transition to Terminated state after 2xx"
+            "INVITE client transaction should project Terminated after 2xx"
+        );
+        assert!(
+            !manager
+                .client_transactions
+                .get(&tx_id)
+                .expect("client transaction remains retained through Timer M")
+                .is_protocol_terminated(),
+            "private Timer M retention must remain active"
+        );
+        assert_eq!(
+            manager.cleanup_terminated_transactions().await?,
+            0,
+            "diagnostic cleanup must not remove private Timer M retention"
+        );
+        assert!(
+            manager.client_transactions.contains_key(&tx_id),
+            "client transaction must remain routable through Timer M"
         );
 
         // Test ACK creation and sending
@@ -2824,7 +3830,7 @@ mod tests {
                     Some(TransactionEvent::SuccessResponse { transaction_id, .. })
                         if transaction_id == transaction =>
                     {
-                        return "success"
+                        return "success";
                     }
                     Some(TransactionEvent::StrayResponse { .. }) => return "stray",
                     Some(_) => continue,
@@ -3114,7 +4120,7 @@ mod tests {
             .expect_err("local CANCEL composition prerequisite must fail");
         assert!(matches!(
             failure,
-            super::super::CancelInviteTransactionFailure::ZeroWire(_)
+            super::super::CancelInviteTransactionFailure::ZeroWire { .. }
         ));
         assert_eq!(transport.wire_attempts(), 0);
 
@@ -3145,7 +4151,7 @@ mod tests {
             .expect_err("route preparation must fail before the write boundary");
         assert!(matches!(
             failure,
-            super::super::CancelInviteTransactionFailure::ZeroWire(_)
+            super::super::CancelInviteTransactionFailure::ZeroWire { .. }
         ));
         assert_eq!(transport.wire_attempts(), 0);
 
@@ -4444,7 +5450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invite_retransmission_after_2xx_reuses_cached_response() -> Result<()> {
+    async fn invite_retransmission_after_2xx_reuses_uas_response_cache() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (transport_tx, transport_rx) = mpsc::channel(16);
         let (manager, _event_rx) =
@@ -4460,7 +5466,7 @@ mod tests {
         let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
         manager.send_response(&tx_id, ok_response).await?;
 
-        let terminated = manager
+        let accepted = manager
             .wait_for_transaction_state(
                 &tx_id,
                 TransactionState::Terminated,
@@ -4468,8 +5474,21 @@ mod tests {
             )
             .await?;
         assert!(
-            terminated,
-            "INVITE server transaction should terminate after 2xx"
+            accepted,
+            "INVITE server transaction should enter Accepted after 2xx"
+        );
+        assert!(
+            !transaction.is_protocol_terminated(),
+            "private Timer L retention must remain active"
+        );
+        assert_eq!(
+            manager.cleanup_terminated_transactions().await?,
+            0,
+            "diagnostic cleanup must not remove private Timer L retention"
+        );
+        assert!(
+            manager.server_transactions.contains_key(&tx_id),
+            "server transaction must remain routable through Timer L"
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4489,30 +5508,23 @@ mod tests {
             .await
             .unwrap();
 
-        let mut retransmitted = false;
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            let sent_messages = transport.get_sent_messages().await;
-            if sent_messages.len() > before {
-                let last_msg = sent_messages.last().unwrap();
-                assert!(
-                    matches!(last_msg.0, Message::Response(ref resp) if resp.status_code() == 200),
-                    "retransmitted message should be cached 200 OK"
-                );
-                assert_eq!(last_msg.1, source);
-                retransmitted = true;
-                break;
-            }
-        }
-
-        assert!(
-            retransmitted,
-            "retransmitted INVITE should resend cached 2xx"
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let sent = transport.get_sent_messages().await;
+        assert_eq!(
+            sent.len(),
+            before + 1,
+            "the private Accepted transaction absorbs the INVITE while the independent \
+             UAS response cache preserves 0.3.1 2xx reliability"
         );
         assert!(
-            transport.raw_send_count() > 0,
-            "cached INVITE 2xx retransmission should use pre-built wire bytes"
+            matches!(sent.last(), Some((Message::Response(response), _)) if response.status_code() == 200),
+            "UAS response cache should replay the final 2xx"
         );
+        assert_eq!(
+            manager.transaction_state(&tx_id).await?,
+            TransactionState::Terminated
+        );
+        assert!(!transaction.is_protocol_terminated());
 
         manager.shutdown().await;
         Ok(())
@@ -4629,7 +5641,7 @@ mod tests {
         let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
         manager.send_response(&tx_id, ok_response).await?;
 
-        let terminated = manager
+        let accepted = manager
             .wait_for_transaction_state(
                 &tx_id,
                 TransactionState::Terminated,
@@ -4637,8 +5649,12 @@ mod tests {
             )
             .await?;
         assert!(
-            terminated,
-            "INVITE server transaction should terminate after 2xx"
+            accepted,
+            "INVITE server transaction should enter Accepted after 2xx"
+        );
+        assert!(
+            !transaction.is_protocol_terminated(),
+            "private Timer L retention must remain active"
         );
 
         let before = transport.get_sent_messages().await.len();
@@ -5664,6 +6680,63 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn stateless_acks_do_not_accumulate_pending_inbound_transport() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        for sequence in 0..8 {
+            let branch = format!("z9hG4bK.stateless-ack-retention-{sequence}");
+            let ack = create_dispatch_request_with_via(
+                Method::Ack,
+                &branch,
+                700 + sequence,
+                "edge.example.test",
+                "TLS",
+            )
+            .map_err(|error| Error::Other(error.to_string()))?;
+            let ack_key = TransactionKey::from_request(&ack)
+                .ok_or_else(|| Error::Other("ACK transaction key missing".to_string()))?;
+
+            manager
+                .handle_transport_event(TransportEvent::MessageReceived {
+                    message: Message::Request(ack),
+                    source: "192.0.2.100:5061".parse().unwrap(),
+                    destination: transport.local_addr().unwrap(),
+                    transport_type: TransportType::Tls,
+                    flow_id: None,
+                    raw_bytes: None,
+                    timing: None,
+                    connection_metadata: None,
+                })
+                .await?;
+
+            assert!(matches!(
+                tokio::time::timeout(Duration::from_millis(250), event_rx.recv()).await,
+                Ok(Some(TransactionEvent::StrayAckRequest { .. }))
+            ));
+            assert!(
+                !manager.server_transactions.contains_key(&ack_key),
+                "a stateless ACK must not allocate a server transaction"
+            );
+            assert!(
+                manager.peek_inbound_transport(&ack_key).is_none(),
+                "the ACK wire key must not survive protocol dispatch"
+            );
+        }
+
+        let counts = manager.retention_counts();
+        assert_eq!(
+            counts.pending_inbound_transport, 0,
+            "a transactionless ACK must not create transport metadata with no cleanup owner"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
     /// Test wait_for_final_response function
     #[tokio::test]
     async fn test_wait_for_final_response() -> Result<()> {
@@ -5922,9 +6995,14 @@ mod tests {
             "127.0.0.1:5060".parse().unwrap(),
             TransportType::Udp,
         );
+        let replay_request = Request::new(Method::Bye, "sip:bob@example.test".parse().unwrap());
         assert!(
             manager
-                .replay_compact_non_invite_server_response(&transaction_id, &ingress)
+                .replay_compact_non_invite_server_response(
+                    &transaction_id,
+                    &replay_request,
+                    &ingress,
+                )
                 .await?,
             "expired authentic retransmission must be absorbed during scheduler cleanup"
         );
