@@ -820,15 +820,19 @@ def verify_row(
     peer_log = peer_log_path.read_text(encoding="utf-8", errors="replace")
     peer_inbound_client = "rvoip" if order == "rvoip-first" else "sipp"
     expected_inbound_serial = certificates[peer_inbound_client]["serial"]
+    # OpenSSL's certificate metadata renders serials in hexadecimal, while
+    # Kamailio/OpenSIPS expose an all-numeric serial as its decimal value.
+    # Compare the integer identity rather than the presentation format.
+    expected_inbound_serial_value = int(expected_inbound_serial, 16)
     observed_inbound_serials = {
-        value.lower()
+        int(value, 16 if re.search(r"[A-Fa-f]", value) else 10)
         for value in re.findall(
             r"INTEROP_TLS_VERIFIED direction=inbound "
             r"peer_serial=([0-9A-Fa-f]+)",
             peer_log,
         )
     }
-    if observed_inbound_serials != {expected_inbound_serial}:
+    if observed_inbound_serials != {expected_inbound_serial_value}:
         raise VerificationError(
             "independent peer inbound mTLS serial binding failed"
         )

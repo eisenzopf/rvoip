@@ -243,6 +243,19 @@ tls_cleanup_pki
             len(verifier.TLS_PACKET_SCENARIOS),
         )
 
+    def test_decimal_peer_serial_matches_openssl_hex_metadata(self) -> None:
+        metadata = (self.row / "tls-public/rvoip.metadata.txt").read_text()
+        serial = re.search(
+            r"^serial=([0-9A-Fa-f]+)$", metadata, re.MULTILINE
+        )
+        assert serial
+        peer_log = self.row / "peer.log"
+        peer_log.write_text(
+            "INTEROP_TLS_VERIFIED direction=inbound "
+            f"peer_serial={int(serial.group(1), 16)}\n"
+        )
+        self.assertEqual(self.verify()["result"], "PASS")
+
     def test_missing_scenario_packet_evidence_fails(self) -> None:
         (
             self.row
