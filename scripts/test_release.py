@@ -157,7 +157,7 @@ serde = { version = "1.0" }
             receipt_path.write_text(
                 json.dumps(
                     {
-                        "schema": "rvoip-unified-release-verification-v2",
+                        "schema": "rvoip-unified-release-verification-v3",
                         "version": "0.3.0",
                         "git_commit": "abc",
                         "package_count": 2,
@@ -167,6 +167,11 @@ serde = { version = "1.0" }
                             "leaf": "b" * 64,
                             "dependent": "c" * 64,
                         },
+                        "beta_qualification": {
+                            "mode": "strict",
+                            "disposition": "RELEASE-CANDIDATE",
+                            "strict_automated_status": "PASS",
+                        },
                     }
                 )
             )
@@ -174,6 +179,52 @@ serde = { version = "1.0" }
                 root, "0.3.0", "abc", ["leaf", "dependent"]
             )
             self.assertEqual(set(receipt["package_sha256"]), {"leaf"})
+
+    def test_beta_exception_is_explicit_and_hash_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attestation = root / "exception-attestation.json"
+            attestation.write_text(
+                json.dumps(
+                    {
+                        "release": {
+                            "version": "0.3.2",
+                            "disposition": "APPROVED-WITH-EXCEPTION",
+                            "strict_automated_status": "NON-RC",
+                        }
+                    }
+                )
+            )
+            log = mock.Mock()
+            qualification = release.verify_beta_reporting(
+                root,
+                "0.3.2",
+                None,
+                str(attestation),
+                log,
+            )
+            self.assertEqual(qualification["mode"], "owner-approved-exception")
+            self.assertEqual(
+                qualification["disposition"], "APPROVED-WITH-EXCEPTION"
+            )
+            self.assertEqual(qualification["strict_automated_status"], "NON-RC")
+            self.assertEqual(
+                qualification["attestation_sha256"],
+                release.hashlib.sha256(attestation.read_bytes()).hexdigest(),
+            )
+            command = log.command.call_args.args[0]
+            self.assertIn("release_exception_attestation.py", command[1])
+            self.assertEqual(command[-2:], ["--version", "0.3.2"])
+
+    def test_strict_and_exception_beta_inputs_are_mutually_exclusive(self) -> None:
+        with self.assertRaises(release.ReleaseError):
+            release.verify_beta_reporting(
+                Path("/repo"),
+                "0.3.2",
+                "/tmp/strict-report",
+                "/tmp/exception.json",
+                mock.Mock(),
+            )
 
     def test_visibility_timeout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

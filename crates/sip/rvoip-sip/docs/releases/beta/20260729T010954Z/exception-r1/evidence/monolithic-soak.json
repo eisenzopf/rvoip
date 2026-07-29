@@ -1,0 +1,4784 @@
+{
+  "diagnostics": {
+    "call_failures": {
+      "by_phase_and_class": [],
+      "dropped_samples": 0,
+      "sample_limit": 32,
+      "sampled": 0,
+      "samples": [],
+      "total": 0
+    },
+    "retention_samples": {
+      "final_retained_objects": 0,
+      "first": {
+        "alice": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 0,
+              "enqueued_total": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 0,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 0
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 0
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 0,
+              "deadline_record_bytes": 128,
+              "disarmed": 0,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 2
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 0,
+              "exact_entry_table_capacity": 0,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 0,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_media_session_removed_total": 0,
+              "session_create_attempt_total": 6,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 0
+            },
+            "media_create_reservations": 6,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 0,
+              "media_mapped_total": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 6,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 6,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 7168,
+                "exact_cell_index_capacity": 7168,
+                "index_blocked": 0,
+                "index_live": 6,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 264,
+                "retained_total": 6,
+                "retired": 0,
+                "reusable_deadline_capacity": 0
+              },
+              "created_total": 6,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 6
+              },
+              "net_created_minus_removed": 6,
+              "remove_missing_total": 0,
+              "removed_total": 0,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 0,
+              "destroy_wake_failed": 0,
+              "destroy_wake_sent": 0,
+              "exited": 0,
+              "started": 0
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 0,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "bob": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 0,
+              "enqueued_total": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 0,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 0
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 0
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 0,
+              "deadline_record_bytes": 128,
+              "disarmed": 0,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 3
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 0,
+              "exact_entry_table_capacity": 0,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 0,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_media_session_removed_total": 0,
+              "session_create_attempt_total": 0,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 0
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 0,
+              "media_mapped_total": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 7168,
+                "exact_cell_index_capacity": 7168,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 0
+              },
+              "created_total": 0,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 0,
+              "destroy_wake_failed": 0,
+              "destroy_wake_sent": 0,
+              "exited": 0,
+              "started": 0
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 0,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "label": "periodic",
+        "retained_total": 6,
+        "t_secs": 0.01
+      },
+      "format": "jsonl",
+      "last": {
+        "alice": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 2935,
+              "enqueued_total": 2935,
+              "in_flight_current": 0,
+              "in_flight_max": 2,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 4,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 587,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 1
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 208
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 1761,
+              "deadline_record_bytes": 128,
+              "disarmed": 1761,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 587,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 587,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 0,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 0,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 0
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 2
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 328,
+              "exact_entry_table_capacity": 340,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 587,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 587,
+              "cleanup_media_session_removed_total": 587,
+              "session_create_attempt_total": 587,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 587
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 587,
+              "media_mapped_total": 587,
+              "remove_missing_total": 0,
+              "removed_total": 587
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 0,
+                "exact_cell_index_capacity": 0,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 32
+              },
+              "created_total": 587,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 587,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 60,
+              "destroy_wake_failed": 862,
+              "destroy_wake_sent": 312,
+              "exited": 2348,
+              "started": 2348
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 196,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 192,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "bob": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 1174,
+              "enqueued_total": 1174,
+              "in_flight_current": 0,
+              "in_flight_max": 1,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 1,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 587,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 1
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 192
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 1761,
+              "deadline_record_bytes": 128,
+              "disarmed": 1761,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 1174,
+              "cleanup_mapped_total": 1174,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 3
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 320,
+              "exact_entry_table_capacity": 296,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 587,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 587,
+              "cleanup_audio_receiver_removed_total": 587,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 587,
+              "cleanup_media_session_removed_total": 587,
+              "session_create_attempt_total": 587,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 587
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 587,
+              "media_mapped_total": 587,
+              "remove_missing_total": 0,
+              "removed_total": 587
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 0,
+                "exact_cell_index_capacity": 0,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 32
+              },
+              "created_total": 587,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 587,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 60,
+              "destroy_wake_failed": 862,
+              "destroy_wake_sent": 312,
+              "exited": 2348,
+              "started": 2348
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 196,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 192,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "label": "after_drain",
+        "retained_total": 0,
+        "t_secs": 3761.62
+      },
+      "max_retained_objects": 1254,
+      "sample_count": 127,
+      "samples_path": "<workspace>/target/beta-gate/20260729T010954Z/perf-results/perf_soak_30min_retention_samples_89273.jsonl",
+      "storage": "streamed_lossless"
+    },
+    "rss_windows": {
+      "active_tail_growth_mb_per_hr": 12.7,
+      "active_tail_window_complete": true,
+      "active_tail_window_secs": 595.31,
+      "gate_growth_mb_per_hr": 12.7,
+      "gate_window": "active_tail_600s",
+      "windows": [
+        {
+          "delta_mb": 14.63,
+          "end_secs": 60.0,
+          "first_rss_mb": 111.02,
+          "growth_mb_per_hr": 506.76,
+          "label": "active",
+          "last_rss_mb": 125.64,
+          "sample_count": 12,
+          "start_secs": 0.0
+        },
+        {
+          "delta_mb": 1.34,
+          "end_secs": 120.0,
+          "first_rss_mb": 126.08,
+          "growth_mb_per_hr": 92.71,
+          "label": "active",
+          "last_rss_mb": 127.42,
+          "sample_count": 12,
+          "start_secs": 60.0
+        },
+        {
+          "delta_mb": 0.88,
+          "end_secs": 180.0,
+          "first_rss_mb": 128.28,
+          "growth_mb_per_hr": 67.28,
+          "label": "active",
+          "last_rss_mb": 129.16,
+          "sample_count": 12,
+          "start_secs": 120.0
+        },
+        {
+          "delta_mb": 0.83,
+          "end_secs": 240.0,
+          "first_rss_mb": 129.52,
+          "growth_mb_per_hr": 57.52,
+          "label": "active",
+          "last_rss_mb": 130.34,
+          "sample_count": 12,
+          "start_secs": 180.0
+        },
+        {
+          "delta_mb": 0.72,
+          "end_secs": 300.0,
+          "first_rss_mb": 130.55,
+          "growth_mb_per_hr": 53.86,
+          "label": "active",
+          "last_rss_mb": 131.27,
+          "sample_count": 12,
+          "start_secs": 240.0
+        },
+        {
+          "delta_mb": 1.27,
+          "end_secs": 360.0,
+          "first_rss_mb": 131.77,
+          "growth_mb_per_hr": 88.47,
+          "label": "active",
+          "last_rss_mb": 133.03,
+          "sample_count": 12,
+          "start_secs": 300.0
+        },
+        {
+          "delta_mb": 0.83,
+          "end_secs": 420.0,
+          "first_rss_mb": 133.69,
+          "growth_mb_per_hr": 63.45,
+          "label": "active",
+          "last_rss_mb": 134.52,
+          "sample_count": 12,
+          "start_secs": 360.0
+        },
+        {
+          "delta_mb": 0.39,
+          "end_secs": 480.0,
+          "first_rss_mb": 134.64,
+          "growth_mb_per_hr": 25.63,
+          "label": "active",
+          "last_rss_mb": 135.03,
+          "sample_count": 12,
+          "start_secs": 420.0
+        },
+        {
+          "delta_mb": 0.22,
+          "end_secs": 540.0,
+          "first_rss_mb": 135.44,
+          "growth_mb_per_hr": 14.19,
+          "label": "active",
+          "last_rss_mb": 135.66,
+          "sample_count": 12,
+          "start_secs": 480.0
+        },
+        {
+          "delta_mb": 0.64,
+          "end_secs": 600.0,
+          "first_rss_mb": 135.73,
+          "growth_mb_per_hr": 48.36,
+          "label": "active",
+          "last_rss_mb": 136.38,
+          "sample_count": 12,
+          "start_secs": 540.0
+        },
+        {
+          "delta_mb": 0.66,
+          "end_secs": 660.0,
+          "first_rss_mb": 136.42,
+          "growth_mb_per_hr": 35.38,
+          "label": "active",
+          "last_rss_mb": 137.08,
+          "sample_count": 12,
+          "start_secs": 600.0
+        },
+        {
+          "delta_mb": 0.31,
+          "end_secs": 720.0,
+          "first_rss_mb": 137.14,
+          "growth_mb_per_hr": 24.73,
+          "label": "active",
+          "last_rss_mb": 137.45,
+          "sample_count": 12,
+          "start_secs": 660.0
+        },
+        {
+          "delta_mb": 0.52,
+          "end_secs": 780.0,
+          "first_rss_mb": 137.59,
+          "growth_mb_per_hr": 36.52,
+          "label": "active",
+          "last_rss_mb": 138.11,
+          "sample_count": 12,
+          "start_secs": 720.0
+        },
+        {
+          "delta_mb": 0.58,
+          "end_secs": 840.0,
+          "first_rss_mb": 138.23,
+          "growth_mb_per_hr": 42.78,
+          "label": "active",
+          "last_rss_mb": 138.81,
+          "sample_count": 12,
+          "start_secs": 780.0
+        },
+        {
+          "delta_mb": 0.31,
+          "end_secs": 900.0,
+          "first_rss_mb": 139.0,
+          "growth_mb_per_hr": 16.12,
+          "label": "active",
+          "last_rss_mb": 139.31,
+          "sample_count": 12,
+          "start_secs": 840.0
+        },
+        {
+          "delta_mb": 0.33,
+          "end_secs": 960.0,
+          "first_rss_mb": 139.41,
+          "growth_mb_per_hr": 20.76,
+          "label": "active",
+          "last_rss_mb": 139.73,
+          "sample_count": 12,
+          "start_secs": 900.0
+        },
+        {
+          "delta_mb": 0.33,
+          "end_secs": 1020.0,
+          "first_rss_mb": 139.78,
+          "growth_mb_per_hr": 22.65,
+          "label": "active",
+          "last_rss_mb": 140.11,
+          "sample_count": 12,
+          "start_secs": 960.0
+        },
+        {
+          "delta_mb": 0.25,
+          "end_secs": 1080.0,
+          "first_rss_mb": 140.19,
+          "growth_mb_per_hr": 19.97,
+          "label": "active",
+          "last_rss_mb": 140.44,
+          "sample_count": 12,
+          "start_secs": 1020.0
+        },
+        {
+          "delta_mb": 0.33,
+          "end_secs": 1140.0,
+          "first_rss_mb": 140.48,
+          "growth_mb_per_hr": 22.88,
+          "label": "active",
+          "last_rss_mb": 140.81,
+          "sample_count": 12,
+          "start_secs": 1080.0
+        },
+        {
+          "delta_mb": 0.52,
+          "end_secs": 1200.0,
+          "first_rss_mb": 140.83,
+          "growth_mb_per_hr": 37.19,
+          "label": "active",
+          "last_rss_mb": 141.34,
+          "sample_count": 12,
+          "start_secs": 1140.0
+        },
+        {
+          "delta_mb": 0.28,
+          "end_secs": 1260.0,
+          "first_rss_mb": 141.41,
+          "growth_mb_per_hr": 21.04,
+          "label": "active",
+          "last_rss_mb": 141.69,
+          "sample_count": 12,
+          "start_secs": 1200.0
+        },
+        {
+          "delta_mb": 0.27,
+          "end_secs": 1320.0,
+          "first_rss_mb": 141.91,
+          "growth_mb_per_hr": 18.36,
+          "label": "active",
+          "last_rss_mb": 142.17,
+          "sample_count": 12,
+          "start_secs": 1260.0
+        },
+        {
+          "delta_mb": 0.2,
+          "end_secs": 1380.0,
+          "first_rss_mb": 142.2,
+          "growth_mb_per_hr": 10.34,
+          "label": "active",
+          "last_rss_mb": 142.41,
+          "sample_count": 12,
+          "start_secs": 1320.0
+        },
+        {
+          "delta_mb": 0.17,
+          "end_secs": 1440.0,
+          "first_rss_mb": 142.44,
+          "growth_mb_per_hr": 14.43,
+          "label": "active",
+          "last_rss_mb": 142.61,
+          "sample_count": 12,
+          "start_secs": 1380.0
+        },
+        {
+          "delta_mb": 0.31,
+          "end_secs": 1500.0,
+          "first_rss_mb": 142.72,
+          "growth_mb_per_hr": 19.34,
+          "label": "active",
+          "last_rss_mb": 143.03,
+          "sample_count": 12,
+          "start_secs": 1440.0
+        },
+        {
+          "delta_mb": 0.2,
+          "end_secs": 1560.0,
+          "first_rss_mb": 143.08,
+          "growth_mb_per_hr": 11.84,
+          "label": "active",
+          "last_rss_mb": 143.28,
+          "sample_count": 12,
+          "start_secs": 1500.0
+        },
+        {
+          "delta_mb": 0.33,
+          "end_secs": 1620.0,
+          "first_rss_mb": 143.28,
+          "growth_mb_per_hr": 22.1,
+          "label": "active",
+          "last_rss_mb": 143.61,
+          "sample_count": 12,
+          "start_secs": 1560.0
+        },
+        {
+          "delta_mb": 0.2,
+          "end_secs": 1680.0,
+          "first_rss_mb": 143.61,
+          "growth_mb_per_hr": 13.52,
+          "label": "active",
+          "last_rss_mb": 143.81,
+          "sample_count": 12,
+          "start_secs": 1620.0
+        },
+        {
+          "delta_mb": 0.19,
+          "end_secs": 1740.0,
+          "first_rss_mb": 143.84,
+          "growth_mb_per_hr": 11.99,
+          "label": "active",
+          "last_rss_mb": 144.03,
+          "sample_count": 12,
+          "start_secs": 1680.0
+        },
+        {
+          "delta_mb": 0.14,
+          "end_secs": 1800.0,
+          "first_rss_mb": 144.03,
+          "growth_mb_per_hr": 8.02,
+          "label": "active",
+          "last_rss_mb": 144.17,
+          "sample_count": 12,
+          "start_secs": 1740.0
+        },
+        {
+          "delta_mb": 0.22,
+          "end_secs": 1860.0,
+          "first_rss_mb": 144.17,
+          "growth_mb_per_hr": 16.47,
+          "label": "active",
+          "last_rss_mb": 144.39,
+          "sample_count": 12,
+          "start_secs": 1800.0
+        },
+        {
+          "delta_mb": 0.17,
+          "end_secs": 1920.0,
+          "first_rss_mb": 144.42,
+          "growth_mb_per_hr": 12.27,
+          "label": "active",
+          "last_rss_mb": 144.59,
+          "sample_count": 12,
+          "start_secs": 1860.0
+        },
+        {
+          "delta_mb": 0.16,
+          "end_secs": 1980.0,
+          "first_rss_mb": 144.61,
+          "growth_mb_per_hr": 10.69,
+          "label": "active",
+          "last_rss_mb": 144.77,
+          "sample_count": 12,
+          "start_secs": 1920.0
+        },
+        {
+          "delta_mb": 0.27,
+          "end_secs": 2040.0,
+          "first_rss_mb": 144.8,
+          "growth_mb_per_hr": 19.74,
+          "label": "active",
+          "last_rss_mb": 145.06,
+          "sample_count": 12,
+          "start_secs": 1980.0
+        },
+        {
+          "delta_mb": 0.39,
+          "end_secs": 2100.0,
+          "first_rss_mb": 145.06,
+          "growth_mb_per_hr": 27.13,
+          "label": "active",
+          "last_rss_mb": 145.45,
+          "sample_count": 12,
+          "start_secs": 2040.0
+        },
+        {
+          "delta_mb": 0.36,
+          "end_secs": 2160.0,
+          "first_rss_mb": 145.45,
+          "growth_mb_per_hr": 26.2,
+          "label": "active",
+          "last_rss_mb": 145.81,
+          "sample_count": 12,
+          "start_secs": 2100.0
+        },
+        {
+          "delta_mb": 0.11,
+          "end_secs": 2220.0,
+          "first_rss_mb": 145.86,
+          "growth_mb_per_hr": 8.57,
+          "label": "active",
+          "last_rss_mb": 145.97,
+          "sample_count": 12,
+          "start_secs": 2160.0
+        },
+        {
+          "delta_mb": 0.41,
+          "end_secs": 2280.0,
+          "first_rss_mb": 146.03,
+          "growth_mb_per_hr": 29.84,
+          "label": "active",
+          "last_rss_mb": 146.44,
+          "sample_count": 12,
+          "start_secs": 2220.0
+        },
+        {
+          "delta_mb": 0.11,
+          "end_secs": 2340.0,
+          "first_rss_mb": 146.47,
+          "growth_mb_per_hr": 5.03,
+          "label": "active",
+          "last_rss_mb": 146.58,
+          "sample_count": 12,
+          "start_secs": 2280.0
+        },
+        {
+          "delta_mb": 0.28,
+          "end_secs": 2400.0,
+          "first_rss_mb": 146.58,
+          "growth_mb_per_hr": 21.48,
+          "label": "active",
+          "last_rss_mb": 146.86,
+          "sample_count": 12,
+          "start_secs": 2340.0
+        },
+        {
+          "delta_mb": 0.25,
+          "end_secs": 2460.0,
+          "first_rss_mb": 146.86,
+          "growth_mb_per_hr": 14.78,
+          "label": "active",
+          "last_rss_mb": 147.11,
+          "sample_count": 12,
+          "start_secs": 2400.0
+        },
+        {
+          "delta_mb": 0.19,
+          "end_secs": 2520.0,
+          "first_rss_mb": 147.17,
+          "growth_mb_per_hr": 16.0,
+          "label": "active",
+          "last_rss_mb": 147.36,
+          "sample_count": 12,
+          "start_secs": 2460.0
+        },
+        {
+          "delta_mb": 0.27,
+          "end_secs": 2580.0,
+          "first_rss_mb": 147.36,
+          "growth_mb_per_hr": 19.54,
+          "label": "active",
+          "last_rss_mb": 147.63,
+          "sample_count": 12,
+          "start_secs": 2520.0
+        },
+        {
+          "delta_mb": 0.39,
+          "end_secs": 2640.0,
+          "first_rss_mb": 147.66,
+          "growth_mb_per_hr": 24.85,
+          "label": "active",
+          "last_rss_mb": 148.05,
+          "sample_count": 12,
+          "start_secs": 2580.0
+        },
+        {
+          "delta_mb": 0.16,
+          "end_secs": 2700.0,
+          "first_rss_mb": 148.05,
+          "growth_mb_per_hr": 8.96,
+          "label": "active",
+          "last_rss_mb": 148.2,
+          "sample_count": 12,
+          "start_secs": 2640.0
+        },
+        {
+          "delta_mb": 0.34,
+          "end_secs": 2760.0,
+          "first_rss_mb": 148.2,
+          "growth_mb_per_hr": 24.42,
+          "label": "active",
+          "last_rss_mb": 148.55,
+          "sample_count": 12,
+          "start_secs": 2700.0
+        },
+        {
+          "delta_mb": 0.25,
+          "end_secs": 2820.0,
+          "first_rss_mb": 148.55,
+          "growth_mb_per_hr": 15.77,
+          "label": "active",
+          "last_rss_mb": 148.8,
+          "sample_count": 12,
+          "start_secs": 2760.0
+        },
+        {
+          "delta_mb": 0.11,
+          "end_secs": 2880.0,
+          "first_rss_mb": 148.8,
+          "growth_mb_per_hr": 6.84,
+          "label": "active",
+          "last_rss_mb": 148.91,
+          "sample_count": 12,
+          "start_secs": 2820.0
+        },
+        {
+          "delta_mb": 0.03,
+          "end_secs": 2940.0,
+          "first_rss_mb": 148.91,
+          "growth_mb_per_hr": 2.67,
+          "label": "active",
+          "last_rss_mb": 148.94,
+          "sample_count": 12,
+          "start_secs": 2880.0
+        },
+        {
+          "delta_mb": 0.39,
+          "end_secs": 3000.0,
+          "first_rss_mb": 148.98,
+          "growth_mb_per_hr": 24.57,
+          "label": "active",
+          "last_rss_mb": 149.38,
+          "sample_count": 12,
+          "start_secs": 2940.0
+        },
+        {
+          "delta_mb": 0.14,
+          "end_secs": 3060.0,
+          "first_rss_mb": 149.38,
+          "growth_mb_per_hr": 9.2,
+          "label": "active",
+          "last_rss_mb": 149.52,
+          "sample_count": 12,
+          "start_secs": 3000.0
+        },
+        {
+          "delta_mb": 0.36,
+          "end_secs": 3120.0,
+          "first_rss_mb": 149.58,
+          "growth_mb_per_hr": 27.25,
+          "label": "active",
+          "last_rss_mb": 149.94,
+          "sample_count": 12,
+          "start_secs": 3060.0
+        },
+        {
+          "delta_mb": 0.27,
+          "end_secs": 3180.0,
+          "first_rss_mb": 149.94,
+          "growth_mb_per_hr": 16.63,
+          "label": "active",
+          "last_rss_mb": 150.2,
+          "sample_count": 12,
+          "start_secs": 3120.0
+        },
+        {
+          "delta_mb": 0.2,
+          "end_secs": 3240.0,
+          "first_rss_mb": 150.22,
+          "growth_mb_per_hr": 11.44,
+          "label": "active",
+          "last_rss_mb": 150.42,
+          "sample_count": 12,
+          "start_secs": 3180.0
+        },
+        {
+          "delta_mb": 0.13,
+          "end_secs": 3300.0,
+          "first_rss_mb": 150.47,
+          "growth_mb_per_hr": 9.79,
+          "label": "active",
+          "last_rss_mb": 150.59,
+          "sample_count": 12,
+          "start_secs": 3240.0
+        },
+        {
+          "delta_mb": 0.25,
+          "end_secs": 3360.0,
+          "first_rss_mb": 150.59,
+          "growth_mb_per_hr": 16.71,
+          "label": "active",
+          "last_rss_mb": 150.84,
+          "sample_count": 12,
+          "start_secs": 3300.0
+        },
+        {
+          "delta_mb": 0.14,
+          "end_secs": 3420.0,
+          "first_rss_mb": 150.89,
+          "growth_mb_per_hr": 10.02,
+          "label": "active",
+          "last_rss_mb": 151.03,
+          "sample_count": 12,
+          "start_secs": 3360.0
+        },
+        {
+          "delta_mb": 0.13,
+          "end_secs": 3480.0,
+          "first_rss_mb": 151.08,
+          "growth_mb_per_hr": 5.35,
+          "label": "active",
+          "last_rss_mb": 151.2,
+          "sample_count": 12,
+          "start_secs": 3420.0
+        },
+        {
+          "delta_mb": 0.13,
+          "end_secs": 3540.0,
+          "first_rss_mb": 151.2,
+          "growth_mb_per_hr": 9.75,
+          "label": "active",
+          "last_rss_mb": 151.33,
+          "sample_count": 12,
+          "start_secs": 3480.0
+        },
+        {
+          "delta_mb": 0.0,
+          "end_secs": 3600.0,
+          "first_rss_mb": 151.33,
+          "growth_mb_per_hr": 0.0,
+          "label": "active",
+          "last_rss_mb": 151.33,
+          "sample_count": 12,
+          "start_secs": 3540.0
+        },
+        {
+          "delta_mb": 0.0,
+          "end_secs": 3660.0,
+          "first_rss_mb": 151.36,
+          "growth_mb_per_hr": 0.0,
+          "label": "controlled_drain",
+          "last_rss_mb": 151.36,
+          "sample_count": 12,
+          "start_secs": 3600.0
+        },
+        {
+          "delta_mb": 0.0,
+          "end_secs": 3720.0,
+          "first_rss_mb": 151.36,
+          "growth_mb_per_hr": 0.0,
+          "label": "post_drain",
+          "last_rss_mb": 151.36,
+          "sample_count": 12,
+          "start_secs": 3660.0
+        },
+        {
+          "delta_mb": 0.0,
+          "end_secs": 3761.62,
+          "first_rss_mb": 151.36,
+          "growth_mb_per_hr": 0.0,
+          "label": "post_drain",
+          "last_rss_mb": 151.36,
+          "sample_count": 8,
+          "start_secs": 3720.0
+        },
+        {
+          "delta_mb": 0.03,
+          "end_secs": 3761.62,
+          "first_rss_mb": 151.36,
+          "growth_mb_per_hr": 0.12,
+          "label": "post_drain",
+          "last_rss_mb": 151.39,
+          "sample_count": 33,
+          "start_secs": 3601.62
+        }
+      ]
+    }
+  },
+  "duration_secs": 0,
+  "environment": {
+    "build_profile": "release",
+    "cargo_features": [
+      "dev-insecure-tls",
+      "perf-tests"
+    ],
+    "cpu_count_logical": 16,
+    "cpu_count_physical": 16,
+    "cpu_model": "Apple M3 Max",
+    "git_commit": "fbc96ed4f1736f1cc4b0a1145497183d6acf0d2f",
+    "git_dirty": false,
+    "git_rev": "fbc96ed4",
+    "global_allocator": "mimalloc",
+    "mimalloc_enabled": true,
+    "network_topology": "loopback",
+    "nic": "loopback",
+    "os": "Darwin 26.2",
+    "requested_cargo_features": null,
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "rvoip_sip_version": "0.3.2",
+    "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+    "tokio_version": "1.40",
+    "total_ram_gb": 128.0
+  },
+  "latency_ns": {
+    "setup_latency": {
+      "count": 587,
+      "max": 18661375,
+      "mean": 3840775.8500851775,
+      "min": 799232,
+      "p50": 3624959,
+      "p95": 7700479,
+      "p99": 14991359,
+      "p99_9": 18661375
+    },
+    "setup_latency_last_minute": {
+      "count": 0,
+      "max": 0,
+      "mean": 0.0,
+      "min": 0,
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "p99_9": 0
+    },
+    "setup_latency_minute_1": {
+      "count": 35,
+      "max": 18661375,
+      "mean": 9116320.914285716,
+      "min": 3313664,
+      "p50": 8122367,
+      "p95": 16662527,
+      "p99": 18661375,
+      "p99_9": 18661375
+    }
+  },
+  "load": {
+    "cooldown_secs": 161,
+    "ramp_secs": 0,
+    "steady_secs": 3600,
+    "target_cps": 0.0
+  },
+  "resources": {
+    "avg_cpu_pct": 21.726069658439844,
+    "baseline_rss_mb": 111.015625,
+    "peak_rss_mb": 151.390625,
+    "rss_active_growth_mb_per_min": null,
+    "rss_cleanup_endpoint_growth_mb_per_hour": null,
+    "rss_cleanup_growth_mb_per_hour": null,
+    "rss_cleanup_growth_mb_per_min": null,
+    "rss_cleanup_retained_growth_mb": null,
+    "rss_growth_mb_per_min": 0.3510471740079607,
+    "rss_sample_count": 753,
+    "rss_sample_interval_estimate_secs": 5.0024070409999695,
+    "rss_samples_embedded": false,
+    "rss_samples_mb": [],
+    "rss_samples_path": null,
+    "rss_tail_growth_mb_per_min": 0.014413276619133329,
+    "rss_tail_sample_count": 12,
+    "rss_tail_window_complete": true,
+    "rss_tail_window_requested_secs": 60.0,
+    "rss_tail_window_secs": 55.03929062499992,
+    "rss_windows": {}
+  },
+  "results": {
+    "active_call_max_hold_secs": 360,
+    "active_call_min_hold_secs": 10,
+    "active_calls_offered": 587,
+    "active_calls_succeeded": 587,
+    "active_calls_target": 30,
+    "asr": 1.0,
+    "bob_active_audio_receivers": 0,
+    "bob_completed_audio_receivers": 587,
+    "bob_received_frames": 5379966,
+    "calls_offered": 587,
+    "calls_succeeded": 587,
+    "churn_calls_offered": 0,
+    "churn_calls_succeeded": 0,
+    "controlled_drain_calls": 17,
+    "controlled_drain_cps": 10.0,
+    "controlled_drain_elapsed_secs": 1.62,
+    "controlled_drain_failed": 0,
+    "controlled_drain_succeeded": 17,
+    "cps_per_core": 0.01,
+    "duration_secs": 3600,
+    "errors": {
+      "answer_failed": 0,
+      "answer_timeout": 0,
+      "call_failed": 0,
+      "invite_send_failed": 0,
+      "media_setup_failed": 0,
+      "teardown_failed": 0
+    },
+    "global_event_channel_capacity": 256,
+    "latency_drift_pct": 0.0,
+    "lifecycle_expired_terminal_entries_after_drain": 0,
+    "lifecycle_terminal_entries_after_drain": 0,
+    "media_calls_held": 30,
+    "replenishment_stop_budget_secs": 65,
+    "retained_objects_after_drain": 0,
+    "retention": {
+      "final_retained_objects": 0,
+      "first": {
+        "alice": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 0,
+              "enqueued_total": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 0,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 0
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 0
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 0,
+              "deadline_record_bytes": 128,
+              "disarmed": 0,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 2
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 0,
+              "exact_entry_table_capacity": 0,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 0,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_media_session_removed_total": 0,
+              "session_create_attempt_total": 6,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 0
+            },
+            "media_create_reservations": 6,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 0,
+              "media_mapped_total": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 6,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 6,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 7168,
+                "exact_cell_index_capacity": 7168,
+                "index_blocked": 0,
+                "index_live": 6,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 264,
+                "retained_total": 6,
+                "retired": 0,
+                "reusable_deadline_capacity": 0
+              },
+              "created_total": 6,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 6
+              },
+              "net_created_minus_removed": 6,
+              "remove_missing_total": 0,
+              "removed_total": 0,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 0,
+              "destroy_wake_failed": 0,
+              "destroy_wake_sent": 0,
+              "exited": 0,
+              "started": 0
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 0,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "bob": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 0,
+              "enqueued_total": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 0,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 0
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 0
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 0,
+              "deadline_record_bytes": 128,
+              "disarmed": 0,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 3
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 0,
+              "exact_entry_table_capacity": 0,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 0,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 0,
+              "cleanup_media_session_removed_total": 0,
+              "session_create_attempt_total": 0,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 0
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 0,
+              "media_mapped_total": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 7168,
+                "exact_cell_index_capacity": 7168,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 0
+              },
+              "created_total": 0,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 0,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 0,
+              "destroy_wake_failed": 0,
+              "destroy_wake_sent": 0,
+              "exited": 0,
+              "started": 0
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 0,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "label": "periodic",
+        "retained_total": 6,
+        "t_secs": 0.01
+      },
+      "last": {
+        "alice": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 2935,
+              "enqueued_total": 2935,
+              "in_flight_current": 0,
+              "in_flight_max": 2,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 4,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 587,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 1
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 208
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 1761,
+              "deadline_record_bytes": 128,
+              "disarmed": 1761,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 587,
+              "cleanup_mapped_total": 0,
+              "cleanup_missing_total": 587,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 0,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 0,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 0
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 2
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 328,
+              "exact_entry_table_capacity": 340,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 0,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 587,
+              "cleanup_audio_receiver_removed_total": 0,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 587,
+              "cleanup_media_session_removed_total": 587,
+              "session_create_attempt_total": 587,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 587
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 587,
+              "media_mapped_total": 587,
+              "remove_missing_total": 0,
+              "removed_total": 587
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 0,
+                "exact_cell_index_capacity": 0,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 32
+              },
+              "created_total": 587,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 587,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 60,
+              "destroy_wake_failed": 862,
+              "destroy_wake_sent": 312,
+              "exited": 2348,
+              "started": 2348
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 196,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 192,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 0,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "bob": {
+          "app_event_publisher": {
+            "dispatcher": {
+              "best_effort_dropped": 0,
+              "closed_admissions": 0,
+              "delivered_total": 1174,
+              "enqueued_total": 1174,
+              "in_flight_current": 0,
+              "in_flight_max": 1,
+              "publication_failures": 0,
+              "queued_current": 0,
+              "queued_max": 1,
+              "saturated_admissions": 0,
+              "shutdown_aborted_workers": 0,
+              "shutdown_timeouts": 0,
+              "terminal_delivered_total": 587,
+              "terminal_queued_current": 0,
+              "terminal_queued_max": 1
+            },
+            "exact_terminal_claims": {
+              "completed": 0,
+              "deadlines": 0,
+              "pending": 0,
+              "retention_secs": 60,
+              "slots": 0,
+              "storage": {
+                "handle_identifier_payload_bytes": 0,
+                "identity_payload_bytes": 0,
+                "record_inline_bytes": {
+                  "claim_state": 16,
+                  "deadline_key": 24,
+                  "deadline_record": 64,
+                  "exact_claim_key": 48
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "slot_table_capacity": 192
+              }
+            }
+          },
+          "cleanup": {
+            "active_total": 0,
+            "enabled": false,
+            "session_event_dispatch": {
+              "aborted_workers": 0,
+              "closed": 0,
+              "dropped": 0,
+              "publication_failed": 0,
+              "publication_timed_out": 0,
+              "saturated": 0,
+              "shutdown_timeouts": 0
+            },
+            "setup_teardown_watchdog": {
+              "accepting": true,
+              "armed": 1761,
+              "deadline_record_bytes": 128,
+              "disarmed": 1761,
+              "fire_concurrency_limit": 64,
+              "fire_in_flight": 0,
+              "fired": 0,
+              "pending_by_owner": {
+                "accepted_call": 0,
+                "accepted_call_with_sdp": 0,
+                "cancellation": 0,
+                "inbound_setup": 0,
+                "outbound_setup": 0
+              },
+              "pending_deadlines": 0,
+              "release_completed": 0,
+              "release_failed": 0,
+              "retained_task_panicked": false,
+              "retained_tasks": 70,
+              "transition_failed": 0
+            }
+          },
+          "dialog_adapter": {
+            "lifecycle": {
+              "cleanup_attempt_total": 1174,
+              "cleanup_mapped_total": 1174,
+              "cleanup_missing_total": 0,
+              "cleanup_outgoing_invite_removed_total": 0
+            },
+            "outbound_initial_invites": 0,
+            "outbound_request_tracker": {
+              "deferred_events": 0,
+              "live_requests": 0
+            },
+            "outgoing_bye_generation_watch": 0,
+            "outgoing_bye_tx": 0,
+            "outgoing_bye_wait_intents": 0,
+            "outgoing_invite_tx": 0,
+            "registration_refresh_retained_tasks": 0,
+            "registration_refresh_tasks": 0
+          },
+          "dialog_manager": {
+            "active_invite_failover_by_dialog": 0,
+            "dialog_invite_transactions": 0,
+            "dialog_lookup": 0,
+            "dialog_server_transactions": 0,
+            "dialog_to_session": 0,
+            "dialogs": 0,
+            "early_dialog_lookup": 0,
+            "flow_by_aor": 0,
+            "flow_by_destination": 0,
+            "invite_failover_attempt_reservations": 0,
+            "invite_failover_attempts": 0,
+            "invite_failover_attempts_by_dialog": 0,
+            "invite_failover_plan_reservations": 0,
+            "invite_failover_plans": 0,
+            "invite_failover_plans_by_dialog": 0,
+            "outbound_flow_tasks": 0,
+            "outbound_flows": 0,
+            "pending_response_transaction_by_dialog": 0,
+            "reliable_provisional_tasks": 0,
+            "session_refresh_tasks": 0,
+            "session_to_dialog": 0,
+            "terminated_bye_deadlines": 0,
+            "terminated_bye_lookup": 0,
+            "transaction_dialog_route_hash": 0,
+            "transaction_to_dialog": 0
+          },
+          "exact_response_supervisor": {
+            "accepting": true,
+            "closing_lifetimes": 0,
+            "deadline_record_bytes": 80,
+            "fire_concurrency_limit": 256,
+            "fire_in_flight": 0,
+            "pending_deadlines": 0,
+            "pending_obligations": 0,
+            "retry_attempts": 0
+          },
+          "global_event_bus": {
+            "broadcast_retained_total": 0,
+            "channel_capacity": 256,
+            "event_types": {
+              "media_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "session_to_app": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              },
+              "transport_to_session": {
+                "broadcast_capacity": 256,
+                "broadcast_receivers": 1,
+                "broadcast_retained": 0,
+                "subscriber_queue_count": 1,
+                "subscriber_queued": 0,
+                "subscriber_queued_max": 0,
+                "subscriber_weak_slots": 1
+              }
+            },
+            "mode": "monolithic",
+            "observational_handlers": {
+              "delivered_total": 0,
+              "dropped_closed": 0,
+              "dropped_full": 0,
+              "dropped_shutdown_in_flight": 0,
+              "dropped_shutdown_queued": 0,
+              "enqueued_total": 0,
+              "handler_failures": 0,
+              "in_flight_current": 0,
+              "in_flight_max": 0,
+              "lifecycle_state": 0,
+              "queued_current": 0,
+              "queued_max": 0,
+              "registered": 4,
+              "shutdown_aborted_workers": 0
+            },
+            "subscriber_dead_weak_slots_pruned_total": 0,
+            "subscriber_queued_total": 0,
+            "subscriber_weak_slots_total": 3
+          },
+          "lifecycle": {
+            "answered_entries": 0,
+            "entries": 0,
+            "exact_entries": 0,
+            "exact_waiters": 0,
+            "expired_terminal_entries": 0,
+            "progress_events": 0,
+            "pruned_expired_exact_terminal_entries": 0,
+            "pruned_expired_terminal_entries": 0,
+            "retained_sdp_bytes": 0,
+            "retained_terminal_reason_bytes": 0,
+            "storage": {
+              "entry_identifier_payload_bytes": 0,
+              "entry_table_capacity": 320,
+              "exact_entry_table_capacity": 296,
+              "exact_terminal_deadline_records": 0,
+              "exact_waiter_table_capacity": 0,
+              "record_inline_bytes": {
+                "deadline_key": 24,
+                "entry_key": 8,
+                "exact_entry_key": 48,
+                "lifecycle_entry": 96,
+                "session_id": 24,
+                "terminal_lifecycle_entry": 64
+              },
+              "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+              "terminal_deadline_identifier_payload_bytes": 0,
+              "terminal_deadline_identifiers_share_entry_keys": true,
+              "terminal_deadline_records": 0,
+              "waiter_table_capacity": 0
+            },
+            "terminal_entries": 0,
+            "terminal_ttl_secs": 60,
+            "waiters": 0
+          },
+          "media_adapter": {
+            "audio_mixers": 0,
+            "audio_receiver_capacity_frames": 0,
+            "audio_receiver_queue_frames": 0,
+            "audio_receivers": 0,
+            "audio_send": {
+              "frames_total": 0,
+              "samples_total": 0
+            },
+            "controller": {
+              "compiled": false,
+              "enabled": false,
+              "feature": "perf-media-diagnostics"
+            },
+            "dialog_to_session": 0,
+            "lifecycle": {
+              "audio_subscriber_created_total": 587,
+              "audio_subscriber_disconnected_total": 0,
+              "cleanup_attempt_total": 587,
+              "cleanup_audio_receiver_removed_total": 587,
+              "cleanup_fallback_total": 0,
+              "cleanup_mapped_total": 587,
+              "cleanup_media_session_removed_total": 587,
+              "session_create_attempt_total": 587,
+              "session_create_failed_total": 0,
+              "session_create_success_total": 587
+            },
+            "media_create_reservations": 0,
+            "media_resources": 0,
+            "media_sessions": 0,
+            "negotiated_srtp": 0,
+            "pending_srtp_offerers": 0,
+            "registry_media_bindings": 0,
+            "session_to_dialog": 0
+          },
+          "retained_tasks": {
+            "coordinator_runtime": 70,
+            "coordinator_runtime_panicked": false,
+            "registration_refresh": 0
+          },
+          "session_registry": {
+            "dialog_mappings": 0,
+            "entries": 0,
+            "lifecycle": {
+              "dialog_mapped_total": 587,
+              "media_mapped_total": 587,
+              "remove_missing_total": 0,
+              "removed_total": 587
+            },
+            "lock_poisoned": false,
+            "media_mappings": 0,
+            "sessions": 0
+          },
+          "session_store": {
+            "active": 0,
+            "failed": 0,
+            "idle": 0,
+            "initiating": 0,
+            "lifecycle": {
+              "authority": {
+                "active": 0,
+                "active_capacity": 65536,
+                "active_capacity_in_use": 0,
+                "admission_index_capacity": 7168,
+                "current_index_capacity": 0,
+                "exact_cell_index_capacity": 0,
+                "index_blocked": 0,
+                "index_live": 0,
+                "quarantined": 0,
+                "quiescing": 0,
+                "record_inline_bytes": {
+                  "session_id": 24,
+                  "session_key": 64
+                },
+                "releasing": 0,
+                "retained_capacity": 131072,
+                "retained_identifier_payload_bytes": 0,
+                "retained_total": 0,
+                "retired": 0,
+                "reusable_deadline_capacity": 32
+              },
+              "created_total": 587,
+              "live_indexes": {
+                "call_id": 0,
+                "dialog": 0,
+                "media": 0,
+                "session_cells": 0
+              },
+              "net_created_minus_removed": 0,
+              "remove_missing_total": 0,
+              "removed_total": 587,
+              "update_missing_total": 0
+            },
+            "on_hold": 0,
+            "ringing": 0,
+            "terminated": 0,
+            "terminating": 0,
+            "total": 0
+          },
+          "sip_dialog_diagnostics": {
+            "bye_tombstone": {
+              "hit": 0,
+              "miss": 0,
+              "table_size_max": 0
+            },
+            "invite_2xx_cache": {
+              "ack_removed": 0,
+              "expired": 0,
+              "insert": 0,
+              "maintenance_cache_len_max": 0,
+              "maintenance_capped_ticks": 0,
+              "maintenance_due": 0,
+              "maintenance_due_queue_len_max": 0,
+              "maintenance_expired": 0
+            },
+            "transaction_cleanup": {
+              "enqueued": 0,
+              "in_flight": 0,
+              "max_in_flight": 0,
+              "poll_attempts": 0,
+              "queue_full": 0,
+              "removed": 0
+            },
+            "transaction_runner": {
+              "active": 0,
+              "active_max": 60,
+              "destroy_wake_failed": 862,
+              "destroy_wake_sent": 312,
+              "exited": 2348,
+              "started": 2348
+            }
+          },
+          "state_machine_helpers": {
+            "active_sessions": 0,
+            "subscriber_sessions": 0
+          },
+          "transaction_manager": {
+            "breakdown": {
+              "client_by_kind": {},
+              "client_by_lifecycle": {},
+              "client_by_method": {},
+              "client_by_state": {},
+              "client_completions": {
+                "active": 0,
+                "compact": 0,
+                "deadlines": 0,
+                "parsed_responses": 0,
+                "retained": 0,
+                "wire_response_bytes": 0,
+                "wire_responses": 0
+              },
+              "compact_non_invite_deadlines": 0,
+              "compact_non_invite_tombstones": 0,
+              "retired_client": {
+                "ack_template_allocations": 0,
+                "deadlines": 0,
+                "request_wire_bytes": 0,
+                "transactions": 0
+              },
+              "retired_client_ack_template_allocations": 0,
+              "retired_client_deadlines": 0,
+              "retired_client_request_wire_bytes": 0,
+              "retired_client_transactions": 0,
+              "server_by_kind": {},
+              "server_by_lifecycle": {},
+              "server_by_method": {},
+              "server_by_state": {},
+              "storage": {
+                "client_completion": {
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_route_shared_key_records": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "wire_response_bytes": 0
+                },
+                "compact_non_invite": {
+                  "client_completion_wire_bytes": 0,
+                  "client_live_completion_cells": 0,
+                  "client_route_owner_proofs": 0,
+                  "client_tombstones": 0,
+                  "server_response_wire_bytes": 0,
+                  "server_tombstones": 0,
+                  "transaction_key_payload_bytes": 0
+                },
+                "record_inline_bytes": {
+                  "client_completion_entry": 88,
+                  "client_response_route_state": 232,
+                  "compact_non_invite_tombstone": 200,
+                  "live_client_completion": 112,
+                  "retained_client_completion": 88,
+                  "retired_client_transaction": 232,
+                  "server_invite_ack_expiry_entry": 96,
+                  "server_invite_ack_index_entry": 88,
+                  "server_invite_dialog_key": 72,
+                  "transaction_key": 56,
+                  "transport_route": 88
+                },
+                "retired_client_route": {
+                  "completion_wire_bytes": 0,
+                  "consolidated_layout": {
+                    "current_deadline_records": 0,
+                    "current_index_inline_bytes_per_record": 16,
+                    "current_map_records": 0,
+                    "current_transaction_key_payload_allocated_bytes": 0,
+                    "current_value_inline_bytes_per_record": 232,
+                    "current_wire_backing_allocations": 0,
+                    "legacy_deadline_records": 0,
+                    "legacy_index_inline_bytes_per_record": 128,
+                    "legacy_map_records": 0,
+                    "legacy_transaction_key_payload_allocated_bytes": 0,
+                    "legacy_value_inline_bytes_per_record": 232,
+                    "legacy_wire_backing_allocations": 0,
+                    "records": 0,
+                    "shared_deadline_key_records": 0,
+                    "shared_request_response_records": 0
+                  },
+                  "deadline_records": 0,
+                  "deadline_shared_key_records": 0,
+                  "deadline_transaction_key_payload_bytes": 0,
+                  "map_transaction_key_payload_bytes": 0,
+                  "request_wire_bytes": 0,
+                  "shared_request_response_wire_records": 0
+                },
+                "scope": "payload_and_inline_estimates_exclude_container_node_and_allocator_overhead",
+                "server_invite_ack_index": {
+                  "expiry_dialog_key_payload_bytes": 0,
+                  "expiry_records": 0,
+                  "index_dialog_key_payload_bytes": 0,
+                  "index_records": 0,
+                  "index_transaction_key_payload_bytes": 0,
+                  "reverse_dialog_key_payload_bytes": 0,
+                  "reverse_records": 0,
+                  "reverse_transaction_key_payload_bytes": 0
+                },
+                "table_capacity": {
+                  "client_completions": 0,
+                  "client_transactions": 7168,
+                  "compact_non_invite_tombstones": 196,
+                  "pending_inbound_bytes": 7168,
+                  "pending_inbound_inserted_at": 7168,
+                  "pending_inbound_principal_inserted_at": 7168,
+                  "pending_inbound_principals": 7168,
+                  "pending_inbound_timing": 7168,
+                  "pending_inbound_transport": 7168,
+                  "server_invite_dialog_index": 192,
+                  "server_invite_dialog_keys_by_tx": 7168,
+                  "server_transactions": 7168,
+                  "terminated_transactions": 7168,
+                  "transaction_destinations": 7168,
+                  "transaction_to_subscribers": 0
+                },
+                "transaction_index_capacity": {
+                  "initial_per_map": 4096,
+                  "logical": 10000,
+                  "max_eager_per_map": 4096
+                }
+              }
+            },
+            "client_transactions": 0,
+            "event_subscribers": 0,
+            "invite_2xx_response_cache": 0,
+            "invite_2xx_response_due_queue": 0,
+            "pending_inbound_bytes": 0,
+            "pending_inbound_timing": 0,
+            "retired_client_transactions": 0,
+            "server_invite_dialog_index": 0,
+            "server_invite_dialog_keys_by_tx": 0,
+            "server_transactions": 0,
+            "subscriber_to_transactions": 0,
+            "terminated_transactions": 0,
+            "total": 0,
+            "transaction_destinations": 0,
+            "transaction_to_subscribers": 0
+          }
+        },
+        "label": "after_drain",
+        "retained_total": 0,
+        "t_secs": 3761.62
+      },
+      "max_retained_objects": 1254,
+      "sample_count": 127,
+      "samples_path": "<workspace>/target/beta-gate/20260729T010954Z/perf-results/perf_soak_30min_retention_samples_89273.jsonl"
+    },
+    "retention_drain_reason": "default covers UDP non-INVITE Timer J plus transaction runner grace",
+    "retention_drain_wait_secs": 160,
+    "rss_active_tail_end_sample_count": 12,
+    "rss_active_tail_endpoint_band_secs": 60.0,
+    "rss_active_tail_endpoint_separation_secs": 540.28,
+    "rss_active_tail_estimator": "median_first_last_sixth_capped_60s",
+    "rss_active_tail_growth_mb_per_hr": 12.7,
+    "rss_active_tail_sample_count": 120,
+    "rss_active_tail_start_sample_count": 12,
+    "rss_active_tail_window_complete": true,
+    "rss_active_tail_window_secs": 595.31,
+    "rss_gate": {
+      "alice_config_mb_per_hr": null,
+      "bob_config_mb_per_hr": null,
+      "default_mb_per_hr": 10.0,
+      "effective_mb_per_hr": 15.0,
+      "env_override_mb_per_hr": 15.0,
+      "source": "env:RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR"
+    },
+    "rss_gate_growth_mb_per_hr": 12.7,
+    "rss_gate_window": "active_tail_600s",
+    "rss_growth_mb_per_hr": 21.06,
+    "rss_post_drain_growth_mb_per_hr": 0.12,
+    "rss_post_drain_sample_count": 33,
+    "rss_post_drain_start_secs": 3601.62,
+    "rss_sustained_growth_mb_per_hr": 0.86,
+    "session_event_dispatcher_channel_capacity": 256,
+    "sip_transaction_command_channel_capacity": 32,
+    "soak_cps": 0.0,
+    "teardown_phase_elapsed_secs": 1.62,
+    "transaction_manager_active_after_drain": 0,
+    "transaction_runner_active_after_drain": 0
+  },
+  "scenario": "perf_soak_30min"
+}

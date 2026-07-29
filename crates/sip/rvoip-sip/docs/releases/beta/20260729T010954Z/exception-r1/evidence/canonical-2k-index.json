@@ -1,0 +1,66 @@
+{
+  "schema": "rvoip-canonical-2k-evidence-v2",
+  "status": "PASS",
+  "scenario": "perf_call_setup_cps_pbx-media-server",
+  "run_count": 3,
+  "source_at_beta_start": {
+    "git_commit": "fbc96ed4f1736f1cc4b0a1145497183d6acf0d2f",
+    "git_rev": "fbc96ed4",
+    "git_tree": "2dfc781726589cf5758c6277ab5ae82441f4b495",
+    "git_dirty": false,
+    "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c"
+  },
+  "common_source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+  "common_executable_sha256": "48e2c81731ef3424a412b67d7541f9f0e416b02291812cdd984c0023449ede57",
+  "packaged_executable": "executable/perf_call_setup_cps-cd977a51e6356a45",
+  "reviewed_baseline": {
+    "id": "20260706T181609Z",
+    "relative_path": "perf_call_setup_cps_pbx-media-server/2000.json",
+    "sha256": "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3",
+    "packaged_path": "reviewed-baseline/perf_call_setup_cps_pbx-media-server/2000.json"
+  },
+  "runs": [
+    {
+      "sequence": 1,
+      "source_run_dir": "<workspace>/target/perf-results/profiles/20260729T001656Z_clean_3N6dhy",
+      "packaged_run_dir": "run-1",
+      "captured_at_utc": "2026-07-29T00:40:07.639049+00:00",
+      "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+      "executable_sha256": "48e2c81731ef3424a412b67d7541f9f0e416b02291812cdd984c0023449ede57",
+      "reviewed_baseline_id": "20260706T181609Z",
+      "reviewed_baseline_relative_path": "perf_call_setup_cps_pbx-media-server/2000.json",
+      "reviewed_baseline_sha256": "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3",
+      "reviewed_baseline_origin": "tracked-default",
+      "source_tree_sha256": "14527448d58e183cb37b57c173e3fb1bf28fb27f4f586decc2f99288f9918664",
+      "packaged_tree_sha256": "14527448d58e183cb37b57c173e3fb1bf28fb27f4f586decc2f99288f9918664"
+    },
+    {
+      "sequence": 2,
+      "source_run_dir": "<workspace>/target/perf-results/profiles/20260729T004007Z_clean_ez7qJb",
+      "packaged_run_dir": "run-2",
+      "captured_at_utc": "2026-07-29T00:55:01.263786+00:00",
+      "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+      "executable_sha256": "48e2c81731ef3424a412b67d7541f9f0e416b02291812cdd984c0023449ede57",
+      "reviewed_baseline_id": "20260706T181609Z",
+      "reviewed_baseline_relative_path": "perf_call_setup_cps_pbx-media-server/2000.json",
+      "reviewed_baseline_sha256": "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3",
+      "reviewed_baseline_origin": "tracked-default",
+      "source_tree_sha256": "5a2cb54496be09b8dce43724a51c1a676b77874ef05a07f0b1a14552b535c93a",
+      "packaged_tree_sha256": "5a2cb54496be09b8dce43724a51c1a676b77874ef05a07f0b1a14552b535c93a"
+    },
+    {
+      "sequence": 3,
+      "source_run_dir": "<workspace>/target/perf-results/profiles/20260729T005501Z_clean_KWysQw",
+      "packaged_run_dir": "run-3",
+      "captured_at_utc": "2026-07-29T01:09:54.676576+00:00",
+      "source_fingerprint_sha256": "cd26a7d50a512633344d931acbed15cf4523c87808d14b7c8acd4dbeb42dd70c",
+      "executable_sha256": "48e2c81731ef3424a412b67d7541f9f0e416b02291812cdd984c0023449ede57",
+      "reviewed_baseline_id": "20260706T181609Z",
+      "reviewed_baseline_relative_path": "perf_call_setup_cps_pbx-media-server/2000.json",
+      "reviewed_baseline_sha256": "6d55df11e169ff22dd955c466c02cb86a506830559e3f9d2aa03fc2b86f417c3",
+      "reviewed_baseline_origin": "tracked-default",
+      "source_tree_sha256": "7825306740a3b04f4cdced08feea991ac391f07fb9500207c127d37977824487",
+      "packaged_tree_sha256": "7825306740a3b04f4cdced08feea991ac391f07fb9500207c127d37977824487"
+    }
+  ]
+}

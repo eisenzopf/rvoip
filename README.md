@@ -25,6 +25,9 @@
 > available today as developer-preview surfaces unless their own documentation
 > states a narrower qualification. Available does not mean API-stable or
 > production-certified; breaking changes remain possible before `1.0`.
+> The 0.3.2 SIP release is [approved with one documented performance
+> exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md); its strict
+> automated qualification remains NON-RC.
 
 ## What ships today
 
@@ -277,9 +280,13 @@ SIP beta claims are intentionally bounded by checked-in evidence rather than
 inferred from the presence of parser types, low-level primitives, or another
 product's implementation:
 
-- [Beta performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md)
-  — canonical and matrix results, including the documented general full-media
-  profile of up to 2,000 target CPS.
+- [0.3.2 release exception](crates/sip/rvoip-sip/docs/BETA_RELEASE_EXCEPTION.md)
+  and [performance evidence](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_EXCEPTION.md)
+  — the complete owner-approved disposition, strict 106/108 result, and the
+  accepted high-density burst deviation.
+- [Last strict beta candidate](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)
+  — the most recent candidate that passed all 108 automated gates without an
+  exception.
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) —
   exact supported, partial, and unsupported standards claims.
 - [Security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md) —

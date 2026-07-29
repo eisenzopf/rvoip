@@ -4,13 +4,16 @@
 
 No changes yet.
 
-## 0.3.2 — 2026-07-26
+## 0.3.2 — 2026-07-29
 
 This unified release advances the reusable Bridgefu 1.0 foundation across all
 44 publishable workspace crates.
 
 ### Added
 
+- Hash-bound release-exception reporting for the owner-approved 0.3.2
+  candidate, with the strict 106/108 gate result and NON-RC qualification
+  preserved rather than rewritten.
 - Complete authenticated-principal propagation and ownership checks across
   SIP, WebRTC, UCTP, routes, and operational events.
 - Transport-neutral `DataMessage`, arbitrary WebRTC DataChannels, SIP MESSAGE,

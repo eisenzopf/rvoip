@@ -1,0 +1,3796 @@
+{
+  "binding_mode": "native-v2-input",
+  "failed": 2,
+  "mode": "full",
+  "passed": 106,
+  "records": [
+    {
+      "category": "Source integrity",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T01:09:56Z",
+      "evidence": [
+        {
+          "path": "clean_beta_source_fingerprint.log",
+          "sha256": "fabc8a2bccd1a9fd949ebb2efd05acd32d7f68e5f1c9045912c450282d49e89d"
+        }
+      ],
+      "id": "source.clean-start",
+      "kind": "source",
+      "name": "clean beta source fingerprint",
+      "sanitized_argv": [
+        "verify_clean_source_fingerprint"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 1,
+      "started_at_utc": "2026-07-29T01:09:56Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Source integrity",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T01:09:56Z",
+      "evidence": [
+        {
+          "path": "canonical_2k_three-pass_evidence.log",
+          "sha256": "0060282c9e5f265d49f2c0499036560f4c2eb205c8496e1e7a1db81f7cf7a9d8"
+        }
+      ],
+      "id": "source.canonical-2k",
+      "kind": "source",
+      "name": "canonical 2k three-pass evidence",
+      "sanitized_argv": [
+        "python3",
+        "<workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py",
+        "import",
+        "--workspace-root",
+        "<workspace>",
+        "--beta-start",
+        "<workspace>/target/beta-gate/20260729T010954Z/environment/source-at-beta-start.json",
+        "--artifact-dir",
+        "<workspace>/target/beta-gate/20260729T010954Z",
+        "--run-dir",
+        "<workspace>/target/perf-results/profiles/20260729T001656Z_clean_3N6dhy",
+        "--run-dir",
+        "<workspace>/target/perf-results/profiles/20260729T004007Z_clean_ez7qJb",
+        "--run-dir",
+        "<workspace>/target/perf-results/profiles/20260729T005501Z_clean_KWysQw"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 2,
+      "started_at_utc": "2026-07-29T01:09:56Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 4,
+      "ended_at_utc": "2026-07-29T01:10:01Z",
+      "evidence": [
+        {
+          "path": "format_check.log",
+          "sha256": "5872fca0a420fc7d3f9f806f5e9972fb4842dde6da119184c337bf8b449367e7"
+        }
+      ],
+      "id": "build.format",
+      "kind": "cargo",
+      "name": "format check",
+      "sanitized_argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 3,
+      "started_at_utc": "2026-07-29T01:09:57Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 8,
+      "ended_at_utc": "2026-07-29T01:10:09Z",
+      "evidence": [
+        {
+          "path": "beta_evidence_helper_tests.log",
+          "sha256": "73030355fe949cebace4942252969b545544b73da7a9f0d1a7fc8dabf8795552"
+        }
+      ],
+      "id": "build.evidence-helper-tests",
+      "kind": "cargo",
+      "name": "beta evidence helper tests",
+      "sanitized_argv": [
+        "python3",
+        "-m",
+        "unittest",
+        "crates/sip/rvoip-sip/scripts/test_beta_attestation.py",
+        "crates/sip/rvoip-sip/scripts/test_beta_performance_gate_metrics.py",
+        "crates/sip/rvoip-sip/scripts/test_beta_gate_source.py",
+        "crates/sip/rvoip-sip/scripts/test_perf_audit.py",
+        "crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py",
+        "crates/sip/rvoip-sip/scripts/test_perf_2k_acceptance.py",
+        "crates/sip/rvoip-sip/scripts/test_perf_2k_baseline.py",
+        "crates/sip/rvoip-sip/scripts/test_perf_regression_baseline.py",
+        "crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py",
+        "crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 4,
+      "started_at_utc": "2026-07-29T01:10:01Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 328,
+      "ended_at_utc": "2026-07-29T01:15:37Z",
+      "evidence": [
+        {
+          "path": "public_api_compatibility.log",
+          "sha256": "c2316fca63e15a8927573c53e889b7bed96d0a5ad72b3836e57b66a2946d06dc"
+        }
+      ],
+      "id": "build.public-api",
+      "kind": "cargo",
+      "name": "public API compatibility",
+      "sanitized_argv": [
+        "<workspace>/crates/sip/rvoip-sip/scripts/check_public_api.sh"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 5,
+      "started_at_utc": "2026-07-29T01:10:09Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 300,
+      "ended_at_utc": "2026-07-29T01:20:37Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_all-target_check.log",
+          "sha256": "d8a640fbfc6bfc33482e57796acc5cc27c90b12a4b0e6c44e6d9cc30661fefa4"
+        }
+      ],
+      "id": "build.sip-all-targets",
+      "kind": "cargo",
+      "name": "rvoip-sip all-target check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-sip",
+        "--all-targets",
+        "--features",
+        "generated-validation,dev-insecure-tls"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 6,
+      "started_at_utc": "2026-07-29T01:15:37Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 22,
+      "ended_at_utc": "2026-07-29T01:20:59Z",
+      "evidence": [
+        {
+          "path": "claimed_lower-crate_check.log",
+          "sha256": "62e2c0e5993f0ed250bef0af36f901b0f7ded9bc868c39d249fcedb2c2ae4685"
+        }
+      ],
+      "id": "build.claimed-lower-crates",
+      "kind": "cargo",
+      "name": "claimed lower-crate check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-sip-core",
+        "-p",
+        "rvoip-sip-transport",
+        "-p",
+        "rvoip-sip-dialog",
+        "-p",
+        "rvoip-media-core",
+        "-p",
+        "rvoip-rtp-core",
+        "-p",
+        "rvoip-auth-core",
+        "-p",
+        "rvoip-sip-registrar",
+        "-p",
+        "rvoip-sip-proxy",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 7,
+      "started_at_utc": "2026-07-29T01:20:37Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 35,
+      "ended_at_utc": "2026-07-29T01:21:34Z",
+      "evidence": [
+        {
+          "path": "supporting_sip_crate_tests.log",
+          "sha256": "1125bf500ddb1d011303876877c05aa247b0be629d1f6b48e99d91315cb86760"
+        }
+      ],
+      "id": "test.supporting-sip-crates",
+      "kind": "cargo",
+      "name": "supporting SIP crate tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-auth-core",
+        "-p",
+        "rvoip-sip-registrar",
+        "-p",
+        "rvoip-sip-proxy",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 8,
+      "started_at_utc": "2026-07-29T01:20:59Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 37,
+      "ended_at_utc": "2026-07-29T01:22:11Z",
+      "evidence": [
+        {
+          "path": "rtp-core_tests.log",
+          "sha256": "97b51b3772ba55fa70baca646f4c7e285b19a31bd198e705f715b53099258e70"
+        }
+      ],
+      "id": "test.rtp-core",
+      "kind": "cargo",
+      "name": "rtp-core tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-rtp-core",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 9,
+      "started_at_utc": "2026-07-29T01:21:34Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 306,
+      "ended_at_utc": "2026-07-29T01:27:18Z",
+      "evidence": [
+        {
+          "path": "workspace_unit_tests.log",
+          "sha256": "f72665b9db76e08fc65cdb894b50505b44845688d080d7ed64f3d4f0748eac22"
+        }
+      ],
+      "id": "test.workspace-unit",
+      "kind": "cargo",
+      "name": "workspace unit tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--exclude",
+        "rvoip-sip",
+        "--lib"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 10,
+      "started_at_utc": "2026-07-29T01:22:12Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 703,
+      "ended_at_utc": "2026-07-29T01:39:01Z",
+      "evidence": [
+        {
+          "path": "workspace_target_and_integration_tests.log",
+          "sha256": "3fd0dc28ff9f481fb83471eaab7a57f872fb0aaebc3d266fad40da23218b92ab"
+        }
+      ],
+      "id": "test.workspace-integration",
+      "kind": "cargo",
+      "name": "workspace target and integration tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--exclude",
+        "rvoip-sip",
+        "--bins",
+        "--examples",
+        "--tests"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 11,
+      "started_at_utc": "2026-07-29T01:27:18Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 615,
+      "ended_at_utc": "2026-07-29T01:49:16Z",
+      "evidence": [
+        {
+          "path": "workspace_doctests.log",
+          "sha256": "a51467d16233955d1745fa98add9b7eb0634f343addc82f0b1d4d1c6339ead17"
+        }
+      ],
+      "id": "test.workspace-doctest",
+      "kind": "cargo",
+      "name": "workspace doctests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--exclude",
+        "rvoip-sip",
+        "--doc"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 12,
+      "started_at_utc": "2026-07-29T01:39:01Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 220,
+      "ended_at_utc": "2026-07-29T01:52:56Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_unit_tests.log",
+          "sha256": "32adf295ad706bba5f982380930365a65dd16a6597b1ba0adf9231b619541103"
+        }
+      ],
+      "id": "test.sip-unit",
+      "kind": "cargo",
+      "name": "rvoip-sip unit tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--lib"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 13,
+      "started_at_utc": "2026-07-29T01:49:16Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1048,
+      "ended_at_utc": "2026-07-29T02:10:24Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_integration_tests.log",
+          "sha256": "cc1ee5da5c9d568becfc22705b0090f33b25a115de005839ac626377b4fca87f"
+        }
+      ],
+      "id": "test.sip-integration",
+      "kind": "cargo",
+      "name": "rvoip-sip integration tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--tests",
+        "--features",
+        "generated-validation,dev-insecure-tls"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 14,
+      "started_at_utc": "2026-07-29T01:52:56Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 52,
+      "ended_at_utc": "2026-07-29T02:11:17Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_doctests.log",
+          "sha256": "d059c6b776e1186cf7971f7674b460d5054d586e3d28b43713aed4933839fb86"
+        }
+      ],
+      "id": "test.sip-doctest",
+      "kind": "cargo",
+      "name": "rvoip-sip doctests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--doc"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 15,
+      "started_at_utc": "2026-07-29T02:10:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 274,
+      "ended_at_utc": "2026-07-29T02:15:52Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_examples_compile.log",
+          "sha256": "761a7ea923d3d4420000064168e751072225d6397911657ac8f9f951253f5c5c"
+        }
+      ],
+      "id": "build.sip-examples",
+      "kind": "cargo",
+      "name": "rvoip-sip examples compile",
+      "sanitized_argv": [
+        "cargo",
+        "build",
+        "-p",
+        "rvoip-sip",
+        "--examples",
+        "--features",
+        "dev-insecure-tls"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 16,
+      "started_at_utc": "2026-07-29T02:11:18Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 143,
+      "ended_at_utc": "2026-07-29T02:18:15Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip_default_check.log",
+          "sha256": "5e75102665b533e4023966d27e9a49406c6d2994cb9aae4e46f27890ca2f439e"
+        }
+      ],
+      "id": "build.downstream-rvoip",
+      "kind": "cargo",
+      "name": "downstream rvoip default check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip",
+        "--lib"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 17,
+      "started_at_utc": "2026-07-29T02:15:52Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 151,
+      "ended_at_utc": "2026-07-29T02:20:46Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip_app_check.log",
+          "sha256": "5b6da473d451b7b33b744c4d079a9f5eccb87598c1375759d62724e24d9688de"
+        }
+      ],
+      "id": "build.downstream-rvoip-app",
+      "kind": "cargo",
+      "name": "downstream rvoip app check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip",
+        "--lib",
+        "--no-default-features",
+        "--features",
+        "app"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 18,
+      "started_at_utc": "2026-07-29T02:18:15Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 14,
+      "ended_at_utc": "2026-07-29T02:21:00Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-client_default_check.log",
+          "sha256": "f38584418c185db6e650d7abbe75490c070ad451b565b2f8eca1afd6f999e085"
+        }
+      ],
+      "id": "build.downstream-client",
+      "kind": "cargo",
+      "name": "downstream rvoip-client default check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-client",
+        "--lib"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 19,
+      "started_at_utc": "2026-07-29T02:20:46Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 141,
+      "ended_at_utc": "2026-07-29T02:23:21Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-client_full_check.log",
+          "sha256": "2e4b5ac7a911fbb083fa546c63132edb3a438f081dde86db7b4e23fad34670df"
+        }
+      ],
+      "id": "build.downstream-client-full",
+      "kind": "cargo",
+      "name": "downstream rvoip-client full check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-client",
+        "--lib",
+        "--no-default-features",
+        "--features",
+        "full"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 20,
+      "started_at_utc": "2026-07-29T02:21:00Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 3,
+      "ended_at_utc": "2026-07-29T02:23:24Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-core_check.log",
+          "sha256": "99491a64291153b7201157849f44df61301364579fe71a12c5cf174a475a655a"
+        }
+      ],
+      "id": "build.downstream-core",
+      "kind": "cargo",
+      "name": "downstream rvoip-core check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-core",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 21,
+      "started_at_utc": "2026-07-29T02:23:21Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 148,
+      "ended_at_utc": "2026-07-29T02:25:52Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-amazon-connect_server_check.log",
+          "sha256": "86be30fa734a420e18f58971154c554cde28382aff0c45919d7572845b2f39f2"
+        }
+      ],
+      "id": "build.downstream-amazon-connect",
+      "kind": "cargo",
+      "name": "downstream rvoip-amazon-connect server check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-amazon-connect",
+        "--all-targets",
+        "--features",
+        "server"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 22,
+      "started_at_utc": "2026-07-29T02:23:24Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 143,
+      "ended_at_utc": "2026-07-29T02:28:15Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-uctp_check.log",
+          "sha256": "7c193d1cc1f755beecce8012654d5a17cffb6422e8bc6f39e0258e7a84d7c26c"
+        }
+      ],
+      "id": "build.downstream-uctp",
+      "kind": "cargo",
+      "name": "downstream rvoip-uctp check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-uctp",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 23,
+      "started_at_utc": "2026-07-29T02:25:52Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 13,
+      "ended_at_utc": "2026-07-29T02:28:28Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-quic_check.log",
+          "sha256": "0e546a524fcc892991f9a2131dc4dede4ed96678596ca0d7c1877905be863d2b"
+        }
+      ],
+      "id": "build.downstream-quic",
+      "kind": "cargo",
+      "name": "downstream rvoip-quic check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-quic",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 24,
+      "started_at_utc": "2026-07-29T02:28:15Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 4,
+      "ended_at_utc": "2026-07-29T02:28:32Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-webtransport_check.log",
+          "sha256": "2f976798e71b0a14c0416195ae1916242f7946eb1c010fc7c0fd182079f4165f"
+        }
+      ],
+      "id": "build.downstream-webtransport",
+      "kind": "cargo",
+      "name": "downstream rvoip-webtransport check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-webtransport",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 25,
+      "started_at_utc": "2026-07-29T02:28:28Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 14,
+      "ended_at_utc": "2026-07-29T02:28:46Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-websocket_media_and_tls_check.log",
+          "sha256": "3ca9a9bb379ca1a81665cb70c6161074177b69a29e55fcd59af3a748d6feee77"
+        }
+      ],
+      "id": "build.downstream-websocket",
+      "kind": "cargo",
+      "name": "downstream rvoip-websocket media and TLS check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-websocket",
+        "--all-targets",
+        "--features",
+        "media-webrtc,wss"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 26,
+      "started_at_utc": "2026-07-29T02:28:32Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 155,
+      "ended_at_utc": "2026-07-29T02:31:21Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-webrtc_interop_check.log",
+          "sha256": "6057aff01525eb37fb6eb02931081212e43928532be16b0426a11c3ac0f8414f"
+        }
+      ],
+      "id": "build.downstream-webrtc",
+      "kind": "cargo",
+      "name": "downstream rvoip-webrtc interop check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-webrtc",
+        "--all-targets",
+        "--features",
+        "comprehensive,tls-rustls,bridge-quic"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 27,
+      "started_at_utc": "2026-07-29T02:28:46Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:22Z",
+      "evidence": [
+        {
+          "path": "downstream_rvoip-audio-device_check.log",
+          "sha256": "ac2fb6ee905f43a4478c591f0eb4415ff68736949c6636af11c655455eac9e02"
+        }
+      ],
+      "id": "build.downstream-audio-device",
+      "kind": "cargo",
+      "name": "downstream rvoip-audio-device check",
+      "sanitized_argv": [
+        "cargo",
+        "check",
+        "-p",
+        "rvoip-audio-device",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 28,
+      "started_at_utc": "2026-07-29T02:31:21Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:23Z",
+      "evidence": [
+        {
+          "path": "standalone_example_01-quickstart-p2p_tests.log",
+          "sha256": "540f62c84ad60118ae7332f2fe4c2ed0b299f65c67496ca1d2dc2e71cebda579"
+        }
+      ],
+      "id": "test.example-01",
+      "kind": "cargo",
+      "name": "standalone example 01-quickstart-p2p tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/01-quickstart-p2p/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 29,
+      "started_at_utc": "2026-07-29T02:31:22Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:23Z",
+      "evidence": [
+        {
+          "path": "standalone_example_02-softphone-audio_tests.log",
+          "sha256": "4b3a0f71ce46edce6a29ea713968268e660c80819eaf1c511b32830975a6ebd3"
+        }
+      ],
+      "id": "test.example-02",
+      "kind": "cargo",
+      "name": "standalone example 02-softphone-audio tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/02-softphone-audio/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 30,
+      "started_at_utc": "2026-07-29T02:31:23Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:24Z",
+      "evidence": [
+        {
+          "path": "standalone_example_03-register-to-pbx_tests.log",
+          "sha256": "ab3b254355a76c6db86f74bdc1077cbd109dbd118a1cb8be1dfbc7debbccf41e"
+        }
+      ],
+      "id": "test.example-03",
+      "kind": "cargo",
+      "name": "standalone example 03-register-to-pbx tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/03-register-to-pbx/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 31,
+      "started_at_utc": "2026-07-29T02:31:23Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:24Z",
+      "evidence": [
+        {
+          "path": "standalone_example_04-call-control_tests.log",
+          "sha256": "973f71da3ebe4af274dcc2c7e8306856a09005c3e6017ac373c90339b97a8056"
+        }
+      ],
+      "id": "test.example-04",
+      "kind": "cargo",
+      "name": "standalone example 04-call-control tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/04-call-control/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 32,
+      "started_at_utc": "2026-07-29T02:31:24Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:25Z",
+      "evidence": [
+        {
+          "path": "standalone_example_05-blind-transfer_tests.log",
+          "sha256": "c15364e6055a6180bffaed60f8b3ad485c60b6a489124c8e8f13498fb325d0b5"
+        }
+      ],
+      "id": "test.example-05",
+      "kind": "cargo",
+      "name": "standalone example 05-blind-transfer tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/05-blind-transfer/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 33,
+      "started_at_utc": "2026-07-29T02:31:24Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:26Z",
+      "evidence": [
+        {
+          "path": "standalone_example_06-attended-transfer_tests.log",
+          "sha256": "9cff3aeaf0bf4101ce8abfefea95bad204387438ff7ada525cd27bd062e39edf"
+        }
+      ],
+      "id": "test.example-06",
+      "kind": "cargo",
+      "name": "standalone example 06-attended-transfer tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/06-attended-transfer/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 34,
+      "started_at_utc": "2026-07-29T02:31:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:26Z",
+      "evidence": [
+        {
+          "path": "standalone_example_07-secure-call-srtp_tests.log",
+          "sha256": "45108a7138edc7deb5bfca5a32bde0a1acff5c5f3fd7ff7020be621279157ccd"
+        }
+      ],
+      "id": "test.example-07",
+      "kind": "cargo",
+      "name": "standalone example 07-secure-call-srtp tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/07-secure-call-srtp/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 35,
+      "started_at_utc": "2026-07-29T02:31:26Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:27Z",
+      "evidence": [
+        {
+          "path": "standalone_example_08-tls-transport_tests.log",
+          "sha256": "3e9a3599e2a959153e642b4a4601190b7fda47d7dd84ef21174dc0ba09626df1"
+        }
+      ],
+      "id": "test.example-08",
+      "kind": "cargo",
+      "name": "standalone example 08-tls-transport tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/08-tls-transport/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 36,
+      "started_at_utc": "2026-07-29T02:31:26Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:27Z",
+      "evidence": [
+        {
+          "path": "standalone_example_09-ivr-server_tests.log",
+          "sha256": "17910235650498f1c6cedf898edf0085bc5419b1bf511c77179044a3eb458d74"
+        }
+      ],
+      "id": "test.example-09",
+      "kind": "cargo",
+      "name": "standalone example 09-ivr-server tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/09-ivr-server/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 37,
+      "started_at_utc": "2026-07-29T02:31:27Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:28Z",
+      "evidence": [
+        {
+          "path": "standalone_example_10-call-center-b2bua_tests.log",
+          "sha256": "e6537f89ff109b13832897e6d4350891acea1fd661c1dd7561d07691ce115acd"
+        }
+      ],
+      "id": "test.example-10",
+      "kind": "cargo",
+      "name": "standalone example 10-call-center-b2bua tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/10-call-center-b2bua/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 38,
+      "started_at_utc": "2026-07-29T02:31:28Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:28Z",
+      "evidence": [
+        {
+          "path": "standalone_example_11-ai-harness-demo_tests.log",
+          "sha256": "c5601f53c3fbb79c8ba44fe950cfb83cf991e649f70238bf95703524e7a9802c"
+        }
+      ],
+      "id": "test.example-11",
+      "kind": "cargo",
+      "name": "standalone example 11-ai-harness-demo tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/11-ai-harness-demo/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 39,
+      "started_at_utc": "2026-07-29T02:31:28Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:31:29Z",
+      "evidence": [
+        {
+          "path": "standalone_example_12-customer-escalation-sip-webrtc_tests.log",
+          "sha256": "523d5e553789ddc9ec9ac9581bf45ab94134cc46479410f22fddc38777c458a5"
+        }
+      ],
+      "id": "test.example-12",
+      "kind": "cargo",
+      "name": "standalone example 12-customer-escalation-sip-webrtc tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/12-customer-escalation-sip-webrtc/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 40,
+      "started_at_utc": "2026-07-29T02:31:29Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:31:30Z",
+      "evidence": [
+        {
+          "path": "standalone_example_13-sip-to-amazon-connect_tests.log",
+          "sha256": "9feb6d01033e2e4be4aa5a8957a49e37a036c9bc19cdef9459b5e54bb74a7e42"
+        }
+      ],
+      "id": "test.example-13",
+      "kind": "cargo",
+      "name": "standalone example 13-sip-to-amazon-connect tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "<workspace>/examples/13-sip-to-amazon-connect/Cargo.toml",
+        "--all-targets"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 41,
+      "started_at_utc": "2026-07-29T02:31:29Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 7,
+      "ended_at_utc": "2026-07-29T02:31:37Z",
+      "evidence": [
+        {
+          "path": "pbx_analyzer_unit_tests.log",
+          "sha256": "e6c9108b2b6ada72b7625aa0cc5a42f47ae837394397e7bf472cb7872af7290e"
+        }
+      ],
+      "id": "test.pbx-analyzer",
+      "kind": "cargo",
+      "name": "PBX analyzer unit tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--example",
+        "pbx_analyze",
+        "--features",
+        "dev-insecure-tls"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 42,
+      "started_at_utc": "2026-07-29T02:31:30Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 18,
+      "ended_at_utc": "2026-07-29T02:31:55Z",
+      "evidence": [
+        {
+          "path": "rvoip-sip_rustdoc.log",
+          "sha256": "7ec86431b3344b73f233201f8b059ed1e883b5670d03405f9d79e9f43a3ca26c"
+        }
+      ],
+      "id": "build.rustdoc",
+      "kind": "cargo",
+      "name": "rvoip-sip rustdoc",
+      "sanitized_argv": [
+        "env",
+        "RUSTDOCFLAGS=-D warnings",
+        "cargo",
+        "doc",
+        "-p",
+        "rvoip-sip",
+        "--no-deps",
+        "--features",
+        "generated-validation,dev-insecure-tls"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 43,
+      "started_at_utc": "2026-07-29T02:31:37Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 11,
+      "ended_at_utc": "2026-07-29T02:32:07Z",
+      "evidence": [
+        {
+          "path": "sip-core_rfc_4475_torture_tests.log",
+          "sha256": "631c50a15beed9a9adc8ed9593690e794b8a4c5216e087a977358bdfdaaea80d"
+        }
+      ],
+      "id": "test.rfc4475",
+      "kind": "cargo",
+      "name": "sip-core RFC 4475 torture tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip-core",
+        "--features",
+        "lenient_parsing",
+        "--test",
+        "torture_tests"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 44,
+      "started_at_utc": "2026-07-29T02:31:56Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 6,
+      "ended_at_utc": "2026-07-29T02:32:13Z",
+      "evidence": [
+        {
+          "path": "sip-core_generated_message_validation.log",
+          "sha256": "4585f416f3ecf8a339e9f49c989480961a870633b8eb04bb4b4c452c8418371b"
+        }
+      ],
+      "id": "test.generated-message",
+      "kind": "cargo",
+      "name": "sip-core generated message validation",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip-core",
+        "--features",
+        "generated-validation",
+        "--test",
+        "generated_message_compliance"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 45,
+      "started_at_utc": "2026-07-29T02:32:07Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Build, API, and documentation",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 25,
+      "ended_at_utc": "2026-07-29T02:32:38Z",
+      "evidence": [
+        {
+          "path": "sip_dialog_generated_validation.log",
+          "sha256": "e198475b484038801e8feeba4db23de38d4b91f902c43c8b35ce8424a658531a"
+        }
+      ],
+      "id": "test.generated-dialog",
+      "kind": "cargo",
+      "name": "sip dialog generated validation",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip-dialog",
+        "--features",
+        "generated-validation",
+        "--test",
+        "generated_sip_compliance"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 46,
+      "started_at_utc": "2026-07-29T02:32:13Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:32:40Z",
+      "evidence": [
+        {
+          "path": "dependency_advisory_audit.log",
+          "sha256": "1295a6f1122d1271b453e660a0c546cbea2db6e50d95cc90347a72f36599c28d"
+        }
+      ],
+      "id": "security.advisory-audit",
+      "kind": "security",
+      "name": "dependency advisory audit",
+      "sanitized_argv": [
+        "env",
+        "SECURITY_DIR=<workspace>/target/beta-gate/20260729T010954Z/security",
+        "bash",
+        "-c",
+        "\n    set -euo pipefail\n    mkdir -p \"$SECURITY_DIR\"\n    if ! cargo audit --version > \"$SECURITY_DIR/cargo-audit-version.txt\" 2>&1; then\n      echo \"cargo-audit is not available. Install it with: cargo install cargo-audit\" >&2\n      exit 127\n    fi\n    set +e\n    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 > \"$SECURITY_DIR/cargo-audit.txt\" 2>&1\n    audit_status=$?\n    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --json > \"$SECURITY_DIR/cargo-audit.json\" 2> \"$SECURITY_DIR/cargo-audit-json.stderr\"\n    json_status=$?\n    set -e\n    {\n      echo\n      echo \"Accepted dependency advisory retained for beta evidence:\"\n      cat \"$SECURITY_DIR/accepted-advisories.md\"\n    } >> \"$SECURITY_DIR/cargo-audit.txt\"\n    cat \"$SECURITY_DIR/cargo-audit.txt\"\n    if [ \"$audit_status\" -ne 0 ] || [ \"$json_status\" -ne 0 ]; then\n      exit 1\n    fi\n  "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 47,
+      "started_at_utc": "2026-07-29T02:32:38Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 38,
+      "ended_at_utc": "2026-07-29T02:33:18Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_sip_message.log",
+          "sha256": "21bff7f9cc1ed11c25c9c97fb18d89373853fa93cf6afc78c0642055e94fbaae"
+        }
+      ],
+      "id": "security.fuzz-sip-message",
+      "kind": "security",
+      "name": "parser fuzz smoke (sip_message)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/sip/rvoip-sip/../fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=sip_message",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/sip_message.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 48,
+      "started_at_utc": "2026-07-29T02:32:40Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:33:19Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_uri.log",
+          "sha256": "4aeeb6e9ebae7ea73f6c9cf0dd340af69d14b367f6ee5f9af1a9ca08a42c0b4b"
+        }
+      ],
+      "id": "security.fuzz-uri",
+      "kind": "security",
+      "name": "parser fuzz smoke (uri)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/sip/rvoip-sip/../fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=uri",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/uri.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 49,
+      "started_at_utc": "2026-07-29T02:33:18Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:33:21Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_header.log",
+          "sha256": "82244d70c0ad07b99806bcbe65bb4657edab7671f3746d4ab6287fac84e2936d"
+        }
+      ],
+      "id": "security.fuzz-header",
+      "kind": "security",
+      "name": "parser fuzz smoke (header)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/sip/rvoip-sip/../fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=header",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/header.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 50,
+      "started_at_utc": "2026-07-29T02:33:19Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:33:23Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_sdp.log",
+          "sha256": "51b63ccc6e4b957184515072b32c0fcf7c021e9ea56377a0f4706cf13190200c"
+        }
+      ],
+      "id": "security.fuzz-sdp",
+      "kind": "security",
+      "name": "parser fuzz smoke (sdp)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/sip/rvoip-sip/../fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=sdp",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/sdp.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 51,
+      "started_at_utc": "2026-07-29T02:33:21Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 55,
+      "ended_at_utc": "2026-07-29T02:34:18Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_rtp_packet.log",
+          "sha256": "cc0186a461a5cf69d6db2ec096326bade8a9c2d3a2fa2f7b539d10366725fe33"
+        }
+      ],
+      "id": "security.fuzz-rtp",
+      "kind": "security",
+      "name": "parser fuzz smoke (rtp_packet)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=rtp_packet",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/rtp_packet.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 52,
+      "started_at_utc": "2026-07-29T02:33:23Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:34:20Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_rtcp_packet.log",
+          "sha256": "492a992757d45e041fe27c8c815780fdb175b208d91e6a1d5794344ae9e0b744"
+        }
+      ],
+      "id": "security.fuzz-rtcp",
+      "kind": "security",
+      "name": "parser fuzz smoke (rtcp_packet)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=rtcp_packet",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/rtcp_packet.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 53,
+      "started_at_utc": "2026-07-29T02:34:18Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T02:34:21Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_srtp_unprotect.log",
+          "sha256": "00ded49518529ec3b4fa01841b5bef0bf7d8e862bf596debd4d797c04801d4d5"
+        }
+      ],
+      "id": "security.fuzz-srtp",
+      "kind": "security",
+      "name": "parser fuzz smoke (srtp_unprotect)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=srtp_unprotect",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/srtp_unprotect.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 54,
+      "started_at_utc": "2026-07-29T02:34:20Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:34:23Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_dtls_record.log",
+          "sha256": "bf9de579a7702ab7ddcfa4372d19b0849ee0e2d0041a35e720b5f1faa1aea3bf"
+        }
+      ],
+      "id": "security.fuzz-dtls",
+      "kind": "security",
+      "name": "parser fuzz smoke (dtls_record)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=dtls_record",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/dtls_record.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 55,
+      "started_at_utc": "2026-07-29T02:34:21Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:34:25Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_stun_response.log",
+          "sha256": "83bc739056eb2850b66bbad53c2d5d2e9ca11a7ede4c7530c2b691448a2c7f46"
+        }
+      ],
+      "id": "security.fuzz-stun",
+      "kind": "security",
+      "name": "parser fuzz smoke (stun_response)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=stun_response",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/stun_response.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 56,
+      "started_at_utc": "2026-07-29T02:34:23Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Security",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:34:27Z",
+      "evidence": [
+        {
+          "path": "parser_fuzz_smoke_g711_unpack.log",
+          "sha256": "9c84538498cef39e951ee4237618e64efde47692d4ee87c9915af35357905815"
+        }
+      ],
+      "id": "security.fuzz-g711",
+      "kind": "security",
+      "name": "parser fuzz smoke (g711_unpack)",
+      "sanitized_argv": [
+        "env",
+        "FUZZ_CRATE_DIR=<workspace>/crates/media/fuzz",
+        "WORKSPACE_ROOT=<workspace>",
+        "FUZZ_TARGET=g711_unpack",
+        "FUZZ_LOG=<workspace>/target/beta-gate/20260729T010954Z/security/fuzz/g711_unpack.log",
+        "BETA_FUZZ_SMOKE_RUNS=1000",
+        "BETA_FUZZ_SMOKE_SECONDS=10",
+        "BETA_FUZZ_TOOLCHAIN=nightly",
+        "bash",
+        "-c",
+        "\n      set -euo pipefail\n      mkdir -p \"$(dirname \"$FUZZ_LOG\")\"\n      if ! cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz --version > \"${FUZZ_LOG%.log}.version.txt\" 2>&1; then\n        echo \"cargo-fuzz or Rust toolchain nightly is not available.\" >&2\n        echo \"Install with: rustup toolchain install $BETA_FUZZ_TOOLCHAIN && cargo install cargo-fuzz\" >&2\n        exit 127\n      fi\n      cd \"$WORKSPACE_ROOT\"\n      set +e\n      CARGO_TARGET_DIR=\"$WORKSPACE_ROOT/target/fuzz\" \\\n        cargo +\"$BETA_FUZZ_TOOLCHAIN\" fuzz run --fuzz-dir \"$FUZZ_CRATE_DIR\" \"$FUZZ_TARGET\" -- \\\n          -runs=\"$BETA_FUZZ_SMOKE_RUNS\" \\\n          -max_total_time=\"$BETA_FUZZ_SMOKE_SECONDS\" \\\n          > \"$FUZZ_LOG\" 2>&1\n      fuzz_status=$?\n      set -e\n      cat \"$FUZZ_LOG\"\n      exit \"$fuzz_status\"\n    "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 57,
+      "started_at_utc": "2026-07-29T02:34:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:34:27Z",
+      "evidence": [
+        {
+          "path": "local_freeswitch_down_before_asterisk.log",
+          "sha256": "0f794dcd5e88a59852df57d892c16791dfee5f4092e962b4fdde8428229af790"
+        }
+      ],
+      "id": "interop.freeswitch-down-before-asterisk",
+      "kind": "interop",
+      "name": "local FreeSWITCH down before Asterisk",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 58,
+      "started_at_utc": "2026-07-29T02:34:27Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 2,
+      "ended_at_utc": "2026-07-29T02:34:29Z",
+      "evidence": [
+        {
+          "path": "local_asterisk_up.log",
+          "sha256": "2ce15c4124925062b7e1c212eae8611c091f1156aba3e9adc7f5fde64f354191"
+        }
+      ],
+      "id": "interop.asterisk-up",
+      "kind": "interop",
+      "name": "local Asterisk up",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 59,
+      "started_at_utc": "2026-07-29T02:34:27Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 759,
+      "ended_at_utc": "2026-07-29T02:47:09Z",
+      "evidence": [
+        {
+          "path": "local_asterisk_pbx_matrix.log",
+          "sha256": "093f47585f0ecd5ad52671c7a9383aee41070a660876e897f05bc233a0397ca9"
+        }
+      ],
+      "id": "interop.asterisk-matrix",
+      "kind": "interop",
+      "name": "local Asterisk PBX matrix",
+      "sanitized_argv": [
+        "env",
+        "PBX_OUT_ROOT=<workspace>/target/beta-gate/20260729T010954Z/pbx",
+        "PBX_REPORT_APPEND=1",
+        "PBX_G729_PROFILES=g729a g729ab",
+        "<workspace>/crates/sip/rvoip-sip/examples/pbx/run.sh",
+        "--pbx",
+        "asterisk",
+        "--api",
+        "all",
+        "--scenario",
+        "all"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 60,
+      "started_at_utc": "2026-07-29T02:34:30Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 3,
+      "ended_at_utc": "2026-07-29T02:47:13Z",
+      "evidence": [
+        {
+          "path": "local_asterisk_down_after_matrix.log",
+          "sha256": "ad1a470f1ebef0dd83a32d7cc4e0a0c233146976102409acd1e5a709529aed0e"
+        }
+      ],
+      "id": "interop.asterisk-down-after",
+      "kind": "interop",
+      "name": "local Asterisk down after matrix",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 61,
+      "started_at_utc": "2026-07-29T02:47:10Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:47:14Z",
+      "evidence": [
+        {
+          "path": "local_asterisk_down_before_freeswitch.log",
+          "sha256": "d28c09f6d646cd0f41419af2fac716fb086bc844bef0f6aea91de1123cf129dd"
+        }
+      ],
+      "id": "interop.asterisk-down-before-freeswitch",
+      "kind": "interop",
+      "name": "local Asterisk down before FreeSWITCH",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 62,
+      "started_at_utc": "2026-07-29T02:47:14Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 7,
+      "ended_at_utc": "2026-07-29T02:47:20Z",
+      "evidence": [
+        {
+          "path": "local_freeswitch_up.log",
+          "sha256": "76a7d1ee6d3bc12ed2b8fe52b600777bb95ef8be5a81e7114a5f1fb6b646ec40"
+        }
+      ],
+      "id": "interop.freeswitch-up",
+      "kind": "interop",
+      "name": "local FreeSWITCH up",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 63,
+      "started_at_utc": "2026-07-29T02:47:14Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 417,
+      "ended_at_utc": "2026-07-29T02:54:18Z",
+      "evidence": [
+        {
+          "path": "local_freeswitch_pbx_matrix.log",
+          "sha256": "50843ed03fc15e7dc01e53beed0b9c1210e2569795486916edef99a3630fe9f9"
+        }
+      ],
+      "id": "interop.freeswitch-matrix",
+      "kind": "interop",
+      "name": "local FreeSWITCH PBX matrix",
+      "sanitized_argv": [
+        "env",
+        "PBX_OUT_ROOT=<workspace>/target/beta-gate/20260729T010954Z/pbx",
+        "PBX_REPORT_APPEND=1",
+        "PBX_G729_PROFILES=g729a g729ab",
+        "<workspace>/crates/sip/rvoip-sip/examples/pbx/run.sh",
+        "--pbx",
+        "freeswitch",
+        "--api",
+        "all",
+        "--scenario",
+        "all"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 64,
+      "started_at_utc": "2026-07-29T02:47:21Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 9,
+      "ended_at_utc": "2026-07-29T02:54:27Z",
+      "evidence": [
+        {
+          "path": "local_freeswitch_down_after_matrix.log",
+          "sha256": "5068d5a68f6c2046e938b6f2826939247245d48e0df9f4c50be2bb894ede1d46"
+        }
+      ],
+      "id": "interop.freeswitch-down-after",
+      "kind": "interop",
+      "name": "local FreeSWITCH down after matrix",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 65,
+      "started_at_utc": "2026-07-29T02:54:18Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:54:27Z",
+      "evidence": [
+        {
+          "path": "restore_local_asterisk_down.log",
+          "sha256": "ac4d9a0eadc1e7029594ea905eec46a7a3d59f457608ca375f42c02a87e28f62"
+        }
+      ],
+      "id": "interop.restore-asterisk-down",
+      "kind": "interop",
+      "name": "restore local Asterisk down",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 66,
+      "started_at_utc": "2026-07-29T02:54:27Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T02:54:27Z",
+      "evidence": [
+        {
+          "path": "restore_local_freeswitch_down.log",
+          "sha256": "124ea5d5da5a42be1fdb164b8a1c96c12e863d09c7d8d8799369808c068c753f"
+        }
+      ],
+      "id": "interop.restore-freeswitch-down",
+      "kind": "interop",
+      "name": "restore local FreeSWITCH down",
+      "sanitized_argv": [
+        "<local-path>"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 67,
+      "started_at_utc": "2026-07-29T02:54:27Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 427,
+      "ended_at_utc": "2026-07-29T03:01:35Z",
+      "evidence": [
+        {
+          "path": "sipp_standalone_target_build.log",
+          "sha256": "630d9f140925a00ecceaba56c72bc9ba64faa84b6a64c39327d810f5fecef1b9"
+        }
+      ],
+      "id": "interop.sipp-build",
+      "kind": "interop",
+      "name": "SIPp standalone target build",
+      "sanitized_argv": [
+        "cargo",
+        "build",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--example",
+        "perf_listener"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 68,
+      "started_at_utc": "2026-07-29T02:54:28Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T03:01:36Z",
+      "evidence": [
+        {
+          "path": "sipp_standalone_target_start.log",
+          "sha256": "ed28ec7da50f75f1d55a018b583c0878afb66a0babb43ad623b3f447f291d697"
+        }
+      ],
+      "id": "interop.sipp-start",
+      "kind": "interop",
+      "name": "SIPp standalone target start",
+      "sanitized_argv": [
+        "<workspace>/target/release/examples/perf_listener",
+        "35060",
+        "127.0.0.1",
+        "--perf-profile",
+        "pbx-media-server"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 69,
+      "started_at_utc": "2026-07-29T03:01:35Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 87,
+      "ended_at_utc": "2026-07-29T03:03:03Z",
+      "evidence": [
+        {
+          "path": "sipp_standalone_matrix.log",
+          "sha256": "74fd94bfef3898044910778074a95f82c1f2faef78acd7a4ddbd14ea649f6539"
+        }
+      ],
+      "id": "interop.sipp-matrix",
+      "kind": "interop",
+      "name": "SIPp standalone matrix",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_RESULTS=<workspace>/target/beta-gate/20260729T010954Z/sipp",
+        "RVOIP_PERF_CPS=30 100 300 1000 2000",
+        "RVOIP_PERF_MIN_SUCCESS_PCT=99.9",
+        "<workspace>/crates/sip/rvoip-sip/tests/perf/sipp_scenarios/run_comparison.sh",
+        "127.0.0.1",
+        "35060",
+        "rvoip"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 70,
+      "started_at_utc": "2026-07-29T03:01:36Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T03:03:03Z",
+      "evidence": [
+        {
+          "path": "sipp_standalone_target_stop.log",
+          "sha256": "e31900097d467e70a212ecd604e91f738711ce9c933ce4fb36e7228b8ec3f54f"
+        }
+      ],
+      "id": "interop.sipp-stop",
+      "kind": "interop",
+      "name": "SIPp standalone target stop",
+      "sanitized_argv": [
+        "managed-sipp-listener-stop"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 71,
+      "started_at_utc": "2026-07-29T03:03:03Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 9,
+      "ended_at_utc": "2026-07-29T03:03:12Z",
+      "evidence": [
+        {
+          "path": "baresip_strict-ua_matrix.log",
+          "sha256": "7a92990fa5b34c2a33e9c0fe6db6135afc587b5808aca734fc64422da3f0d8cc"
+        }
+      ],
+      "id": "interop.strict-ua",
+      "kind": "interop",
+      "name": "baresip strict-UA matrix",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_STRICT_UA_RESULTS=<workspace>/target/beta-gate/20260729T010954Z/strict-ua",
+        "<workspace>/crates/sip/rvoip-sip/tests/interop/baresip/run_strict_ua.sh"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 72,
+      "started_at_utc": "2026-07-29T03:03:03Z",
+      "status": "PASS"
+    },
+    {
+      "category": "PBX and interoperability",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T03:03:12Z",
+      "evidence": [
+        {
+          "path": "kamailio_opensips_proxy_de-scope_audit.log",
+          "sha256": "e4c9a56c6736b386e0d9c8ad1b4d5da7cfc1a23618be515e86252d759c17cbad"
+        }
+      ],
+      "id": "interop.proxy-descope",
+      "kind": "interop",
+      "name": "Kamailio/OpenSIPS proxy de-scope audit",
+      "sanitized_argv": [
+        "bash",
+        "-c",
+        "set -euo pipefail\n     rg -q 'Kamailio/OpenSIPS.*planned validation targets, not release' crates/sip/rvoip-sip/README.md\n     rg -q 'Kamailio/OpenSIPS plus RTPengine.*Investigation' crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md\n     rg -q 'Kamailio/OpenSIPS.*Investigation only' crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 73,
+      "started_at_utc": "2026-07-29T03:03:12Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T03:03:13Z",
+      "evidence": [
+        {
+          "path": "perf_results_capture_boundary.log",
+          "sha256": "a1afb3fff3019badb743bfe6bbacd7a2c9e5837309598de797573abf3c41b48d"
+        }
+      ],
+      "id": "perf.capture-boundary",
+      "kind": "performance",
+      "name": "perf results capture boundary",
+      "sanitized_argv": [
+        "prepare_perf_results_capture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 74,
+      "started_at_utc": "2026-07-29T03:03:13Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T03:03:13Z",
+      "evidence": [
+        {
+          "path": "literal-all_perf_configuration.log",
+          "sha256": "4a3f413f3b4aa38941eee06d0bd915b524b0b950bf08778d468448e7d786991a"
+        }
+      ],
+      "id": "perf.literal-all-config",
+      "kind": "performance",
+      "name": "literal-all perf configuration",
+      "sanitized_argv": [
+        "env",
+        "BETA_RUN_BURST_MATRIX=1",
+        "BETA_BURST_MATRIX=all",
+        "BETA_RUN_LONG_SOAK=1",
+        "RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0",
+        "bash",
+        "-c",
+        "\n        set -euo pipefail\n        [ \"$BETA_RUN_BURST_MATRIX\" = \"1\" ] || {\n          echo \"BETA_RUN_PERF_ALL=1 requires BETA_RUN_BURST_MATRIX=1\" >&2\n          exit 1\n        }\n        [ \"$BETA_BURST_MATRIX\" = \"all\" ] || {\n          echo \"BETA_RUN_PERF_ALL=1 requires BETA_BURST_MATRIX=all\" >&2\n          exit 1\n        }\n        [ \"$BETA_RUN_LONG_SOAK\" = \"1\" ] || {\n          echo \"BETA_RUN_PERF_ALL=1 requires BETA_RUN_LONG_SOAK=1\" >&2\n          exit 1\n        }\n        [ \"$RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY\" = \"0\" ] || {\n          echo \"BETA_RUN_PERF_ALL=1 requires full app-facing AudioFrame delivery\" >&2\n          exit 1\n        }\n      "
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 75,
+      "started_at_utc": "2026-07-29T03:03:13Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 514,
+      "ended_at_utc": "2026-07-29T03:11:47Z",
+      "evidence": [
+        {
+          "path": "perf_call_setup_cps_endpoint.log",
+          "sha256": "8741740bb73cb7034862cd7178853517c4dcdd533c1e4401fd064da7ca2c51f5"
+        }
+      ],
+      "id": "perf.call-setup-endpoint",
+      "kind": "performance",
+      "name": "perf call setup CPS (endpoint)",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_PROFILE=endpoint",
+        "RVOIP_PERF_REPORT_SCENARIO=perf_call_setup_cps_endpoint",
+        "RVOIP_PERF_SWEEP_CPS=30",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_call_setup_cps",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 76,
+      "started_at_utc": "2026-07-29T03:03:13Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 203,
+      "ended_at_utc": "2026-07-29T03:15:09Z",
+      "evidence": [
+        {
+          "path": "perf_call_setup_cps_pbx-media-server.log",
+          "sha256": "77ed78c7052ef99c4c15556d8109ab4142ea275736d7f429beb5087c4223f3f5"
+        }
+      ],
+      "id": "perf.call-setup-pbx",
+      "kind": "performance",
+      "name": "perf call setup CPS (pbx-media-server)",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_PROFILE=pbx-media-server",
+        "RVOIP_PERF_REPORT_SCENARIO=perf_call_setup_cps_pbx-media-server",
+        "RVOIP_PERF_SWEEP_CPS=30,100,300,1000,2000",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_call_setup_cps",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 77,
+      "started_at_utc": "2026-07-29T03:11:47Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 202,
+      "ended_at_utc": "2026-07-29T03:18:32Z",
+      "evidence": [
+        {
+          "path": "perf_call_setup_cps_signaling-only-server-high-performance.log",
+          "sha256": "60b66b8a41c633337e41fb06ff8bf69b3f477eb0b94892648d962f08ad7f87e8"
+        }
+      ],
+      "id": "perf.call-setup-signaling",
+      "kind": "performance",
+      "name": "perf call setup CPS (signaling-only-server-high-performance)",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_PROFILE=signaling-only-server-high-performance",
+        "RVOIP_PERF_REPORT_SCENARIO=perf_call_setup_cps_signaling-only-server-high-performance",
+        "RVOIP_PERF_SWEEP_CPS=30,100,300,1000,2000",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_call_setup_cps",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 78,
+      "started_at_utc": "2026-07-29T03:15:10Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 254,
+      "ended_at_utc": "2026-07-29T03:22:46Z",
+      "evidence": [
+        {
+          "path": "perf_registration_throughput.log",
+          "sha256": "c82d596320a465fd473873208156f46a42c947ad07032aa15ad6397dda3a02d5"
+        }
+      ],
+      "id": "perf.registration",
+      "kind": "performance",
+      "name": "perf registration throughput",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_registration_throughput",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 79,
+      "started_at_utc": "2026-07-29T03:18:32Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 250,
+      "ended_at_utc": "2026-07-29T03:26:56Z",
+      "evidence": [
+        {
+          "path": "perf_concurrent_active_calls.log",
+          "sha256": "c5f42e123f8ab551ad033cb5f8cd5e9efd6c48e386d4fd5cc2cbfbbd4e85d2b5"
+        }
+      ],
+      "id": "perf.concurrent-calls",
+      "kind": "performance",
+      "name": "perf concurrent active calls",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_concurrent_active_calls",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 80,
+      "started_at_utc": "2026-07-29T03:22:46Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 252,
+      "ended_at_utc": "2026-07-29T03:31:08Z",
+      "evidence": [
+        {
+          "path": "perf_rtp_steady_state.log",
+          "sha256": "cfb663fc2577d0e55baa0cd82c376a41172255a4358127a0068dffdb995e5ff5"
+        }
+      ],
+      "id": "perf.rtp-steady-state",
+      "kind": "performance",
+      "name": "perf RTP steady state",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_rtp_steady_state",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 81,
+      "started_at_utc": "2026-07-29T03:26:56Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 332,
+      "ended_at_utc": "2026-07-29T03:36:40Z",
+      "evidence": [
+        {
+          "path": "perf_backpressure_step.log",
+          "sha256": "2961241344000dcb2e17da58eb48edcab3b4f02e46dfe484a02418698421c1fc"
+        }
+      ],
+      "id": "perf.backpressure",
+      "kind": "performance",
+      "name": "perf backpressure step",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_backpressure_step",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 82,
+      "started_at_utc": "2026-07-29T03:31:08Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 273,
+      "ended_at_utc": "2026-07-29T03:41:13Z",
+      "evidence": [
+        {
+          "path": "perf_transport_recovery.log",
+          "sha256": "6155304600cb5ba47f1f34a998a1321402ed4c125b0e99aec1ab219a5b37eea9"
+        }
+      ],
+      "id": "perf.transport-recovery",
+      "kind": "performance",
+      "name": "perf transport recovery",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_transport_recovery",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 83,
+      "started_at_utc": "2026-07-29T03:36:40Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 520,
+      "ended_at_utc": "2026-07-29T03:49:53Z",
+      "evidence": [
+        {
+          "path": "all_registered_resiliency_tests.log",
+          "sha256": "9897710b3617dbe4d1bf8f5ee9dafd88073443673ec3c1451a268fc2e9adc7ad"
+        }
+      ],
+      "id": "perf.resiliency-all",
+      "kind": "performance",
+      "name": "all registered resiliency tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "resilien*",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 84,
+      "started_at_utc": "2026-07-29T03:41:13Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 253,
+      "ended_at_utc": "2026-07-29T03:54:06Z",
+      "evidence": [
+        {
+          "path": "perf_mid-call_signaling_under_media.log",
+          "sha256": "31d8e6465544fee28a536f5226d7a1d2874cbd083e7c868986f38081f75d9e06"
+        }
+      ],
+      "id": "perf.mid-call-signaling",
+      "kind": "performance",
+      "name": "perf mid-call signaling under media",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_mid_call_signal_under_media",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 85,
+      "started_at_utc": "2026-07-29T03:49:53Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 281,
+      "ended_at_utc": "2026-07-29T03:58:47Z",
+      "evidence": [
+        {
+          "path": "perf_tls_overhead.log",
+          "sha256": "7f184eef0a23b11664490bedaf7783c249e7b32a0a0458f1398a9a9dfe424134"
+        }
+      ],
+      "id": "perf.tls-overhead",
+      "kind": "performance",
+      "name": "perf TLS overhead",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_tls_overhead",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 86,
+      "started_at_utc": "2026-07-29T03:54:06Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 252,
+      "ended_at_utc": "2026-07-29T04:02:59Z",
+      "evidence": [
+        {
+          "path": "perf_srtp_overhead.log",
+          "sha256": "6936c895d4b2d18ff505de59ff2fcdaeb7a8926adbc70d9c2052333bc3fb9a0c"
+        }
+      ],
+      "id": "perf.srtp-overhead",
+      "kind": "performance",
+      "name": "perf SRTP overhead",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_srtp_overhead",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 87,
+      "started_at_utc": "2026-07-29T03:58:47Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 279,
+      "ended_at_utc": "2026-07-29T04:07:38Z",
+      "evidence": [
+        {
+          "path": "perf_pdd_with_180_first.log",
+          "sha256": "789d6bf855330cb4793eb92e6a5e7c3e98f1957ab348df165923fd5e6afba8ff"
+        }
+      ],
+      "id": "perf.pdd-180",
+      "kind": "performance",
+      "name": "perf PDD with 180 first",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_pdd_with_180_first",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 88,
+      "started_at_utc": "2026-07-29T04:02:59Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 338,
+      "ended_at_utc": "2026-07-29T04:13:17Z",
+      "evidence": [
+        {
+          "path": "perf_sustained_long-duration_calls.log",
+          "sha256": "4e7aed3fd081a057a8205ab9f4671b23e5932628d3a32fc1e6f1d57c72955d1d"
+        }
+      ],
+      "id": "perf.long-duration",
+      "kind": "performance",
+      "name": "perf sustained long-duration calls",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_sustained_long_duration_calls",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 89,
+      "started_at_utc": "2026-07-29T04:07:39Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 249,
+      "ended_at_utc": "2026-07-29T04:17:26Z",
+      "evidence": [
+        {
+          "path": "perf_registrar_binding_scale.log",
+          "sha256": "d56cffeecc10c4a2b7461438d664e303e3a44d21431bae7e96c333e1d8c9e409"
+        }
+      ],
+      "id": "perf.registrar-scale",
+      "kind": "performance",
+      "name": "perf registrar binding scale",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_registrar_binding_scale",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 90,
+      "started_at_utc": "2026-07-29T04:13:17Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 262,
+      "ended_at_utc": "2026-07-29T04:21:48Z",
+      "evidence": [
+        {
+          "path": "perf_mixed_workload.log",
+          "sha256": "9f19e9aab40057606e8938220e659e4c3e330f4f38eecae2241044535fb7e468"
+        }
+      ],
+      "id": "perf.mixed-workload",
+      "kind": "performance",
+      "name": "perf mixed workload",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_mixed_workload",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 91,
+      "started_at_utc": "2026-07-29T04:17:26Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 284,
+      "ended_at_utc": "2026-07-29T04:26:32Z",
+      "evidence": [
+        {
+          "path": "perf_b2bua_forwarding.log",
+          "sha256": "4ff9750108332921fffcd196db42e960975740210480bec60e92713ce19da109"
+        }
+      ],
+      "id": "perf.b2bua",
+      "kind": "performance",
+      "name": "perf B2BUA forwarding",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_b2bua_forwarding",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 92,
+      "started_at_utc": "2026-07-29T04:21:48Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 251,
+      "ended_at_utc": "2026-07-29T04:30:43Z",
+      "evidence": [
+        {
+          "path": "perf_ai-agent_load.log",
+          "sha256": "6c69b66cb7b58bcd694828c1d5d21f14a162539b6cbf94c5f13fcdc0152aa5f7"
+        }
+      ],
+      "id": "perf.ai-agent",
+      "kind": "performance",
+      "name": "perf AI-agent load",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_ai_agent_load",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 93,
+      "started_at_utc": "2026-07-29T04:26:32Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 257,
+      "ended_at_utc": "2026-07-29T04:35:00Z",
+      "evidence": [
+        {
+          "path": "perf_contact-center_transfers.log",
+          "sha256": "76ac0b052edc8430f10bc25bb75daf94a6f00f4379fcbde3aa073af72a61c2b0"
+        }
+      ],
+      "id": "perf.contact-center",
+      "kind": "performance",
+      "name": "perf contact-center transfers",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_contact_center_transfers",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 94,
+      "started_at_utc": "2026-07-29T04:30:43Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 246,
+      "ended_at_utc": "2026-07-29T04:39:07Z",
+      "evidence": [
+        {
+          "path": "perf_sipp_parity.log",
+          "sha256": "ded1b20caf6eaaa0a397ac489e4bcd893fde52c18109b59964e5939452d01389"
+        }
+      ],
+      "id": "perf.sipp-parity",
+      "kind": "performance",
+      "name": "perf SIPp parity",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_sipp_parity",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 95,
+      "started_at_utc": "2026-07-29T04:35:01Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 265,
+      "ended_at_utc": "2026-07-29T04:43:32Z",
+      "evidence": [
+        {
+          "path": "perf_soak_target_invariant_tests.log",
+          "sha256": "af60f9380795740f357b1fb100f6bc43b15177b337015cb19397bf991a6033d5"
+        }
+      ],
+      "id": "perf.soak-invariants",
+      "kind": "performance",
+      "name": "perf soak target invariant tests",
+      "sanitized_argv": [
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_soak_caller",
+        "--test",
+        "perf_soak_30min",
+        "--",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 96,
+      "started_at_utc": "2026-07-29T04:39:07Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 334,
+      "ended_at_utc": "2026-07-29T04:49:06Z",
+      "evidence": [
+        {
+          "path": "perf_media_churn.log",
+          "sha256": "9264b404148c9df21cc3079f1f295d5df28e4983d315f6d5ea6feb6bc439c43d"
+        }
+      ],
+      "id": "perf.media-churn",
+      "kind": "performance",
+      "name": "perf media churn",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_SOAK_DURATION_SECS=120",
+        "RVOIP_PERF_SOAK_ACTIVE_CALLS=30",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_media_churn",
+        "perf_media_churn",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 97,
+      "started_at_utc": "2026-07-29T04:43:32Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 3763,
+      "ended_at_utc": "2026-07-29T05:51:49Z",
+      "evidence": [
+        {
+          "path": "perf_monolithic_soak.log",
+          "sha256": "ea5f16665f143182dde1799d7eefced5a0c77911235c3040b1cfa8900f7b365a"
+        }
+      ],
+      "id": "perf.monolithic-soak",
+      "kind": "performance",
+      "name": "perf monolithic soak",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_SOAK_DURATION_SECS=3600",
+        "RVOIP_PERF_SOAK_ACTIVE_CALLS=30",
+        "RVOIP_PERF_SOAK_DRAIN_CPS=10",
+        "RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15",
+        "RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT=32",
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160",
+        "RVOIP_PERF_ARCHIVE_DIR=<workspace>/target/beta-gate/20260729T010954Z/perf-results",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_soak_30min",
+        "perf_soak_30min",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 98,
+      "started_at_utc": "2026-07-29T04:49:06Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 179,
+      "ended_at_utc": "2026-07-29T05:54:48Z",
+      "evidence": [
+        {
+          "path": "perf_mass_teardown_stress.log",
+          "sha256": "6d4729e689ee07e4756bc6294a8dd7d2d4c88a4821dc40c7b6a6a7225177d779"
+        }
+      ],
+      "id": "perf.mass-teardown",
+      "kind": "performance",
+      "name": "perf mass teardown stress",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_MASS_TEARDOWN_CALLS=500",
+        "RVOIP_PERF_MASS_TEARDOWN_SETUP_CPS=30",
+        "RVOIP_PERF_SOAK_ERROR_SAMPLE_LIMIT=32",
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160",
+        "RVOIP_PERF_ARCHIVE_DIR=<workspace>/target/beta-gate/20260729T010954Z/perf-results",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests,dev-insecure-tls",
+        "--test",
+        "perf_soak_30min",
+        "perf_mass_teardown_stress",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 99,
+      "started_at_utc": "2026-07-29T05:51:49Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 413,
+      "ended_at_utc": "2026-07-29T06:01:41Z",
+      "evidence": [
+        {
+          "path": "perf_session_churn_leak.log",
+          "sha256": "2a44bc0b05280c788e1208d7d57e3408bd409a5bacc3c83bcf932dd7119351b6"
+        }
+      ],
+      "id": "perf.session-churn",
+      "kind": "performance",
+      "name": "perf session churn leak",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS=160",
+        "cargo",
+        "test",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "perf_soak_30min",
+        "perf_session_churn_leak",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 100,
+      "started_at_utc": "2026-07-29T05:54:48Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 1,
+          "passed": false
+        }
+      ],
+      "duration_seconds": 5591,
+      "ended_at_utc": "2026-07-29T07:34:53Z",
+      "evidence": [
+        {
+          "path": "perf_media_burst_matrix.log",
+          "sha256": "97b84bd0e26faec081af5995e75d13d952d069d3dc49544817a879b3ea7c7c70"
+        }
+      ],
+      "id": "perf.media-burst-matrix",
+      "kind": "performance",
+      "name": "perf media burst matrix",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_FEATURES=perf-tests",
+        "RVOIP_PERF_BURST_SCENARIO_FILE=<workspace>/crates/sip/rvoip-sip/config/perf-burst-scenarios.yaml",
+        "RVOIP_PERF_BURST_SCENARIOS=all",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=0",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0",
+        "RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS=5",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
+        "RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0",
+        "RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15",
+        "<workspace>/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 101,
+      "started_at_utc": "2026-07-29T06:01:42Z",
+      "status": "FAIL"
+    },
+    {
+      "category": "Performance and resiliency",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 4412,
+      "ended_at_utc": "2026-07-29T08:48:25Z",
+      "evidence": [
+        {
+          "path": "perf_soak_candidate.log",
+          "sha256": "007539d81bc295590b0e5240c2d11818f17b76c75fc083efad764510f858cc9e"
+        }
+      ],
+      "id": "perf.soak-candidate",
+      "kind": "performance",
+      "name": "perf soak candidate",
+      "sanitized_argv": [
+        "env",
+        "RVOIP_PERF_FEATURES=perf-tests",
+        "RVOIP_PERF_SOAK_DURATION_SECS=3600",
+        "RVOIP_PERF_SOAK_ACTIVE_CALLS=500",
+        "RVOIP_PERF_SOAK_MIN_HOLD_SECS=10",
+        "RVOIP_PERF_SOAK_MAX_HOLD_SECS=360",
+        "RVOIP_PERF_SOAK_CPS=0",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=0",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0",
+        "RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS=5",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
+        "RVOIP_PERF_SYSTEM_ALLOCATOR=0",
+        "RVOIP_PERF_DHAT=0",
+        "RVOIP_PERF_HEAP_SNAPSHOTS=0",
+        "RVOIP_PERF_HEAP_SNAPSHOT_SECS=",
+        "RVOIP_PERF_MALLOC_STACK_LOGGING=0",
+        "RVOIP_PERF_LEAKS_SNAPSHOTS=0",
+        "RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0",
+        "RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15",
+        "RVOIP_PERF_EXTERNAL_RESOURCE_SAMPLER=1",
+        "<workspace>/crates/sip/rvoip-sip/scripts/perf_soak_split.sh"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 102,
+      "started_at_utc": "2026-07-29T07:34:53Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Reporting and regression",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T08:48:25Z",
+      "evidence": [
+        {
+          "path": "perf_regression_baseline_evidence.log",
+          "sha256": "6296208d645638bf45fd0e4463fb0206234b4e9edc8f3457de2c00c84852c3c9"
+        }
+      ],
+      "id": "report.regression-baseline",
+      "kind": "reporting",
+      "name": "perf regression baseline evidence",
+      "sanitized_argv": [
+        "python3",
+        "<workspace>/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py",
+        "package",
+        "--manifest",
+        "<workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json",
+        "--source-root",
+        "<workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z",
+        "--artifact-dir",
+        "<workspace>/target/beta-gate/20260729T010954Z"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 103,
+      "started_at_utc": "2026-07-29T08:48:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Reporting and regression",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T08:48:25Z",
+      "evidence": [
+        {
+          "path": "perf_regression_audit.log",
+          "sha256": "8f5ee39ca608a2b0dd5b6950def3716e745ce82fa6855ed464d454ccaffa54dd"
+        }
+      ],
+      "id": "report.regression-audit",
+      "kind": "reporting",
+      "name": "perf regression audit",
+      "sanitized_argv": [
+        "python3",
+        "<workspace>/crates/sip/rvoip-sip/scripts/perf_audit.py",
+        "--baseline",
+        "<workspace>/target/beta-gate/20260729T010954Z/perf-regression-baseline/perf-results",
+        "--baseline-manifest",
+        "<workspace>/target/beta-gate/20260729T010954Z/perf-regression-baseline/manifest.json",
+        "--current",
+        "<workspace>/target/perf-results",
+        "--out",
+        "<workspace>/target/beta-gate/20260729T010954Z/perf-audit.md",
+        "--tolerance-pct",
+        "15",
+        "--latency-tolerance-pct",
+        "25",
+        "--fail-on-regression"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 104,
+      "started_at_utc": "2026-07-29T08:48:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Reporting and regression",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 1,
+      "ended_at_utc": "2026-07-29T08:48:26Z",
+      "evidence": [
+        {
+          "path": "perf_results_evidence_capture.log",
+          "sha256": "d8d5b7fac40a364cb7363018e87ba708b0cb5b5f03dfd96075e569592ceefa25"
+        }
+      ],
+      "id": "report.perf-evidence-capture",
+      "kind": "reporting",
+      "name": "perf results evidence capture",
+      "sanitized_argv": [
+        "capture_current_perf_results"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 105,
+      "started_at_utc": "2026-07-29T08:48:25Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Reporting and regression",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 1,
+          "passed": false
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T08:48:26Z",
+      "evidence": [
+        {
+          "path": "performance_gate_metrics_report.log",
+          "sha256": "313af1b155b64a77ab7f9e2a6919adf6911e962c1df80cdc6d598422f10f2aa3"
+        }
+      ],
+      "id": "report.performance-metrics",
+      "kind": "reporting",
+      "name": "performance gate metrics report",
+      "sanitized_argv": [
+        "write_performance_gate_metrics"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 106,
+      "started_at_utc": "2026-07-29T08:48:26Z",
+      "status": "FAIL"
+    },
+    {
+      "category": "Source integrity",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T08:48:26Z",
+      "evidence": [
+        {
+          "path": "beta_final_source_fingerprint_capture.log",
+          "sha256": "70e9aac64b8ca42828f6615cca677748a46c3aa32e83a8fbd2a45a207a00ce38"
+        }
+      ],
+      "id": "source.final-capture",
+      "kind": "source",
+      "name": "beta final source fingerprint capture",
+      "sanitized_argv": [
+        "python3",
+        "<workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py",
+        "fingerprint",
+        "--workspace-root",
+        "<workspace>",
+        "--out",
+        "<workspace>/target/beta-gate/20260729T010954Z/environment/source-at-beta-end.json"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 107,
+      "started_at_utc": "2026-07-29T08:48:26Z",
+      "status": "PASS"
+    },
+    {
+      "category": "Source integrity",
+      "checks": [
+        {
+          "check": "command exit status",
+          "observed": 0,
+          "passed": true
+        }
+      ],
+      "duration_seconds": 0,
+      "ended_at_utc": "2026-07-29T08:48:26Z",
+      "evidence": [
+        {
+          "path": "canonical_2k_beta_source_unchanged.log",
+          "sha256": "017f07a518c8d718ff6623c31c91f65b8e444d7be00540d9fe2807a80cd98178"
+        }
+      ],
+      "id": "source.canonical-2k-unchanged",
+      "kind": "source",
+      "name": "canonical 2k beta source unchanged",
+      "sanitized_argv": [
+        "python3",
+        "<workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py",
+        "verify-source",
+        "--workspace-root",
+        "<workspace>",
+        "--beta-start",
+        "<workspace>/target/beta-gate/20260729T010954Z/environment/source-at-beta-start.json"
+      ],
+      "schema": "rvoip-sip-gate-result-v1",
+      "sequence": 108,
+      "started_at_utc": "2026-07-29T08:48:26Z",
+      "status": "PASS"
+    }
+  ],
+  "required_count": 108,
+  "schema": "rvoip-sip-gate-results-v1",
+  "skipped": 0
+}

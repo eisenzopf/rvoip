@@ -9,6 +9,7 @@ Current release train and runtime crate version: `0.3.2`.
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)
 - [Beta Performance Report](BETA_PERFORMANCE_REPORT.md)
+- [0.3.2 owner-approved release exception](BETA_RELEASE_EXCEPTION.md)
 - [Immutable release history](releases/beta/README.md)
 
 ## Promotion rule
@@ -40,6 +41,45 @@ Conditional gates are required whenever their enabling configuration schedules
 them. They are never classified as optional or “additional” after execution.
 Unknown, duplicate, ambiguous, uncatalogued, missing, or unvalidated gates fail
 closed.
+
+## Owner-approved exception path
+
+The strict promotion rule above is unchanged. A project owner may separately
+accept a bounded deviation only through a tracked exception attestation that:
+
+- retains the source run's original `FAIL` / `NON-RC` status and every gate
+  result;
+- identifies the exact accepted deviation and approval basis;
+- binds the decision, full gate inventory, and selected source evidence with
+  SHA-256;
+- passes the dedicated exception verifier; and
+- is supplied explicitly to unified release verification.
+
+For 0.3.2, the owner accepted the high-density full-media burst ASR result of
+0.9928 against the 0.995 threshold. The adjacent reporting failure is a derived
+roll-up of that same miss. All 106 other gates passed and no gate was skipped.
+The immutable report is
+[`20260729T010954Z/exception-r1`](releases/beta/20260729T010954Z/exception-r1/BETA_RELEASE_REPORT.md).
+
+Verify the exception by itself:
+
+```sh
+python3 scripts/release_exception_attestation.py verify \
+  --attestation crates/sip/rvoip-sip/docs/releases/beta/20260729T010954Z/exception-r1/exception-attestation.json \
+  --version 0.3.2
+```
+
+Use it during the normal unified verification phase:
+
+```sh
+python3 scripts/release.py verify \
+  --version 0.3.2 \
+  --beta-exception-attestation crates/sip/rvoip-sip/docs/releases/beta/20260729T010954Z/exception-r1/exception-attestation.json
+```
+
+`--beta-exception-attestation` and the strict `--beta-report-root` input are
+mutually exclusive. The verification receipt records which qualification mode
+was used and the exception attestation's SHA-256.
 
 ## Required release configuration
 

@@ -474,7 +474,48 @@ class ReleaseLog:
         return output
 
 
-def verify_beta_reporting(root: Path, beta_report_root: str | None, log: ReleaseLog) -> None:
+def verify_beta_reporting(
+    root: Path,
+    version: str,
+    beta_report_root: str | None,
+    beta_exception_attestation: str | None,
+    log: ReleaseLog,
+) -> dict[str, Any]:
+    if beta_report_root and beta_exception_attestation:
+        raise ReleaseError(
+            "--beta-report-root and --beta-exception-attestation are mutually exclusive"
+        )
+    if beta_exception_attestation:
+        attestation = Path(beta_exception_attestation)
+        if not attestation.is_absolute():
+            attestation = root / attestation
+        verifier = root / "scripts/release_exception_attestation.py"
+        command = [
+            sys.executable,
+            str(verifier),
+            "verify",
+            "--attestation",
+            str(attestation),
+            "--version",
+            version,
+        ]
+        log.command(command, root)
+        payload = json.loads(attestation.read_text())
+        relative = (
+            attestation.relative_to(root).as_posix()
+            if attestation.is_relative_to(root)
+            else str(attestation)
+        )
+        return {
+            "mode": "owner-approved-exception",
+            "disposition": payload["release"]["disposition"],
+            "strict_automated_status": payload["release"][
+                "strict_automated_status"
+            ],
+            "attestation_path": relative,
+            "attestation_sha256": hashlib.sha256(attestation.read_bytes()).hexdigest(),
+        }
+
     crate = root / "crates/sip/rvoip-sip"
     reporter = crate / "scripts/beta_release_report.py"
     docs = crate / "docs"
@@ -488,6 +529,12 @@ def verify_beta_reporting(root: Path, beta_report_root: str | None, log: Release
     if beta_report_root:
         command.extend(["--report-root", beta_report_root])
     log.command(command, root)
+    return {
+        "mode": "strict",
+        "disposition": "RELEASE-CANDIDATE",
+        "strict_automated_status": "PASS",
+        "report_root": beta_report_root or "docs-current",
+    }
 
 
 def package_artifact(
@@ -548,9 +595,10 @@ def write_verification_receipt(
     log: ReleaseLog,
     package_hashes: dict[str, str],
     package_file_hashes: dict[str, str],
+    beta_qualification: dict[str, Any],
 ) -> None:
     receipt = {
-        "schema": "rvoip-unified-release-verification-v2",
+        "schema": "rvoip-unified-release-verification-v3",
         "verified_at": utc_now(),
         "version": version,
         "git_commit": head,
@@ -558,6 +606,7 @@ def write_verification_receipt(
         "ordered_packages": ordered,
         "package_sha256": package_hashes,
         "package_file_manifest_sha256": package_file_hashes,
+        "beta_qualification": beta_qualification,
         "package_hash_scope": (
             "Pre-publication .crate hashes exist only where all target-version "
             "registry dependencies were already resolvable. Publication records "
@@ -574,13 +623,22 @@ def write_verification_receipt(
 
 
 def verify(
-    root: Path, version: str, beta_report_root: str | None
+    root: Path,
+    version: str,
+    beta_report_root: str | None,
+    beta_exception_attestation: str | None,
 ) -> None:
     head = ensure_release_state(root, version, require_no_tag=True)
     packages, ordered = validate_workspace(root, version, locked=True)
     log = ReleaseLog(root, version, "verify")
     log.event("start", operation="verify", version=version, git_commit=head)
-    verify_beta_reporting(root, beta_report_root, log)
+    beta_qualification = verify_beta_reporting(
+        root,
+        version,
+        beta_report_root,
+        beta_exception_attestation,
+        log,
+    )
     commands = [
         ["cargo", "check", "--workspace", "--all-targets", "--locked"],
         ["cargo", "test", "--workspace", "--lib", "--locked"],
@@ -637,6 +695,7 @@ def verify(
         log,
         package_hashes,
         package_file_hashes,
+        beta_qualification,
     )
     log.event("complete", operation="verify", package_count=len(packages))
     log.message(f"verified {len(packages)} packages at {version}")
@@ -652,7 +711,7 @@ def read_verification_receipt(
     file_hashes = receipt.get("package_file_manifest_sha256")
     package_hashes = receipt.get("package_sha256")
     expected = (
-        receipt.get("schema") == "rvoip-unified-release-verification-v2"
+        receipt.get("schema") == "rvoip-unified-release-verification-v3"
         and receipt.get("version") == version
         and receipt.get("git_commit") == head
         and receipt.get("ordered_packages") == ordered
@@ -661,6 +720,9 @@ def read_verification_receipt(
         and set(file_hashes) == set(ordered)
         and isinstance(package_hashes, dict)
         and set(package_hashes) <= set(ordered)
+        and isinstance(receipt.get("beta_qualification"), dict)
+        and receipt["beta_qualification"].get("mode")
+        in {"strict", "owner-approved-exception"}
     )
     if not expected:
         raise ReleaseError("verification receipt does not match this release commit")
@@ -858,9 +920,14 @@ def parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("--version", required=True)
         if name == "verify":
-            command.add_argument(
+            report_group = command.add_mutually_exclusive_group()
+            report_group.add_argument(
                 "--beta-report-root",
                 default=os.environ.get("RVOIP_BETA_REPORT_ROOT"),
+            )
+            report_group.add_argument(
+                "--beta-exception-attestation",
+                default=os.environ.get("RVOIP_BETA_EXCEPTION_ATTESTATION"),
             )
         if name == "publish":
             command.add_argument(
@@ -882,7 +949,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.command == "prepare":
                 prepare(root, version)
             elif args.command == "verify":
-                verify(root, version, args.beta_report_root)
+                verify(
+                    root,
+                    version,
+                    args.beta_report_root,
+                    args.beta_exception_attestation,
+                )
             elif args.command == "publish":
                 publish(root, version, execute=args.execute)
     except ReleaseError as error:
