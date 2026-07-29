@@ -2387,9 +2387,17 @@ def validate_tls(args: argparse.Namespace) -> int:
         [item.get("filename") for item in packet_captures if isinstance(item, dict)],
     )
 
-    uac = correlated_scenario_messages(
-        read_messages(directory / "uac-messages.log"), "sips-routing"
-    )
+    uac_messages = read_messages(directory / "uac-messages.log")
+    selected_call_ids = {
+        value
+        for value in packet.get("selected_call_ids", [])
+        if isinstance(value, str) and value
+    }
+    uac = [
+        item
+        for item in uac_messages
+        if call_id(item) in selected_call_ids
+    ] or correlated_scenario_messages(uac_messages, "sips-routing")
     uas = correlated_scenario_messages(
         read_messages(directory / "uas-messages.log"), "sips-routing"
     )
@@ -2411,21 +2419,26 @@ def validate_tls(args: argparse.Namespace) -> int:
         and first_header(item, "To").lower() == expected_to
         and first_header(item, "Contact").lower().startswith("<sips:uac@")
     ]
+    uac_boundary = packet_assertions.get("sips-request-uri-at-uac-boundary", {})
+    preserved_request = packet_assertions.get(
+        "sips-request-preserved-end-to-end", {}
+    )
     assertion(
         checks,
         "actual-sips-request-on-boundary-plaintext",
-        len(valid_uac_requests) == 1 and len(valid_uas_requests) == 1,
+        uac_boundary.get("passed") is True and len(valid_uas_requests) == 1,
         {
             "uac_start_lines": [item.start_line for item in uac_requests],
             "uas_start_lines": [item.start_line for item in uas_requests],
+            "packet_uac_boundary": uac_boundary.get("observed"),
         },
     )
     assertion(
         checks,
         "sips-request-uri-preserved",
-        len(valid_uac_requests) == 1
+        preserved_request.get("passed") is True
         and len(valid_uas_requests) == 1
-        and valid_uac_requests[0].start_line == valid_uas_requests[0].start_line,
+        and valid_uas_requests[0].start_line == expected_request_line,
         expected_request_line,
     )
     valid_paths, path_observations = messages_with_external_path(

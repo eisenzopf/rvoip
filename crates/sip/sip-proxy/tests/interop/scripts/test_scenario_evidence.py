@@ -1399,6 +1399,24 @@ class ScenarioEvidenceTests(unittest.TestCase):
                 <= names
             )
 
+    def test_tls_sips_evidence_accepts_buffered_uac_send_with_packet_proof(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            args, _row, directory = tls_sips_fixture(Path(temporary))
+            uac_trace = directory / "uac-messages.log"
+            write_trace(
+                uac_trace,
+                [
+                    item
+                    for item in scenario_evidence.read_messages(uac_trace)
+                    if item.direction == "received"
+                ],
+            )
+            self.assertEqual(scenario_evidence.validate_tls(args), 0)
+            result = json.loads((directory / "result.json").read_text())
+            self.assertEqual(result["status"], "PASS")
+
     def test_tls_sips_evidence_rejects_downgraded_request_uri(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             args, _row, directory = tls_sips_fixture(Path(temporary))
