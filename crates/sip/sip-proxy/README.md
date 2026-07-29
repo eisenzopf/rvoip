@@ -12,9 +12,9 @@ and Via handling consumed by the
 
 ## Status
 
-**Partial RFC 3261 stateful-proxy implementation.** Published `0.3.1`
+**Partial RFC 3261 stateful-proxy implementation.** Published `0.3.3`
 does not carry a bounded proxy-conformance claim. The coordinated
-`0.3.2` development work adds candidate support for
+`0.3.4` candidate adds support for
 transaction-stateful forwarding, parallel/sequential forking, Via and
 Max-Forwards processing, response aggregation, CANCEL propagation, and
 Timer C. Those features do not yet constitute a qualified RFC profile.
@@ -35,7 +35,7 @@ you want the raw transaction-layer primitives:
 
 ```toml
 [dependencies]
-rvoip-sip-proxy = "0.3.2"
+rvoip-sip-proxy = "0.3.4"
 ```
 
 ## License

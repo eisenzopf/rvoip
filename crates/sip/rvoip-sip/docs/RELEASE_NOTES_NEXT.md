@@ -1,100 +1,83 @@
-# rvoip 0.3.2 Release Notes
+# rvoip 0.3.4 Release Candidate Notes
 
 Date: 2026-07-29
 
-These notes describe the unified `0.3.2` workspace release approved with one
-explicit performance exception. Behavioral and performance claims remain
-bounded by the clean full-run evidence, compatibility and RFC matrices,
-interoperability evidence, security posture, and exception report.
+These notes describe the coordinated `0.3.4` candidate. They do not represent
+a published release or a passing beta attestation until the exact committed
+candidate completes the strict full gate and receives owner approval.
 
 ## Headline
 
-All 44 publishable crates move together to `0.3.2`. The SIP product remains the
-release-gated beta surface. WebRTC, UCTP, Media over QUIC, identity, and
-optional extensions retain their documented developer-preview or experimental
-status where they are outside the SIP attestation.
+All 44 publishable crates move together to `0.3.4`. The release adds an exact
+inbound-admission terminal signal, completes the RFC 6026 INVITE transaction
+updates used by the SIP stack, and introduces a bounded RFC 3261
+transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
 
 ## Added
 
-- Authenticated-principal propagation and ownership checks now span SIP,
-  WebRTC, UCTP, routes, and operational events.
-- Transport-neutral data messaging covers arbitrary WebRTC DataChannels, SIP
-  MESSAGE, typed initial SIP headers, DTMF, and correlated transfer outcomes.
-- `MediaGraph` provides directional routes, codec-group transcoding, bounded
-  fanout, snapshots, and drop/eviction metrics under a single-consumer model.
-- SIP, WebRTC, and Amazon Connect support prepare/bind/activate lifecycles with
-  owned cancellation, terminal events, and bounded drain.
-- SIP outbound activation receipts linearize after the exact session becomes
-  active; established teardown waits for the peer's final BYE response while
-  retaining timeout/rejection cleanup.
-- UCTP carries complete RTP packets and supports authenticated raw QUIC and
-  WebTransport sessions, virtual publishers, direct-listener limits, and exact
-  cleanup.
-- `rvoip-moq` implements the documented draft-19/MSF-01/LOC-03 publisher,
-  subscriber, origin, relay, authorization, reconnect, health, and drain
-  abstractions.
-- Symmetric RTP, advertised SIP/RTP addresses, RFC 3581 `rport`, WebRTC ICE/NAT
-  policy, and per-exchange WHIP/WHEP versus WebSocket gathering are
-  configurable.
-- Developer-preview `rvoip-vapi` supplies a bidirectional WebSocket agent
-  adapter through the facade's opt-in `vapi` feature and the `full` profile.
-- `rvoip::app` adds voice-only SIP/WebRTC admission, transport-neutral accepted
-  call events, startup-safe event retention, explicit SIP/RTP advertisement,
-  and example 14's shared Vapi agent server.
+- `InboundAdmissionTermination` and exact-generation `watch` receivers notify
+  applications of cancellation, remote end, or failure without polling or a
+  global event subscription.
+- Private INVITE client/server Accepted lifecycles retain matching 2xx traffic
+  through Timer M and Timer L while preserving the public transaction enum.
+- Stateful proxy response contexts support matched and unmatched CANCEL,
+  cancellation latching, forked and late 2xx responses, ACK ownership,
+  response aggregation, Timer C, strict/loose routing, SIPS, and exact response
+  flow handling.
+- Kamailio and OpenSIPS are mandatory real-process interoperability peers in
+  both adjacency orders over UDP, TCP, and verified TLS.
+- The beta report generator records revision-bound Asterisk, FreeSWITCH,
+  Kamailio, and OpenSIPS attestations and fails closed on missing or skipped
+  required rows.
 
 ## Fixed
 
-- SCIM provisioning passwords are structurally guaranteed to satisfy the
-  users-core password policy, eliminating random provisioning failures.
+- Renamed workspace dependencies, including the WebRTC and MOQT package
+  aliases, are updated and validated during coordinated release preparation.
+- Transactionless ACK transport metadata is bounded and eligible for exact
+  cleanup after the protocol retention horizon.
+- Via `received`/`rport`, packed Via popping, body preservation, route-set
+  processing, and RFC 3263 failover paths have dedicated packet-level tests.
+- The existing SCIM, vCon, Vapi, WebRTC, MOQT, and extension behavior from
+  `0.3.2` and `0.3.3` remains part of the coordinated workspace.
 
-## Compatibility Notes
+## Proxy Claim Boundary
 
-- UCTP media datagrams now contain a complete RTP packet after the UCTP header.
-- MOQT draft changes are wire-incompatible at the `rvoip-moq` compatibility
-  boundary.
-- Exhaustive matches over `rvoip_core_traits::connection::Transport` must add
-  the `Vapi` variant.
-- Exhaustive matches over `rvoip::app::AppEvent` must add the
-  `InboundCallAccepted` variant.
+The candidate may be described only as an “RFC 3261 transaction-stateful
+proxy profile, updated by RFC 4320 and RFC 6026,” after every applicable row in
+the conformance matrix links to green executable evidence.
 
-These are intentional pre-1.0 compatibility changes. The private WebRTC/RTC
-TURN candidate and dynamic moq-rs publisher-lease candidate remain outside the
-consumed dependency graph.
+- Recursive 3xx Contact processing is not part of the claimed profile.
+- Loop detection is disabled unless it can distinguish loops from spirals.
+- Asymmetric Record-Route rewriting is outside the claim unless separately
+  qualified.
+- The claim does not cover every SIP extension, topology, or peer version.
 
-## Beta-Scope Claims
+## Compatibility
 
-- SIP APIs remain centered on `Endpoint`, `StreamPeer`, `CallbackPeer`,
-  `UnifiedCoordinator`, and `SessionHandle`.
-- Beta media support and interoperability claims are limited to the codecs,
-  transports, peers, topology, and workloads recorded by the promoted report.
-- General full-media performance claims remain capped at the documented 2,000
-  CPS beta profile and require three source-identical canonical runs.
-- Higher-CPS tuned results must retain their hardware, topology, workload, and
-  configuration caveats.
-- The full release gate includes workspace and downstream tests, documentation,
-  API compatibility, Asterisk, FreeSWITCH, SIPp, baresip strict-UA, dependency
-  audit, parser fuzz smoke, performance matrices, burst tests, and soaks.
+- Public source compatibility is compared against `v0.3.3`.
+- RFC 6026 Accepted state remains private protocol state so exhaustive matches
+  over the public `TransactionState` remain compatible.
+- The admission terminal APIs are additive.
+- Stateful proxy wire behavior changes are externally observable but ship as
+  `0.3.4` by owner decision within the pre-1.0 release train.
 
-## Must Not Claim Yet
+## Required Qualification
 
-- Broad production readiness.
-- Carrier SBC certification.
-- Browser/WebRTC support within the SIP beta qualification.
-- DTLS-SRTP, ICE, or TURN support within the SIP beta qualification.
-- Untested codec or topology support.
-- General-user 10,000 CPS full-media capability.
+Promotion requires the exact clean candidate revision to pass:
 
-## Evidence and Promotion
+- all unit, integration, security, lifecycle, RFC, and public-API checks;
+- Asterisk and FreeSWITCH signaling plus real audio matrices;
+- Kamailio and OpenSIPS in both orders over UDP, TCP, and TLS;
+- the SIPp ladder and strict-UA checks;
+- three canonical 2,000-CPS runs with the recorded beta thresholds;
+- one-hour monolithic and one-hour split soaks; and
+- report verification, package inspection, SBOM, provenance, vulnerability
+  policy, and publication dry run.
 
-The owner-approved [0.3.2 release exception](BETA_RELEASE_EXCEPTION.md),
-[complete gate record](BETA_GATE_EXCEPTION.md), and
-[performance evidence](BETA_PERFORMANCE_EXCEPTION.md) are the authority for
-this release disposition. The source run remains `FAIL` / `NON-RC`: 106 of 108
-required records passed, with zero skips. The root deviation was high-density
-full-media burst ASR of 0.9928 against the 0.995 requirement; the second failed
-record is the reporting roll-up of that same miss.
+No prior exception or historical report qualifies `0.3.4`. Publication,
+tagging, pushing, or deployment requires separate owner authorization.
 
-No failed gate was changed to PASS. The immutable exception snapshot binds the
-decision to the clean, unchanged tested commit and its evidence with SHA-256.
-The last fully strict 108/108 beta candidate remains available through
-[the strict current reports](BETA_RELEASE_REPORT.md).
+Historical `0.3.2` disposition and evidence remain unchanged in
+[`BETA_RELEASE_EXCEPTION.md`](BETA_RELEASE_EXCEPTION.md) and its immutable
+release archive.

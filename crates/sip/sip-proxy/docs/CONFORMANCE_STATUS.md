@@ -17,7 +17,8 @@ release certificate.
 | Isolated branch | `codex/sip-proxy-conformance` |
 | Initial isolated worktree state | Clean |
 | Workspace version at baseline | `0.3.1` |
-| Planned behavioral release | Coordinated `0.3.2`, after owner review and qualification |
+| Integration base | Published `v0.3.3` (`b8f2b78a321cce89a855819d0319b309c669ea88`) |
+| Planned behavioral release | Coordinated `0.3.4`, after owner review and qualification |
 
 The manifest fingerprint was produced from the reviewed commit with:
 
@@ -34,7 +35,7 @@ with the clean starting point recorded above.
 
 ## Claim boundary
 
-- Published `0.3.1` and the current development candidate are described
+- Published `0.3.3` and the current development candidate are described
   as a **partial stateful-proxy implementation**.
 - No complete RFC conformance claim is made.
 - The eventual claim, if qualified, is limited to the rows marked
@@ -42,8 +43,8 @@ with the clean starting point recorded above.
 - The transaction state machines are supplied by the exact
   `rvoip-sip-dialog` dependency and are part of the qualification
   boundary.
-- Because the coordinated release is `0.3.2`, every published crate must pass
-  source-compatibility comparison with `0.3.1`. RFC 6026 `Accepted` state is
+- Because the coordinated release is `0.3.4`, every published crate must pass
+  source-compatibility comparison with `0.3.3`. RFC 6026 `Accepted` state is
   internal protocol state; the exhaustive public `TransactionState` and
   `TransactionEvent` shapes must remain compatible.
 - Bridgefu remains a B2BUA. Its cross-leg cancellation fix is separate

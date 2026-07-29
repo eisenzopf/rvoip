@@ -13,8 +13,10 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The `0.3.2` crate is a **beta release approved with one documented performance
-exception** for bounded SIP client, server, PBX, gateway, and B2BUA scenarios.
+The workspace is preparing a strict-gate `0.3.4` release candidate. The
+current published SIP qualification remains the `0.3.2` **beta release
+approved with one documented performance exception** for bounded SIP client,
+server, PBX, gateway, and B2BUA scenarios.
 The strict automated result remains NON-RC; see the
 [release exception](docs/BETA_RELEASE_EXCEPTION.md). It is intended for
 developers who want a Rust-native SIP control surface with runnable examples
@@ -44,7 +46,7 @@ is **Rust 1.88**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.2"
+rvoip-sip = "0.3.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -136,6 +138,11 @@ in [`examples/pbx/README.md`](examples/pbx/README.md). The terminal softphone
 is documented in [`examples/sip_client/README.md`](examples/sip_client/README.md).
 
 ## Interoperability status
+
+The `0.3.4` candidate requires revision-bound PASS evidence for Asterisk,
+FreeSWITCH, Kamailio, and OpenSIPS. Kamailio and OpenSIPS must each pass both
+adjacency orders over UDP, TCP, and verified TLS. Until that report is green,
+the historical status below remains the latest published SIP attestation.
 
 The 0.3.2 full release run passed all 16 selected PBX and interoperability
 gates. Asterisk and FreeSWITCH were executed as external PBX peers; Kamailio

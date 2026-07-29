@@ -4,7 +4,9 @@ This document defines the promotion procedure. It does not duplicate a
 candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
-Current release train and runtime crate version: `0.3.2`.
+Current candidate and runtime crate version: `0.3.4`.
+The `0.3.4` candidate requires the strict full gate; the historical `0.3.2`
+exception path cannot qualify it.
 
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)

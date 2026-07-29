@@ -19,8 +19,11 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.3` release.** All 44 publishable workspace crates ship on the
-> same version. The SIP product is the release-gated beta surface. WebRTC,
+> **Unified `0.3.4` release candidate.** All 44 publishable workspace crates
+> are being qualified on the same version. The current crates.io release
+> remains `0.3.3` until the candidate passes the strict full beta gate and the
+> owner explicitly authorizes publication. The SIP product is the
+> release-gated beta surface. WebRTC,
 > UCTP, MoQ, the cross-transport APIs, Amazon Connect, and extension crates are
 > available today as developer-preview surfaces unless their own documentation
 > states a narrower qualification. Available does not mean API-stable or
@@ -115,7 +118,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.3"
+rvoip-sip = "0.3.4"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -336,7 +339,7 @@ product's implementation:
 
 ### SIP interoperability attestation
 
-Starting with the `0.3.2` qualification gate, a full SIP beta candidate must
+For the `0.3.4` qualification gate, a full SIP beta candidate must
 carry an explicit PASS attestation for all four independently managed peers
 below. The report generator binds every row to the tested source tree, exact
 peer identity and configuration, selected matrix, and hashed evidence; it

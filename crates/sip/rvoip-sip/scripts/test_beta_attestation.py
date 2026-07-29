@@ -130,6 +130,25 @@ class BetaAttestationTests(unittest.TestCase):
             path = self.report / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"fixture evidence for {relative}\n", encoding="utf-8")
+        (self.report / "proxy-interop/summary.json").write_text(
+            json.dumps(
+                {
+                    "schema": "rvoip-sip-proxy-interop-v1",
+                    "configuration": {
+                        "kamailio_image": "kamailio@sha256:" + "a" * 64,
+                        "kamailio_platform": "linux/amd64",
+                        "opensips_image": "opensips@sha256:" + "b" * 64,
+                        "opensips_platform": "linux/amd64",
+                    },
+                    "rows": [
+                        {"peer": "kamailio", "status": "PASS"},
+                        {"peer": "opensips", "status": "PASS"},
+                    ],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         for relative in sorted(attestation.PERFORMANCE_GATE_METRICS_PATHS):
             path = self.report / relative
             path.write_text("fixture performance metrics\n", encoding="utf-8")
@@ -358,6 +377,12 @@ class BetaAttestationTests(unittest.TestCase):
             "beta_run_perf_all": "1",
             "beta_run_sipp": "1",
             "beta_run_strict_ua": "1",
+            "beta_proxy_interop_peers": "kamailio opensips",
+            "beta_proxy_interop_orders": "rvoip-first peer-first",
+            "beta_proxy_interop_transports": "udp tcp tls",
+            "beta_proxy_interop_retention_drain_seconds": "130",
+            "beta_proxy_interop_require_clean_source": "1",
+            "beta_proxy_interop_require_unchanged_source": "1",
             "beta_state_table_fallback_reason": state_table_fallback_reason
             or "none",
             "beta_state_table_sha256": digest(self.state_yaml.read_bytes()),
@@ -626,7 +651,14 @@ class BetaAttestationTests(unittest.TestCase):
         )
         self.assertEqual(
             {peer["product"] for peer in manifest["peers"]},
-            {"asterisk", "baresip", "freeswitch", "sipp"},
+            {
+                "asterisk",
+                "baresip",
+                "freeswitch",
+                "kamailio",
+                "opensips",
+                "sipp",
+            },
         )
         self.assertEqual(
             manifest["configuration"]["effective_gate_config_keys"],
@@ -1068,10 +1100,31 @@ class BetaAttestationTests(unittest.TestCase):
         ):
             attestation.verify_report(self.report)
 
+    def test_missing_real_proxy_peer_is_not_release_eligible(self):
+        summary_path = self.report / "proxy-interop/summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        summary["rows"] = [
+            row for row in summary["rows"] if row["peer"] != "opensips"
+        ]
+        summary_path.write_text(
+            json.dumps(summary, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        self.create(require_external=True)
+        manifest = attestation.verify_report(self.report)
+        self.assertFalse(manifest["qualification"]["release_candidate"])
+        self.assertTrue(
+            any(
+                "missing opensips" in reason
+                for reason in manifest["qualification"]["ineligibility_reasons"]
+            )
+        )
+
     def test_uncaptured_optional_mode_evidence_is_explicitly_absent(self):
         shutil.rmtree(self.report / "strict-ua")
         shutil.rmtree(self.report / "perf-results")
         shutil.rmtree(self.report / "sipp")
+        shutil.rmtree(self.report / "proxy-interop")
         shutil.rmtree(self.environment / "local-pbx")
         self.create(mode="local", include_executable=False)
         manifest = attestation.verify_report(self.report)
@@ -1245,6 +1298,20 @@ class BetaAttestationTests(unittest.TestCase):
             )
         )
 
+    def test_full_pass_without_proxy_runtime_state_evidence_is_non_rc(self):
+        self.install_canonical_2k_fixture()
+        (self.report / "proxy-interop/runtime-state-check.json").unlink()
+        self.create(require_external=True)
+        manifest = attestation.verify_report(self.report, require_pass=True)
+        self.assertFalse(manifest["pointers"]["mode_specific_eligible"])
+        self.assertTrue(
+            any(
+                reason.startswith("interop report evidence is incomplete")
+                and "proxy-interop/runtime-state-check.json" in reason
+                for reason in manifest["pointers"]["ineligibility_reasons"]
+            )
+        )
+
     def test_full_pass_without_split_soak_json_is_non_rc(self):
         self.install_canonical_2k_fixture()
         (self.report / "perf-results/perf_soak_receiver.json").unlink()
@@ -1325,14 +1392,20 @@ class BetaAttestationTests(unittest.TestCase):
         checklist = (
             WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"
         ).read_text(encoding="utf-8")
-        self.assertIn(
-            f"version.workspace = true  # {self.workspace_version} — beta-tier",
+        release_notes = (
+            WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(self.workspace_version, "0.3.4")
+        self.assertRegex(
             crate_manifest,
+            r"(?m)^version\.workspace\s*=\s*true(?:\s*(?:#.*)?)?$",
         )
-        marker = f"Current release train and runtime crate version: `{self.workspace_version}`"
+        marker = f"Current candidate and runtime crate version: `{self.workspace_version}`"
         self.assertIn(marker, checklist)
-        # Generated current reports remain bound to the previously promoted
-        # candidate until a new clean gate is verified and promote-docs runs.
+        self.assertIn("0.3.4 Release Candidate Notes", release_notes)
+        self.assertIn("current crates.io release\n> remains `0.3.3`", (
+            WORKSPACE_ROOT / "README.md"
+        ).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

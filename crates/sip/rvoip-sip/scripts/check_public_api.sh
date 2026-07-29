@@ -13,7 +13,7 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 crate_dir=$(CDPATH= cd -- "$script_dir/.." && pwd)
 workspace_dir=$(CDPATH= cd -- "$crate_dir/../../.." && pwd)
 baseline="$crate_dir/public-api/rvoip-sip.txt"
-baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-v0.3.1}
+baseline_rev=${RVOIP_SIP_API_BASELINE_REV:-v0.3.3}
 require_tools=${RVOIP_REQUIRE_API_TOOLS:-0}
 public_api_version=cargo-public-api\ 0.52.0
 semver_checks_version=cargo-semver-checks\ 0.49.0

@@ -9,6 +9,7 @@ import io
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -798,8 +799,11 @@ rvoip-rtc = { path = "../rvoip-rtc" }
 
     def test_current_workspace_has_all_44_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
+        workspace_version = tomllib.loads(
+            (root / "Cargo.toml").read_text()
+        )["workspace"]["package"]["version"]
         packages, ordered = release.validate_workspace(
-            root, "0.3.3", locked=True
+            root, workspace_version, locked=True
         )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
         self.assertEqual(len(ordered), 44)
