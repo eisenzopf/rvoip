@@ -258,7 +258,15 @@ pub enum EventType {
     Dialog180Ringing,
     Dialog183SessionProgress,
     Dialog200OK,
-    DialogACK,
+    /// The peer's answer, when this ACK completes a delayed-offer
+    /// INVITE/re-INVITE. Our 200 OK carried the offer in that case (RFC
+    /// 3261 §14.2), so the answer only shows up here. `None` covers both
+    /// the common case, where the offer/answer exchange already completed
+    /// before the 200 OK went out, and a delayed-offer ACK that came back
+    /// with no body, which violates §14.2.
+    DialogACK {
+        sdp: Option<String>,
+    },
     DialogBYE,
     DialogCANCEL,
     DialogREFER,
@@ -448,6 +456,7 @@ impl EventType {
                 contacts: Vec::new(),
             },
             EventType::SendEarlyMedia { .. } => EventType::SendEarlyMedia { sdp: None },
+            EventType::DialogACK { .. } => EventType::DialogACK { sdp: None },
             EventType::AuthRequired { .. } => EventType::AuthRequired {
                 status_code: 0,
                 challenge: String::new(),
@@ -634,6 +643,17 @@ pub enum Action {
     SwitchToPassThroughOnActive,
     NegotiateSDPAsUAC,
     NegotiateSDPAsUAS,
+    /// RFC 3261 §14.2 delayed-offer completion. When our 200 OK carried a
+    /// freshly generated offer, because the triggering INVITE/re-INVITE had
+    /// no SDP and `NegotiateSDPAsUAS` left `session.pending_local_offer` set
+    /// instead of negotiating, the peer's answer arrives in the ACK instead
+    /// of anything we can process earlier. This action reads that answer,
+    /// negotiates it as a UAC would, and only promotes it to
+    /// `session.remote_sdp` and marks `sdp_negotiated` once that succeeds.
+    /// It's a no-op if the offer/answer exchange already completed at 200
+    /// OK time, which is the common case where the offer was in the
+    /// INVITE/re-INVITE.
+    CompleteAckNegotiation,
     /// RFC 3262 — prepare SDP for a reliable 183. Uses caller-supplied SDP
     /// from `session.early_media_sdp` if present, otherwise negotiates
     /// against the stored remote offer. Writes the result into

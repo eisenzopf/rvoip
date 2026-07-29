@@ -316,7 +316,7 @@ type ExactSipResponseResult = Result<
     Box<dyn std::error::Error + Send + Sync>,
 >;
 
-async fn send_exact_sip_response_on_fresh_task(
+pub(crate) async fn send_exact_sip_response_on_fresh_task(
     dialog_adapter: Arc<DialogAdapter>,
     session_id: SessionId,
     transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
@@ -1860,13 +1860,23 @@ pub(crate) async fn execute_action(
             let initial_invite_response = initial_invite_event
                 || (inbound_response.is_none()
                     && session.pending_inbound_invite_transaction_id.is_some());
+            // A bodyless UPDATE (RFC 4028 §9 session-timer refresh) must get
+            // a bodyless 200 OK back. Attaching `session.local_sdp` here
+            // would turn the response into an unsolicited offer with no
+            // ACK or further request to carry an answer back on.
+            let response_body = if matches!(triggering_event, EventType::UpdateReceived { sdp: None })
+            {
+                None
+            } else {
+                session.local_sdp.clone()
+            };
             let mut terminal_error = None;
             if response_is_final && initial_invite_response {
                 let terminal = send_exact_initial_invite_final_response(
                     session,
                     dialog_adapter,
                     response_code,
-                    session.local_sdp.clone(),
+                    response_body,
                     extras,
                 )
                 .await?;
@@ -1883,7 +1893,7 @@ pub(crate) async fn execute_action(
                     inbound_response.as_deref_mut(),
                     dialog_adapter,
                     response_code,
-                    session.local_sdp.clone(),
+                    response_body,
                     extras,
                 )
                 .await?;
@@ -1893,7 +1903,7 @@ pub(crate) async fn execute_action(
                     session,
                     dialog_adapter,
                     response_code,
-                    session.local_sdp.clone(),
+                    response_body,
                     extras,
                 )
                 .await?;
@@ -1903,7 +1913,7 @@ pub(crate) async fn execute_action(
                     inbound_response.as_deref_mut(),
                     dialog_adapter,
                     response_code,
-                    session.local_sdp.clone(),
+                    response_body,
                     extras,
                 )
                 .await?;
@@ -2284,6 +2294,17 @@ pub(crate) async fn execute_action(
 
         // Media actions
         Action::StartMediaSession => {
+            if session.needs_teardown_after_failed_ack_negotiation {
+                // `CompleteAckNegotiation` couldn't complete a delayed-offer
+                // exchange (see that action). There's no negotiated media
+                // to start a session for; the caller is about to hang this
+                // call up.
+                info!(
+                    "Action::StartMediaSession for session {}: skipped, delayed-offer negotiation failed",
+                    session.session_id
+                );
+                return Ok(ActionOutcome::default());
+            }
             media_adapter.start_session(&session.session_id).await?;
             // Mark media as ready after successfully starting
             session.media_session_ready = true;
@@ -2346,34 +2367,215 @@ pub(crate) async fn execute_action(
                 CleanupStage::ActionNegotiateSdpUas,
                 &session.session_id.0,
             );
+            // An UPDATE with no body is a pure RFC 4028 §9 session-timer
+            // refresh signal, not an offer. There's nothing to negotiate,
+            // and unlike a bodyless re-INVITE there's no ACK to carry a
+            // later answer in either, so this can't go through the
+            // delayed-offer path below. SendSIPResponse separately knows
+            // not to attach a body for this triggering event.
+            let bodyless_update = matches!(triggering_event, EventType::UpdateReceived { sdp: None });
             // Skip negotiation when caller supplied the answer SDP ahead of
             // time via `accept_call_with_sdp`. Same reasoning as
             // `GenerateLocalSDP` above.
-            if session.sdp_negotiated && session.local_sdp.is_some() {
+            if bodyless_update {
+                info!(
+                    "Action::NegotiateSDPAsUAS for session {}: bodyless UPDATE, nothing to negotiate",
+                    session.session_id
+                );
+            } else if session.sdp_negotiated && session.local_sdp.is_some() {
                 info!(
                     "Action::NegotiateSDPAsUAS for session {}: using pre-set SDP",
                     session.session_id
                 );
-            } else if let Some(remote_sdp) = session.remote_sdp.clone() {
-                let (local_sdp, config) = media_adapter
+            } else if let Some(remote_sdp) = session.pending_remote_offer.clone().or_else(|| {
+                // This fallback exists for the initial-INVITE AcceptCall
+                // path, where the offer already lives in `remote_sdp`
+                // directly (that flow never populates
+                // `pending_remote_offer`). A re-INVITE or UPDATE with no
+                // offer of its own must NOT fall back to whatever
+                // `remote_sdp` already holds from the last committed
+                // negotiation, an offerless re-INVITE needs the
+                // delayed-offer branch below instead.
+                let in_dialog_modification = matches!(
+                    triggering_event,
+                    EventType::ReinviteReceived { .. } | EventType::UpdateReceived { .. }
+                );
+                if in_dialog_modification {
+                    None
+                } else {
+                    session.remote_sdp.clone()
+                }
+            }) {
+                match media_adapter
                     .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
-                    .await?;
-
-                // Convert to session_store NegotiatedConfig
-                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
-                let session_config = crate::session_store::state::NegotiatedConfig {
-                    local_addr: config.local_addr,
-                    remote_addr: config.remote_addr,
-                    codec: config.codec,
-                    sample_rate,
-                    channels,
-                };
-                session.local_sdp = Some(local_sdp);
-                session.negotiated_config = Some(session_config);
-                session.local_media_direction = config.local_direction;
-                session.remote_media_direction = config.remote_direction;
-                session.sdp_negotiated = true;
-                info!("SDP negotiated as UAS for session {}", session.session_id);
+                    .await
+                {
+                    Ok((local_sdp, config)) => {
+                        // Convert to session_store NegotiatedConfig
+                        let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
+                        let session_config = crate::session_store::state::NegotiatedConfig {
+                            local_addr: config.local_addr,
+                            remote_addr: config.remote_addr,
+                            codec: config.codec,
+                            sample_rate,
+                            channels,
+                        };
+                        session.local_sdp = Some(local_sdp);
+                        // Negotiation actually succeeded at this point, so
+                        // this offer can become the committed remote SDP.
+                        // A re-INVITE that fails here leaves `remote_sdp`
+                        // at its previous (pre-offer) value untouched.
+                        session.remote_sdp = Some(remote_sdp);
+                        session.pending_remote_offer = None;
+                        session.negotiated_config = Some(session_config);
+                        session.local_media_direction = config.local_direction;
+                        session.remote_media_direction = config.remote_direction;
+                        session.sdp_negotiated = true;
+                        info!("SDP negotiated as UAS for session {}", session.session_id);
+                    }
+                    Err(error) => {
+                        // RFC 3264: an offer/answer failure doesn't tear
+                        // down the session. Drop the failed offer and
+                        // leave every committed field (remote_sdp,
+                        // local_sdp, negotiated_config) exactly as it was.
+                        session.pending_remote_offer = None;
+                        match inbound_response {
+                            Some(inbound_response) => {
+                                warn!(
+                                    "SDP negotiation failed as UAS for session {}: {}",
+                                    session.session_id, error
+                                );
+                                use rvoip_sip_core::types::uri::Uri;
+                                use rvoip_sip_core::types::warning::Warning;
+                                let warning_header = TypedHeader::Warning(vec![Warning::new(
+                                    399,
+                                    Uri::sip("rvoip"),
+                                    format!("SDP negotiation failed: {error}"),
+                                )]);
+                                let terminal = send_exact_inbound_final_response(
+                                    &session.session_id,
+                                    Some(inbound_response),
+                                    dialog_adapter,
+                                    488,
+                                    None,
+                                    Some(vec![warning_header]),
+                                )
+                                .await?;
+                                if let Some(terminal_error) = terminal.terminal_error {
+                                    return Err(terminal_error);
+                                }
+                                // The 488 is on the wire now. Still return
+                                // an error here (rather than falling
+                                // through as a success) so the executor's
+                                // per-transition action loop stops instead
+                                // of running `SendSIPResponse(200)` right
+                                // after and sending a second response for
+                                // the same transaction.
+                                return Err(error.into());
+                            }
+                            None => {
+                                // No event-local transaction authority here
+                                // (this action also runs for the initial
+                                // INVITE AcceptCall path, which has its own
+                                // existing rejection handling). Preserve
+                                // the original propagate-the-error
+                                // behavior for that case.
+                                return Err(error.into());
+                            }
+                        }
+                    }
+                }
+            } else {
+                // RFC 3261 §14.2 delayed offer: the triggering INVITE/
+                // re-INVITE had no SDP, so there's no remote offer to
+                // negotiate against here. `GenerateLocalSDP` (which always
+                // runs before this action in the same transition) already
+                // put a freshly generated offer in `session.local_sdp`;
+                // mark it pending so `CompleteAckNegotiation` knows to
+                // finish this exchange once the peer's answer arrives in
+                // the ACK, instead of the transition claiming
+                // `sdp_negotiated` for an offer nobody has answered yet.
+                if let Some(local_offer) = session.local_sdp.clone() {
+                    session.pending_local_offer = Some(local_offer);
+                    info!(
+                        "Action::NegotiateSDPAsUAS for session {}: no remote offer, \
+                         sent a delayed offer instead, awaiting the answer in ACK",
+                        session.session_id
+                    );
+                }
+            }
+            guard.finish_success();
+        }
+        Action::CompleteAckNegotiation => {
+            let guard = cleanup_diag::stage_guard(
+                CleanupStage::ActionNegotiateSdpUas,
+                &session.session_id.0,
+            );
+            if let Some(local_offer) = session.pending_local_offer.take() {
+                match session.ack_answer_sdp.take() {
+                    Some(answer_sdp) => {
+                        match media_adapter
+                            .negotiate_sdp_as_uac_lane_owned(session, &answer_sdp)
+                            .await
+                        {
+                            Ok(config) => {
+                                let (sample_rate, channels) =
+                                    negotiated_audio_shape(&config.codec);
+                                session.negotiated_config =
+                                    Some(crate::session_store::state::NegotiatedConfig {
+                                        local_addr: config.local_addr,
+                                        remote_addr: config.remote_addr,
+                                        codec: config.codec,
+                                        sample_rate,
+                                        channels,
+                                    });
+                                session.local_media_direction = config.local_direction;
+                                session.remote_media_direction = config.remote_direction;
+                                // The peer's answer has now actually been
+                                // validated and applied, so the offer we
+                                // sent can become the committed local SDP
+                                // and the peer's answer the committed
+                                // remote SDP.
+                                session.local_sdp = Some(local_offer);
+                                session.remote_sdp = Some(answer_sdp);
+                                session.sdp_negotiated = true;
+                                info!(
+                                    "Delayed-offer negotiation completed from ACK answer for session {}",
+                                    session.session_id
+                                );
+                            }
+                            Err(error) => {
+                                // Negotiation failed against the peer's ACK
+                                // answer. The 3-way handshake already
+                                // completed, this is the UAS ACK, so there
+                                // is no SIP response left to send and we
+                                // can't reject the way we would a
+                                // pre-response failure. Leave
+                                // `sdp_negotiated` false; the caller is
+                                // responsible for tearing the dialog down
+                                // with BYE rather than running an
+                                // unnegotiated call as if it were healthy.
+                                warn!(
+                                    "Delayed-offer ACK answer failed to negotiate for session {}: {}",
+                                    session.session_id, error
+                                );
+                                session.needs_teardown_after_failed_ack_negotiation = true;
+                            }
+                        }
+                    }
+                    None => {
+                        // RFC 3261 §14.2 requires the answer to be in this
+                        // ACK when the offer was in our 2xx. A peer that
+                        // omits it has violated the offer/answer contract;
+                        // same handling as a failed negotiation above.
+                        warn!(
+                            "ACK for session {} completed a delayed offer with no answer body \
+                             (RFC 3261 §14.2 violation), leaving sdp_negotiated unset",
+                            session.session_id
+                        );
+                        session.needs_teardown_after_failed_ack_negotiation = true;
+                    }
+                }
             }
             guard.finish_success();
         }

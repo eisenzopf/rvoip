@@ -571,6 +571,22 @@ pub enum Event {
         request: crate::api::incoming::IncomingRequest,
     },
 
+    /// A re-INVITE carrying SDP arrived while
+    /// [`crate::api::unified::ReinvitePolicy::ApplicationControlled`] is
+    /// active. The call keeps running on its previously negotiated media
+    /// until this is resolved. Use
+    /// [`crate::api::incoming_reinvite::IncomingReinvite`] (constructed
+    /// from this event by whichever peer surface delivers it) to answer
+    /// with `accept_with_answer` or `reject`. A bodyless re-INVITE and
+    /// every UPDATE never produce this event; see `ReinvitePolicy`'s doc
+    /// comment for why.
+    IncomingReinvite {
+        /// Session identifier for the dialog the re-INVITE arrived on.
+        call_id: CallId,
+        /// The peer's offer.
+        sdp: String,
+    },
+
     /// SIP_API_DESIGN_2 Phase D — inbound REGISTER (RFC 3261 §10).
     /// Surfaces the typed `IncomingRegister` view so registrar
     /// applications can author the response via `accept_builder` /
@@ -965,6 +981,10 @@ impl std::fmt::Debug for Event {
                 .debug_tuple("UpdateReceived")
                 .field(request)
                 .finish(),
+            Self::IncomingReinvite { sdp, .. } => formatter
+                .debug_struct("IncomingReinvite")
+                .field("sdp_bytes", &sdp.len())
+                .finish(),
             Self::IncomingRegister { register } => formatter
                 .debug_tuple("IncomingRegister")
                 .field(register)
@@ -1104,7 +1124,8 @@ impl Event {
             | Event::CallFailedDetailed(r) => Some(&r.call_id),
             Event::InfoReceived { call_id, .. }
             | Event::MessageReceived { call_id, .. }
-            | Event::UpdateReceived { call_id, .. } => Some(call_id),
+            | Event::UpdateReceived { call_id, .. }
+            | Event::IncomingReinvite { call_id, .. } => Some(call_id),
             Event::OptionsReceived { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
             Event::RegistrationSuccess { .. }
@@ -1133,6 +1154,7 @@ impl Event {
                 | Event::MessageReceived { .. }
                 | Event::OptionsReceived { .. }
                 | Event::UpdateReceived { .. }
+                | Event::IncomingReinvite { .. }
         )
     }
 

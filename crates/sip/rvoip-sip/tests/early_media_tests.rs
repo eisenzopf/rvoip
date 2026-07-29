@@ -137,7 +137,11 @@ fn dialog_ack_auto_switches_transmitter_to_passthrough() {
     // incoming call, not just early-media ones.
     let table = load();
     let t = table
-        .get(&key(Role::UAS, CallState::Answering, EventType::DialogACK))
+        .get(&key(
+            Role::UAS,
+            CallState::Answering,
+            EventType::DialogACK { sdp: None },
+        ))
         .expect("UAS Answering + DialogACK transition must exist");
 
     assert_eq!(t.next_state, Some(CallState::Active));

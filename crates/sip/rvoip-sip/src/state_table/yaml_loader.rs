@@ -778,7 +778,7 @@ impl YamlTableLoader {
             // entry the YAML "DialogACK" event falls through to
             // `EventType::MediaEvent("DialogACK")` and the transition never
             // fires.
-            "DialogACK" => Ok(EventType::DialogACK),
+            "DialogACK" => Ok(EventType::DialogACK { sdp: None }),
             "DialogBYE" => Ok(EventType::DialogBYE),
             "DialogCANCEL" => Ok(EventType::DialogCANCEL),
             "DialogTimeout" => Ok(EventType::DialogTimeout),
@@ -1016,6 +1016,7 @@ impl YamlTableLoader {
             "StopMediaSession" | "StopMedia" => Ok(Action::CleanupMedia),
             "NegotiateSDPAsUAC" => Ok(Action::NegotiateSDPAsUAC),
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
+            "CompleteAckNegotiation" => Ok(Action::CompleteAckNegotiation),
             "PrepareEarlyMediaSDP" => Ok(Action::PrepareEarlyMediaSDP),
             "SwitchToPassThroughOnActive" => Ok(Action::SwitchToPassThroughOnActive),
             "StoreAuthChallenge" => Ok(Action::StoreAuthChallenge),

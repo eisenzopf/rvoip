@@ -165,7 +165,7 @@ fn local_bye_initiators_defer_media_cleanup_to_terminal_phase() {
         (
             Role::UAS,
             CallState::AnsweringHangupPending,
-            EventType::DialogACK,
+            EventType::DialogACK { sdp: None },
         ),
     ] {
         let t = transition(&table, role, state, event);
@@ -278,7 +278,7 @@ fn uas_answering_hangup_pending_ack_sends_bye_without_established_event() {
         &table,
         Role::UAS,
         CallState::AnsweringHangupPending,
-        EventType::DialogACK,
+        EventType::DialogACK { sdp: None },
     );
 
     assert_eq!(t.next_state, Some(CallState::Terminating));

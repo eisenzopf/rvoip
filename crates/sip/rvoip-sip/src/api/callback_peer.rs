@@ -2616,6 +2616,13 @@ impl<H: CallHandler> CallbackPeer<H> {
                     register.set_coordinator(coordinator.clone());
                     handler.on_register_received(register).await;
                 }
+                // No dedicated CallHandler hook (unlike IncomingCall/
+                // UpdateReceived/etc). The generic `handler.on_event`
+                // call above already delivered the raw event; the
+                // application builds an `IncomingReinvite` itself via
+                // `IncomingReinvite::for_call(coordinator, call_id)`
+                // when it wants to act on it.
+                Event::IncomingReinvite { .. } => {}
             }
             dispatch_guard.finish_success();
         });

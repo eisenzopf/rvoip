@@ -779,6 +779,9 @@ pub struct MediaAdapter {
     /// Whether to allocate media-core sessions or generate SDP only.
     media_mode: MediaMode,
 
+    /// Who decides how an inbound re-INVITE carrying SDP gets answered.
+    reinvite_policy: crate::api::unified::ReinvitePolicy,
+
     // ==== RFC 4568 SDES-SRTP state (Step 2B) ====
     /// Whether to attach `a=crypto:` lines to outgoing offers and to
     /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
@@ -936,6 +939,7 @@ impl MediaAdapter {
             media_port_start: port_start,
             media_port_end: port_end,
             media_mode: MediaMode::Enabled,
+            reinvite_policy: crate::api::unified::ReinvitePolicy::Automatic,
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: vec![
@@ -986,6 +990,16 @@ impl MediaAdapter {
     /// Set media allocation behavior.
     pub fn set_media_mode(&mut self, mode: MediaMode) {
         self.media_mode = mode;
+    }
+
+    /// Set who decides how an inbound re-INVITE carrying SDP gets answered.
+    pub fn set_reinvite_policy(&mut self, policy: crate::api::unified::ReinvitePolicy) {
+        self.reinvite_policy = policy;
+    }
+
+    /// Current re-INVITE application-control policy.
+    pub fn reinvite_policy(&self) -> crate::api::unified::ReinvitePolicy {
+        self.reinvite_policy
     }
 
     /// Resolve the live lower media allocation owned by one exact session
@@ -4551,6 +4565,7 @@ impl Clone for MediaAdapter {
             media_port_start: self.media_port_start,
             media_port_end: self.media_port_end,
             media_mode: self.media_mode,
+            reinvite_policy: self.reinvite_policy,
             offer_srtp: self.offer_srtp,
             srtp_required: self.srtp_required,
             srtp_offered_suites: self.srtp_offered_suites.clone(),

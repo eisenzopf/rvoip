@@ -387,6 +387,29 @@ pub enum MediaMode {
     },
 }
 
+/// Who decides how an inbound re-INVITE that carries an SDP offer gets
+/// answered.
+///
+/// This only affects a re-INVITE that carries SDP. RFC 3261 §14.2
+/// delayed-offer re-INVITEs (no body) are always handled automatically
+/// regardless of this setting, since generating a fresh offer and
+/// completing the exchange from the ACK isn't a decision an application
+/// can usefully weigh in on. UPDATE (RFC 3311) is also always automatic:
+/// that RFC itself recommends against deferring to user/application
+/// interaction for UPDATE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReinvitePolicy {
+    /// Negotiate and answer every re-INVITE automatically (the historical
+    /// behavior, and still the default).
+    #[default]
+    Automatic,
+    /// Hold a re-INVITE that carries SDP and deliver it to the
+    /// application as an [`crate::api::incoming_reinvite::IncomingReinvite`],
+    /// which the application resolves with `accept_with_answer` or
+    /// `reject`.
+    ApplicationControlled,
+}
+
 /// SIP media NAT behavior kept as a source-compatible sidecar to [`Config`].
 ///
 /// Existing `Config` struct literals and constructors remain unchanged. Use
@@ -2258,6 +2281,11 @@ pub struct Config {
     /// and controlled tests.
     pub media_mode: MediaMode,
 
+    /// Who decides how an inbound re-INVITE carrying SDP gets answered.
+    /// Default: [`ReinvitePolicy::Automatic`]. See that type for exactly
+    /// which re-INVITE/UPDATE shapes are affected.
+    pub reinvite_policy: ReinvitePolicy,
+
     /// Optional capacity hint for media-core session and RTP port indexes.
     ///
     /// This is intentionally separate from [`Config::server_call_capacity`]:
@@ -2751,6 +2779,7 @@ impl std::fmt::Debug for Config {
                 &self.media_public_addr.is_some(),
             )
             .field("media_mode", &self.media_mode)
+            .field("reinvite_policy", &self.reinvite_policy)
             .field("media_session_capacity", &self.media_session_capacity)
             .field("stun_configured", &self.stun_server.is_some())
             .field("offered_codec_count", &self.offered_codecs.len())
@@ -2908,6 +2937,7 @@ impl Config {
             srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            reinvite_policy: ReinvitePolicy::Automatic,
             media_session_capacity: None,
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
@@ -3026,6 +3056,7 @@ impl Config {
             srtp_keying: SrtpKeyingMode::Sdes,
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            reinvite_policy: ReinvitePolicy::Automatic,
             media_session_capacity: None,
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
@@ -3605,6 +3636,14 @@ impl Config {
     /// Set media allocation behavior.
     pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
         self.media_mode = mode;
+        self
+    }
+
+    /// Set who decides how an inbound re-INVITE carrying SDP gets
+    /// answered. See [`ReinvitePolicy`] for exactly which re-INVITE/UPDATE
+    /// shapes this affects.
+    pub fn with_reinvite_policy(mut self, policy: ReinvitePolicy) -> Self {
+        self.reinvite_policy = policy;
         self
     }
 
@@ -8657,6 +8696,7 @@ impl UnifiedCoordinator {
             config.media_port_end,
         );
         media_adapter_inner.set_media_mode(config.media_mode);
+        media_adapter_inner.set_reinvite_policy(config.reinvite_policy);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
             config.offer_srtp,

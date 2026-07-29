@@ -2168,6 +2168,39 @@ impl SessionCrossCrateEventHandler {
                         );
                     }
                 }
+                // ReinvitePolicy::ApplicationControlled only ever applies
+                // to a re-INVITE that actually carries SDP. A bodyless
+                // re-INVITE (RFC 3261 §14.2 delayed offer) and every
+                // UPDATE are always automatic (see `ReinvitePolicy`'s doc
+                // comment), so those keep going through
+                // `handle_reinvite_received_parts` below unconditionally.
+                if method.eq_ignore_ascii_case("INVITE")
+                    && sdp.is_some()
+                    && self.media_adapter.reinvite_policy()
+                        == crate::api::unified::ReinvitePolicy::ApplicationControlled
+                {
+                    let offered_sdp = sdp.clone().expect("checked Some above");
+                    let transaction_id = inbound_response.transaction_id()?.clone();
+                    let _ = self.state_machine.store.update_session_exact_with(
+                        handle,
+                        None,
+                        |session| {
+                            session.pending_incoming_reinvite =
+                                Some(crate::session_store::state::PendingIncomingReinvite {
+                                    transaction_id,
+                                    offered_sdp: offered_sdp.clone(),
+                                });
+                        },
+                    );
+                    self.app_event_publisher.publish_exact(
+                        handle,
+                        crate::api::events::Event::IncomingReinvite {
+                            call_id: sid.clone(),
+                            sdp: offered_sdp,
+                        },
+                    );
+                    return Ok(());
+                }
                 self.handle_reinvite_received_parts(
                     handle,
                     sdp.clone(),
@@ -2198,11 +2231,11 @@ impl SessionCrossCrateEventHandler {
                 )
                 .await
             }
-            DialogToSessionEvent::AckReceived { session_id, .. } => {
-                self.handle_ack_received_session(require_dialog_event_handle(
-                    exact_handle,
-                    session_id,
-                )?)
+            DialogToSessionEvent::AckReceived { session_id, sdp } => {
+                self.handle_ack_received_session(
+                    require_dialog_event_handle(exact_handle, session_id)?,
+                    sdp.clone(),
+                )
                 .await
             }
             DialogToSessionEvent::RegistrationSuccess { session_id } => {
@@ -5546,7 +5579,11 @@ impl SessionCrossCrateEventHandler {
         processing_ack.map_err(anyhow::Error::msg)
     }
 
-    async fn handle_ack_received_session(&self, handle: &SessionRegistryHandle) -> Result<()> {
+    async fn handle_ack_received_session(
+        &self,
+        handle: &SessionRegistryHandle,
+        sdp: Option<String>,
+    ) -> Result<()> {
         let session_id = handle.session_id();
         if self
             .state_machine
@@ -5564,7 +5601,7 @@ impl SessionCrossCrateEventHandler {
         rvoip_sip_dialog::diagnostics::record_ack_event_delivered();
         if let Err(error) = self
             .state_machine
-            .process_event_exact(handle, EventType::DialogACK)
+            .process_event_exact(handle, EventType::DialogACK { sdp })
             .await
         {
             error!(
@@ -5575,6 +5612,47 @@ impl SessionCrossCrateEventHandler {
             coordinator
                 .schedule_active_call_media_timeout_if_current(session_id)
                 .await;
+        }
+
+        // RFC 3261 §14.2 delayed-offer completion failed (missing or
+        // invalid answer in this ACK). The dialog is established, so
+        // there's no SIP response left to reject the call with, but
+        // there's no negotiated media either, so the only correct move
+        // left is to hang the call up rather than leave it looking Active
+        // with no working RTP.
+        let needs_teardown = self
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .map(|snapshot| snapshot.needs_teardown_after_failed_ack_negotiation)
+            .unwrap_or(false);
+        if needs_teardown {
+            warn!(
+                "Tearing down session {} after failed delayed-offer ACK negotiation",
+                session_id
+            );
+            let _ = self.state_machine.store.update_session_exact_with(
+                handle,
+                None,
+                |session| {
+                    session.needs_teardown_after_failed_ack_negotiation = false;
+                    session.pending_bye_reason = Some((
+                        "SIP".to_string(),
+                        488,
+                        Some("Delayed offer negotiation failed".to_string()),
+                    ));
+                },
+            );
+            if let Err(error) = self
+                .state_machine
+                .process_event_exact(handle, EventType::HangupCall)
+                .await
+            {
+                error!(
+                    "Failed to hang up session {} after failed ACK negotiation: {}",
+                    session_id, error
+                );
+            }
         }
         Ok(())
     }

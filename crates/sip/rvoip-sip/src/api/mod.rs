@@ -301,6 +301,7 @@ pub mod handle; // SessionHandle, CallId
 pub mod handlers; // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
 pub mod headers; // SipHeaderView, SipRequestOptions, HeaderPolicy (SIP_API_DESIGN_2)
 pub mod incoming; // IncomingCall, IncomingCallGuard, IncomingRequest, IncomingResponse, IncomingRegister
+pub mod incoming_reinvite; // IncomingReinvite (ReinvitePolicy::ApplicationControlled)
 pub mod lifecycle;
 pub mod performance;
 pub mod proxy_coordinator; // Stateful SIP proxy entry point (Phase 6)
@@ -325,8 +326,9 @@ pub use crate::types::CallState;
 // Re-export the unified API
 pub use unified::{
     Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
-    RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SipContactMode,
-    SipNatConfig, SipTlsMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
+    RegistrationStatus, ReinvitePolicy, RtpSessionBufferConfig, RtpTransportBufferConfig,
+    SipContactMode, SipNatConfig, SipTlsMode, SrtpSuitePolicy, SymmetricRtpPolicy,
+    UnifiedCoordinator,
 };
 
 // Re-export event types
@@ -364,6 +366,9 @@ pub use types::DialogIdentity;
 pub use incoming::{
     IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
+
+// IncomingReinvite (ReinvitePolicy::ApplicationControlled)
+pub use incoming_reinvite::IncomingReinvite;
 
 // Header view + builder trait surface (SIP_API_DESIGN_2)
 pub use headers::{
