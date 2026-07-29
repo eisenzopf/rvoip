@@ -109,6 +109,12 @@ impl RecordRouteEntry {
     /// Check if this record-route entry has a specific parameter
     pub fn has_param(&self, name: &str) -> bool {
         self.0.has_param(name)
+            || self
+                .0
+                .uri
+                .parameters
+                .iter()
+                .any(|parameter| parameter.key().eq_ignore_ascii_case(name))
     }
 
     /// Get the inner Address

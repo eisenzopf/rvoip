@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
+use hickory_resolver::config::{NameServerConfig, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::net::{DnsError, NetError};
 use hickory_resolver::proto::rr::{RData, RecordType};
@@ -119,6 +119,21 @@ impl HickoryResolver {
         Self {
             inner: Arc::new(inner),
         }
+    }
+
+    /// Build a resolver that sends DNS queries to one exact nameserver.
+    ///
+    /// This keeps disposable interoperability environments independent of
+    /// host resolver configuration while still exercising the production
+    /// RFC 3263 NAPTR/SRV/A implementation.
+    pub fn with_nameserver(nameserver: SocketAddr) -> Self {
+        let mut server = NameServerConfig::udp(nameserver.ip());
+        server
+            .connections
+            .iter_mut()
+            .for_each(|connection| connection.port = nameserver.port());
+        let config = ResolverConfig::from_parts(None, Vec::new(), vec![server]);
+        Self::with_resolver(config, ResolverOpts::default())
     }
 
     /// Adopt an externally-built `TokioAsyncResolver`. Provided for the
@@ -503,6 +518,12 @@ mod tests {
         let ns = vec![NameServerConfig::udp("127.0.0.1".parse().unwrap())];
         let config = ResolverConfig::from_parts(None, vec![], ns);
         HickoryResolver::with_resolver(config, ResolverOpts::default())
+    }
+
+    #[test]
+    fn exact_nameserver_constructor_is_available_for_interop() {
+        let resolver = HickoryResolver::with_nameserver("127.0.0.1:25353".parse().unwrap());
+        assert_eq!(format!("{resolver:?}"), "HickoryResolver { .. }");
     }
 
     #[test]

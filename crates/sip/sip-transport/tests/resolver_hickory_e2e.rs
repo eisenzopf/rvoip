@@ -60,7 +60,9 @@ fn build_fixture_authority() -> InMemoryZoneHandler {
     let mut authority =
         InMemoryZoneHandler::empty(origin.clone(), ZoneType::Primary, AxfrPolicy::Deny);
 
-    // Top-level domain NAPTRs — SIPS+D2T first (lower order), then SIP+D2U.
+    // Top-level domain NAPTRs — cover every RFC 3263 transport service token
+    // supported by this release profile. Lower order values establish a
+    // deterministic TLS, TCP, UDP candidate ordering.
     add_record(
         &mut authority,
         "example.test.",
@@ -69,7 +71,12 @@ fn build_fixture_authority() -> InMemoryZoneHandler {
     add_record(
         &mut authority,
         "example.test.",
-        naptr_rdata(20, 50, "SIP+D2U", "_sip._udp.example.test."),
+        naptr_rdata(20, 50, "SIP+D2T", "_sip._tcp.example.test."),
+    );
+    add_record(
+        &mut authority,
+        "example.test.",
+        naptr_rdata(30, 50, "SIP+D2U", "_sip._udp.example.test."),
     );
 
     // SRVs for both transports point at host.example.test.
@@ -77,6 +84,11 @@ fn build_fixture_authority() -> InMemoryZoneHandler {
         &mut authority,
         "_sips._tcp.example.test.",
         srv_rdata(1, 1, 5061, "host.example.test."),
+    );
+    add_record(
+        &mut authority,
+        "_sip._tcp.example.test.",
+        srv_rdata(1, 1, 5060, "host.example.test."),
     );
     add_record(
         &mut authority,
@@ -135,9 +147,8 @@ async fn hickory_client_resolves_naptr_then_srv_then_a() {
         .await
         .expect("resolve must succeed against fixture");
 
-    // Expected: TLS (from the order=10 NAPTR) first, then UDP
-    // (order=20). Both should map to 127.0.0.1 with the SRV-supplied
-    // ports.
+    // Expected: TLS, TCP, then UDP from NAPTR orders 10, 20, and 30. All
+    // should map to 127.0.0.1 with the SRV-supplied ports.
     assert!(
         !candidates.is_empty(),
         "resolver returned no candidates against fixture"
@@ -149,24 +160,35 @@ async fn hickory_client_resolves_naptr_then_srv_then_a() {
         candidates
     );
     assert!(
+        candidates.iter().any(|c| c.transport == TransportType::Tcp
+            && c.addr == SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5060)),
+        "missing TCP candidate at 127.0.0.1:5060 — got {:?}",
+        candidates
+    );
+    assert!(
         candidates.iter().any(|c| c.transport == TransportType::Udp
             && c.addr == SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 5060)),
         "missing UDP candidate at 127.0.0.1:5060 — got {:?}",
         candidates
     );
-    // TLS appears before UDP (RFC 3263 NAPTR order honoured).
+    // The complete NAPTR service ordering is honoured.
     let tls_idx = candidates
         .iter()
         .position(|c| c.transport == TransportType::Tls)
+        .unwrap();
+    let tcp_idx = candidates
+        .iter()
+        .position(|c| c.transport == TransportType::Tcp)
         .unwrap();
     let udp_idx = candidates
         .iter()
         .position(|c| c.transport == TransportType::Udp)
         .unwrap();
     assert!(
-        tls_idx < udp_idx,
-        "TLS should precede UDP (lower NAPTR order); got TLS@{} UDP@{}",
+        tls_idx < tcp_idx && tcp_idx < udp_idx,
+        "NAPTR order should be TLS, TCP, UDP; got TLS@{} TCP@{} UDP@{}",
         tls_idx,
+        tcp_idx,
         udp_idx
     );
     assert!(

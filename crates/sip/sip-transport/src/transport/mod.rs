@@ -7,7 +7,10 @@ use tokio::sync::mpsc;
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
-use rvoip_sip_core::{types::uri::Host, HeaderName, Message, Method, Request, TypedHeader};
+use rvoip_sip_core::{
+    types::{param::Param, uri::Host},
+    HeaderName, Message, Method, Request, TypedHeader,
+};
 
 mod runtime;
 pub mod tcp;
@@ -128,19 +131,32 @@ impl TransportAuthority {
     }
 }
 
-/// Determine the authenticated authority for a typed SIP request: the top
-/// Route URI when present, otherwise the Request-URI.
+/// Determine the authenticated authority for a typed SIP request.
+///
+/// A loose (`;lr`) top Route selects the next-hop authority. After
+/// strict-routing postprocessing the Request-URI names the strict router and
+/// the top Route contains the original target, so it must not replace the
+/// Request-URI authority.
 pub fn transport_authority_for_request(request: &Request) -> Result<TransportAuthority> {
-    let route_host = request.headers.iter().find_map(|header| {
-        if header.name() != HeaderName::Route {
+    let loose_route_host = request.headers.iter().find_map(|header| {
+        if !header.name().wire_eq(&HeaderName::Route) {
             return None;
         }
         match header {
-            TypedHeader::Route(route) => route.first().map(|entry| entry.0.uri.host.clone()),
+            TypedHeader::Route(route) => route.first().and_then(|entry| {
+                let is_loose = entry
+                    .0
+                    .uri
+                    .parameters
+                    .iter()
+                    .chain(entry.0.params.iter())
+                    .any(|parameter| matches!(parameter, Param::Lr));
+                is_loose.then(|| entry.0.uri.host.clone())
+            }),
             _ => None,
         }
     });
-    match route_host.as_ref().unwrap_or(&request.uri().host) {
+    match loose_route_host.as_ref().unwrap_or(&request.uri().host) {
         Host::Domain(domain) => TransportAuthority::dns(domain.clone()),
         Host::Address(address) => Ok(TransportAuthority::ip(*address)),
     }
