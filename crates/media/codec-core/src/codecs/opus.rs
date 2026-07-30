@@ -710,7 +710,8 @@ mod tests {
         let mut codec = OpusCodec::new(config).unwrap();
         let samples: Vec<i16> = (0_usize..2_880)
             .flat_map(|index| {
-                let left = ((index.wrapping_mul(7_919) % 65_535) as i32 - 32_767) as i16;
+                let value = u16::try_from(index.wrapping_mul(7_919) % 65_535).unwrap();
+                let left = i16::try_from(i32::from(value) - 32_767).unwrap();
                 [left, left.wrapping_neg()]
             })
             .collect();
