@@ -141,6 +141,15 @@ pub struct SdesConfig {
     pub offer_count: usize,
 }
 
+/// Directional key material produced by an SDES offer/answer exchange.
+#[derive(Debug, Clone)]
+pub struct SdesKeyMaterial {
+    /// Key this endpoint uses to protect outbound RTP and RTCP.
+    pub local_tx: SrtpCryptoKey,
+    /// Peer key this endpoint uses to unprotect inbound RTP and RTCP.
+    pub remote_rx: SrtpCryptoKey,
+}
+
 impl Default for SdesConfig {
     fn default() -> Self {
         Self {
@@ -164,8 +173,10 @@ pub struct Sdes {
     remote_attrs: Vec<SdesCryptoAttribute>,
     /// Selected crypto attribute
     selected_attr: Option<SdesCryptoAttribute>,
-    /// Negotiated SRTP crypto key
-    srtp_key: Option<SrtpCryptoKey>,
+    /// Local transmit key advertised by this endpoint.
+    local_srtp_key: Option<SrtpCryptoKey>,
+    /// Remote transmit key used by this endpoint for inbound unprotection.
+    remote_srtp_key: Option<SrtpCryptoKey>,
     /// Negotiated SRTP crypto suite
     srtp_suite: Option<SrtpCryptoSuite>,
 }
@@ -180,7 +191,8 @@ impl Sdes {
             local_attrs: Vec::new(),
             remote_attrs: Vec::new(),
             selected_attr: None,
-            srtp_key: None,
+            local_srtp_key: None,
+            remote_srtp_key: None,
             srtp_suite: None,
         }
     }
@@ -332,7 +344,7 @@ impl Sdes {
 
             // Save key if it's the first one (the default)
             if i == 0 {
-                self.srtp_key = Some(srtp_key);
+                self.local_srtp_key = Some(srtp_key);
                 self.srtp_suite = Some(suite.clone());
             }
         }
@@ -384,18 +396,27 @@ impl Sdes {
                     "No mutually configured, implemented SDES crypto suite".to_string(),
                 )
             })?;
-        let srtp_key = Self::decode_key(selected, &srtp_suite)?;
+        let remote_srtp_key = Self::decode_key(selected, &srtp_suite)?;
         let selected = selected.clone();
 
-        // Store key for later use
+        // RFC 4568 uses independent key material in each direction. The
+        // answer keeps the offered key only for inbound traffic and advertises
+        // a freshly generated local transmit key with the selected tag/suite.
+        let (local_attr, local_srtp_key) =
+            self.create_crypto_attribute(selected.tag, &srtp_suite)?;
+
+        // Commit negotiation state only after both directional keys and the
+        // answer attribute have been validated and created successfully.
         self.remote_attrs = remote_attrs;
-        self.srtp_key = Some(srtp_key);
+        self.local_attrs = vec![local_attr.clone()];
+        self.local_srtp_key = Some(local_srtp_key);
+        self.remote_srtp_key = Some(remote_srtp_key);
         self.srtp_suite = Some(srtp_suite);
-        self.selected_attr = Some(selected.clone());
+        self.selected_attr = Some(local_attr.clone());
 
         // Create answer
         let mut answer = Vec::new();
-        answer.push(format!("a=crypto:{}", selected.to_string()));
+        answer.push(format!("a=crypto:{}", local_attr.to_string()));
 
         // Update state
         self.state = SdesState::Completed;
@@ -461,17 +482,43 @@ impl Sdes {
             ));
         }
         let local_key = Self::decode_key(local_attr, &suite)?;
+        let remote_key = Self::decode_key(&selected, &suite)?;
 
-        // Store selected attribute
+        // Commit only after the answer and both directional keys are valid.
         self.remote_attrs = remote_attrs;
         self.selected_attr = Some(selected);
-        self.srtp_key = Some(local_key);
+        self.local_srtp_key = Some(local_key);
+        self.remote_srtp_key = Some(remote_key);
         self.srtp_suite = Some(suite);
 
         // Update state
         self.state = SdesState::Completed;
 
         Ok(())
+    }
+}
+
+impl Sdes {
+    /// Return both directional keys after negotiation completes.
+    ///
+    /// An incomplete exchange returns an error instead of falling back to the
+    /// local key for both directions.
+    pub fn get_directional_keys(&self) -> Result<SdesKeyMaterial, Error> {
+        let local_tx = self.local_srtp_key.clone().ok_or_else(|| {
+            Error::InvalidState("SDES local transmit key is not available".to_string())
+        })?;
+        let remote_rx = self.remote_srtp_key.clone().ok_or_else(|| {
+            Error::InvalidState("SDES remote receive key is not available".to_string())
+        })?;
+        Ok(SdesKeyMaterial {
+            local_tx,
+            remote_rx,
+        })
+    }
+
+    /// Return the peer's transmit key used for inbound unprotection.
+    pub fn get_remote_srtp_key(&self) -> Option<SrtpCryptoKey> {
+        self.remote_srtp_key.clone()
     }
 }
 
@@ -513,7 +560,13 @@ impl SecurityKeyExchange for Sdes {
     }
 
     fn get_srtp_key(&self) -> Option<SrtpCryptoKey> {
-        self.srtp_key.clone()
+        // Compatibility accessor: SDES now has directional keys, so this
+        // continues to expose the key used for local transmission.
+        self.local_srtp_key.clone()
+    }
+
+    fn get_remote_srtp_key(&self) -> Option<SrtpCryptoKey> {
+        self.remote_srtp_key.clone()
     }
 
     fn get_srtp_suite(&self) -> Option<SrtpCryptoSuite> {

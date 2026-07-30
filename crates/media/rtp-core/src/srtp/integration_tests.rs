@@ -51,24 +51,20 @@ fn test_srtp_with_sdes_key_exchange() {
     assert!(offerer.is_complete());
     assert!(answerer.is_complete());
 
-    // Verify both sides have SRTP keys
-    assert!(offerer.get_srtp_key().is_some());
-    assert!(answerer.get_srtp_key().is_some());
-
     // 2. Use the negotiated keys with SRTP
 
-    // Create SRTP contexts
-    let offerer_srtp = SrtpContext::new(
-        offerer.get_srtp_suite().unwrap(),
-        offerer.get_srtp_key().unwrap(),
-    )
-    .expect("Failed to create offerer SRTP context");
+    // Create directional SRTP contexts. Each endpoint protects with its own
+    // advertised key and unprotects with the peer's advertised key.
+    let offerer_keys = offerer.get_directional_keys().unwrap();
+    let answerer_keys = answerer.get_directional_keys().unwrap();
+    let suite = offerer.get_srtp_suite().unwrap();
+    let mut offerer_srtp =
+        SrtpContext::new_directional(suite.clone(), offerer_keys.local_tx, offerer_keys.remote_rx)
+            .expect("Failed to create offerer SRTP context");
 
-    let mut answerer_srtp = SrtpContext::new(
-        answerer.get_srtp_suite().unwrap(),
-        answerer.get_srtp_key().unwrap(),
-    )
-    .expect("Failed to create answerer SRTP context");
+    let mut answerer_srtp =
+        SrtpContext::new_directional(suite, answerer_keys.local_tx, answerer_keys.remote_rx)
+            .expect("Failed to create answerer SRTP context");
 
     // 3. Test SRTP encryption and decryption
 
@@ -78,8 +74,7 @@ fn test_srtp_with_sdes_key_exchange() {
     let packet = RtpPacket::new(header, payload);
 
     // Encrypt with offerer's context
-    let mut offerer_srtp_mut = offerer_srtp;
-    let protected = offerer_srtp_mut
+    let protected = offerer_srtp
         .protect(&packet)
         .expect("Failed to protect RTP packet");
 
@@ -102,6 +97,50 @@ fn test_srtp_with_sdes_key_exchange() {
     assert_eq!(decrypted.header.timestamp, packet.header.timestamp);
     assert_eq!(decrypted.header.ssrc, packet.header.ssrc);
     assert_eq!(decrypted.payload, packet.payload);
+
+    // The answerer's independent transmit key works in the reverse direction.
+    let reverse = RtpPacket::new(
+        RtpHeader::new(96, 1001, 12505, 0xabcdef02),
+        Bytes::from_static(b"Hello back from the answerer!"),
+    );
+    let protected = answerer_srtp
+        .protect(&reverse)
+        .expect("Failed to protect reverse RTP packet")
+        .serialize()
+        .expect("Failed to serialize reverse RTP packet");
+    let decrypted = offerer_srtp
+        .unprotect(&protected)
+        .expect("Failed to unprotect reverse RTP packet");
+    assert_eq!(decrypted.payload, reverse.payload);
+
+    // SRTCP uses the same directional material in both directions.
+    let mut offerer_report = vec![0x80, 200, 0, 6];
+    offerer_report.extend_from_slice(&0xabcdef01_u32.to_be_bytes());
+    offerer_report.extend_from_slice(&[0x11; 20]);
+    let protected = offerer_srtp
+        .protect_rtcp(&offerer_report)
+        .expect("Failed to protect offerer RTCP");
+    assert_eq!(
+        answerer_srtp
+            .unprotect_rtcp(&protected)
+            .expect("Failed to unprotect offerer RTCP")
+            .as_ref(),
+        offerer_report
+    );
+
+    let mut answerer_report = vec![0x80, 200, 0, 6];
+    answerer_report.extend_from_slice(&0xabcdef02_u32.to_be_bytes());
+    answerer_report.extend_from_slice(&[0x22; 20]);
+    let protected = answerer_srtp
+        .protect_rtcp(&answerer_report)
+        .expect("Failed to protect answerer RTCP");
+    assert_eq!(
+        offerer_srtp
+            .unprotect_rtcp(&protected)
+            .expect("Failed to unprotect answerer RTCP")
+            .as_ref(),
+        answerer_report
+    );
 }
 
 #[test]
