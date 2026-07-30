@@ -168,6 +168,10 @@ pub struct SessionStateCold {
     pub redirect_targets: Vec<String>,
     pub redirect_attempts: u8,
     pub pending_reinvite: Option<PendingReinvite>,
+    /// Stable local SDP captured before an outbound re-INVITE replaces the
+    /// working offer. The outer option marks an in-flight snapshot; the inner
+    /// option preserves whether the stable dialog had local SDP at all.
+    pub(crate) stable_local_sdp_before_reinvite: Option<Option<String>>,
     pub reinvite_retry_attempts: u8,
     pub session_timer_min_se: Option<u32>,
     pub session_timer_retry_count: u8,
@@ -282,10 +286,6 @@ pub struct SessionState {
     // SDP data
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
-    /// Stable local SDP captured before an outbound re-INVITE replaces the
-    /// working offer. The outer option marks an in-flight snapshot; the inner
-    /// option preserves whether the stable dialog had local SDP at all.
-    pub(crate) stable_local_sdp_before_reinvite: Option<Option<String>>,
     pub negotiated_config: Option<NegotiatedConfig>,
     /// Negotiated media security, populated after SRTP contexts install.
     pub media_security: Option<MediaSecurityState>,
@@ -860,7 +860,6 @@ impl SessionState {
             call_established_triggered: false,
             local_sdp: None,
             remote_sdp: None,
-            stable_local_sdp_before_reinvite: None,
             negotiated_config: None,
             media_security: None,
             sdp_origin_session_id,
@@ -898,6 +897,7 @@ impl SessionState {
                 redirect_targets: Vec::new(),
                 redirect_attempts: 0,
                 pending_reinvite: None,
+                stable_local_sdp_before_reinvite: None,
                 reinvite_retry_attempts: 0,
                 session_timer_min_se: None,
                 session_timer_retry_count: 0,
