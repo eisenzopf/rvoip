@@ -577,6 +577,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// These tests intentionally replace the process-global typed channel for
+    /// the same event type. Serialize that replacement so parallel test
+    /// execution cannot close another test's receiver mid-assertion.
+    static STATIC_FILTER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Test event for filtering tests
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct StaticFilterEvent {
@@ -613,6 +618,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_basic_filtering() {
+        let _test_guard = STATIC_FILTER_TEST_LOCK.lock().await;
         // Register our test event with the global registry
         register_static_filter_event();
 
@@ -683,6 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_filtered_subscriber() {
+        let _test_guard = STATIC_FILTER_TEST_LOCK.lock().await;
         // Register our test event with the global registry
         register_static_filter_event();
 
@@ -799,6 +806,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_static_try_receive_filtering() {
+        let _test_guard = STATIC_FILTER_TEST_LOCK.lock().await;
         // Register our test event with the global registry
         register_static_filter_event();
 
