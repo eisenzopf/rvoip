@@ -22,6 +22,14 @@
 # Run `cargo deny check bans` locally; CI runs it on every PR via
 # `.github/workflows/cargo-deny.yml`.
 
+# Dependency-direction and production supply-chain policy applies to shipped
+# dependencies. Workspace-only test harnesses deliberately use implementation
+# crates (for example rvoip-client's loopback Orchestrator tests), so including
+# dev-dependency edges creates false production-policy violations and cycles.
+[graph]
+exclude-dev = true
+all-features = true
+
 # RustSec security-advisory scanning. Enforced in CI (cargo-deny.yml runs
 # `check advisories`) alongside the local beta release gate's `cargo audit`.
 # Accepted transitive advisories are listed in `ignore` with rationale.
@@ -44,16 +52,10 @@ ignore = [
     # `rsa` — RustSec reports no fixed upgrade. Transitive via users-core
     # RS256/JWK support and webauthn-rs crypto-glue.
     "RUSTSEC-2023-0071",
-    # `quinn-proto` — transitive via the QUIC stack. Revisit at quinn-proto >= 0.11.15.
-    "RUSTSEC-2026-0185",
     # `rustls-webpki` — transitive via the rustls stack. Revisit on the fixed line.
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0098",
     "RUSTSEC-2026-0099",
-    # `anyhow` (RUSTSEC-2026-0190) — unsound `Error::downcast_mut` after
-    # `Error::context`. Ubiquitous transitive dep; the affected pattern is not
-    # used in rvoip. Revisit when anyhow publishes the fix.
-    "RUSTSEC-2026-0190",
 ]
 
 # License compliance — permissive default; revisit when shipping
@@ -110,6 +112,10 @@ wrappers = [
     "rvoip-websocket",
     "rvoip-uctp",
     "rvoip-identity",
+    # Vapi implements the full ConnectionAdapter and drives Orchestrator.
+    "rvoip-vapi",
+    # Optional VCon/PostgreSQL integration consumes Orchestrator storage APIs.
+    "rvoip-vcon-postgres",
 ]
 reason = "Adapter crates should consume type/trait surface from `rvoip-core-traits`; the implementation crate `rvoip-core` is reserved for the facade. See GAP_PLAN.md V2.A.10."
 
@@ -120,6 +126,9 @@ reason = "Adapter crates should consume type/trait surface from `rvoip-core-trai
 [sources]
 unknown-registry = "deny"
 unknown-git      = "deny"
+# Project-owned fork URLs remain pre-approved even in revisions whose lockfile
+# does not currently contain both forks.
+unused-allowed-source = "allow"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
 allow-git        = [
     "https://github.com/eisenzopf/rtc",

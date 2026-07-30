@@ -1,0 +1,16 @@
+{
+  "name": "rvoip-browser-smoke",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:webrtc": "RVOIP_WEBRTC_SMOKE=1 playwright test --project=chromium-webrtc"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
