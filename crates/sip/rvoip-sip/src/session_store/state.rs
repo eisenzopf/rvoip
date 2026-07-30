@@ -282,6 +282,10 @@ pub struct SessionState {
     // SDP data
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
+    /// Stable local SDP captured before an outbound re-INVITE replaces the
+    /// working offer. The outer option marks an in-flight snapshot; the inner
+    /// option preserves whether the stable dialog had local SDP at all.
+    pub(crate) stable_local_sdp_before_reinvite: Option<Option<String>>,
     pub negotiated_config: Option<NegotiatedConfig>,
     /// Negotiated media security, populated after SRTP contexts install.
     pub media_security: Option<MediaSecurityState>,
@@ -417,6 +421,10 @@ impl fmt::Debug for SessionState {
             )
             .field("local_sdp_present", &self.local_sdp.is_some())
             .field("remote_sdp_present", &self.remote_sdp.is_some())
+            .field(
+                "stable_local_sdp_before_reinvite_present",
+                &self.stable_local_sdp_before_reinvite.is_some(),
+            )
             .field(
                 "negotiated_config_present",
                 &self.negotiated_config.is_some(),
@@ -852,6 +860,7 @@ impl SessionState {
             call_established_triggered: false,
             local_sdp: None,
             remote_sdp: None,
+            stable_local_sdp_before_reinvite: None,
             negotiated_config: None,
             media_security: None,
             sdp_origin_session_id,
