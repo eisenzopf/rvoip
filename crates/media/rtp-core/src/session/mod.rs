@@ -74,6 +74,21 @@ fn take_rtcp_report_blocks(
         .collect()
 }
 
+fn sender_report_totals(
+    stats: &parking_lot::Mutex<RtpSessionStats>,
+    sender_octets: &AtomicU64,
+) -> (u32, u32) {
+    // Packet sends update both counters while holding this lock. Keep the
+    // guard while loading the atomic octet counter so an RTCP report cannot
+    // combine the packet total from one send with the octet total from the
+    // next one.
+    let stats = stats.lock();
+    (
+        stats.packets_sent as u32,
+        sender_octets.load(Ordering::Relaxed) as u32,
+    )
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ReceivedSenderReport {
     lsr: u32,
@@ -1104,20 +1119,15 @@ impl RtpSession {
                     }
 
                     // Update RTP statistics before sending the report
-                    {
-                        let session_stats = stats.lock();
-                        rtcp_generator.set_sent_totals(
-                            session_stats.packets_sent as u32,
-                            sender_octets.load(Ordering::Relaxed) as u32,
-                        );
+                    let (sender_packet_count, sender_octet_count) =
+                        sender_report_totals(&stats, &sender_octets);
+                    rtcp_generator.set_sent_totals(sender_packet_count, sender_octet_count);
 
-                        // Log the current stats for debugging
-                        debug!(
-                            "Current stats for RTCP report: packets={}, payload_octets={}",
-                            session_stats.packets_sent,
-                            sender_octets.load(Ordering::Relaxed)
-                        );
-                    }
+                    // Log the current stats for debugging
+                    debug!(
+                        "Current stats for RTCP report: packets={}, payload_octets={}",
+                        sender_packet_count, sender_octet_count
+                    );
 
                     // Send an RTCP report regardless of should_send_report logic for this example
                     // We'll send a compound packet with SR and SDES
@@ -1567,8 +1577,10 @@ impl RtpSession {
             }
         };
 
-        // Get session stats
-        let session_stats = self.stats.lock().clone();
+        // Snapshot both sender totals while holding the same lock used by the
+        // packet-send update so the report cannot mix two send generations.
+        let (sender_packet_count, sender_octet_count) =
+            sender_report_totals(&self.stats, &self.sender_octets);
 
         // Create a new SR packet
         let mut sr = crate::packet::rtcp::RtcpSenderReport::new(self.ssrc);
@@ -1580,8 +1592,8 @@ impl RtpSession {
         sr.rtp_timestamp = self.get_timestamp();
 
         // Set packet and octet count from session stats
-        sr.sender_packet_count = session_stats.packets_sent as u32;
-        sr.sender_octet_count = self.sender_octets.load(Ordering::Relaxed) as u32;
+        sr.sender_packet_count = sender_packet_count;
+        sr.sender_octet_count = sender_octet_count;
 
         // Add report blocks for active streams (remote SSRCs we're receiving from)
         // Up to 31 streams per RTCP packet.
@@ -1826,6 +1838,39 @@ mod tests {
             config.transport_buffer_config,
             RtpTransportBufferConfig::default()
         );
+    }
+
+    #[test]
+    fn sender_report_totals_wait_for_a_complete_concurrent_update() {
+        let stats = Arc::new(parking_lot::Mutex::new(RtpSessionStats::default()));
+        let sender_octets = Arc::new(AtomicU64::new(0));
+        let (packet_count_updated_tx, packet_count_updated_rx) = std::sync::mpsc::channel();
+        let (finish_update_tx, finish_update_rx) = std::sync::mpsc::channel();
+
+        let update_stats = stats.clone();
+        let update_octets = sender_octets.clone();
+        let updater = std::thread::spawn(move || {
+            let mut stats = update_stats.lock();
+            stats.packets_sent = 1;
+            packet_count_updated_tx.send(()).unwrap();
+            finish_update_rx.recv().unwrap();
+            update_octets.store(5, Ordering::Relaxed);
+        });
+
+        packet_count_updated_rx.recv().unwrap();
+        let (snapshot_started_tx, snapshot_started_rx) = std::sync::mpsc::channel();
+        let snapshot_stats = stats.clone();
+        let snapshot_octets = sender_octets.clone();
+        let snapshot = std::thread::spawn(move || {
+            snapshot_started_tx.send(()).unwrap();
+            sender_report_totals(&snapshot_stats, &snapshot_octets)
+        });
+
+        snapshot_started_rx.recv().unwrap();
+        finish_update_tx.send(()).unwrap();
+
+        updater.join().unwrap();
+        assert_eq!(snapshot.join().unwrap(), (1, 5));
     }
 
     #[tokio::test]
