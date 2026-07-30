@@ -1411,7 +1411,7 @@ fn session_handle_audio_keeps_exact_generation_authority_off_the_raw_hot_path() 
         "pub(crate) async fn send_audio_frame_exact",
     ));
     assert!(send.contains("media_for_handle_exact(handle)"));
-    assert!(send.contains("encode_and_send_audio_frame(&exact.dialog_id"));
+    assert!(send.contains("encode_and_send_audio(&exact.dialog_id,audio_frame)"));
     assert!(!send.contains("current_media("));
     assert!(!send.contains("media_is_still_exact("));
     assert!(!send.contains("session_id:&SessionId"));
