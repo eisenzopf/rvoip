@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::api::client::security::{ClientSecurityConfig, ClientSecurityContext};
-use crate::api::common::config::{SecurityInfo, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
 use crate::dtls::DtlsConnection;
@@ -52,6 +52,21 @@ pub struct DefaultClientSecurityContext {
 impl DefaultClientSecurityContext {
     /// Create a new DefaultClientSecurityContext
     pub async fn new(config: ClientSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        if config.srtp_profiles.is_empty() {
+            return Err(SecurityError::Configuration(
+                "No SRTP profiles specified in client config".to_string(),
+            ));
+        }
+        if let Some(profile) = config
+            .srtp_profiles
+            .iter()
+            .copied()
+            .find(|profile| !profile.is_supported())
+        {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "SRTP profile {profile:?} is not implemented"
+            )));
+        }
         // Create context
         let ctx = Self {
             config,
@@ -213,14 +228,10 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             .config
             .srtp_profiles
             .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
+            .filter_map(|profile| profile.advertised_name().ok())
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
+        let srtp_profile = crypto_suites.first().cloned();
 
         // Get the fingerprint from our connection
         let fingerprint = self.get_fingerprint().await.unwrap_or_else(|_| {
@@ -233,7 +244,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             fingerprint_algorithm: self.remote_fingerprint_algorithm.lock().await.clone(),
             crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         })
     }
 
@@ -269,13 +280,21 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 
     fn get_security_info_sync(&self) -> SecurityInfo {
+        let crypto_suites = self
+            .config
+            .srtp_profiles
+            .iter()
+            .filter_map(|profile| profile.advertised_name().ok())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let srtp_profile = crypto_suites.first().cloned();
         SecurityInfo {
             mode: self.config.security_mode,
             fingerprint: None, // Will be filled by async get_security_info method
             fingerprint_algorithm: None, // Can't await in a sync function
-            crypto_suites: vec!["AES_CM_128_HMAC_SHA1_80".to_string()],
+            crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         }
     }
 

@@ -484,10 +484,20 @@ impl HandshakeState {
                         // Check for SRTP extension
                         for ext in &server_hello.extensions {
                             if let Extension::UseSrtp(srtp_ext) = ext {
-                                if !srtp_ext.profiles.is_empty() {
-                                    // Use the first profile
-                                    self.srtp_profile = Some(srtp_ext.profiles[0].into());
+                                let profile = *srtp_ext.profiles.first().ok_or_else(|| {
+                                    crate::error::Error::DtlsHandshakeError(
+                                        "server selected an empty SRTP profile list".to_string(),
+                                    )
+                                })?;
+                                profile.ensure_supported()?;
+                                if !self.available_srtp_profiles.contains(&profile) {
+                                    self.step = HandshakeStep::Failed;
+                                    return Err(crate::error::Error::DtlsHandshakeError(
+                                        "server selected an SRTP profile that was not offered"
+                                            .to_string(),
+                                    ));
                                 }
+                                self.srtp_profile = Some(profile.into());
                             }
                         }
 

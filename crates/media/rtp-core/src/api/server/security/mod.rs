@@ -52,7 +52,7 @@ impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
             role: ConnectionRole::Server,
-            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             fingerprint_algorithm: "sha-256".to_string(),
             certificate_path: None,
             private_key_path: None,
@@ -95,7 +95,7 @@ impl Default for ServerSecurityConfig {
             fingerprint_algorithm: "sha-256".to_string(),
             certificate_path: None,
             private_key_path: None,
-            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             require_client_certificate: false,
             srtp_key: None,
         }

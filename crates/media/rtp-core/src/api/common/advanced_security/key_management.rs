@@ -471,7 +471,7 @@ impl SecurityPolicy {
             required_methods: vec![KeyExchangeMethod::Zrtp, KeyExchangeMethod::Mikey],
             min_rotation_interval: Some(Duration::from_secs(900)), // 15 minutes
             max_key_lifetime: Some(Duration::from_secs(3600)),     // 1 hour
-            required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+            required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             strict_validation: true,
             require_pfs: true,
         }

@@ -126,6 +126,7 @@ impl FailureType {
     /// Classify an error into a failure type
     pub fn from_error(error: &SecurityError) -> Self {
         match error {
+            SecurityError::UnsupportedFeature(_) => Self::ConfigurationFailure,
             SecurityError::NotInitialized(_) => Self::InitializationFailure,
             SecurityError::CryptoError(_) => Self::CryptoFailure,
             SecurityError::InvalidState(_) => Self::ConfigurationFailure,

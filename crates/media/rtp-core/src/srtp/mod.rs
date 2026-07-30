@@ -21,6 +21,18 @@ pub enum SrtpEncryptionAlgorithm {
     /// AES in f8-mode (Customized for SRTP)
     AesF8,
 
+    /// AEAD AES-128-GCM (RFC 7714).
+    ///
+    /// The profile identity is retained so configuration and negotiation can
+    /// fail closed. Encryption is not implemented in this release.
+    AeadAes128Gcm,
+
+    /// AEAD AES-256-GCM (RFC 7714).
+    ///
+    /// The profile identity is retained so configuration and negotiation can
+    /// fail closed. Encryption is not implemented in this release.
+    AeadAes256Gcm,
+
     /// Null encryption (for debugging/testing only)
     Null,
 }
@@ -104,18 +116,18 @@ pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
 
 /// AEAD AES-128 GCM
 pub const SRTP_AEAD_AES_128_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
+    encryption: SrtpEncryptionAlgorithm::AeadAes128Gcm,
     authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
-    key_length: 16,                             // 128 bits
-    tag_length: 16,                             // 128 bits for GCM
+    key_length: 16,                                    // 128 bits
+    tag_length: 16,                                    // 128 bits for GCM
 };
 
 /// AEAD AES-256 GCM
 pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
-    encryption: SrtpEncryptionAlgorithm::AesCm, // Using AesCm as placeholder
+    encryption: SrtpEncryptionAlgorithm::AeadAes256Gcm,
     authentication: SrtpAuthenticationAlgorithm::Null, // Authentication is part of AEAD
-    key_length: 32,                             // 256 bits
-    tag_length: 16,                             // 128 bits for GCM
+    key_length: 32,                                    // 256 bits
+    tag_length: 16,                                    // 128 bits for GCM
 };
 
 impl SrtpCryptoSuite {
@@ -129,16 +141,44 @@ impl SrtpCryptoSuite {
     /// sliced out of the digest during protect/unprotect.
     pub fn validate(&self) -> Result<(), crate::Error> {
         const HMAC_SHA1_OUTPUT_LEN: usize = 20;
-        match self.authentication {
-            SrtpAuthenticationAlgorithm::HmacSha1_80 | SrtpAuthenticationAlgorithm::HmacSha1_32 => {
-                if self.tag_length > HMAC_SHA1_OUTPUT_LEN {
-                    return Err(crate::Error::SrtpError(format!(
-                        "SRTP suite tag_length {} exceeds HMAC-SHA1 output {}",
-                        self.tag_length, HMAC_SHA1_OUTPUT_LEN
-                    )));
-                }
-            }
-            SrtpAuthenticationAlgorithm::Null => {}
+        if matches!(
+            self.encryption,
+            SrtpEncryptionAlgorithm::AeadAes128Gcm | SrtpEncryptionAlgorithm::AeadAes256Gcm
+        ) {
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP AEAD AES-GCM profiles are not implemented".to_string(),
+            ));
+        }
+
+        if self.encryption == SrtpEncryptionAlgorithm::AesF8 {
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP AES-f8 is not implemented".to_string(),
+            ));
+        }
+
+        if !matches!(self.key_length, 16 | 32) {
+            return Err(crate::Error::SrtpError(format!(
+                "unsupported SRTP master key length: {} bytes",
+                self.key_length
+            )));
+        }
+
+        let expected_tag_length = match self.authentication {
+            SrtpAuthenticationAlgorithm::HmacSha1_80 => 10,
+            SrtpAuthenticationAlgorithm::HmacSha1_32 => 4,
+            SrtpAuthenticationAlgorithm::Null => 0,
+        };
+        if self.tag_length != expected_tag_length {
+            return Err(crate::Error::SrtpError(format!(
+                "SRTP authentication mode requires a {expected_tag_length}-byte tag, got {}",
+                self.tag_length
+            )));
+        }
+        if self.tag_length > HMAC_SHA1_OUTPUT_LEN {
+            return Err(crate::Error::SrtpError(format!(
+                "SRTP suite tag_length {} exceeds HMAC-SHA1 output {}",
+                self.tag_length, HMAC_SHA1_OUTPUT_LEN
+            )));
         }
         Ok(())
     }

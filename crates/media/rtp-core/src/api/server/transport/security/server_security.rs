@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use crate::api::common::config::{SecurityInfo, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::config::ServerConfig;
 use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
@@ -78,14 +78,10 @@ pub async fn get_security_info(
         // Create crypto suites list from profiles
         let crypto_suites = profiles
             .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
+            .filter_map(|profile| profile.advertised_name().ok())
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
+        let srtp_profile = crypto_suites.first().cloned();
 
         // Create security info
         Ok(SecurityInfo {
@@ -94,7 +90,7 @@ pub async fn get_security_info(
             fingerprint_algorithm: Some(algorithm),
             crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+            srtp_profile,
         })
     } else {
         Err(MediaTransportError::Security(

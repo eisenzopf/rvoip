@@ -22,11 +22,13 @@ pub async fn create_server_connection(
         version: crate::dtls::DtlsVersion::Dtls12,
         mtu: 1500,
         max_retransmissions: 5,
-        srtp_profiles: keys::convert_profiles(&config.srtp_profiles),
+        srtp_profiles: keys::convert_profiles(&config.srtp_profiles)?,
     };
 
     // Create connection
-    let connection = DtlsConnection::new(dtls_config);
+    let connection = crate::dtls::create_connection(dtls_config)
+        .await
+        .map_err(SecurityError::from)?;
 
     // Generate or load certificate based on config
     let _cert = if let (Some(cert_path), Some(key_path)) =

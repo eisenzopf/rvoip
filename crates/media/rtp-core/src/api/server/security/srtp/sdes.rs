@@ -19,7 +19,10 @@ use crate::security::{
     sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
     SecurityKeyExchange,
 };
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::{
+    SrtpContext, SrtpCryptoSuite, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
+    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
+};
 
 /// SDES server configuration
 #[derive(Debug, Clone)]
@@ -120,21 +123,11 @@ impl SdesServerSession {
     fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<SrtpCryptoSuite> {
         profiles
             .iter()
-            .filter_map(|profile| {
-                match profile {
-                    SrtpProfile::AesCm128HmacSha1_80 => Some(SRTP_AES128_CM_SHA1_80),
-                    SrtpProfile::AesCm128HmacSha1_32 => Some(SRTP_AES128_CM_SHA1_32),
-                    SrtpProfile::AesGcm128 => {
-                        // AES-GCM not implemented in core yet
-                        debug!("AES-GCM profile not yet supported, skipping");
-                        None
-                    }
-                    SrtpProfile::AesGcm256 => {
-                        // AES-GCM not implemented in core yet
-                        debug!("AES-GCM-256 profile not yet supported, skipping");
-                        None
-                    }
-                }
+            .map(|profile| match profile {
+                SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
+                SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
+                SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
+                SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
             })
             .collect()
     }
@@ -471,6 +464,15 @@ pub struct SrtpServerSecurityContext {
 impl SrtpServerSecurityContext {
     /// Create a new SRTP-only server security context
     pub async fn new(config: ServerSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        if config.srtp_profiles.is_empty() {
+            return Err(SecurityError::Configuration(
+                "SRTP/SDES requires at least one implemented profile".to_string(),
+            ));
+        }
+        for profile in &config.srtp_profiles {
+            profile.ensure_supported().map_err(SecurityError::from)?;
+        }
+
         // Create SDES server config from security config
         let sdes_config = SdesServerConfig {
             supported_profiles: config.srtp_profiles.clone(),
@@ -594,14 +596,10 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
             .config
             .srtp_profiles
             .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
+            .filter_map(|profile| profile.advertised_name().ok())
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
+        let srtp_profile = crypto_suites.first().cloned();
 
         SecurityInfo {
             mode: SecurityMode::Srtp,
@@ -609,7 +607,7 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
             fingerprint_algorithm: None,
             crypto_suites,
             key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         }
     }
 
@@ -656,6 +654,14 @@ impl SrtpServerClientContext {
         addr: SocketAddr,
         config: ServerSecurityConfig,
     ) -> Result<Self, SecurityError> {
+        if config.srtp_profiles.is_empty() {
+            return Err(SecurityError::Configuration(
+                "SRTP/SDES requires at least one implemented profile".to_string(),
+            ));
+        }
+        for profile in &config.srtp_profiles {
+            profile.ensure_supported().map_err(SecurityError::from)?;
+        }
         Ok(Self {
             addr,
             config,
@@ -703,14 +709,10 @@ impl ClientSecurityContext for SrtpServerClientContext {
             .config
             .srtp_profiles
             .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
+            .filter_map(|profile| profile.advertised_name().ok())
             .map(|s| s.to_string())
             .collect::<Vec<_>>();
+        let srtp_profile = crypto_suites.first().cloned();
 
         SecurityInfo {
             mode: SecurityMode::Srtp,
@@ -718,7 +720,7 @@ impl ClientSecurityContext for SrtpServerClientContext {
             fingerprint_algorithm: None,
             crypto_suites,
             key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         }
     }
 

@@ -12,6 +12,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_server_lifecycle() {
+        let mut security_config = crate::api::server::security::ServerSecurityConfig::default();
+        security_config.security_mode = crate::api::common::config::SecurityMode::None;
+
         // Create a server config with default values
         let config = ServerConfig {
             local_address: "127.0.0.1:0".parse().unwrap(), // Use port 0 to get a random port
@@ -24,7 +27,7 @@ mod tests {
             jitter_max_packet_age_ms: 200,
             default_payload_type: 8,
             clock_rate: 8000,
-            security_config: Default::default(),
+            security_config,
             buffer_limits: Default::default(),
             high_performance_buffers_enabled: false,
             max_clients: 100,

@@ -154,10 +154,39 @@ pub enum SrtpProfile {
     AesCm128HmacSha1_80,
     /// AES_CM_128_HMAC_SHA1_32 (reduced auth tag for bandwidth savings)
     AesCm128HmacSha1_32,
-    /// AEAD_AES_128_GCM (more secure, less overhead)
+    /// AEAD_AES_128_GCM identity (not implemented in this release)
     AesGcm128,
-    /// AEAD_AES_256_GCM (highest security)
+    /// AEAD_AES_256_GCM identity (not implemented in this release)
     AesGcm256,
+}
+
+impl SrtpProfile {
+    /// Whether this profile has a complete cryptographic implementation.
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::AesCm128HmacSha1_80 | Self::AesCm128HmacSha1_32)
+    }
+
+    /// Reject profiles that must not be advertised or negotiated.
+    pub fn ensure_supported(self) -> crate::Result<()> {
+        if self.is_supported() {
+            Ok(())
+        } else {
+            Err(crate::Error::UnsupportedFeature(format!(
+                "SRTP profile {self:?} is not implemented"
+            )))
+        }
+    }
+
+    /// Return the SDP/DTLS name only for a profile implemented in this release.
+    pub fn advertised_name(self) -> crate::Result<&'static str> {
+        match self {
+            Self::AesCm128HmacSha1_80 => Ok("AES_CM_128_HMAC_SHA1_80"),
+            Self::AesCm128HmacSha1_32 => Ok("AES_CM_128_HMAC_SHA1_32"),
+            Self::AesGcm128 | Self::AesGcm256 => Err(crate::Error::UnsupportedFeature(format!(
+                "SRTP profile {self:?} is not implemented"
+            ))),
+        }
+    }
 }
 
 /// Network condition preset for buffer configuration
@@ -316,7 +345,7 @@ impl Default for SecurityConfig {
             profile: SecurityProfile::default(),
             mode: SecurityMode::DtlsSrtp,
             required: true,
-            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             certificate_path: None,
             private_key_path: None,
             fingerprint_algorithm: "sha-256".to_string(),
@@ -377,7 +406,7 @@ impl SecurityConfig {
                     profile,
                     mode: SecurityMode::DtlsSrtp,
                     required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
                     certificate_path: None, // Will use self-signed
                     private_key_path: None, // Will use self-signed
                     fingerprint_algorithm: "sha-256".to_string(),
@@ -396,7 +425,7 @@ impl SecurityConfig {
                     profile,
                     mode: SecurityMode::DtlsSrtp,
                     required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
                     // Paths need to be set by user
                     certificate_path: None,
                     private_key_path: None,

@@ -53,6 +53,16 @@ impl DefaultServerSecurityContext {
                 "No SRTP profiles specified in server config".to_string(),
             ));
         }
+        if let Some(profile) = config
+            .srtp_profiles
+            .iter()
+            .copied()
+            .find(|profile| !profile.is_supported())
+        {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "SRTP profile {profile:?} is not implemented"
+            )));
+        }
 
         // Create the server context
         let ctx = Self {
@@ -146,9 +156,11 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             version: crate::dtls::DtlsVersion::Dtls12,
             mtu: 1500,
             max_retransmissions: 5,
-            srtp_profiles: keys::convert_profiles(&self.config.srtp_profiles),
+            srtp_profiles: keys::convert_profiles(&self.config.srtp_profiles)?,
         };
-        let mut connection = crate::dtls::DtlsConnection::new(dtls_config);
+        let mut connection = crate::dtls::create_connection(dtls_config)
+            .await
+            .map_err(SecurityError::from)?;
 
         // Set certificate
         let cert = match self.connection_template.lock().await.as_ref() {

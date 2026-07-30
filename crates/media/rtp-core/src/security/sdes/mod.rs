@@ -189,31 +189,78 @@ impl Sdes {
         }
     }
 
+    /// Return the RFC 4568 name for an SDES suite implemented by this module.
+    fn suite_name(suite: &SrtpCryptoSuite) -> Result<&'static str, Error> {
+        suite.validate()?;
+        if suite == &SRTP_AES128_CM_SHA1_80 {
+            Ok("AES_CM_128_HMAC_SHA1_80")
+        } else if suite == &SRTP_AES128_CM_SHA1_32 {
+            Ok("AES_CM_128_HMAC_SHA1_32")
+        } else {
+            Err(Error::UnsupportedFeature(format!(
+                "SRTP suite {suite:?} is not implemented for SDES"
+            )))
+        }
+    }
+
+    /// Map an RFC 4568 suite name to an implemented SRTP suite.
+    fn suite_from_name(name: &str) -> Option<SrtpCryptoSuite> {
+        match name {
+            "AES_CM_128_HMAC_SHA1_80" => Some(SRTP_AES128_CM_SHA1_80),
+            "AES_CM_128_HMAC_SHA1_32" => Some(SRTP_AES128_CM_SHA1_32),
+            _ => None,
+        }
+    }
+
+    /// Reject configurations that could produce an empty or dishonest offer.
+    fn validate_config(&self) -> Result<(), Error> {
+        if self.config.crypto_suites.is_empty() {
+            return Err(Error::InvalidParameter(
+                "SDES requires at least one implemented SRTP suite".to_string(),
+            ));
+        }
+        if self.role == SdesRole::Offerer && self.config.offer_count == 0 {
+            return Err(Error::InvalidParameter(
+                "SDES offer_count must be greater than zero".to_string(),
+            ));
+        }
+        for suite in &self.config.crypto_suites {
+            Self::suite_name(suite)?;
+        }
+        Ok(())
+    }
+
+    /// Decode the fixed-size master key and salt used by implemented suites.
+    fn decode_key(
+        attr: &SdesCryptoAttribute,
+        suite: &SrtpCryptoSuite,
+    ) -> Result<SrtpCryptoKey, Error> {
+        let keysalt = BASE64
+            .decode(&attr.key_info)
+            .map_err(|_| Error::ParseError("Invalid Base64 encoding in key info".into()))?;
+        let expected_len = suite.key_length + 14;
+        if keysalt.len() != expected_len {
+            return Err(Error::ParseError(format!(
+                "SDES key info must contain exactly {expected_len} bytes, got {}",
+                keysalt.len()
+            )));
+        }
+        Ok(SrtpCryptoKey::new(
+            keysalt[..suite.key_length].to_vec(),
+            keysalt[suite.key_length..].to_vec(),
+        ))
+    }
+
     /// Create a crypto attribute for a specific crypto suite
     fn create_crypto_attribute(
         &self,
         tag: u32,
         suite: &SrtpCryptoSuite,
     ) -> Result<(SdesCryptoAttribute, SrtpCryptoKey), Error> {
-        // Map SRTP crypto suite to SDES crypto suite string
-        let crypto_suite_str = match (suite.encryption, suite.authentication) {
-            (
-                crate::srtp::SrtpEncryptionAlgorithm::AesCm,
-                crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_80,
-            ) => "AES_CM_128_HMAC_SHA1_80",
-            (
-                crate::srtp::SrtpEncryptionAlgorithm::AesCm,
-                crate::srtp::SrtpAuthenticationAlgorithm::HmacSha1_32,
-            ) => "AES_CM_128_HMAC_SHA1_32",
-            _ => {
-                return Err(Error::UnsupportedFeature(
-                    "Unsupported SRTP crypto suite for SDES".into(),
-                ))
-            }
-        };
+        let crypto_suite_str = Self::suite_name(suite)?;
 
         // Generate random key
-        let mut key = vec![0u8; 16]; // 128-bit AES key
+        let mut key = vec![0u8; suite.key_length];
         OsRng.fill_bytes(&mut key);
 
         // Generate random salt
@@ -242,6 +289,7 @@ impl Sdes {
         if self.role != SdesRole::Offerer {
             return Err(Error::InvalidState("Only offerer can create offer".into()));
         }
+        self.validate_config()?;
 
         let mut offer = Vec::new();
 
@@ -282,57 +330,45 @@ impl Sdes {
                 "Only answerer can create answer".into(),
             ));
         }
+        self.validate_config()?;
 
         // Parse offer
+        let mut remote_attrs = Vec::new();
         for line in offer {
             if line.starts_with("a=crypto:") {
                 let attr_str = line.trim_start_matches("a=crypto:");
                 let attr = SdesCryptoAttribute::parse(attr_str)?;
-
-                // Store remote attribute
-                self.remote_attrs.push(attr);
+                remote_attrs.push(attr);
             }
         }
 
-        if self.remote_attrs.is_empty() {
+        if remote_attrs.is_empty() {
             return Err(Error::InvalidMessage(
                 "No crypto attributes in offer".into(),
             ));
         }
 
-        // Select the first supported crypto attribute
-        let selected = &self.remote_attrs[0];
-
-        // Map SDES crypto suite to SRTP crypto suite
-        let srtp_suite = match selected.crypto_suite.as_str() {
-            "AES_CM_128_HMAC_SHA1_80" => SRTP_AES128_CM_SHA1_80,
-            "AES_CM_128_HMAC_SHA1_32" => SRTP_AES128_CM_SHA1_32,
-            _ => {
-                return Err(Error::UnsupportedFeature(format!(
-                    "Unsupported crypto suite: {}",
-                    selected.crypto_suite
-                )))
-            }
-        };
-
-        // Parse key info
-        let key_info = selected.key_info.as_str();
-
-        // Base64 decode key+salt
-        let keysalt = BASE64
-            .decode(key_info)
-            .map_err(|_| Error::ParseError("Invalid Base64 encoding in key info".into()))?;
-
-        if keysalt.len() < 30 {
-            return Err(Error::ParseError("Key info too short".into()));
-        }
-
-        // Split key and salt
-        let key = keysalt[0..16].to_vec();
-        let salt = keysalt[16..30].to_vec();
+        // Select the first offered suite that is also locally configured.
+        let (selected, srtp_suite) = remote_attrs
+            .iter()
+            .find_map(|attr| {
+                let suite = Self::suite_from_name(&attr.crypto_suite)?;
+                self.config
+                    .crypto_suites
+                    .contains(&suite)
+                    .then_some((attr, suite))
+            })
+            .ok_or_else(|| {
+                Error::NegotiationFailed(
+                    "No mutually configured, implemented SDES crypto suite".to_string(),
+                )
+            })?;
+        let srtp_key = Self::decode_key(selected, &srtp_suite)?;
+        let selected = selected.clone();
 
         // Store key for later use
-        self.srtp_key = Some(SrtpCryptoKey::new(key, salt));
+        self.remote_attrs = remote_attrs;
+        self.srtp_key = Some(srtp_key);
         self.srtp_suite = Some(srtp_suite);
         self.selected_attr = Some(selected.clone());
 
@@ -353,44 +389,62 @@ impl Sdes {
                 "Only offerer can process answer".into(),
             ));
         }
+        self.validate_config()?;
 
         // Parse answer
         let mut selected_attr = None;
+        let mut remote_attrs = Vec::new();
 
         for line in answer {
             if line.starts_with("a=crypto:") {
                 let attr_str = line.trim_start_matches("a=crypto:");
                 let attr = SdesCryptoAttribute::parse(attr_str)?;
 
-                // Store remote attribute
-                self.remote_attrs.push(attr.clone());
-
                 // This is the selected attribute
-                selected_attr = Some(attr);
+                selected_attr = Some(attr.clone());
+                remote_attrs.push(attr);
                 break;
             }
         }
 
-        if selected_attr.is_none() {
-            return Err(Error::InvalidMessage(
-                "No crypto attributes in answer".into(),
-            ));
-        }
-
-        let selected = selected_attr.unwrap();
+        let selected = selected_attr
+            .ok_or_else(|| Error::InvalidMessage("No crypto attributes in answer".into()))?;
 
         // Find matching local attribute by tag
-        let local_attr = self.local_attrs.iter().find(|a| a.tag == selected.tag);
-
-        if local_attr.is_none() {
-            return Err(Error::InvalidMessage(format!(
-                "No matching local attribute for tag {}",
+        let local_attr = self
+            .local_attrs
+            .iter()
+            .find(|attr| attr.tag == selected.tag)
+            .ok_or_else(|| {
+                Error::InvalidMessage(format!(
+                    "No matching local attribute for tag {}",
+                    selected.tag
+                ))
+            })?;
+        if selected.crypto_suite != local_attr.crypto_suite {
+            return Err(Error::NegotiationFailed(format!(
+                "SDES answer changed suite for tag {}",
                 selected.tag
             )));
         }
+        let suite = Self::suite_from_name(&local_attr.crypto_suite).ok_or_else(|| {
+            Error::UnsupportedFeature(format!(
+                "Unsupported crypto suite: {}",
+                local_attr.crypto_suite
+            ))
+        })?;
+        if !self.config.crypto_suites.contains(&suite) {
+            return Err(Error::NegotiationFailed(
+                "SDES answer selected a suite outside the local configuration".to_string(),
+            ));
+        }
+        let local_key = Self::decode_key(local_attr, &suite)?;
 
         // Store selected attribute
+        self.remote_attrs = remote_attrs;
         self.selected_attr = Some(selected);
+        self.srtp_key = Some(local_key);
+        self.srtp_suite = Some(suite);
 
         // Update state
         self.state = SdesState::Completed;
@@ -401,11 +455,11 @@ impl Sdes {
 
 impl SecurityKeyExchange for Sdes {
     fn init(&mut self) -> Result<(), Error> {
-        // No initialization needed for SDES
-        Ok(())
+        self.validate_config()
     }
 
     fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.validate_config()?;
         // SDES messages are SDP lines
         let message_str = std::str::from_utf8(message)
             .map_err(|_| Error::ParseError("Invalid UTF-8 in SDES message".into()))?;

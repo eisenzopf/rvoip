@@ -11,10 +11,9 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 // Direct DTLS imports
-use rvoip_rtp_core::dtls::connection::DtlsConnection;
 use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
 use rvoip_rtp_core::dtls::transport::udp::UdpTransport;
-use rvoip_rtp_core::dtls::{DtlsConfig, DtlsRole, DtlsVersion};
+use rvoip_rtp_core::dtls::{create_connection, DtlsConfig, DtlsRole, DtlsVersion};
 
 // Media transport imports
 use rvoip_rtp_core::api::client::config::ClientConfigBuilder;
@@ -83,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("Starting DTLS server task...");
 
         // Create DTLS connection for server
-        let mut server_conn = DtlsConnection::new(server_config);
+        let mut server_conn = create_connection(server_config).await?;
 
         // Create server transport
         let server_transport = UdpTransport::new(server_socket, 1500).await.unwrap();
@@ -158,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("Starting DTLS client task...");
 
         // Create DTLS connection for client
-        let mut client_conn = DtlsConnection::new(client_config);
+        let mut client_conn = create_connection(client_config).await?;
 
         // Create client transport
         let client_transport = UdpTransport::new(client_socket, 1500).await.unwrap();

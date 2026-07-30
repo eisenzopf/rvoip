@@ -104,6 +104,7 @@ struct SrtpSessionKeys {
 impl SrtpCrypto {
     /// Create a new SRTP crypto context
     pub fn new(suite: SrtpCryptoSuite, master_key: SrtpCryptoKey) -> Result<Self> {
+        suite.validate()?;
         // Validate key length
         if master_key.key().len() != suite.key_length {
             return Err(Error::SrtpError(format!(

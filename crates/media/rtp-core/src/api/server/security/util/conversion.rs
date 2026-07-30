@@ -7,6 +7,7 @@ use std::net::SocketAddr;
 use tracing::debug;
 
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::error::SecurityError;
 use crate::api::server::security::{ConnectionConfig, ConnectionRole};
 use crate::dtls::{DtlsRole, DtlsVersion};
 
@@ -21,14 +22,16 @@ pub fn role_to_dtls_role(role: ConnectionRole) -> DtlsRole {
 }
 
 /// Convert ConnectionConfig to a DtlsConfig
-pub fn connection_config_to_dtls_config(config: &ConnectionConfig) -> crate::dtls::DtlsConfig {
-    crate::dtls::DtlsConfig {
+pub fn connection_config_to_dtls_config(
+    config: &ConnectionConfig,
+) -> Result<crate::dtls::DtlsConfig, SecurityError> {
+    Ok(crate::dtls::DtlsConfig {
         role: role_to_dtls_role(config.role.clone()),
         version: DtlsVersion::Dtls12, // Currently only DTLS 1.2 is supported
         mtu: 1500,                    // Default MTU
         max_retransmissions: 5,       // Default retransmissions
-        srtp_profiles: keys::convert_profiles(&config.srtp_profiles),
-    }
+        srtp_profiles: keys::convert_profiles(&config.srtp_profiles)?,
+    })
 }
 
 /// Create a SecurityInfo struct from mode, fingerprint, and profiles
@@ -38,16 +41,19 @@ pub fn create_security_info(
     fingerprint_algorithm: &str,
     profiles: &[SrtpProfile],
 ) -> SecurityInfo {
+    let crypto_suites = profiles
+        .iter()
+        .filter_map(|profile| profile.advertised_name().ok())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let srtp_profile = crypto_suites.first().cloned();
     SecurityInfo {
         mode,
         fingerprint,
         fingerprint_algorithm: Some(fingerprint_algorithm.to_string()),
-        crypto_suites: profiles
-            .iter()
-            .map(|p| keys::profile_to_string(*p))
-            .collect(),
+        crypto_suites,
         key_params: None,
-        srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+        srtp_profile,
     }
 }
 
@@ -106,19 +112,21 @@ pub fn security_context_to_string(
 }
 
 /// Convert API SrtpProfile array to internal SrtpCryptoSuite array
-pub fn convert_srtp_profiles(_profiles: &[SrtpProfile]) -> Vec<crate::srtp::SrtpCryptoSuite> {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement convert_srtp_profiles in Phase 6")
+pub fn convert_srtp_profiles(
+    profiles: &[SrtpProfile],
+) -> Result<Vec<crate::srtp::SrtpCryptoSuite>, SecurityError> {
+    keys::convert_profiles(profiles)
 }
 
 /// Convert SrtpProfile to string
-pub fn srtp_profile_to_string(_profile: SrtpProfile) -> String {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement srtp_profile_to_string in Phase 6")
+pub fn srtp_profile_to_string(profile: SrtpProfile) -> Result<String, SecurityError> {
+    keys::profile_to_string(profile)
 }
 
 /// Get crypto suites as strings
-pub fn get_crypto_suite_strings(_profiles: &[SrtpProfile]) -> Vec<String> {
-    // This function will be fully implemented in Phase 6
-    todo!("Implement get_crypto_suite_strings in Phase 6")
+pub fn get_crypto_suite_strings(profiles: &[SrtpProfile]) -> Result<Vec<String>, SecurityError> {
+    profiles
+        .iter()
+        .map(|profile| keys::profile_to_string(*profile))
+        .collect()
 }
