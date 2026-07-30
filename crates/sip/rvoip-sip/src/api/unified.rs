@@ -11418,6 +11418,9 @@ impl UnifiedCoordinator {
                 .sip_transaction_command_channel_capacity
                 .unwrap_or(Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY),
         );
+        transaction_manager.set_stateless_overload_retry_after_secs(
+            config.server_overload_retry_after_secs.unwrap_or(1),
+        );
         if let Some(max_burst) = config.sip_transaction_dispatch_priority_burst_max {
             transaction_manager.set_transaction_dispatch_priority_burst_max(max_burst);
         }

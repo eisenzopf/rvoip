@@ -57,8 +57,10 @@ impl ServerNonInviteLogic {
         match current_state {
             TransactionState::Completed => {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer J fired in Completed state, terminating");
-                // Timer J automatically transitions to Terminated, no need to return a state
-                Ok(None)
+                // Keep the callback and transition indivisible inside the
+                // runner; a second bounded-channel command could otherwise be
+                // cancelled after the timer callback had already fired.
+                Ok(Some(TransactionState::Terminated))
             }
             _ => {
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer J fired in invalid state, ignoring");

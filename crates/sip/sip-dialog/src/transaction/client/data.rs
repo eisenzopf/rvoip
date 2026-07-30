@@ -147,6 +147,11 @@ pub struct ClientTransactionData {
     pub(crate) compact_retention_reservation:
         std::sync::OnceLock<crate::transaction::lifecycle_scheduler::CompactRetentionReservation>,
 
+    /// Total UA-mode authenticated late-2xx horizon beginning when the INVITE
+    /// enters Accepted. Timer M consumes the first part of this horizon;
+    /// proxy mode sets it to zero and drops responses at the RFC boundary.
+    pub(crate) late_2xx_total_retention: std::sync::OnceLock<std::time::Duration>,
+
     /// Exact wire-key admission owner. Manager-created transactions install
     /// this before entering the active map; it is cloned into compact Timer K
     /// state or the terminal-event sidecar so no later same-key transaction
@@ -216,6 +221,10 @@ impl ClientTransactionData {
         let _ = self.transaction_admission_owner.set(owner);
     }
 
+    pub(crate) fn install_late_2xx_total_retention(&self, retention: std::time::Duration) {
+        let _ = self.late_2xx_total_retention.set(retention);
+    }
+
     pub(crate) fn transaction_admission_owner(
         &self,
     ) -> Option<crate::transaction::manager::TransactionAdmissionOwner> {
@@ -249,12 +258,14 @@ impl ClientTransactionData {
                     crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::K,
                     delay,
                     None,
+                    None,
                     self.state.clone(),
                     Some(self.completion.clone()),
                     self.cmd_tx.clone(),
                     self.compact_retention_reservation.get().cloned(),
                     self.transaction_admission_owner(),
                     Arc::clone(&self.terminal_event_publication),
+                    std::time::Duration::ZERO,
                 )
                 .await;
         }
@@ -266,6 +277,40 @@ impl ClientTransactionData {
             self.cmd_tx.clone(),
         )
         .await
+    }
+
+    /// Replace an RFC 6026 Accepted INVITE client runner with a compact
+    /// manager-owned Timer M response route.
+    pub(crate) async fn schedule_compact_timer_m(
+        self: Arc<Self>,
+        delay: std::time::Duration,
+    ) -> bool {
+        let identity = Arc::as_ptr(&self) as usize;
+        let Some(scheduler) = self.lifecycle_scheduler.get().cloned() else {
+            return false;
+        };
+        scheduler
+            .schedule_compact_non_invite_with_reservation(
+                identity,
+                self.id.clone(),
+                crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::M,
+                delay,
+                None,
+                Some(bytes::Bytes::from(
+                    rvoip_sip_core::Message::Request((*self.request).clone()).to_bytes(),
+                )),
+                self.state.clone(),
+                Some(self.completion.clone()),
+                self.cmd_tx.clone(),
+                self.compact_retention_reservation.get().cloned(),
+                self.transaction_admission_owner(),
+                Arc::clone(&self.terminal_event_publication),
+                self.late_2xx_total_retention
+                    .get()
+                    .copied()
+                    .unwrap_or_default(),
+            )
+            .await
     }
 
     pub(crate) async fn schedule_termination(self: Arc<Self>) -> bool {

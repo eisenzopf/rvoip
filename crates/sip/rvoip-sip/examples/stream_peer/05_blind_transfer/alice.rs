@@ -43,6 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match events.next().await {
             Some(Event::ReferReceived { refer_to, .. }) => {
                 println!("[ALICE] Got REFER to {}", refer_to);
+                // RFC 3515: complete the REFER server transaction before
+                // tearing down the referenced dialog. Relying on the delayed
+                // default action races the BYE cleanup and leaves Bob
+                // retransmitting REFER while the replacement call starts.
+                handle.accept_refer().await?;
                 // Hang up with Bob and call Charlie
                 handle.hangup().await?;
                 alice.wait_for_ended(handle.id()).await?;

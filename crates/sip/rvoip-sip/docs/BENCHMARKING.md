@@ -870,6 +870,10 @@ a transient call.
 
 ## See also
 
+- [`SIGNALING_PERFORMANCE_ARCHITECTURE.md`](SIGNALING_PERFORMANCE_ARCHITECTURE.md)
+  — design rationale, tradeoffs, and source-linked comparisons with other SIP
+  implementations. Architecture is explanatory context, not benchmark
+  evidence.
 - [`PROFILING.md`](PROFILING.md) — flamegraph and dhat recipes for
   finding the root cause once a number regresses.
 - `crates/sip/rvoip-sip/benches/` — criterion benches for *relative*

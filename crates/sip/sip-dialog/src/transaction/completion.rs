@@ -187,7 +187,6 @@ impl RetainedClientTransactionCompletion {
         self.auth_challenge_request_uri.as_deref().cloned()
     }
 
-    #[cfg(test)]
     pub(crate) fn set_deadline(&mut self, expires_at: Instant, version: u64) {
         self.expires_at = expires_at;
         self.version = version;

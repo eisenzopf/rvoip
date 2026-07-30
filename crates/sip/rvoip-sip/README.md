@@ -271,6 +271,9 @@ packaged release reporting before it invokes the full gate.
 
 Operational references:
 
+- [`docs/SIGNALING_PERFORMANCE_ARCHITECTURE.md`](docs/SIGNALING_PERFORMANCE_ARCHITECTURE.md)
+  for the sharded lookup, consolidated deadline, compact retention, bounded
+  batch, generation-fencing, and other SIP-stack comparison rationale.
 - [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) for reproducible performance
   test shapes and artifact conventions.
 - [`docs/TUNING.md`](docs/TUNING.md) for runtime profile and deployment

@@ -71,7 +71,7 @@
 //! ```
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 
@@ -89,9 +89,230 @@ const MAX_DUE_TIMERS_PER_BATCH: usize = 1_024;
 const FULL_CHANNEL_RETRY_DELAY: Duration = Duration::from_millis(1);
 
 static NEXT_TIMER_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_TIMER_DELIVERY_ID: AtomicU64 = AtomicU64::new(1);
 static RUNTIME_TIMER_SCHEDULERS: OnceLock<
     StdMutex<HashMap<tokio::runtime::Id, Arc<SharedTimerScheduler>>>,
 > = OnceLock::new();
+static TIMER_DELIVERIES: OnceLock<StdMutex<HashMap<u64, InternalTimerFired>>> = OnceLock::new();
+const TIMER_DELIVERY_PREFIX: &str = "\u{1e}rvoip-timer:";
+
+const TIMER_SCHEDULED: u8 = 0;
+const TIMER_DELIVERING: u8 = 1;
+const TIMER_EXECUTING: u8 = 2;
+const TIMER_CANCELLED: u8 = 3;
+const TIMER_COMPLETE: u8 = 4;
+
+struct TimerFireAuthority {
+    state: AtomicU8,
+}
+
+impl TimerFireAuthority {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: AtomicU8::new(TIMER_SCHEDULED),
+        })
+    }
+
+    fn begin_delivery(&self) -> bool {
+        match self.state.compare_exchange(
+            TIMER_SCHEDULED,
+            TIMER_DELIVERING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(TIMER_DELIVERING) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn cancel_from_handle(&self) -> bool {
+        self.state
+            .compare_exchange(
+                TIMER_SCHEDULED,
+                TIMER_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn cancel_for_replacement(&self) -> bool {
+        loop {
+            let state = self.state.load(Ordering::Acquire);
+            if matches!(state, TIMER_EXECUTING | TIMER_COMPLETE | TIMER_CANCELLED) {
+                return false;
+            }
+            if self
+                .state
+                .compare_exchange(state, TIMER_CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+
+    fn begin_execution(&self) -> bool {
+        self.state
+            .compare_exchange(
+                TIMER_DELIVERING,
+                TIMER_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == TIMER_CANCELLED
+    }
+
+    fn complete(&self) {
+        self.state.store(TIMER_COMPLETE, Ordering::Release);
+    }
+}
+
+/// Exact, indivisible timer firing delivered to a transaction runner.
+///
+/// This type is public only because it is carried by a public, doc-hidden
+/// internal command variant. Applications should never construct it.
+#[derive(Clone)]
+pub(crate) struct InternalTimerFired {
+    timer_name: String,
+    delivery_id: u64,
+    generation: u64,
+    target_state: Option<crate::transaction::TransactionState>,
+    authority: Arc<TimerFireAuthority>,
+    scheduler: Weak<SharedTimerScheduler>,
+    key: TimerDeadlineKey,
+}
+
+impl std::fmt::Debug for InternalTimerFired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InternalTimerFired")
+            .field("timer_name_len", &self.timer_name.len())
+            .field("generation", &self.generation)
+            .field("target_state", &self.target_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InternalTimerFired {
+    pub(crate) fn timer_name(&self) -> &str {
+        &self.timer_name
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn target_state(&self) -> Option<crate::transaction::TransactionState> {
+        self.target_state
+    }
+
+    fn begin_delivery(&self, register_claim: bool) -> bool {
+        if !self.authority.begin_delivery() {
+            return false;
+        }
+        if register_claim {
+            TIMER_DELIVERIES
+                .get_or_init(|| StdMutex::new(HashMap::new()))
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(self.delivery_id, self.clone());
+        }
+        true
+    }
+
+    fn cancel_from_handle(&self) -> bool {
+        self.authority.cancel_from_handle()
+    }
+
+    fn cancel_for_replacement(&self) -> bool {
+        let cancelled = self.authority.cancel_for_replacement();
+        if cancelled {
+            if let Some(deliveries) = TIMER_DELIVERIES.get() {
+                deliveries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(&self.delivery_id);
+            }
+        }
+        cancelled
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.authority.is_cancelled()
+    }
+
+    fn command_token(&self) -> String {
+        format!(
+            "{TIMER_DELIVERY_PREFIX}{}:{}",
+            self.delivery_id, self.generation
+        )
+    }
+
+    /// Claim execution and acknowledge the exact queued generation. A
+    /// superseded firing returns `None` and cannot invoke its callback.
+    pub(crate) fn begin_execution(&self) -> Option<InternalTimerExecutionGuard> {
+        let executing = self.authority.begin_execution();
+        if let Some(scheduler) = self.scheduler.upgrade() {
+            scheduler.finish_generation(&self.key, self.generation);
+        }
+        executing.then(|| InternalTimerExecutionGuard {
+            authority: Arc::clone(&self.authority),
+        })
+    }
+}
+
+pub(crate) enum TimerFiringClaim {
+    Legacy(String),
+    Claimed(InternalTimerFired),
+    Stale { generation: u64 },
+}
+
+/// Resolve a generation-bearing internal timer token without changing the
+/// public `InternalTransactionCommand::Timer(String)` shape. This keeps the
+/// 0.3.x public API stable while the runner still rejects queued stale timer
+/// generations exactly.
+pub(crate) fn claim_timer_firing(command: String) -> TimerFiringClaim {
+    let Some(delivery) = command.strip_prefix(TIMER_DELIVERY_PREFIX) else {
+        return TimerFiringClaim::Legacy(command);
+    };
+    let Some((delivery_id, generation)) = delivery.split_once(':') else {
+        return TimerFiringClaim::Stale { generation: 0 };
+    };
+    let (Ok(delivery_id), Ok(generation)) = (delivery_id.parse::<u64>(), generation.parse::<u64>())
+    else {
+        return TimerFiringClaim::Stale { generation: 0 };
+    };
+    let firing = TIMER_DELIVERIES.get().and_then(|deliveries| {
+        deliveries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&delivery_id)
+    });
+    match firing {
+        Some(firing) if firing.generation() == generation => TimerFiringClaim::Claimed(firing),
+        Some(firing) => {
+            firing.cancel_for_replacement();
+            TimerFiringClaim::Stale { generation }
+        }
+        None => TimerFiringClaim::Stale { generation },
+    }
+}
+
+pub(crate) struct InternalTimerExecutionGuard {
+    authority: Arc<TimerFireAuthority>,
+}
+
+impl Drop for InternalTimerExecutionGuard {
+    fn drop(&mut self) {
+        self.authority.complete();
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct TimerDeadlineKey {
@@ -102,11 +323,9 @@ struct TimerDeadlineKey {
 
 struct TimerDeadline {
     key: TimerDeadlineKey,
-    generation: u64,
-    commands: Vec<InternalTransactionCommand>,
-    next_command: usize,
+    firing: InternalTimerFired,
+    generation_protected: bool,
     command_tx: mpsc::WeakSender<InternalTransactionCommand>,
-    cancelled: Arc<AtomicBool>,
     completion: Option<oneshot::Sender<()>>,
 }
 
@@ -115,7 +334,7 @@ struct ReverseTimerDeadline {
     due_at: Instant,
     sequence: u64,
     generation: u64,
-    cancelled: Arc<AtomicBool>,
+    firing: InternalTimerFired,
 }
 
 #[derive(Default)]
@@ -147,14 +366,25 @@ impl TimerDeadlineQueue {
         &mut self,
         key: TimerDeadlineKey,
         due_at: Instant,
-        commands: Vec<InternalTransactionCommand>,
+        timer_name: String,
+        target_state: Option<crate::transaction::TransactionState>,
+        generation_protected: bool,
         command_tx: mpsc::WeakSender<InternalTransactionCommand>,
         completion: Option<oneshot::Sender<()>>,
-    ) -> (u64, Arc<AtomicBool>) {
+        scheduler: Weak<SharedTimerScheduler>,
+    ) -> (u64, InternalTimerFired) {
         self.cancel_key(&key);
         let sequence = self.next_sequence(due_at);
         let generation = self.next_generation();
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let firing = InternalTimerFired {
+            timer_name,
+            delivery_id: NEXT_TIMER_DELIVERY_ID.fetch_add(1, Ordering::Relaxed),
+            generation,
+            target_state,
+            authority: TimerFireAuthority::new(),
+            scheduler,
+            key: key.clone(),
+        };
         self.by_transaction
             .entry((key.manager_id, key.transaction_id.clone()))
             .or_default()
@@ -165,29 +395,27 @@ impl TimerDeadlineQueue {
                 due_at,
                 sequence,
                 generation,
-                cancelled: cancelled.clone(),
+                firing: firing.clone(),
             },
         );
         self.by_deadline.insert(
             (due_at, sequence),
             TimerDeadline {
                 key,
-                generation,
-                commands,
-                next_command: 0,
+                firing: firing.clone(),
+                generation_protected,
                 command_tx,
-                cancelled: cancelled.clone(),
                 completion,
             },
         );
-        (generation, cancelled)
+        (generation, firing)
     }
 
     fn cancel_key(&mut self, key: &TimerDeadlineKey) -> bool {
         let Some(reverse) = self.by_key.remove(key) else {
             return false;
         };
-        reverse.cancelled.store(true, Ordering::Release);
+        reverse.firing.cancel_for_replacement();
         self.by_deadline.remove(&(reverse.due_at, reverse.sequence));
         self.remove_transaction_timer(key);
         true
@@ -262,12 +490,12 @@ impl TimerDeadlineQueue {
         let Some(reverse) = self.by_key.get(&deadline.key) else {
             return false;
         };
-        if reverse.generation != deadline.generation || reverse.cancelled.load(Ordering::Acquire) {
+        if reverse.generation != deadline.firing.generation() || deadline.firing.is_cancelled() {
             return false;
         }
         let sequence = self.next_sequence(due_at);
         if let Some(reverse) = self.by_key.get_mut(&deadline.key) {
-            if reverse.generation != deadline.generation {
+            if reverse.generation != deadline.firing.generation() {
                 return false;
             }
             reverse.due_at = due_at;
@@ -353,23 +581,41 @@ impl SharedTimerScheduler {
         self: &Arc<Self>,
         key: TimerDeadlineKey,
         due_at: Instant,
-        commands: Vec<InternalTransactionCommand>,
+        timer_name: String,
+        target_state: Option<crate::transaction::TransactionState>,
+        generation_protected: bool,
         command_tx: mpsc::WeakSender<InternalTransactionCommand>,
         completion: Option<oneshot::Sender<()>>,
     ) -> ManagedTimerHandle {
-        let (generation, cancelled) = self
+        let (generation, firing) = self
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key.clone(), due_at, commands, command_tx, completion);
+            .insert(
+                key.clone(),
+                due_at,
+                timer_name,
+                target_state,
+                generation_protected,
+                command_tx,
+                completion,
+                Arc::downgrade(self),
+            );
         self.notify.notify_one();
         ManagedTimerHandle {
             scheduler: Arc::downgrade(self),
             key,
             generation,
-            cancelled,
+            firing,
             cancel_on_drop: true,
         }
+    }
+
+    fn finish_generation(&self, key: &TimerDeadlineKey, generation: u64) {
+        self.queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finish_generation(key, generation);
     }
 
     fn cancel_generation(&self, key: &TimerDeadlineKey, generation: u64) -> bool {
@@ -441,7 +687,7 @@ pub(crate) struct ManagedTimerHandle {
     scheduler: Weak<SharedTimerScheduler>,
     key: TimerDeadlineKey,
     generation: u64,
-    cancelled: Arc<AtomicBool>,
+    firing: InternalTimerFired,
     cancel_on_drop: bool,
 }
 
@@ -457,9 +703,14 @@ impl std::fmt::Debug for ManagedTimerHandle {
 
 impl ManagedTimerHandle {
     pub(crate) fn abort(&self) {
-        self.cancelled.store(true, Ordering::Release);
-        if let Some(scheduler) = self.scheduler.upgrade() {
-            scheduler.cancel_generation(&self.key, self.generation);
+        // Once a due timer begins delivery it is an indivisible firing owned
+        // by the runner. Dropping its handle may cancel the whole scheduled
+        // firing beforehand, but can never cancel a transition after the
+        // callback has become deliverable.
+        if self.firing.cancel_from_handle() {
+            if let Some(scheduler) = self.scheduler.upgrade() {
+                scheduler.cancel_generation(&self.key, self.generation);
+            }
         }
     }
 
@@ -532,58 +783,64 @@ fn cancel_manager_timers(manager_id: u64) {
 }
 
 async fn deliver_due_timer(scheduler: &Arc<SharedTimerScheduler>, mut deadline: TimerDeadline) {
-    if deadline.cancelled.load(Ordering::Acquire) {
+    if !deadline
+        .firing
+        .begin_delivery(deadline.generation_protected)
+    {
         scheduler
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_generation(&deadline.key, deadline.generation);
+            .finish_generation(&deadline.key, deadline.firing.generation());
         return;
     }
 
     let Some(command_tx) = deadline.command_tx.upgrade() else {
+        deadline.firing.cancel_for_replacement();
         scheduler
             .queue
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .finish_generation(&deadline.key, deadline.generation);
+            .finish_generation(&deadline.key, deadline.firing.generation());
         return;
     };
-    let mut blocked = false;
-    while deadline.next_command < deadline.commands.len() {
-        if deadline.cancelled.load(Ordering::Acquire) {
-            break;
-        }
-        match command_tx.try_send(deadline.commands[deadline.next_command].clone()) {
-            Ok(()) => deadline.next_command += 1,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                blocked = true;
-                break;
+    let command = if deadline.generation_protected {
+        deadline.firing.command_token()
+    } else {
+        deadline.firing.timer_name().to_string()
+    };
+    match command_tx.try_send(InternalTransactionCommand::Timer(command)) {
+        Ok(()) => {
+            // The exact generation remains in the reverse index until the
+            // runner claims it. A replacement or shutdown in that interval
+            // cancels the queued stale command before its callback executes.
+            if let Some(completion) = deadline.completion.take() {
+                let _ = completion.send(());
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => break,
+            if !deadline.generation_protected {
+                scheduler.finish_generation(&deadline.key, deadline.firing.generation());
+                deadline.firing.authority.complete();
+            }
         }
-    }
-
-    if blocked && !deadline.cancelled.load(Ordering::Acquire) {
-        let retry_at = Instant::now() + FULL_CHANNEL_RETRY_DELAY;
-        let retried = scheduler
-            .queue
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .retry(deadline, retry_at);
-        if retried {
-            scheduler.notify.notify_one();
+        Err(mpsc::error::TrySendError::Full(_)) if !deadline.firing.is_cancelled() => {
+            let retry_at = Instant::now() + FULL_CHANNEL_RETRY_DELAY;
+            let retried = scheduler
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retry(deadline, retry_at);
+            if retried {
+                scheduler.notify.notify_one();
+            }
         }
-        return;
-    }
-
-    scheduler
-        .queue
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .finish_generation(&deadline.key, deadline.generation);
-    if let Some(completion) = deadline.completion.take() {
-        let _ = completion.send(());
+        Err(_) => {
+            deadline.firing.cancel_for_replacement();
+            scheduler
+                .queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish_generation(&deadline.key, deadline.firing.generation());
+        }
     }
 }
 
@@ -787,7 +1044,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            vec![InternalTransactionCommand::Timer(timer_name)],
+            timer_name,
+            None,
+            false,
         )
         .await
     }
@@ -806,7 +1065,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            vec![InternalTransactionCommand::Timer(timer_name)],
+            timer_name,
+            None,
+            true,
             command_tx.downgrade(),
             None,
         ))
@@ -825,10 +1086,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            vec![
-                InternalTransactionCommand::Timer(timer_name),
-                InternalTransactionCommand::TransitionTo(target_state),
-            ],
+            timer_name,
+            Some(target_state),
+            true,
             command_tx.downgrade(),
             None,
         ))
@@ -845,7 +1105,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            vec![InternalTransactionCommand::Timer(timer_type.to_string())],
+            timer_type.to_string(),
+            None,
+            true,
             command_tx.downgrade(),
             None,
         );
@@ -873,10 +1135,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            vec![
-                InternalTransactionCommand::Timer(timer_name),
-                InternalTransactionCommand::TransitionTo(target_state),
-            ],
+            timer_name,
+            Some(target_state),
+            true,
         )
         .await
     }
@@ -886,7 +1147,9 @@ impl TimerManager {
         transaction_id: TransactionKey,
         timer_type: TimerType,
         duration: Duration,
-        commands: Vec<InternalTransactionCommand>,
+        timer_name: String,
+        target_state: Option<crate::transaction::TransactionState>,
+        generation_protected: bool,
     ) -> Result<JoinHandle<()>, crate::transaction::error::Error> {
         let (completion_tx, completion_rx) = oneshot::channel();
         let command_tx = self.compatibility_sender(&transaction_id).await?;
@@ -894,7 +1157,9 @@ impl TimerManager {
             transaction_id,
             timer_type,
             duration,
-            commands,
+            timer_name,
+            target_state,
+            generation_protected,
             command_tx.downgrade(),
             Some(completion_tx),
         );
@@ -911,7 +1176,9 @@ impl TimerManager {
         transaction_id: TransactionKey,
         timer_type: TimerType,
         duration: Duration,
-        commands: Vec<InternalTransactionCommand>,
+        timer_name: String,
+        target_state: Option<crate::transaction::TransactionState>,
+        generation_protected: bool,
         command_tx: mpsc::WeakSender<InternalTransactionCommand>,
         completion: Option<oneshot::Sender<()>>,
     ) -> ManagedTimerHandle {
@@ -922,7 +1189,15 @@ impl TimerManager {
             timer_type,
         };
         let due_at = Instant::now() + duration;
-        scheduler.schedule(key, due_at, commands, command_tx, completion)
+        scheduler.schedule(
+            key,
+            due_at,
+            timer_name,
+            target_state,
+            generation_protected,
+            command_tx,
+            completion,
+        )
     }
 
     async fn compatibility_sender(
@@ -972,6 +1247,26 @@ mod tests {
     async fn settle_scheduler() {
         for _ in 0..3 {
             tokio::task::yield_now().await;
+        }
+    }
+
+    fn claim_timer(
+        command: InternalTransactionCommand,
+    ) -> Option<(String, u64, Option<crate::transaction::TransactionState>)> {
+        match command {
+            InternalTransactionCommand::Timer(timer) => match claim_timer_firing(timer) {
+                TimerFiringClaim::Legacy(timer) => Some((timer, 0, None)),
+                TimerFiringClaim::Claimed(firing) => {
+                    let timer = firing.timer_name().to_string();
+                    let generation = firing.generation();
+                    let target = firing.target_state();
+                    let execution = firing.begin_execution()?;
+                    drop(execution);
+                    Some((timer, generation, target))
+                }
+                TimerFiringClaim::Stale { .. } => None,
+            },
+            _ => None,
         }
     }
 
@@ -1033,8 +1328,13 @@ mod tests {
 
         // Wait for the timer event
         match timeout(timer_duration + Duration::from_millis(50), cmd_rx.recv()).await {
-            Ok(Some(InternalTransactionCommand::Timer(payload))) => {
+            Ok(Some(command)) => {
+                let (payload, generation, _) = claim_timer(command).expect("timer firing");
                 assert_eq!(payload, timer_type.to_string());
+                assert_eq!(
+                    generation, 0,
+                    "public compatibility payload remains unchanged"
+                );
             }
             Ok(Some(other_cmd)) => panic!("Received unexpected command: {:?}", other_cmd),
             Ok(None) => panic!("Command channel closed unexpectedly"),
@@ -1049,6 +1349,7 @@ mod tests {
         let manager = TimerManager::new(None);
         let tx_key = dummy_tm_tx_key("unregistered_fire");
         let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let _command_sender_keepalive = cmd_tx.clone();
 
         manager.register_transaction(tx_key.clone(), cmd_tx).await;
 
@@ -1126,10 +1427,14 @@ mod tests {
         ));
 
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(matches!(
-            cmd_rx.recv().await,
-            Some(InternalTransactionCommand::Timer(name)) if name == "A"
-        ));
+        assert_eq!(
+            cmd_rx
+                .recv()
+                .await
+                .and_then(claim_timer)
+                .map(|value| value.0),
+            Some("A".to_string())
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1163,10 +1468,14 @@ mod tests {
 
         tokio::time::advance(Duration::from_secs(10)).await;
         settle_scheduler().await;
-        assert!(matches!(
-            cmd_rx.try_recv(),
-            Ok(InternalTransactionCommand::Timer(name)) if name == "B"
-        ));
+        assert_eq!(
+            cmd_rx
+                .try_recv()
+                .ok()
+                .and_then(claim_timer)
+                .map(|value| value.0),
+            Some("B".to_string())
+        );
         assert!(matches!(
             cmd_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -1205,14 +1514,22 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         settle_scheduler().await;
 
-        assert!(matches!(
-            first_rx.try_recv(),
-            Ok(InternalTransactionCommand::Timer(name)) if name == "F"
-        ));
-        assert!(matches!(
-            second_rx.try_recv(),
-            Ok(InternalTransactionCommand::Timer(name)) if name == "F"
-        ));
+        assert_eq!(
+            first_rx
+                .try_recv()
+                .ok()
+                .and_then(claim_timer)
+                .map(|value| value.0),
+            Some("F".to_string())
+        );
+        assert_eq!(
+            second_rx
+                .try_recv()
+                .ok()
+                .and_then(claim_timer)
+                .map(|value| value.0),
+            Some("F".to_string())
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -1276,10 +1593,14 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         settle_scheduler().await;
 
-        assert!(matches!(
-            ready_rx.try_recv(),
-            Ok(InternalTransactionCommand::Timer(name)) if name == "B"
-        ));
+        assert_eq!(
+            ready_rx
+                .try_recv()
+                .ok()
+                .and_then(claim_timer)
+                .map(|value| value.0),
+            Some("B".to_string())
+        );
         assert!(matches!(
             blocked_rx.try_recv(),
             Ok(InternalTransactionCommand::Terminate)
@@ -1289,7 +1610,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn transition_retry_resumes_without_repeating_timer_event() {
+    async fn transition_timer_is_one_atomic_delivery() {
         let manager = TimerManager::new(None);
         let tx_key = dummy_tm_tx_key("transition_progress");
         let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
@@ -1305,22 +1626,130 @@ mod tests {
             .await
             .unwrap();
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(matches!(
-            cmd_rx.recv().await,
-            Some(InternalTransactionCommand::Timer(name)) if name == "D"
-        ));
+        let (name, generation, target) = cmd_rx
+            .recv()
+            .await
+            .and_then(claim_timer)
+            .expect("atomic timer firing");
+        assert_eq!(name, "D");
+        assert!(generation > 0);
+        assert_eq!(
+            target,
+            Some(crate::transaction::TransactionState::Terminated)
+        );
 
         tokio::time::advance(FULL_CHANNEL_RETRY_DELAY).await;
-        assert!(matches!(
-            cmd_rx.recv().await,
-            Some(InternalTransactionCommand::TransitionTo(
-                crate::transaction::TransactionState::Terminated
-            ))
-        ));
         assert!(matches!(
             cmd_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_handle_after_delivery_begins_cannot_cancel_atomic_firing() {
+        let manager = TimerManager::new(None);
+        let tx_key = dummy_tm_tx_key("delivery_owned");
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let _command_sender_keepalive = cmd_tx.clone();
+        cmd_tx
+            .send(InternalTransactionCommand::Terminate)
+            .await
+            .unwrap();
+        let timer = manager
+            .start_timer_managed_with_transition(
+                tx_key,
+                "K".to_string(),
+                TimerType::K,
+                Duration::from_secs(1),
+                crate::transaction::TransactionState::Terminated,
+                cmd_tx,
+            )
+            .await
+            .unwrap();
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_scheduler().await;
+        assert_eq!(
+            timer.firing.authority.state.load(Ordering::Acquire),
+            TIMER_DELIVERING,
+            "due timer must own one indivisible delivery before handle drop"
+        );
+        drop(timer);
+        assert!(matches!(
+            cmd_rx.recv().await,
+            Some(InternalTransactionCommand::Terminate)
+        ));
+        tokio::time::advance(FULL_CHANNEL_RETRY_DELAY).await;
+        settle_scheduler().await;
+        let (name, generation, target) = cmd_rx
+            .recv()
+            .await
+            .and_then(claim_timer)
+            .expect("already-fired timer delivery survives handle drop");
+        assert_eq!(name, "K");
+        assert!(generation > 0);
+        assert_eq!(
+            target,
+            Some(crate::transaction::TransactionState::Terminated)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn superseded_queued_generation_is_ignored_before_runner_execution() {
+        let manager = TimerManager::new(None);
+        let tx_key = dummy_tm_tx_key("queued_replacement");
+        let (cmd_tx, mut cmd_rx) = mpsc::channel(1);
+        let _command_sender_keepalive = cmd_tx.clone();
+        cmd_tx
+            .send(InternalTransactionCommand::Terminate)
+            .await
+            .unwrap();
+        let old = manager
+            .start_timer_managed(
+                tx_key.clone(),
+                TimerType::D,
+                Duration::from_secs(1),
+                cmd_tx.clone(),
+            )
+            .await
+            .unwrap();
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle_scheduler().await;
+        assert_eq!(
+            old.firing.authority.state.load(Ordering::Acquire),
+            TIMER_DELIVERING
+        );
+
+        let replacement = manager
+            .start_timer_managed(tx_key, TimerType::D, Duration::from_secs(5), cmd_tx)
+            .await
+            .unwrap();
+        assert_eq!(
+            old.firing.authority.state.load(Ordering::Acquire),
+            TIMER_CANCELLED,
+            "replacement must revoke the queued old generation"
+        );
+        assert!(matches!(
+            cmd_rx.recv().await,
+            Some(InternalTransactionCommand::Terminate)
+        ));
+        tokio::time::advance(FULL_CHANNEL_RETRY_DELAY).await;
+        settle_scheduler().await;
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        settle_scheduler().await;
+        let (_, replacement_generation, _) = cmd_rx
+            .recv()
+            .await
+            .and_then(claim_timer)
+            .expect("replacement firing");
+        assert_eq!(replacement_generation, replacement.generation);
+        drop(old);
+        drop(replacement);
     }
 
     #[test]
@@ -1337,9 +1766,12 @@ mod tests {
                     timer_type: TimerType::A,
                 },
                 due_at,
-                vec![InternalTransactionCommand::Timer("A".to_string())],
+                "A".to_string(),
+                None,
+                true,
                 command_tx.downgrade(),
                 None,
+                Weak::new(),
             );
         }
 

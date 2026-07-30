@@ -666,6 +666,9 @@ knobs in a promoted candidate.
 
 ## Related Docs
 
+- [`SIGNALING_PERFORMANCE_ARCHITECTURE.md`](SIGNALING_PERFORMANCE_ARCHITECTURE.md)
+  explains the sharded indexes, manager-owned deadlines, bounded batches,
+  generation checks, compact retained state, and their tradeoffs.
 - [`BENCHMARKING.md`](BENCHMARKING.md) covers publishable benchmark suite runs.
 - [`PROFILING.md`](PROFILING.md) covers Criterion, samply, flamegraph, and dhat
   workflows.

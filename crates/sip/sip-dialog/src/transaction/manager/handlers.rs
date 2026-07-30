@@ -257,6 +257,32 @@ impl TransactionManager {
         request: Request,
         ingress_context: &SipRequestIngressContext,
     ) -> Result<bool> {
+        let compact_timer_l = request.method() == Method::Invite
+            && self
+                .compact_non_invite_tombstones
+                .get(transaction_id)
+                .is_some_and(|entry| {
+                    entry.value().timer()
+                        == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L
+                });
+        if compact_timer_l {
+            if self.request_ingress_authorizer().is_some()
+                && self
+                    .inbound_principal_for_context(transaction_id, ingress_context)
+                    .is_none()
+            {
+                warn!(
+                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+                    source=%ingress_context.source,
+                    "Dropping compact Timer L replay from a different authenticated peer binding"
+                );
+                return Ok(true);
+            }
+            // RFC 6026 §7.1: a retransmitted INVITE is absorbed throughout
+            // Accepted. It is never a trigger for transaction-generated 2xx
+            // retransmission; the TU owns end-to-end 2xx reliability.
+            return Ok(true);
+        }
         let existing = self
             .server_transactions
             .get(transaction_id)
@@ -303,6 +329,10 @@ impl TransactionManager {
                 }
             }
 
+            if request.method() == Method::Invite && transaction.data().state.is_accepted() {
+                transaction.process_request(request).await?;
+                return Ok(true);
+            }
             let lifecycle = transaction.data().get_lifecycle();
             if !matches!(lifecycle, TransactionLifecycle::Active) {
                 if request.method() == Method::Invite {
@@ -319,20 +349,6 @@ impl TransactionManager {
                 }
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), ?lifecycle, "Skipping request processing for non-active transaction");
                 return Ok(true);
-            }
-            if request.method() == Method::Invite
-                && transaction.state() == TransactionState::Terminated
-            {
-                if self
-                    .retransmit_cached_invite_2xx_response_on_route(
-                        transaction_id,
-                        ingress_context.response_route_for_request(&request),
-                    )
-                    .await?
-                {
-                    return Ok(true);
-                }
-                diagnostics::record_duplicate_invite_cache_miss();
             }
             let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
             transaction.process_request(request).await?;
@@ -369,7 +385,11 @@ impl TransactionManager {
     fn absorb_compact_non_invite_client_response(&self, transaction_id: &TransactionKey) -> bool {
         self.compact_non_invite_tombstones
             .get(transaction_id)
-            .is_some_and(|entry| entry.value().is_client())
+            .is_some_and(|entry| {
+                entry.value().is_client()
+                    && entry.value().timer()
+                        == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::K
+            })
     }
 
     pub(super) async fn replay_compact_non_invite_server_response(
@@ -1105,6 +1125,24 @@ impl TransactionManager {
                 {
                     return Ok(());
                 }
+                if published {
+                    // The exact transaction generation can outlive its active
+                    // runner briefly while compact retention or terminal-event
+                    // ownership is being handed off. This is still a matching
+                    // retransmission, not authority to create another server
+                    // transaction. Retrying this function recursively against
+                    // the same published registration used to spin until the
+                    // Tokio worker overflowed its stack (observed with REFER
+                    // racing explicit dialog teardown). Absorb the request;
+                    // a compact response, when present, was already replayed
+                    // by dispatch_matching_server_request above.
+                    debug!(
+                        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&registration.transaction_id),
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                        "Absorbing retransmission while the exact server generation retires"
+                    );
+                    return Ok(());
+                }
                 return Box::pin(self.handle_request(
                     request,
                     source,
@@ -1160,6 +1198,8 @@ impl TransactionManager {
                     &request,
                     ingress_context.response_route_for_request(&request),
                     &self.transport,
+                    self.stateless_overload_retry_after_secs
+                        .load(std::sync::atomic::Ordering::Acquire),
                 )
                 .await?;
                 return Ok(());
@@ -1328,6 +1368,16 @@ impl TransactionManager {
                 .get(&key)
                 .map(|r| r.value().clone());
             let mut processed = self.absorb_compact_non_invite_client_response(&key);
+            let compact_invite_match =
+                self.compact_non_invite_tombstones
+                    .get(&key)
+                    .is_some_and(|entry| {
+                        matches!(
+                            entry.value().timer(),
+                            crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::M
+                                | crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::U
+                        )
+                    });
             if processed {
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Absorbed retransmitted final response in compact Timer K tombstone");
             }
@@ -1344,8 +1394,10 @@ impl TransactionManager {
                         // UA mode retains its bounded late-2xx safety path.
                         // RFC 6026 proxy mode drops every response after Timer
                         // M destroys the matching client transaction.
-                        processed = self.stateful_proxy_tu_mode()
-                            || !(key.method() == &Method::Invite && response.status().is_success());
+                        processed = !compact_invite_match
+                            && (self.stateful_proxy_tu_mode()
+                                || !(key.method() == &Method::Invite
+                                    && response.status().is_success()));
                     } else {
                         let dispatch_started =
                             diagnostics::transaction_timing_enabled().then(Instant::now);
@@ -1364,6 +1416,30 @@ impl TransactionManager {
                     }
                 } else {
                     debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "No matching client transaction found for response key");
+                }
+            }
+
+            if !processed {
+                if compact_invite_match {
+                    if response.status().is_success() {
+                        send_transaction_event(
+                            &self.events_tx,
+                            crate::transaction::TransactionEvent::SuccessResponse {
+                                transaction_id: key.clone(),
+                                response: response.clone(),
+                                need_ack: true,
+                                source,
+                            },
+                        )
+                        .await
+                        .map_err(|error| {
+                            Error::Other(format!(
+                                "Failed to deliver matching RFC 6026 Accepted response: {error}"
+                            ))
+                        })?;
+                    }
+                    // Non-2xx received after entering Accepted is absorbed.
+                    processed = true;
                 }
             }
 
@@ -1724,6 +1800,7 @@ async fn send_stateless_transaction_overload(
     request: &Request,
     response_route: TransportRoute,
     transport: &Arc<dyn Transport>,
+    retry_after_secs: u32,
 ) -> Result<()> {
     // ACK never receives a response. It is normally handled before this path,
     // but retain the RFC rule defensively.
@@ -1731,9 +1808,10 @@ async fn send_stateless_transaction_overload(
         return Ok(());
     }
 
-    let mut builder = ResponseBuilder::new(StatusCode::ServiceUnavailable, None).header(
-        TypedHeader::RetryAfter(rvoip_sip_core::types::retry_after::RetryAfter::new(1)),
-    );
+    let mut builder =
+        ResponseBuilder::new(StatusCode::ServiceUnavailable, None).header(TypedHeader::RetryAfter(
+            rvoip_sip_core::types::retry_after::RetryAfter::new(retry_after_secs.max(1)),
+        ));
     if let Some(to) = request.to() {
         builder = builder.header(TypedHeader::To(to.clone()));
     }

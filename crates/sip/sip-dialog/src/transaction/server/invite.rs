@@ -518,8 +518,7 @@ impl ServerInviteLogic {
         match current_state {
             TransactionState::Confirmed => {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer I fired in Confirmed state, terminating");
-                // Timer I automatically transitions to Terminated, no need to return a state
-                Ok(None)
+                Ok(Some(TransactionState::Terminated))
             }
             _ => {
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer I fired in invalid state, ignoring");
@@ -535,10 +534,11 @@ impl ServerInviteLogic {
     ) -> Result<Option<TransactionState>> {
         if data.state.is_accepted() {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "RFC 6026 Timer L fired in private Accepted state");
+            Ok(Some(TransactionState::Terminated))
         } else {
             trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), state=?current_state, "Timer L fired outside Accepted state; ignoring stale deadline");
+            Ok(None)
         }
-        Ok(None)
     }
 
     /// Processes a retransmitted INVITE request
@@ -845,11 +845,15 @@ impl TransactionLogic<ServerTransactionData, ServerInviteTimerHandles> for Serve
             }
             TransactionState::Terminated => {
                 if data.state.is_accepted() {
-                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered private RFC 6026 Accepted state, starting Timer L");
+                    debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Entered private RFC 6026 Accepted state, compacting through Timer L");
                     self.cancel_timer_100(timer_handles);
+                    let interval_l = data.timer_config.t1.saturating_mul(64);
+                    if Arc::clone(data).schedule_compact_timer_l(interval_l).await {
+                        return Ok(());
+                    }
                     // Failing to install L must not leave an immortal private
-                    // Accepted transaction. Propagating the error makes the
-                    // runner apply the true terminal fence.
+                    // Accepted transaction. The full runner is the bounded
+                    // compatibility fallback when no managed scheduler exists.
                     self.start_timer_l(data, timer_handles, command_tx).await?;
                     return Ok(());
                 }

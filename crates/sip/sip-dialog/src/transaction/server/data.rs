@@ -564,12 +564,53 @@ impl ServerTransactionData {
                     bytes::Bytes::from(rvoip_sip_core::Message::Response(response).to_bytes()),
                     self.response_route.clone(),
                 )),
+                None,
                 self.state.clone(),
                 None,
                 self.cmd_tx.clone(),
                 self.compact_retention_reservation.get().cloned(),
                 self.transaction_admission_owner(),
                 Arc::clone(&self.terminal_event_publication),
+                std::time::Duration::ZERO,
+            )
+            .await
+    }
+
+    /// Replace an RFC 6026 Accepted INVITE server runner with a compact
+    /// manager-owned Timer L record. The request and most recent TU-supplied
+    /// 2xx are retained as immutable wire bytes; matching retransmitted
+    /// INVITEs are absorbed without waking a runner.
+    pub(crate) async fn schedule_compact_timer_l(
+        self: Arc<Self>,
+        delay: std::time::Duration,
+    ) -> bool {
+        let identity = Arc::as_ptr(&self) as usize;
+        let Some(scheduler) = self.lifecycle_scheduler.get().cloned() else {
+            return false;
+        };
+        let Some(response) = self.last_response.lock().await.clone() else {
+            return false;
+        };
+        scheduler
+            .schedule_compact_non_invite_with_reservation(
+                identity,
+                self.id.clone(),
+                crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L,
+                delay,
+                Some((
+                    bytes::Bytes::from(rvoip_sip_core::Message::Response(response).to_bytes()),
+                    self.response_route.clone(),
+                )),
+                Some(bytes::Bytes::from(
+                    rvoip_sip_core::Message::Request((*self.request).clone()).to_bytes(),
+                )),
+                self.state.clone(),
+                None,
+                self.cmd_tx.clone(),
+                self.compact_retention_reservation.get().cloned(),
+                self.transaction_admission_owner(),
+                Arc::clone(&self.terminal_event_publication),
+                std::time::Duration::ZERO,
             )
             .await
     }

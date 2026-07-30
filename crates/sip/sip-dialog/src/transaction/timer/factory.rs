@@ -414,6 +414,7 @@ impl Default for TimerFactory {
 #[allow(dead_code, unused_variables, unused_imports)]
 mod tests {
     use super::*;
+    use crate::transaction::timer::manager::{claim_timer_firing, TimerFiringClaim};
     use crate::transaction::TransactionKey;
     use rvoip_sip_core::Method;
     use std::sync::Mutex;
@@ -423,6 +424,24 @@ mod tests {
     // Helper to create a dummy TransactionKey for tests
     fn dummy_tx_key(name: &str) -> TransactionKey {
         TransactionKey::new(format!("branch-factory-{}", name), Method::Invite, false)
+    }
+
+    fn claim_timer_name(command: crate::transaction::InternalTransactionCommand) -> Option<String> {
+        match command {
+            crate::transaction::InternalTransactionCommand::Timer(command) => {
+                match claim_timer_firing(command) {
+                    TimerFiringClaim::Legacy(name) => Some(name),
+                    TimerFiringClaim::Claimed(firing) => {
+                        let name = firing.timer_name().to_string();
+                        let execution = firing.begin_execution()?;
+                        drop(execution);
+                        Some(name)
+                    }
+                    TimerFiringClaim::Stale { .. } => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     #[derive(Debug)]
@@ -537,10 +556,10 @@ mod tests {
         ));
 
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(matches!(
-            command_rx.recv().await,
-            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "A"
-        ));
+        assert_eq!(
+            command_rx.recv().await.and_then(claim_timer_name),
+            Some("A".to_string())
+        );
     }
 
     // To properly test interactions, TimerManager needs to be mockable.
@@ -647,20 +666,20 @@ mod tests {
             .expect("cancel combined timers");
 
         tokio::time::advance(settings.t1).await;
-        assert!(matches!(
-            timer_a_rx.recv().await,
-            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "A"
-        ));
+        assert_eq!(
+            timer_a_rx.recv().await.and_then(claim_timer_name),
+            Some("A".to_string())
+        );
         assert!(matches!(
             timer_b_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)
         ));
 
         tokio::time::advance(settings.transaction_timeout - settings.t1).await;
-        assert!(matches!(
-            timer_b_rx.recv().await,
-            Some(crate::transaction::InternalTransactionCommand::Timer(name)) if name == "B"
-        ));
+        assert_eq!(
+            timer_b_rx.recv().await.and_then(claim_timer_name),
+            Some("B".to_string())
+        );
         assert!(matches!(
             combo_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty)

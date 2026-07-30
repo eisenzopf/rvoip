@@ -1187,6 +1187,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_server_match_without_runner_absorbs_retransmission_without_recursion(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(16)).await?;
+        let peer: SocketAddr = "192.0.2.80:5060".parse().unwrap();
+        let request = create_dispatch_request_with_via(
+            Method::Refer,
+            "z9hG4bK.retiring-refer",
+            201,
+            "edge.example.com",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+
+        manager
+            .handle_transport_event(dispatch_event_from(Message::Request(request.clone()), peer))
+            .await?;
+        let transaction_id = request_event_transaction_id(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250))
+                .await
+                .expect("initial REFER event"),
+        )
+        .expect("initial REFER transaction id");
+        let retiring_generation = manager
+            .server_transactions
+            .get(&transaction_id)
+            .expect("published server transaction")
+            .value()
+            .clone();
+        assert!(manager
+            .server_transactions
+            .remove(&transaction_id)
+            .is_some());
+        assert!(manager
+            .server_transaction_matches
+            .by_transaction
+            .contains_key(&transaction_id));
+
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            manager.handle_transport_event(dispatch_event_from(Message::Request(request), peer)),
+        )
+        .await
+        .expect("retiring exact match must not recurse")?;
+        assert!(manager.server_transactions.is_empty());
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(25))
+                .await
+                .is_none(),
+            "a retransmission cannot create a replacement server transaction"
+        );
+
+        drop(retiring_generation);
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn udp_server_matching_allows_authenticated_same_wire_collisions_for_all_methods(
     ) -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
@@ -3247,12 +3307,12 @@ mod tests {
             "INVITE client transaction should project Terminated after 2xx"
         );
         assert!(
-            !manager
-                .client_transactions
+            manager
+                .compact_non_invite_tombstones
                 .get(&tx_id)
-                .expect("client transaction remains retained through Timer M")
-                .is_protocol_terminated(),
-            "private Timer M retention must remain active"
+                .is_some_and(|entry| entry.timer()
+                    == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::M),
+            "compact private Timer M retention must remain active"
         );
         assert_eq!(
             manager.cleanup_terminated_transactions().await?,
@@ -3260,8 +3320,43 @@ mod tests {
             "diagnostic cleanup must not remove private Timer M retention"
         );
         assert!(
-            manager.client_transactions.contains_key(&tx_id),
-            "client transaction must remain routable through Timer M"
+            !manager.client_transactions.contains_key(&tx_id),
+            "the heavy client transaction must be released after Timer M handoff"
+        );
+
+        while event_rx.try_recv().is_ok() {}
+        transport_tx
+            .send(rvoip_sip_transport::TransportEvent::MessageReceived {
+                message: Message::Response(ok_response.clone()),
+                source: destination,
+                destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            })
+            .await
+            .unwrap();
+        let repeated_2xx = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if let Some(TransactionEvent::SuccessResponse {
+                    transaction_id,
+                    need_ack,
+                    ..
+                }) = event_rx.recv().await
+                {
+                    if transaction_id == tx_id {
+                        break need_ack;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("matching repeated 2xx must be delivered through compact Timer M");
+        assert!(
+            repeated_2xx,
+            "every INVITE 2xx remains end-to-end ACK owned"
         );
 
         // Test ACK creation and sending
@@ -3299,10 +3394,12 @@ mod tests {
         // Test transaction termination
         manager.terminate_transaction(&tx_id).await?;
 
-        // Verify transaction no longer exists
+        // Explicit termination is idempotent once RFC 6026 compact Timer M
+        // owns the exact response route; it must not shorten that protocol
+        // retention horizon.
         assert!(
-            !manager.transaction_exists(&tx_id).await,
-            "Transaction should not exist after termination"
+            manager.transaction_exists(&tx_id).await,
+            "compact Timer M generation should remain until its exact deadline"
         );
 
         // Clean up
@@ -5464,7 +5561,7 @@ mod tests {
         let tx_id = transaction.id().clone();
 
         let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
-        manager.send_response(&tx_id, ok_response).await?;
+        manager.send_response(&tx_id, ok_response.clone()).await?;
 
         let accepted = manager
             .wait_for_transaction_state(
@@ -5487,8 +5584,16 @@ mod tests {
             "diagnostic cleanup must not remove private Timer L retention"
         );
         assert!(
-            manager.server_transactions.contains_key(&tx_id),
-            "server transaction must remain routable through Timer L"
+            !manager.server_transactions.contains_key(&tx_id),
+            "the heavy server transaction must be released after Timer L handoff"
+        );
+        assert!(
+            manager
+                .compact_non_invite_tombstones
+                .get(&tx_id)
+                .is_some_and(|entry| entry.timer()
+                    == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L),
+            "compact server transaction must remain routable through Timer L"
         );
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5512,13 +5617,9 @@ mod tests {
         let sent = transport.get_sent_messages().await;
         assert_eq!(
             sent.len(),
-            before + 1,
-            "the private Accepted transaction absorbs the INVITE while the independent \
-             UAS response cache preserves 0.3.1 2xx reliability"
-        );
-        assert!(
-            matches!(sent.last(), Some((Message::Response(response), _)) if response.status_code() == 200),
-            "UAS response cache should replay the final 2xx"
+            before,
+            "RFC 6026 Accepted must absorb a retransmitted INVITE; the independent \
+             UAS reliability scheduler, not request dispatch, drives 2xx retransmission"
         );
         assert_eq!(
             manager.transaction_state(&tx_id).await?,
@@ -5627,8 +5728,8 @@ mod tests {
     #[tokio::test]
     async fn invite_2xx_is_retransmitted_until_ack() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
-        let (_transport_tx, transport_rx) = mpsc::channel(16);
-        let (manager, _event_rx) =
+        let (transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, mut event_rx) =
             TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
 
         let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
@@ -5639,7 +5740,7 @@ mod tests {
         let tx_id = transaction.id().clone();
 
         let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
-        manager.send_response(&tx_id, ok_response).await?;
+        manager.send_response(&tx_id, ok_response.clone()).await?;
 
         let accepted = manager
             .wait_for_transaction_state(
@@ -5655,6 +5756,14 @@ mod tests {
         assert!(
             !transaction.is_protocol_terminated(),
             "private Timer L retention must remain active"
+        );
+
+        let before_later_tu_2xx = transport.get_sent_messages().await.len();
+        manager.send_response(&tx_id, ok_response).await?;
+        assert_eq!(
+            transport.get_sent_messages().await.len(),
+            before_later_tu_2xx + 1,
+            "a later TU-supplied 2xx must send through compact Timer L"
         );
 
         let before = transport.get_sent_messages().await.len();
@@ -5674,6 +5783,31 @@ mod tests {
         assert!(
             transport.raw_send_count() > 0,
             "proactive INVITE 2xx retransmission should use pre-built wire bytes"
+        );
+
+        while event_rx.try_recv().is_ok() {}
+        transport_tx
+            .send(rvoip_sip_transport::TransportEvent::MessageReceived {
+                message: Message::Request(
+                    create_test_ack().map_err(|error| Error::Other(error.to_string()))?,
+                ),
+                source,
+                destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                flow_id: None,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(500)).await,
+                Some(TransactionEvent::AckRequest { ref transaction_id, .. })
+                    if transaction_id == &tx_id
+            ),
+            "matching 2xx ACK must reach the TU through the retained dialog index"
         );
 
         manager.shutdown().await;

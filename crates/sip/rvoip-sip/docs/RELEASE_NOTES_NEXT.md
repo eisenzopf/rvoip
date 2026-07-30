@@ -20,6 +20,14 @@ transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
   global event subscription.
 - Private INVITE client/server Accepted lifecycles retain matching 2xx traffic
   through Timer M and Timer L while preserving the public transaction enum.
+- Timer M/L retention now uses compact records in the existing sharded
+  lifecycle indexes and one manager-owned deadline scheduler. Active runners,
+  timer factories, transports, and 128-slot command queues are released at the
+  Accepted handoff; due work is generation-protected and capped at 1,024
+  records per batch.
+- Accepted M/L records and teardown J/K records use independent lazy bounded
+  capacity lanes, so an accepted INVITE cannot consume the only slot required
+  to process its own BYE.
 - Stateful proxy response contexts support matched and unmatched CANCEL,
   cancellation latching, forked and late 2xx responses, ACK ownership,
   response aggregation, Timer C, strict/loose routing, SIPS, and exact response
@@ -36,6 +44,18 @@ transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
   aliases, are updated and validated during coordinated release preparation.
 - Transactionless ACK transport metadata is bounded and eligible for exact
   cleanup after the protocol retention horizon.
+- Transaction timer callback and state transition delivery is atomic and
+  schedule-generation protected, eliminating the channel-saturation race that
+  could strand an otherwise expired transaction.
+- Stateless protocol-retention overload responses now inherit the configured
+  server `Retry-After` policy across already-running transaction-manager
+  worker clones.
+- Server Timer L absorbs retransmitted INVITEs without driving cached 2xx
+  replay, while later TU-supplied 2xx responses and matching ACK delivery
+  remain available through the compact retained indexes.
+- Client Timer M forwards every matching or additional 2xx without owning its
+  ACK; proxy routes expire at M and endpoint routes promote in place to the
+  existing compact late-2xx compatibility horizon.
 - Via `received`/`rport`, packed Via popping, body preservation, route-set
   processing, and RFC 3263 failover paths have dedicated packet-level tests.
 - The existing SCIM, vCon, Vapi, WebRTC, MOQT, and extension behavior from
@@ -61,6 +81,16 @@ the conformance matrix links to green executable evidence.
 - The admission terminal APIs are additive.
 - Stateful proxy wire behavior changes are externally observable but ship as
   `0.3.4` by owner decision within the pre-1.0 release train.
+
+## Limitations and non-claims
+
+- General-user 10,000 CPS full-media capability is not claimed. The supported
+  beta envelope remains bounded by the revision-specific 2,000-CPS real-media
+  evidence and its documented runtime profile.
+- Browser/WebRTC edge behavior remains outside the SIP beta claim; component
+  availability does not imply qualified browser, ICE/TURN, or DTLS-SRTP
+  interoperability.
+- The proxy claim remains limited to the explicitly tested profile below.
 
 ## Required Qualification
 

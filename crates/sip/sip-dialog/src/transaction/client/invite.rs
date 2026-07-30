@@ -445,8 +445,7 @@ impl ClientInviteLogic {
         match current_state {
             TransactionState::Completed => {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer D fired in Completed state, terminating");
-                // Timer D automatically transitions to Terminated (handled by timer_utils)
-                Ok(None)
+                Ok(Some(TransactionState::Terminated))
             }
             _ => {
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer D fired in invalid state, ignoring");
@@ -462,12 +461,11 @@ impl ClientInviteLogic {
     ) -> Result<Option<TransactionState>> {
         if data.state.is_accepted() {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), "RFC 6026 Timer M fired in private Accepted state");
+            Ok(Some(TransactionState::Terminated))
         } else {
             trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&data.id), state=?current_state, "Timer M fired outside Accepted state; ignoring stale deadline");
+            Ok(None)
         }
-        // The centralized timer's TransitionTo command follows this Timer
-        // command, so no second state command is needed here.
-        Ok(None)
     }
 
     /// Create and send an ACK for a non-2xx response
@@ -716,6 +714,10 @@ impl TransactionLogic<ClientTransactionData, ClientInviteTimerHandles> for Clien
                     // transition. Timer M is not reset by additional matching
                     // 2xx responses. Propagating installation failure lets the
                     // runner fence the private Accepted generation.
+                    let interval_m = data.timer_config.t1.saturating_mul(64);
+                    if Arc::clone(data).schedule_compact_timer_m(interval_m).await {
+                        return Ok(());
+                    }
                     self.start_timer_m(data, timer_handles, command_tx).await?;
                     return Ok(());
                 }
@@ -948,6 +950,7 @@ impl ClientInviteTransaction {
             termination_cleanup_tx: std::sync::OnceLock::new(),
             lifecycle_scheduler: std::sync::OnceLock::new(),
             compact_retention_reservation: std::sync::OnceLock::new(),
+            late_2xx_total_retention: std::sync::OnceLock::new(),
             transaction_admission_owner: std::sync::OnceLock::new(),
             terminal_event_publication:
                 crate::transaction::event_sender::TerminalEventPublication::new(),

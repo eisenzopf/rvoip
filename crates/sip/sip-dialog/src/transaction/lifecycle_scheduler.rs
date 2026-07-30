@@ -60,6 +60,7 @@ const COMMAND_RETRY_DELAY: Duration = Duration::from_millis(1);
 #[derive(Clone)]
 pub(crate) enum CompactNonInviteTombstone {
     Client {
+        timer: CompactNonInviteTimer,
         /// Admission-time capacity lease shared with the active transaction.
         /// Keeping the same lease through Timer K prevents active and retired
         /// representations from double-counting the bounded retention slot.
@@ -83,8 +84,13 @@ pub(crate) enum CompactNonInviteTombstone {
         response_route_owner: usize,
         expires_at: StdInstant,
         generation: u64,
+        /// Serialized request retained only for RFC 6026 Timer M. Timer K
+        /// deliberately leaves this empty to preserve its compact footprint.
+        request_wire: Option<bytes::Bytes>,
+        post_expiry_retention: Duration,
     },
     Server {
+        timer: CompactNonInviteTimer,
         /// Admission-time capacity lease shared with the active transaction
         /// and retained through the complete Timer J replay horizon.
         _retention_reservation: CompactRetentionReservation,
@@ -94,6 +100,9 @@ pub(crate) enum CompactNonInviteTombstone {
         auth_lease: Option<crate::transaction::manager::InboundPrincipalLease>,
         response_wire: bytes::Bytes,
         response_route: TransportRoute,
+        /// Serialized request retained only for RFC 6026 Timer L compatibility
+        /// accessors. Timer J does not need the complete request.
+        request_wire: Option<bytes::Bytes>,
         expires_at: StdInstant,
         generation: u64,
     },
@@ -103,6 +112,12 @@ impl CompactNonInviteTombstone {
     pub(crate) fn generation(&self) -> u64 {
         match self {
             Self::Client { generation, .. } | Self::Server { generation, .. } => *generation,
+        }
+    }
+
+    pub(crate) fn timer(&self) -> CompactNonInviteTimer {
+        match self {
+            Self::Client { timer, .. } | Self::Server { timer, .. } => *timer,
         }
     }
 
@@ -128,12 +143,84 @@ impl CompactNonInviteTombstone {
     pub(crate) fn server_replay(&self) -> Option<(&bytes::Bytes, &TransportRoute)> {
         match self {
             Self::Server {
+                timer: CompactNonInviteTimer::J,
+                response_wire,
+                response_route,
+                ..
+            } => Some((response_wire, response_route)),
+            Self::Client { .. } | Self::Server { .. } => None,
+        }
+    }
+
+    pub(crate) fn server_response(&self) -> Option<(&bytes::Bytes, &TransportRoute)> {
+        match self {
+            Self::Server {
                 response_wire,
                 response_route,
                 ..
             } => Some((response_wire, response_route)),
             Self::Client { .. } => None,
         }
+    }
+
+    pub(crate) fn update_server_accepted_response(&mut self, wire: bytes::Bytes) -> bool {
+        match self {
+            Self::Server {
+                timer: CompactNonInviteTimer::L,
+                response_wire,
+                ..
+            } => {
+                *response_wire = wire;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn request_wire(&self) -> Option<&bytes::Bytes> {
+        match self {
+            Self::Client { request_wire, .. } | Self::Server { request_wire, .. } => {
+                request_wire.as_ref()
+            }
+        }
+    }
+
+    pub(crate) fn is_invite_accepted(&self) -> bool {
+        matches!(
+            self.timer(),
+            CompactNonInviteTimer::L | CompactNonInviteTimer::M
+        )
+    }
+
+    fn post_expiry_retention(&self) -> Duration {
+        match self {
+            Self::Client {
+                post_expiry_retention,
+                ..
+            } => *post_expiry_retention,
+            Self::Server { .. } => Duration::ZERO,
+        }
+    }
+
+    fn promote_client_to_late_2xx(&mut self, expires_at: StdInstant, generation: u64) -> bool {
+        let Self::Client {
+            timer,
+            completion,
+            expires_at: current_expires_at,
+            generation: current_generation,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        if *timer != CompactNonInviteTimer::M {
+            return false;
+        }
+        *timer = CompactNonInviteTimer::U;
+        *current_expires_at = expires_at;
+        *current_generation = generation;
+        completion.set_deadline(expires_at, generation);
+        true
     }
 
     fn client_route_owner(&self) -> Option<usize> {
@@ -169,7 +256,9 @@ impl CompactNonInviteTombstone {
         }
     }
 
-    fn admission_owner(&self) -> Option<crate::transaction::manager::TransactionAdmissionOwner> {
+    pub(crate) fn admission_owner(
+        &self,
+    ) -> Option<crate::transaction::manager::TransactionAdmissionOwner> {
         match self {
             Self::Client {
                 _admission_owner, ..
@@ -334,6 +423,10 @@ struct ScheduleRequest {
 pub(crate) enum CompactNonInviteTimer {
     J,
     K,
+    L,
+    M,
+    /// UA-core late-2xx compatibility horizon after RFC 6026 Timer M.
+    U,
 }
 
 impl CompactNonInviteTimer {
@@ -341,6 +434,9 @@ impl CompactNonInviteTimer {
         match self {
             Self::J => "J",
             Self::K => "K",
+            Self::L => "L",
+            Self::M => "M",
+            Self::U => "late-2xx",
         }
     }
 }
@@ -352,6 +448,8 @@ struct CompactScheduleRequest {
     delay: Duration,
     scheduled_at: Instant,
     server_replay: Option<(bytes::Bytes, TransportRoute)>,
+    request_wire: Option<bytes::Bytes>,
+    total_retention: Duration,
     state: Arc<crate::transaction::AtomicTransactionState>,
     completion: Option<Arc<crate::transaction::completion::ClientTransactionCompletion>>,
     command_tx: mpsc::Sender<InternalTransactionCommand>,
@@ -428,7 +526,12 @@ pub(crate) struct LifecycleSchedulerHandle {
     compact_event_shutdown: Option<watch::Sender<bool>>,
     compact_event_completion: Option<Arc<SchedulerWorkerCompletion>>,
     dialog_ack_required: Option<Arc<AtomicBool>>,
+    /// UDP non-INVITE Timer J/K retention. This lane must remain available
+    /// for teardown traffic while the same calls occupy Timer M/L.
     compact_retention_capacity: Arc<CompactRetentionCapacity>,
+    /// RFC 6026 INVITE Accepted retention through Timer M/L (and the in-place
+    /// endpoint U promotion).
+    accepted_retention_capacity: Arc<CompactRetentionCapacity>,
 }
 
 #[derive(Default)]
@@ -465,6 +568,7 @@ impl SchedulerWorkerCompletion {
 pub(crate) struct WeakLifecycleSchedulerHandle {
     sender: mpsc::WeakSender<SchedulerCommand>,
     compact_retention_capacity: Weak<CompactRetentionCapacity>,
+    accepted_retention_capacity: Weak<CompactRetentionCapacity>,
 }
 
 impl LifecycleSchedulerHandle {
@@ -483,6 +587,7 @@ impl LifecycleSchedulerHandle {
             compact_event_completion: None,
             dialog_ack_required: None,
             compact_retention_capacity: CompactRetentionCapacity::new(MAX_COMPACT_RETAINED),
+            accepted_retention_capacity: CompactRetentionCapacity::new(MAX_COMPACT_RETAINED),
         }
     }
 
@@ -555,6 +660,7 @@ impl LifecycleSchedulerHandle {
         let compact_deadline_count = Arc::new(AtomicUsize::new(0));
         let dialog_ack_required = Arc::new(AtomicBool::new(false));
         let compact_retention_capacity = CompactRetentionCapacity::new(max_compact_retained);
+        let accepted_retention_capacity = CompactRetentionCapacity::new(max_compact_retained);
         let compact_event_completion = Arc::new(SchedulerWorkerCompletion::default());
         let dispatcher_completion = Arc::clone(&compact_event_completion);
         let dispatcher_events_tx = events_tx.clone();
@@ -601,6 +707,7 @@ impl LifecycleSchedulerHandle {
             compact_event_completion: Some(compact_event_completion),
             dialog_ack_required: Some(dialog_ack_required),
             compact_retention_capacity,
+            accepted_retention_capacity,
         }
     }
 
@@ -608,6 +715,7 @@ impl LifecycleSchedulerHandle {
         WeakLifecycleSchedulerHandle {
             sender: self.sender.downgrade(),
             compact_retention_capacity: Arc::downgrade(&self.compact_retention_capacity),
+            accepted_retention_capacity: Arc::downgrade(&self.accepted_retention_capacity),
         }
     }
 
@@ -618,13 +726,29 @@ impl LifecycleSchedulerHandle {
         self.compact_retention_capacity.try_reserve()
     }
 
+    /// Reserve one RFC 6026 Timer M/L Accepted slot before INVITE admission.
+    /// Accepted and J/K cleanup use independent lazy bounded lanes so a call
+    /// can admit its own BYE even when each configured limit is one.
+    pub(crate) fn try_reserve_accepted_retention(&self) -> Option<CompactRetentionReservation> {
+        self.accepted_retention_capacity.try_reserve()
+    }
+
     #[cfg(test)]
     pub(crate) fn compact_retention_in_use(&self) -> usize {
         self.compact_retention_capacity.in_use()
     }
 
+    #[cfg(test)]
+    pub(crate) fn accepted_retention_in_use(&self) -> usize {
+        self.accepted_retention_capacity.in_use()
+    }
+
     pub(crate) fn compact_retention_limit(&self) -> usize {
         self.compact_retention_capacity.limit
+    }
+
+    pub(crate) fn accepted_retention_limit(&self) -> usize {
+        self.accepted_retention_capacity.limit
     }
 
     pub(crate) fn compact_deadline_count(&self) -> usize {
@@ -827,12 +951,14 @@ impl WeakLifecycleSchedulerHandle {
             timer,
             delay,
             server_replay,
+            None,
             state,
             completion,
             command_tx,
             None,
             None,
             crate::transaction::event_sender::TerminalEventPublication::new(),
+            Duration::ZERO,
         )
         .await
     }
@@ -844,12 +970,14 @@ impl WeakLifecycleSchedulerHandle {
         timer: CompactNonInviteTimer,
         delay: Duration,
         server_replay: Option<(bytes::Bytes, TransportRoute)>,
+        request_wire: Option<bytes::Bytes>,
         state: Arc<crate::transaction::AtomicTransactionState>,
         completion: Option<Arc<crate::transaction::completion::ClientTransactionCompletion>>,
         command_tx: mpsc::Sender<InternalTransactionCommand>,
         retention_reservation: Option<CompactRetentionReservation>,
         admission_owner: Option<crate::transaction::manager::TransactionAdmissionOwner>,
         terminal_event_publication: Arc<crate::transaction::event_sender::TerminalEventPublication>,
+        total_retention: Duration,
     ) -> bool {
         let Some(sender) = self.sender.upgrade() else {
             return false;
@@ -860,7 +988,15 @@ impl WeakLifecycleSchedulerHandle {
         let retention_reservation = match retention_reservation {
             Some(reservation) => reservation,
             None => {
-                let Some(capacity) = self.compact_retention_capacity.upgrade() else {
+                let capacity = if matches!(
+                    timer,
+                    CompactNonInviteTimer::L | CompactNonInviteTimer::M | CompactNonInviteTimer::U
+                ) {
+                    self.accepted_retention_capacity.upgrade()
+                } else {
+                    self.compact_retention_capacity.upgrade()
+                };
+                let Some(capacity) = capacity else {
                     return false;
                 };
                 let Some(reservation) = capacity.try_reserve() else {
@@ -877,6 +1013,8 @@ impl WeakLifecycleSchedulerHandle {
             delay,
             scheduled_at: Instant::now(),
             server_replay,
+            request_wire,
+            total_retention,
             state,
             completion,
             command_tx,
@@ -1105,6 +1243,13 @@ impl CompactDeadlineQueue {
 
     fn next_due_at(&self) -> Option<Instant> {
         self.by_deadline.first_key_value().map(|(key, _)| key.0)
+    }
+
+    fn next_due_timer(&self, now: Instant) -> Option<CompactNonInviteTimer> {
+        self.by_deadline
+            .first_key_value()
+            .filter(|(key, _)| key.0 <= now)
+            .map(|(_, deadline)| deadline.timer)
     }
 
     fn take_due(&mut self, now: Instant, limit: usize) -> Vec<CompactDeadline> {
@@ -1459,10 +1604,9 @@ fn process_standalone_due(
                 identity: deadline.identity,
                 transaction_id: deadline.transaction_id,
                 command_tx: deadline.command_tx,
-                commands: VecDeque::from([
-                    InternalTransactionCommand::Timer(deadline.timer.name().to_string()),
-                    InternalTransactionCommand::TransitionTo(TransactionState::Terminated),
-                ]),
+                commands: VecDeque::from([InternalTransactionCommand::Timer(
+                    deadline.timer.name().to_string(),
+                )]),
             },
             now,
         );
@@ -1562,6 +1706,7 @@ async fn apply_compact_schedule(
     };
     let tombstone = match request.server_replay {
         Some((response_wire, response_route)) => CompactNonInviteTombstone::Server {
+            timer: request.timer,
             _retention_reservation: request.retention_reservation,
             _admission_owner: request.admission_owner,
             terminal_event_publication: request.terminal_event_publication,
@@ -1569,6 +1714,7 @@ async fn apply_compact_schedule(
             auth_lease,
             response_wire,
             response_route,
+            request_wire: request.request_wire,
             expires_at,
             generation,
         },
@@ -1578,6 +1724,7 @@ async fn apply_compact_schedule(
                 .expect("client compact schedules carry an exact completion cell");
             let completion = live_completion.retained(expires_at, generation);
             CompactNonInviteTombstone::Client {
+                timer: request.timer,
                 _retention_reservation: request.retention_reservation,
                 _admission_owner: request.admission_owner,
                 terminal_event_publication: request.terminal_event_publication,
@@ -1589,10 +1736,23 @@ async fn apply_compact_schedule(
                     .expect("validated client compact schedule carries a route owner"),
                 expires_at,
                 generation,
+                request_wire: request.request_wire,
+                // The compatibility horizon is measured from Accepted, not
+                // appended after Timer M. Otherwise the historical 90-second
+                // UA late-2xx fence becomes 90 + 64*T1 and misses the
+                // canonical post-retention cleanup boundary.
+                post_expiry_retention: request.total_retention.saturating_sub(request.delay),
             }
         }
     };
     tombstones.insert(request.transaction_id.clone(), tombstone);
+    trace!(
+        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&request.transaction_id),
+        timer=request.timer.name(),
+        generation,
+        delay_ms=request.delay.as_millis(),
+        "Installed compact transaction retention"
+    );
 
     // Never await this transaction's own command queue: its runner is waiting
     // for the acceptance acknowledgement before it can drain the command.
@@ -1640,28 +1800,28 @@ async fn publish_compact_terminal_events(
     shutdown: &mut watch::Receiver<bool>,
 ) -> bool {
     let mut publication_claim = Some(publication_claim);
-    // These are the same primary TU events the full runner produced at Timer
-    // J/K expiry, in the same order. This channel is the lossless protocol
-    // path; optional observers are fanned out separately and bounded.
-    for (index, event) in [
-        TransactionEvent::TimerTriggered {
-            transaction_id: transaction_id.clone(),
-            timer: timer.name().to_string(),
-        },
-        TransactionEvent::StateChanged {
+    // These are the same primary TU events the full runner produced. J/K
+    // still publish their final state transition; M/L already published the
+    // compatibility Terminated projection when they entered Accepted.
+    let mut events = vec![TransactionEvent::TimerTriggered {
+        transaction_id: transaction_id.clone(),
+        timer: timer.name().to_string(),
+    }];
+    if matches!(timer, CompactNonInviteTimer::J | CompactNonInviteTimer::K) {
+        events.push(TransactionEvent::StateChanged {
             transaction_id: transaction_id.clone(),
             previous_state: TransactionState::Completed,
             new_state: TransactionState::Terminated,
-        },
-        TransactionEvent::TransactionTerminated {
-            transaction_id: transaction_id.clone(),
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
+        });
+    }
+    events.push(TransactionEvent::TransactionTerminated {
+        transaction_id: transaction_id.clone(),
+    });
+    let terminal_index = events.len() - 1;
+    for (index, event) in events.into_iter().enumerate() {
+        let state_prefix = matches!(&event, TransactionEvent::StateChanged { .. });
         let send = async {
-            if index == 2 {
+            if index == terminal_index {
                 events_tx
                     .send_terminal(
                         event,
@@ -1669,7 +1829,7 @@ async fn publish_compact_terminal_events(
                         admission_owner.clone(),
                     )
                     .await
-            } else if index == 1 {
+            } else if state_prefix {
                 events_tx
                     .send_terminal_prefix(
                         event,
@@ -1700,7 +1860,7 @@ async fn publish_compact_terminal_events(
                     );
                     return false;
                 }
-                if index == 2 {
+                if index == terminal_index {
                     publication_claim
                         .take()
                         .expect("compact terminal publication claim is live")
@@ -1801,6 +1961,12 @@ fn cleanup_compact_generation(
     let Some(tombstone) = tombstone else {
         return false;
     };
+    trace!(
+        transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
+        timer=tombstone.timer().name(),
+        generation,
+        "Removing compact transaction retention"
+    );
 
     if tombstone.is_client() {
         if let Some(client_routes) = context.client_routes.upgrade() {
@@ -1883,6 +2049,18 @@ fn process_compact_due(
     let mut processed = 0;
 
     while processed < MAX_DUE_PER_BATCH {
+        if queue.next_due_timer(now) == Some(CompactNonInviteTimer::U) {
+            let Some(deadline) = queue.take_due(now, 1).pop() else {
+                break;
+            };
+            processed += 1;
+            cleanup_compact_generation(
+                context,
+                deadline.transaction_id.as_ref(),
+                deadline.generation,
+            );
+            continue;
+        }
         // Reserve bounded staging capacity before removing the authoritative
         // deadline. A stalled TU therefore leaves the generation in the due
         // queue instead of accumulating an unbounded side queue.
@@ -1915,10 +2093,42 @@ fn process_compact_due(
             );
             continue;
         };
-        publication_claim
-            .publication()
-            .record_prefix(TransactionState::Completed);
-        tombstone.state().set(TransactionState::Terminated);
+        if deadline.timer == CompactNonInviteTimer::M {
+            let retention = tombstone.post_expiry_retention();
+            if !retention.is_zero() {
+                let late_due_at = now + retention;
+                if let Some(late_generation) = queue.insert(
+                    deadline.transaction_id.as_ref().clone(),
+                    CompactNonInviteTimer::U,
+                    late_due_at,
+                ) {
+                    let remaining = late_due_at.saturating_duration_since(Instant::now());
+                    let late_expires_at = StdInstant::now() + remaining;
+                    let promoted = tombstones.as_ref().is_some_and(|tombstones| {
+                        tombstones
+                            .get_mut(deadline.transaction_id.as_ref())
+                            .is_some_and(|mut current| {
+                                current.generation() == deadline.generation
+                                    && current.promote_client_to_late_2xx(
+                                        late_expires_at,
+                                        late_generation,
+                                    )
+                            })
+                    });
+                    if !promoted {
+                        queue.remove_generation(deadline.transaction_id.as_ref(), late_generation);
+                    }
+                }
+            }
+        }
+        if tombstone.is_invite_accepted() {
+            tombstone.state().leave_accepted();
+        } else {
+            publication_claim
+                .publication()
+                .record_prefix(TransactionState::Completed);
+            tombstone.state().set(TransactionState::Terminated);
+        }
         // Authoritative exact state always precedes the matching public
         // compact Timer K observations. The weak upgrade wakes only a waiter
         // that already owned the live cell; ordinary retirement retains no
@@ -1982,6 +2192,7 @@ fn clear_compact_state(queue: &mut CompactDeadlineQueue, context: &ManagedCompac
             }
         }
         for (_, tombstone) in &entries {
+            tombstone.state().leave_accepted();
             tombstone.state().set(TransactionState::Terminated);
         }
         if let Some(observers) = context.observer_fanout.as_ref() {
@@ -2393,6 +2604,7 @@ mod tests {
         tombstones.insert(
             key.clone(),
             CompactNonInviteTombstone::Server {
+                timer: CompactNonInviteTimer::J,
                 _retention_reservation: retention_capacity
                     .try_reserve()
                     .expect("test retention reservation"),
@@ -2408,6 +2620,7 @@ mod tests {
                 ),
                 response_route: TransportRoute::new("127.0.0.1:5098".parse().unwrap())
                     .with_transport_type(rvoip_sip_transport::transport::TransportType::Udp),
+                request_wire: None,
                 expires_at: StdInstant::now() + Duration::from_secs(1),
                 generation: 2,
             },
@@ -2450,6 +2663,36 @@ mod tests {
         assert_eq!(queue.len(), 0);
     }
 
+    #[test]
+    fn synchronized_65_003_compact_deadlines_drain_in_bounded_batches() {
+        const TOTAL: usize = 65_003;
+        let mut queue = CompactDeadlineQueue::with_capacity(TOTAL);
+        let now = Instant::now();
+        for index in 0..TOTAL {
+            let key = TransactionKey::new(
+                format!("compact-synchronized-{index}"),
+                rvoip_sip_core::Method::Invite,
+                index % 2 == 0,
+            );
+            assert!(
+                queue.insert(key, CompactNonInviteTimer::M, now).is_some(),
+                "logical retention capacity must remain lazy but exact"
+            );
+        }
+
+        let mut drained = 0;
+        let mut batches = 0;
+        while queue.len() != 0 {
+            let due = queue.take_due(now, MAX_DUE_PER_BATCH);
+            assert!(!due.is_empty());
+            assert!(due.len() <= MAX_DUE_PER_BATCH);
+            drained += due.len();
+            batches += 1;
+        }
+        assert_eq!(drained, TOTAL);
+        assert_eq!(batches, TOTAL.div_ceil(MAX_DUE_PER_BATCH));
+    }
+
     #[tokio::test]
     async fn standalone_timer_deadlines_replace_and_fire_without_sleeper_tasks() {
         let mut queue = StandaloneTimerDeadlineQueue::default();
@@ -2484,7 +2727,7 @@ mod tests {
         assert_eq!(process_standalone_due(&mut queue, &mut pending, now), 1);
         assert_eq!(pending.len(), 1);
         assert_eq!(process_pending_commands(&mut pending, now), 1);
-        assert_eq!(process_pending_commands(&mut pending, now), 1);
+        assert_eq!(process_pending_commands(&mut pending, now), 0);
         assert_eq!(pending.len(), 0);
         assert_eq!(queue.len(), 0);
         assert!(old_rx.try_recv().is_err());
@@ -2492,12 +2735,7 @@ mod tests {
             replacement_rx.recv().await,
             Some(InternalTransactionCommand::Timer(ref name)) if name == "K"
         ));
-        assert!(matches!(
-            replacement_rx.recv().await,
-            Some(InternalTransactionCommand::TransitionTo(
-                TransactionState::Terminated
-            ))
-        ));
+        assert!(replacement_rx.try_recv().is_err());
     }
 
     #[test]
@@ -2575,12 +2813,7 @@ mod tests {
             command_rx.recv().await,
             Some(InternalTransactionCommand::Timer(ref name)) if name == "K"
         ));
-        assert!(matches!(
-            command_rx.recv().await,
-            Some(InternalTransactionCommand::TransitionTo(
-                TransactionState::Terminated
-            ))
-        ));
+        assert!(command_rx.try_recv().is_err());
         scheduler.shutdown().await;
     }
 
@@ -2877,6 +3110,239 @@ mod tests {
         }
         assert!(!tombstones.contains_key(&key));
         assert_eq!(scheduler.compact_retention_in_use(), 0);
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compact_timer_l_releases_runner_but_retains_exact_server_accepted_state() {
+        let (scheduler, tombstones, _routes, _leases, _events_tx, mut events_rx) =
+            managed_scheduler_fixture();
+        let key = TransactionKey::new(
+            "timer-l-accepted".into(),
+            rvoip_sip_core::Method::Invite,
+            true,
+        );
+        let state = Arc::new(crate::transaction::AtomicTransactionState::new(
+            TransactionState::Proceeding,
+        ));
+        state.enter_accepted();
+        let response_wire = bytes::Bytes::from_static(
+            b"SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5092;branch=z9hG4bK.l\r\nContent-Length: 0\r\n\r\n",
+        );
+        let request_wire = bytes::Bytes::from_static(
+            b"INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5092;branch=z9hG4bK.l\r\nContent-Length: 0\r\n\r\n",
+        );
+        let route = TransportRoute::new("127.0.0.1:5092".parse().unwrap())
+            .with_transport_type(rvoip_sip_transport::transport::TransportType::Udp);
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let horizon = Duration::from_secs(32);
+        assert!(
+            scheduler
+                .downgrade()
+                .schedule_compact_non_invite_with_reservation(
+                    91,
+                    key.clone(),
+                    CompactNonInviteTimer::L,
+                    horizon,
+                    Some((response_wire.clone(), route.clone())),
+                    Some(request_wire.clone()),
+                    state.clone(),
+                    None,
+                    command_tx,
+                    None,
+                    None,
+                    crate::transaction::event_sender::TerminalEventPublication::new(),
+                    Duration::ZERO,
+                )
+                .await
+        );
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(InternalTransactionCommand::CompactRetire)
+        ));
+        assert_eq!(scheduler.accepted_retention_in_use(), 1);
+        assert_eq!(scheduler.compact_retention_in_use(), 0);
+        drop(
+            scheduler
+                .try_reserve_compact_retention()
+                .expect("Timer L must not consume the teardown J/K lane"),
+        );
+        let retained = tombstones.get(&key).expect("Timer L compact record");
+        assert_eq!(retained.timer(), CompactNonInviteTimer::L);
+        assert_eq!(retained.request_wire(), Some(&request_wire));
+        assert_eq!(retained.server_response(), Some((&response_wire, &route)));
+        drop(retained);
+        assert!(state.is_accepted());
+
+        tokio::time::advance(horizon).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(TransactionEvent::TimerTriggered { timer, .. }) if timer == "L"
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(TransactionEvent::TransactionTerminated { .. })
+        ));
+        assert!(!tombstones.contains_key(&key));
+        assert!(!state.is_accepted());
+        assert_eq!(scheduler.compact_deadline_count(), 0);
+        assert_eq!(scheduler.accepted_retention_in_use(), 0);
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compact_timer_m_promotes_endpoint_route_in_place_then_expires_it() {
+        let (scheduler, tombstones, routes, _leases, _events_tx, mut events_rx) =
+            managed_scheduler_fixture();
+        let key = TransactionKey::new(
+            "timer-m-accepted".into(),
+            rvoip_sip_core::Method::Invite,
+            false,
+        );
+        let route = TransportRoute::new("127.0.0.1:5093".parse().unwrap())
+            .with_transport_type(rvoip_sip_transport::transport::TransportType::Udp);
+        routes.insert(
+            Arc::new(key.clone()),
+            ClientResponseRouteState::active(route, 92),
+        );
+        let state = Arc::new(crate::transaction::AtomicTransactionState::new(
+            TransactionState::Proceeding,
+        ));
+        state.enter_accepted();
+        let request_wire = bytes::Bytes::from_static(
+            b"INVITE sip:bob@example.com SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5093;branch=z9hG4bK.m\r\nContent-Length: 0\r\n\r\n",
+        );
+        let completion = Arc::new(
+            crate::transaction::completion::ClientTransactionCompletion::new(
+                TransactionState::Terminated,
+            ),
+        );
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let timer_m = Duration::from_secs(32);
+        let late_2xx = Duration::from_secs(10);
+        let total_late_2xx_horizon = timer_m + late_2xx;
+        assert!(
+            scheduler
+                .downgrade()
+                .schedule_compact_non_invite_with_reservation(
+                    92,
+                    key.clone(),
+                    CompactNonInviteTimer::M,
+                    timer_m,
+                    None,
+                    Some(request_wire.clone()),
+                    state.clone(),
+                    Some(completion),
+                    command_tx,
+                    None,
+                    None,
+                    crate::transaction::event_sender::TerminalEventPublication::new(),
+                    total_late_2xx_horizon,
+                )
+                .await
+        );
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(InternalTransactionCommand::CompactRetire)
+        ));
+        assert_eq!(
+            tombstones.get(&key).map(|entry| entry.timer()),
+            Some(CompactNonInviteTimer::M)
+        );
+        assert_eq!(scheduler.accepted_retention_in_use(), 1);
+        assert_eq!(scheduler.compact_retention_in_use(), 0);
+
+        tokio::time::advance(timer_m).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(TransactionEvent::TimerTriggered { timer, .. }) if timer == "M"
+        ));
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(TransactionEvent::TransactionTerminated { .. })
+        ));
+        let promoted = tombstones.get(&key).expect("UA late-2xx record");
+        assert_eq!(promoted.timer(), CompactNonInviteTimer::U);
+        assert_eq!(promoted.request_wire(), Some(&request_wire));
+        drop(promoted);
+        assert!(routes.contains_key(&key));
+        assert!(!state.is_accepted());
+
+        tokio::time::advance(late_2xx).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!tombstones.contains_key(&key));
+        assert!(!routes.contains_key(&key));
+        assert_eq!(scheduler.compact_deadline_count(), 0);
+        assert_eq!(scheduler.accepted_retention_in_use(), 0);
+        scheduler.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn compact_timer_m_proxy_mode_removes_route_at_timer_m() {
+        let (scheduler, tombstones, routes, _leases, _events_tx, mut events_rx) =
+            managed_scheduler_fixture();
+        let key = TransactionKey::new(
+            "timer-m-proxy".into(),
+            rvoip_sip_core::Method::Invite,
+            false,
+        );
+        routes.insert(
+            Arc::new(key.clone()),
+            ClientResponseRouteState::active(
+                TransportRoute::new("127.0.0.1:5094".parse().unwrap()),
+                93,
+            ),
+        );
+        let state = Arc::new(crate::transaction::AtomicTransactionState::new(
+            TransactionState::Proceeding,
+        ));
+        state.enter_accepted();
+        let completion = Arc::new(
+            crate::transaction::completion::ClientTransactionCompletion::new(
+                TransactionState::Terminated,
+            ),
+        );
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        assert!(
+            scheduler
+                .downgrade()
+                .schedule_compact_non_invite_with_reservation(
+                    93,
+                    key.clone(),
+                    CompactNonInviteTimer::M,
+                    Duration::from_secs(32),
+                    None,
+                    Some(bytes::Bytes::from_static(b"INVITE compact proxy")),
+                    state,
+                    Some(completion),
+                    command_tx,
+                    None,
+                    None,
+                    crate::transaction::event_sender::TerminalEventPublication::new(),
+                    Duration::ZERO,
+                )
+                .await
+        );
+        assert!(matches!(
+            command_rx.recv().await,
+            Some(InternalTransactionCommand::CompactRetire)
+        ));
+        tokio::time::advance(Duration::from_secs(32)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        events_rx.recv().await.expect("Timer M event");
+        events_rx.recv().await.expect("Timer M terminal event");
+        assert!(!tombstones.contains_key(&key));
+        assert!(!routes.contains_key(&key));
         scheduler.shutdown().await;
     }
 

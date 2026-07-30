@@ -390,8 +390,11 @@ impl ClientNonInviteLogic {
         match current_state {
             TransactionState::Completed => {
                 debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), "Timer K fired in Completed state, terminating");
-                // Timer K automatically transitions to Terminated, no need to return a state
-                Ok(None)
+                // Timer firing and its state transition are one runner-owned
+                // operation.  Returning the target state avoids the former
+                // split Timer + TransitionTo delivery race at channel
+                // saturation.
+                Ok(Some(TransactionState::Terminated))
             }
             _ => {
                 trace!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), state=?current_state, "Timer K fired in invalid state, ignoring");
@@ -776,6 +779,7 @@ impl ClientNonInviteTransaction {
             termination_cleanup_tx: std::sync::OnceLock::new(),
             lifecycle_scheduler: std::sync::OnceLock::new(),
             compact_retention_reservation: std::sync::OnceLock::new(),
+            late_2xx_total_retention: std::sync::OnceLock::new(),
             transaction_admission_owner: std::sync::OnceLock::new(),
             terminal_event_publication:
                 crate::transaction::event_sender::TerminalEventPublication::new(),

@@ -283,6 +283,18 @@ impl TransactionManager {
                 return Ok(server_tx.original_request().await);
             }
         }
+        if let Some(wire) = self
+            .compact_non_invite_tombstones
+            .get(tx_id)
+            .and_then(|entry| entry.value().request_wire().cloned())
+        {
+            return match rvoip_sip_core::parse_message(&wire)? {
+                Message::Request(request) => Ok(Some(request)),
+                Message::Response(_) => Err(Error::Other(
+                    "compact accepted request bytes parsed as a response".into(),
+                )),
+            };
+        }
         if let Some(retired) = self.retired_client_original_request(tx_id)? {
             return Ok(Some(retired));
         }
@@ -347,7 +359,7 @@ impl TransactionManager {
             .and_then(|entry| {
                 entry
                     .value()
-                    .server_replay()
+                    .server_response()
                     .map(|(wire, route)| (wire.clone(), route.clone()))
             })
         {
@@ -396,7 +408,7 @@ impl TransactionManager {
             return Ok(entry.value().remote_addr());
         }
         if let Some(entry) = self.compact_non_invite_tombstones.get(tx_id) {
-            if let Some((_, route)) = entry.value().server_replay() {
+            if let Some((_, route)) = entry.value().server_response() {
                 return Ok(route.destination);
             }
             if entry.value().is_client() {
@@ -585,7 +597,19 @@ impl TransactionManager {
     pub async fn transaction_count(&self) -> usize {
         let client_count = self.client_transactions.len();
         let server_count = self.server_transactions.len();
-        client_count + server_count
+        let compact_accepted = self
+            .compact_non_invite_tombstones
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.timer(),
+                    crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L
+                        | crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::M
+                ) && !self.client_transactions.contains_key(entry.key())
+                    && !self.server_transactions.contains_key(entry.key())
+            })
+            .count();
+        client_count + server_count + compact_accepted
     }
 
     /// Terminates a transaction.
@@ -1063,6 +1087,10 @@ impl TransactionManager {
                     entry.value().is_active()
                         && !self.client_transactions.contains_key(k)
                         && !self.server_transactions.contains_key(k)
+                        && !self
+                            .compact_non_invite_tombstones
+                            .get(k.as_ref())
+                            .is_some_and(|compact| compact.is_client())
                 })
                 .map(|entry| entry.key().as_ref().clone())
                 .collect();
@@ -1138,8 +1166,20 @@ impl TransactionManager {
             if remove_server {
                 self.request_transaction_runner_stop(&key);
                 debug!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "Removing terminated server transaction");
+                let accepted_expires_at = self
+                    .compact_non_invite_tombstones
+                    .get(&key)
+                    .filter(|entry| {
+                        entry.timer()
+                            == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L
+                    })
+                    .map(|entry| entry.expires_at());
                 self.server_transactions.remove(&key);
-                self.retire_server_invite_dialog_index_for(&key);
+                if let Some(expires_at) = accepted_expires_at {
+                    self.retire_server_invite_dialog_index_until(&key, expires_at);
+                } else {
+                    self.retire_server_invite_dialog_index_for(&key);
+                }
                 removed = true;
             }
 
@@ -1423,6 +1463,18 @@ impl TransactionManager {
                         "Failed to replay compact non-INVITE server response",
                     )
                 });
+        }
+
+        if self
+            .compact_non_invite_tombstones
+            .get(tx_id)
+            .is_some_and(|entry| {
+                entry.value().timer()
+                    == crate::transaction::lifecycle_scheduler::CompactNonInviteTimer::L
+                    && request.method() == Method::Invite
+            })
+        {
+            return Ok(());
         }
 
         Err(Error::transaction_not_found(

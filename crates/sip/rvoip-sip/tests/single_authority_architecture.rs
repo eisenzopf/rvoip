@@ -1163,7 +1163,7 @@ fn inbound_ack_has_one_exact_causal_owner() {
         &core_source,
         "async fn process_global_transaction_event(&self",
     ));
-    assert!(ingress.contains("elseifmatches!(&event,TransactionEvent::AckReceived{..})"));
+    assert!(ingress.contains("elseifmatches!(&event,TransactionEvent::AckRequest{..})"));
     assert!(
         !ingress.contains("find_dialog_for_request(request).await"),
         "ACK ingress must not reconstruct a missing exact transaction binding from dialog tags"

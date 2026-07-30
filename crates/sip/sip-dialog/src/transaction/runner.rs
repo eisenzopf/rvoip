@@ -336,6 +336,40 @@ pub async fn run_transaction_loop<D, TH, L>(
                     tracing::trace!("State successfully changed to: {:?}", requested_new_state);
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "State changed from {:?} to {:?}", previous_state, requested_new_state);
 
+                    // RFC 6026 Accepted is projected through the historical
+                    // public `Terminated` state. Install its compact Timer
+                    // M/L authority before publishing that projection: the
+                    // manager's cleanup consumer is allowed to react as soon
+                    // as it sees the event, and otherwise can remove the
+                    // active transaction before the compact response route is
+                    // visible. That race lost later INVITE 2xx responses and
+                    // left retransmitted non-INVITEs spinning on a retiring
+                    // match registration.
+                    let entered_state_before_event = entering_accepted;
+                    if entered_state_before_event {
+                        if let Err(e) = logic
+                            .on_enter_state(
+                                &data,
+                                requested_new_state,
+                                previous_state,
+                                &mut timer_handles,
+                                data.get_self_command_sender(),
+                            )
+                            .await
+                        {
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error installing compact Accepted state");
+                            fence_internal_error(
+                                &data,
+                                logic.as_ref(),
+                                &mut timer_handles,
+                                &tx_id_clone,
+                                format!("Error entering state {:?}: {}", requested_new_state, e),
+                            )
+                            .await;
+                            break;
+                        }
+                    }
+
                     // Handle lifecycle transition if entering terminal state
                     if requested_new_state == TransactionState::Terminated && !entering_accepted {
                         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Entering terminal state - transitioning to Terminating lifecycle");
@@ -393,27 +427,29 @@ pub async fn run_transaction_loop<D, TH, L>(
                         crate::transaction::lifecycle_scheduler::schedule(data.clone()).await;
                     }
 
-                    if let Err(e) = logic
-                        .on_enter_state(
-                            &data,
-                            requested_new_state,
-                            previous_state,
-                            &mut timer_handles,
-                            data.get_self_command_sender(),
-                        )
-                        .await
-                    {
-                        error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error in on_enter_state for state {:?}", requested_new_state);
+                    if !entered_state_before_event {
+                        if let Err(e) = logic
+                            .on_enter_state(
+                                &data,
+                                requested_new_state,
+                                previous_state,
+                                &mut timer_handles,
+                                data.get_self_command_sender(),
+                            )
+                            .await
+                        {
+                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error in on_enter_state for state {:?}", requested_new_state);
 
-                        fence_internal_error(
-                            &data,
-                            logic.as_ref(),
-                            &mut timer_handles,
-                            &tx_id_clone,
-                            format!("Error entering state {:?}: {}", requested_new_state, e),
-                        )
-                        .await;
-                        break;
+                            fence_internal_error(
+                                &data,
+                                logic.as_ref(),
+                                &mut timer_handles,
+                                &tx_id_clone,
+                                format!("Error entering state {:?}: {}", requested_new_state, e),
+                            )
+                            .await;
+                            break;
+                        }
                     }
                 }
                 InternalTransactionCommand::ProcessMessage(message) => {
@@ -505,19 +541,56 @@ pub async fn run_transaction_loop<D, TH, L>(
                         }
                     }
                 }
-                InternalTransactionCommand::Timer(timer_name) => {
+                InternalTransactionCommand::Timer(timer_command) => {
+                    let (timer_name, target_state, _execution) =
+                        match crate::transaction::timer::manager::claim_timer_firing(timer_command)
+                        {
+                            crate::transaction::timer::manager::TimerFiringClaim::Legacy(name) => {
+                                (name, None, None)
+                            }
+                            crate::transaction::timer::manager::TimerFiringClaim::Claimed(
+                                firing,
+                            ) => {
+                                let timer_name = firing.timer_name().to_string();
+                                let target_state = firing.target_state();
+                                let generation = firing.generation();
+                                let Some(execution) = firing.begin_execution() else {
+                                    trace!(
+                                        id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone),
+                                        timer_generation=generation,
+                                        "Ignoring cancelled or superseded timer generation"
+                                    );
+                                    continue;
+                                };
+                                (timer_name, target_state, Some(execution))
+                            }
+                            crate::transaction::timer::manager::TimerFiringClaim::Stale {
+                                generation,
+                            } => {
+                                trace!(
+                                    id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone),
+                                    timer_generation=generation,
+                                    "Ignoring stale timer delivery token"
+                                );
+                                continue;
+                            }
+                        };
                     match logic
                         .handle_timer(&data, &timer_name, current_state, &mut timer_handles)
                         .await
                     {
                         Ok(Some(next_state)) => {
-                            if let Err(e) = data
-                                .get_self_command_sender()
-                                .send(InternalTransactionCommand::TransitionTo(next_state))
-                                .await
-                            {
-                                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send self-command for state transition after Timer");
-                            }
+                            debug_assert!(
+                                target_state.is_none_or(|target| target == next_state),
+                                "timer callback and atomic target state diverged"
+                            );
+                            // Timer delivery and its state transition are one
+                            // runner-owned operation. Never enqueue a second
+                            // command onto this transaction's bounded channel:
+                            // under saturation that split delivery could be
+                            // cancelled when the timer handle was dropped.
+                            locally_owned_command =
+                                Some(InternalTransactionCommand::TransitionTo(next_state));
                         }
                         Ok(None) => { /* No state change needed */ }
                         Err(e) => {
@@ -644,10 +717,6 @@ pub async fn run_transaction_loop<D, TH, L>(
                     break;
                 }
                 InternalTransactionCommand::CompactRetire => {
-                    if data.as_ref_state().is_accepted() {
-                        debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Ignoring compact retirement while RFC 6026 Accepted retention is active");
-                        continue;
-                    }
                     debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Retiring completed transaction into compact manager tombstone");
                     logic.cancel_all_specific_timers(&mut timer_handles);
                     data.set_lifecycle(TransactionLifecycle::Destroyed);
@@ -686,7 +755,9 @@ pub async fn run_transaction_loop<D, TH, L>(
     // A closed command stream or another exceptional runner exit is an
     // explicit shutdown fence. It must not leave private Accepted ownership
     // behind after the sole protocol-processing task has gone away.
-    data.as_ref_state().leave_accepted();
+    if !compact_retired {
+        data.as_ref_state().leave_accepted();
+    }
     let final_state = data.as_ref_state().get();
     tracing::trace!(
         transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(data.as_ref_key()),
