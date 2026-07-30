@@ -174,6 +174,14 @@ fn prepare_session_refresh_update(
     Ok(ActionOutcome::with_event(EventType::SendOutboundUpdate))
 }
 
+fn response_sdp_for_event(event: &EventType, local_sdp: &Option<String>) -> Option<String> {
+    if matches!(event, EventType::UpdateReceived { sdp: None }) {
+        None
+    } else {
+        local_sdp.clone()
+    }
+}
+
 fn prepare_session_refresh_reinvite(
     session: &mut SessionState,
 ) -> crate::errors::Result<ActionOutcome> {
@@ -219,6 +227,12 @@ fn rollback_reinvite_local_sdp(session: &mut SessionState) {
     if let Some(stable) = session.stable_local_sdp_before_reinvite.take() {
         session.local_sdp = stable;
     }
+}
+
+fn rollback_reinvite_with_media(session: &mut SessionState, media_adapter: &MediaAdapter) {
+    rollback_reinvite_local_sdp(session);
+    media_adapter.discard_pending_srtp_offer_for_session(session);
+    media_adapter.discard_staged_media_negotiation_for_session(session);
 }
 
 fn initial_invite_used_delayed_offer(session: &SessionState, event: &EventType) -> bool {
@@ -1890,7 +1904,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendSIPResponse(code, _reason) => {
-            let response_code = session.pending_response_status_override.unwrap_or(*code);
+            let mut response_code = session.pending_response_status_override.unwrap_or(*code);
             let extras = session
                 .reject_response_extras
                 .clone()
@@ -1905,6 +1919,7 @@ pub(crate) async fn execute_action(
                     "YAML UAS response status is outside the SIP response range",
                 ));
             }
+            let mut response_sdp = response_sdp_for_event(triggering_event, &session.local_sdp);
 
             let initial_invite_event = matches!(
                 triggering_event,
@@ -1922,53 +1937,91 @@ pub(crate) async fn execute_action(
             let initial_invite_response = initial_invite_event
                 || (inbound_response.is_none()
                     && session.pending_inbound_invite_transaction_id.is_some());
+            let mut prepared_media = None;
+            let mut media_preparation_error = None;
+            let response_commits_media = (response_is_final && (200..300).contains(&response_code))
+                || (response_is_provisional && response_sdp.is_some());
+            if response_commits_media && media_adapter.has_staged_media_negotiation(session) {
+                match media_adapter
+                    .prepare_staged_media_negotiation_lane_owned(session)
+                    .await
+                {
+                    Ok(prepared) => prepared_media = Some(prepared),
+                    Err(error) if response_is_final => {
+                        response_code = 488;
+                        response_sdp = None;
+                        media_preparation_error = Some(error);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
             let mut terminal_error = None;
-            if response_is_final && initial_invite_response {
-                let terminal = send_exact_initial_invite_final_response(
-                    session,
-                    dialog_adapter,
-                    response_code,
-                    session.local_sdp.clone(),
-                    extras,
-                )
-                .await?;
-                consume_exact_initial_invite_response_authority(
-                    session,
-                    dialog_adapter,
-                    &terminal,
-                    response_code == 200,
-                );
-                terminal_error = terminal.terminal_error;
-            } else if response_is_final {
-                let terminal = send_exact_inbound_final_response(
-                    &session.session_id,
-                    inbound_response.as_deref_mut(),
-                    dialog_adapter,
-                    response_code,
-                    session.local_sdp.clone(),
-                    extras,
-                )
-                .await?;
-                terminal_error = terminal.terminal_error;
-            } else if initial_invite_response {
-                send_exact_initial_invite_provisional_response(
-                    session,
-                    dialog_adapter,
-                    response_code,
-                    session.local_sdp.clone(),
-                    extras,
-                )
-                .await?;
-            } else {
-                send_exact_inbound_provisional_response(
-                    &session.session_id,
-                    inbound_response.as_deref_mut(),
-                    dialog_adapter,
-                    response_code,
-                    session.local_sdp.clone(),
-                    extras,
-                )
-                .await?;
+            let dispatch_result: Result<(), Box<dyn std::error::Error + Send + Sync>> = async {
+                if response_is_final && initial_invite_response {
+                    let terminal = send_exact_initial_invite_final_response(
+                        session,
+                        dialog_adapter,
+                        response_code,
+                        response_sdp.clone(),
+                        extras,
+                    )
+                    .await?;
+                    consume_exact_initial_invite_response_authority(
+                        session,
+                        dialog_adapter,
+                        &terminal,
+                        response_code == 200,
+                    );
+                    terminal_error = terminal.terminal_error;
+                } else if response_is_final {
+                    let terminal = send_exact_inbound_final_response(
+                        &session.session_id,
+                        inbound_response.as_deref_mut(),
+                        dialog_adapter,
+                        response_code,
+                        response_sdp.clone(),
+                        extras,
+                    )
+                    .await?;
+                    terminal_error = terminal.terminal_error;
+                } else if initial_invite_response {
+                    send_exact_initial_invite_provisional_response(
+                        session,
+                        dialog_adapter,
+                        response_code,
+                        response_sdp.clone(),
+                        extras,
+                    )
+                    .await?;
+                } else {
+                    send_exact_inbound_provisional_response(
+                        &session.session_id,
+                        inbound_response.as_deref_mut(),
+                        dialog_adapter,
+                        response_code,
+                        response_sdp,
+                        extras,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(error) = dispatch_result {
+                if let Some(prepared) = prepared_media.take() {
+                    if let Err(rollback_error) = media_adapter
+                        .rollback_prepared_media_negotiation_lane_owned(session, prepared)
+                        .await
+                    {
+                        return Err(Box::new(ExactSipResponseActionError::new(
+                            exact_sip_response_failure_disposition(error.as_ref()).unwrap_or(
+                                rvoip_sip_dialog::FinalResponseCompletionDisposition::ZeroWireRetryable,
+                            ),
+                            rollback_error,
+                        )));
+                    }
+                }
+                return Err(error);
             }
 
             // The event-local response input remains intact across every
@@ -1984,6 +2037,44 @@ pub(crate) async fn execute_action(
                     "Dialog established (UAS sent {} final response) for session {}",
                     response_code, session.session_id
                 );
+            }
+            let committed_disposition = terminal_error
+                .as_ref()
+                .and_then(|error| exact_sip_response_failure_disposition(error.as_ref()))
+                .unwrap_or(
+                    rvoip_sip_dialog::FinalResponseCompletionDisposition::WrittenSuccessTerminal,
+                );
+            if let Some(prepared) = prepared_media.take() {
+                if let Err(error) = media_adapter
+                    .finalize_prepared_media_negotiation_lane_owned(session, prepared)
+                    .await
+                {
+                    return Err(Box::new(ExactSipResponseActionError::new(
+                        committed_disposition,
+                        error,
+                    )));
+                }
+            }
+            if let Some(error) = media_preparation_error {
+                media_adapter.discard_staged_media_negotiation_for_session(session);
+                if initial_invite_response {
+                    let cleanup_result =
+                        release_lane_owned_resources(session, dialog_adapter, media_adapter).await;
+                    session.call_state =
+                        crate::types::CallState::Failed(crate::types::FailureReason::MediaError);
+                    if let Err(cleanup_error) = cleanup_result {
+                        return Err(Box::new(ExactSipResponseActionError::new(
+                            committed_disposition,
+                            crate::errors::SessionError::MediaError(format!(
+                                "initial answer media preparation failed and cleanup was incomplete: {cleanup_error}"
+                            )),
+                        )));
+                    }
+                }
+                return Err(Box::new(ExactSipResponseActionError::new(
+                    committed_disposition,
+                    error,
+                )));
             }
             if let Some(error) = terminal_error {
                 return Err(error);
@@ -2082,14 +2173,48 @@ pub(crate) async fn execute_action(
         }
         Action::ClearPendingReinvite => {
             match triggering_event {
-                EventType::Dialog200OK => commit_reinvite_local_sdp(session),
-                EventType::ReinviteReceived { .. } => {
-                    // A peer offer accepted during glare supersedes our local
-                    // pending offer. Preserve the newly negotiated answer.
+                EventType::Dialog4xxFailure(_)
+                | EventType::Dialog5xxFailure(_)
+                | EventType::Dialog6xxFailure(_)
+                | EventType::DialogTimeout => {
+                    rollback_reinvite_with_media(session, media_adapter);
+                }
+                EventType::MediaEvent(name)
+                    if name
+                        == crate::state_machine::executor::SESSION_REFRESH_REINVITE_FAILED_EVENT =>
+                {
+                    rollback_reinvite_with_media(session, media_adapter);
+                }
+                EventType::Dialog200OK => {
+                    if media_adapter.has_staged_media_negotiation(session) {
+                        media_adapter
+                            .commit_staged_media_negotiation_lane_owned(session)
+                            .await?;
+                    }
+                    commit_reinvite_local_sdp(session);
+                }
+                _ => {
+                    if matches!(triggering_event, EventType::ReinviteReceived { .. }) {
+                        let superseded_transaction = session
+                            .pending_offer_answer
+                            .as_ref()
+                            .filter(|pending| pending.method == rvoip_sip_core::Method::Invite)
+                            .and_then(|pending| pending.transaction_id.clone());
+                        if let Some(transaction) = superseded_transaction {
+                            let handle = exact_request_tracker_handle(session)?;
+                            dialog_adapter.outbound_request_tracker.abort_matching(
+                                handle,
+                                TrackedInDialogMethod::Reinvite,
+                                &transaction,
+                            );
+                            session.clear_tracked_auth_if_transaction(&transaction.to_string());
+                        }
+                    }
                     session.discard_offer_answer_rollback_image();
                     session.stable_local_sdp_before_reinvite = None;
+                    media_adapter.discard_pending_srtp_offer_for_session(session);
+                    media_adapter.discard_staged_media_negotiation_for_session(session);
                 }
-                _ => rollback_reinvite_local_sdp(session),
             }
             session.pending_reinvite = None;
             session.reinvite_retry_attempts = 0;
@@ -2108,7 +2233,7 @@ pub(crate) async fn execute_action(
             use crate::state_table::types::Role;
             const MAX_GLARE_RETRIES: u8 = 3;
             if session.reinvite_retry_attempts >= MAX_GLARE_RETRIES {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(format!(
                     "491 glare retry limit ({}) exceeded for session {}",
@@ -2230,21 +2355,47 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendACK => {
+            let delayed_offer = initial_invite_used_delayed_offer(session, triggering_event);
+            let mut prepared_media = None;
+            let mut media_preparation_error = None;
+            let mut ack_negotiation_error = None;
+            if invite_2xx_ack.is_some() && media_adapter.has_staged_media_negotiation(session) {
+                match media_adapter
+                    .prepare_staged_media_negotiation_lane_owned(session)
+                    .await
+                {
+                    Ok(prepared) => prepared_media = Some(prepared),
+                    Err(error) => media_preparation_error = Some(error),
+                }
+            }
             if let Some(ack) = invite_2xx_ack {
-                if initial_invite_used_delayed_offer(session, triggering_event) {
-                    let answer = session.local_sdp.as_deref().ok_or_else(|| {
-                        crate::errors::SessionError::SDPNegotiationFailed(
-                            "delayed-offer ACK has no generated SDP answer".to_string(),
-                        )
-                    })?;
-                    dialog_adapter
-                        .send_delayed_offer_ack_exact(
-                            exact_request_tracker_handle(session)?,
-                            &ack.transaction_id,
-                            &ack.response,
-                            answer,
-                        )
-                        .await?;
+                let ack_result = if delayed_offer {
+                    if let Some(answer) = session.local_sdp.as_deref() {
+                        dialog_adapter
+                            .send_delayed_offer_ack_exact(
+                                exact_request_tracker_handle(session)?,
+                                &ack.transaction_id,
+                                &ack.response,
+                                answer,
+                            )
+                            .await
+                    } else {
+                        ack_negotiation_error =
+                            Some(crate::errors::SessionError::SDPNegotiationFailed(
+                                "delayed-offer ACK has no generated SDP answer".to_string(),
+                            ));
+                        // A 2xx INVITE response must still be ACKed even when
+                        // its offer cannot be answered. Stop retransmissions,
+                        // preserve stable negotiation state, and surface the
+                        // explicit failure after the write completes.
+                        dialog_adapter
+                            .send_invite_2xx_ack_exact(
+                                exact_request_tracker_handle(session)?,
+                                &ack.transaction_id,
+                                &ack.response,
+                            )
+                            .await
+                    }
                 } else {
                     dialog_adapter
                         .send_invite_2xx_ack_exact(
@@ -2252,13 +2403,49 @@ pub(crate) async fn execute_action(
                             &ack.transaction_id,
                             &ack.response,
                         )
-                        .await?;
+                        .await
+                };
+                if let Err(ack_error) = ack_result {
+                    if let Some(prepared) = prepared_media.take() {
+                        if let Err(rollback_error) = media_adapter
+                            .rollback_prepared_media_negotiation_lane_owned(session, prepared)
+                            .await
+                        {
+                            return Err(crate::errors::SessionError::MediaError(format!(
+                                "INVITE 2xx ACK write failed and prepared media rollback failed: {rollback_error}"
+                            ))
+                            .into());
+                        }
+                    }
+                    return Err(ack_error.into());
                 }
+            }
+            if let Some(prepared) = prepared_media.take() {
+                media_adapter
+                    .finalize_prepared_media_negotiation_lane_owned(session, prepared)
+                    .await?;
+            } else if invite_2xx_ack.is_none()
+                && session.pending_offer_answer.is_none()
+                && media_adapter.has_staged_media_negotiation(session)
+            {
+                media_adapter
+                    .commit_staged_media_negotiation_lane_owned(session)
+                    .await?;
+            }
+            if let Some(error) = ack_negotiation_error {
+                media_adapter.discard_pending_srtp_offer_for_session(session);
+                media_adapter.discard_staged_media_negotiation_for_session(session);
+                return Err(error.into());
+            }
+            if let Some(error) = media_preparation_error {
+                media_adapter.discard_pending_srtp_offer_for_session(session);
+                media_adapter.discard_staged_media_negotiation_for_session(session);
+                return Err(error.into());
             }
             session.dialog_established = true;
             info!(
-                "SendACK action completed for UAC session {}",
-                session.session_id
+                delayed_offer,
+                "SendACK action completed for UAC session {}", session.session_id
             );
         }
         Action::SendBYE => {
@@ -2331,7 +2518,7 @@ pub(crate) async fn execute_action(
             )
             .await
             {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(error.into());
             }
@@ -2354,7 +2541,7 @@ pub(crate) async fn execute_action(
             )
             .await
             {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(error.into());
             }
@@ -2670,7 +2857,7 @@ pub(crate) async fn execute_action(
             )
             .await
             {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(error.into());
             }
@@ -4482,7 +4669,7 @@ pub(crate) async fn execute_action(
             ) {
                 Ok(lease) => lease,
                 Err(error) => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     return Err(error.into());
                 }
             };
@@ -4492,26 +4679,26 @@ pub(crate) async fn execute_action(
             {
                 Ok(transaction_id) => transaction_id,
                 Err(_) if options.session_timer_refresh => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     return Ok(session_refresh_immediate_effect(
                         session,
                         SessionRefreshDeadlineKind::UpdateFailed,
                     ));
                 }
                 Err(error) => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     return Err(error.into());
                 }
             };
             if let Err(error) = session.bind_offer_answer_transaction(transaction_id.clone()) {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 return Err(error.into());
             }
             if let Err(error) = dialog_adapter
                 .outbound_request_tracker
                 .activate(lease, transaction_id)
             {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 return Err(error.into());
             }
             if options.session_timer_refresh {
@@ -4554,7 +4741,7 @@ pub(crate) async fn execute_action(
             ) {
                 Ok(lease) => lease,
                 Err(error) => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     return Err(error.into());
                 }
             };
@@ -4571,7 +4758,7 @@ pub(crate) async fn execute_action(
             {
                 Ok(transaction_id) => transaction_id,
                 Err(_) if options.session_timer_refresh => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     session.pending_reinvite = None;
                     return Ok(session_refresh_immediate_effect(
                         session,
@@ -4579,13 +4766,13 @@ pub(crate) async fn execute_action(
                     ));
                 }
                 Err(error) => {
-                    rollback_reinvite_local_sdp(session);
+                    rollback_reinvite_with_media(session, media_adapter);
                     session.pending_reinvite = None;
                     return Err(error.into());
                 }
             };
             if let Err(error) = session.bind_offer_answer_transaction(transaction_id.clone()) {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(error.into());
             }
@@ -4593,7 +4780,7 @@ pub(crate) async fn execute_action(
                 .outbound_request_tracker
                 .activate(lease, transaction_id)
             {
-                rollback_reinvite_local_sdp(session);
+                rollback_reinvite_with_media(session, media_adapter);
                 session.pending_reinvite = None;
                 return Err(error.into());
             }
@@ -5508,11 +5695,27 @@ mod lane_owned_action_state_tests {
 
         assert_eq!(
             production
-                .matches("release_lane_owned_resources(session, dialog_adapter, media_adapter)")
+                .matches("async fn release_lane_owned_resources(")
                 .count(),
-            2,
-            "ReleaseAllResources and CleanupResources must share one implementation"
+            1,
+            "resource cleanup must have exactly one implementation"
         );
+        for action in [
+            "Action::ReleaseAllResources =>",
+            "Action::CleanupResources =>",
+        ] {
+            let body = production
+                .split(action)
+                .nth(1)
+                .and_then(|tail| tail.split("\n        Action::").next())
+                .unwrap_or_else(|| panic!("missing {action}"));
+            assert!(
+                body.contains(
+                    "release_lane_owned_resources(session, dialog_adapter, media_adapter)"
+                ),
+                "{action} must delegate to the one cleanup implementation"
+            );
+        }
     }
 
     #[test]

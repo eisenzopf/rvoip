@@ -2046,9 +2046,10 @@ impl StateMachine {
                                             rollback.rollback_offer_answer();
                                             rollback.pending_reinvite = None;
                                             rollback.reinvite_retry_attempts = 0;
-                                            media_adapter.discard_pending_srtp_offer(
-                                                &rollback.session_id,
-                                            );
+                                            media_adapter
+                                                .discard_pending_srtp_offer_for_session(&rollback);
+                                            media_adapter
+                                                .discard_staged_media_negotiation_for_session(&rollback);
                                             commit_lane_state(&dispatch_store, rollback)
                                                 .map_err(|commit| commit.to_string())?;
                                             return Err(error.to_string());
@@ -2071,9 +2072,10 @@ impl StateMachine {
                                             rollback.rollback_offer_answer();
                                             rollback.pending_reinvite = None;
                                             rollback.reinvite_retry_attempts = 0;
-                                            media_adapter.discard_pending_srtp_offer(
-                                                &rollback.session_id,
-                                            );
+                                            media_adapter
+                                                .discard_pending_srtp_offer_for_session(&rollback);
+                                            media_adapter
+                                                .discard_staged_media_negotiation_for_session(&rollback);
                                             commit_lane_state(&dispatch_store, rollback)
                                                 .map_err(|commit| commit.to_string())?;
                                             return Err(error.to_string());
@@ -2099,9 +2101,10 @@ impl StateMachine {
                                         session.rollback_offer_answer();
                                         session.pending_reinvite = None;
                                         session.reinvite_retry_attempts = 0;
-                                        media_adapter.discard_pending_srtp_offer(
-                                            &session.session_id,
-                                        );
+                                        media_adapter
+                                            .discard_pending_srtp_offer_for_session(&session);
+                                        media_adapter
+                                            .discard_staged_media_negotiation_for_session(&session);
                                         commit_lane_state(&dispatch_store, session)
                                             .map_err(|commit| commit.to_string())?;
                                         return Err(error.to_string());
@@ -2119,9 +2122,10 @@ impl StateMachine {
                                         rollback.rollback_offer_answer();
                                         rollback.pending_reinvite = None;
                                         rollback.reinvite_retry_attempts = 0;
-                                        media_adapter.discard_pending_srtp_offer(
-                                            &rollback.session_id,
-                                        );
+                                        media_adapter
+                                            .discard_pending_srtp_offer_for_session(&rollback);
+                                        media_adapter
+                                            .discard_staged_media_negotiation_for_session(&rollback);
                                         commit_lane_state(&dispatch_store, rollback)
                                             .map_err(|commit| commit.to_string())?;
                                         return Err(error.to_string());
