@@ -265,3 +265,41 @@ pub(crate) fn rtcp_feedback_intersection(
 
     out
 }
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    fn codec(
+        payload_type: PayloadType,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+        fmtp: &str,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn telephone_event_match_respects_clock_rate() {
+        let haystack = [
+            codec(101, MIME_TYPE_TELEPHONE_EVENT, 8_000, 1, "0-15"),
+            codec(110, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15"),
+        ];
+        let needle = codec(0, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15");
+
+        let (matched, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::Exact);
+        assert_eq!(matched.payload_type, 110);
+    }
+}

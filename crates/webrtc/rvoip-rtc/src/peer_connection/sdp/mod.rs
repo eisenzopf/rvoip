@@ -1476,3 +1476,81 @@ pub(crate) fn has_ice_trickle_option(desc: &SessionDescription) -> bool {
 
     false
 }
+
+#[cfg(test)]
+mod supplemental_encoding_regression_tests {
+    use super::*;
+    use crate::media_stream::track::MediaStreamTrack;
+    use crate::peer_connection::configuration::media_engine::{
+        MIME_TYPE_OPUS, MIME_TYPE_TELEPHONE_EVENT,
+    };
+    use crate::rtp_transceiver::RTCRtpTransceiverInit;
+    use crate::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters};
+    use interceptor::NoopInterceptor;
+
+    fn encoding(
+        ssrc: u32,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+    ) -> RTCRtpEncodingParameters {
+        RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: String::new(),
+                rtcp_feedback: vec![],
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn supplemental_audio_signals_primary_ssrc_without_empty_simulcast() {
+        let encodings = vec![
+            encoding(1001, MIME_TYPE_OPUS, 48_000, 2),
+            encoding(2002, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1),
+        ];
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "audio".to_owned(),
+            RtpCodecKind::Audio,
+            encodings.clone(),
+        );
+        let mut transceiver = RTCRtpTransceiverInternal::<NoopInterceptor>::new(
+            RtpCodecKind::Audio,
+            Some(track),
+            RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendrecv,
+                streams: vec![],
+                send_encodings: encodings,
+            },
+        );
+
+        let (media, send_rids) = RTCPeerConnection::<NoopInterceptor>::add_sender_sdp(
+            MediaDescription::default(),
+            &MediaEngine::default(),
+            &mut transceiver,
+            false,
+        );
+
+        let ssrc_values = media
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.key == ATTR_KEY_SSRC)
+            .filter_map(|attribute| attribute.value.as_deref())
+            .collect::<Vec<_>>();
+        assert!(ssrc_values.iter().any(|value| value.starts_with("1001 ")));
+        assert!(ssrc_values.iter().all(|value| !value.starts_with("2002 ")));
+        assert!(send_rids.is_empty());
+        assert!(media.attributes.iter().all(|attribute| {
+            attribute.key != SDP_ATTRIBUTE_RID && attribute.key != SDP_ATTRIBUTE_SIMULCAST
+        }));
+    }
+}
