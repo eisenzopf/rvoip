@@ -26,6 +26,9 @@ use crate::api::unified::{BridgeError, BridgeHandle, UnifiedCoordinator};
 use crate::server::bridge::sip_bridge;
 use crate::SessionId;
 use std::sync::Arc;
+use std::time::Duration;
+
+const OUTBOUND_ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Error returned by [`SipB2bua`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -71,6 +74,10 @@ impl SipB2bua {
             .coordinator
             .invite(Some(from_uri.to_string()), target_uri.to_string())
             .send()
+            .await?;
+        self.coordinator
+            .session(&outbound)
+            .wait_for_answered(Some(OUTBOUND_ANSWER_TIMEOUT))
             .await?;
         let handle = sip_bridge(&self.coordinator, incoming, &outbound).await?;
         Ok(handle)

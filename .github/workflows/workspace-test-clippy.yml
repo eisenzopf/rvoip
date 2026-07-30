@@ -23,9 +23,9 @@ name: workspace-test-clippy
 on:
   push:
     branches: [main]
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/workspace-test-clippy.yml"]
   pull_request:
-    paths: ["crates/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/workspace-test-clippy.yml"]
   workflow_dispatch: {}
 
 jobs:
@@ -33,12 +33,19 @@ jobs:
     name: cargo test (core)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The default-member test graph links several large SIP integration
+      # binaries. Full debug info plus incremental artifacts exhausts the
+      # hosted runner's disk before the test phase can start.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev protobuf-compiler pkg-config cmake
       - name: Test
         # No `--workspace`: `cargo test` runs the default-members set curated in
         # the root Cargo.toml (the service-free core). See header comment.
@@ -55,6 +62,6 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y libopus-dev pkg-config cmake
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libopus-dev protobuf-compiler pkg-config cmake
       - name: Clippy
         run: cargo clippy --workspace --all-targets

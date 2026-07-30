@@ -19,9 +19,9 @@ name: examples
 on:
   push:
     branches: [main]
-    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/examples.yml"]
   pull_request:
-    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock"]
+    paths: ["examples/**", "crates/**", "Cargo.toml", "Cargo.lock", ".github/workflows/examples.yml"]
   workflow_dispatch: {}
 
 jobs:
@@ -53,6 +53,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "examples/${{ matrix.example }}"
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Build
         run: cargo build --manifest-path "examples/${{ matrix.example }}/Cargo.toml"
 
@@ -80,6 +82,12 @@ jobs:
           workspaces: "examples/${{ matrix.example }}"
       - name: Ensure lsof is present
         run: sudo apt-get update && sudo apt-get install -y lsof
+      - name: Build demo release binaries
+        run: cargo build --release
+        working-directory: "examples/${{ matrix.example }}"
       - name: Run demo
-        run: timeout 240 ./run_demo.sh
+        # Compilation is intentionally outside this timeout. This bounds only
+        # the networked demo itself, so a cold release build cannot masquerade
+        # as a call-flow failure.
+        run: timeout 120 ./run_demo.sh
         working-directory: "examples/${{ matrix.example }}"
