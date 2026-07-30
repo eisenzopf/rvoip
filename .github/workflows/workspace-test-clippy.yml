@@ -32,7 +32,9 @@ jobs:
   test:
     name: cargo test (core)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The post-RTP-correctness suite takes about 28 minutes on hosted runners,
+    # and the remaining 0.3.5 security/signaling regressions add coverage.
+    timeout-minutes: 60
     env:
       # The default-member test graph links several large SIP integration
       # binaries. Full debug info plus incremental artifacts exhausts the
