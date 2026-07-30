@@ -33,6 +33,13 @@ jobs:
     name: cargo test (core)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # The default-member test graph links several large SIP integration
+      # binaries. Full debug info plus incremental artifacts exhausts the
+      # hosted runner's disk before the test phase can start.
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
