@@ -1,9 +1,9 @@
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use rvoip_rtp_core::dtls::crypto::verify::generate_self_signed_certificate;
-/// Certificate Generator for Secure Media Testing
+/// Certificate generator for format and fingerprint testing.
 ///
-/// This example generates self-signed certificates and private keys for testing
-/// the secure media streaming example with DTLS-SRTP.
+/// DTLS-SRTP is unavailable in 0.3.5. Generating these files does not enable a
+/// DTLS handshake or establish a secure media transport.
 use std::fs::File;
 use std::io::Write;
 
@@ -100,6 +100,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\nNote: The fingerprints shown are for randomly generated internal certificates,");
     println!("not for the certificates saved to files. These are for illustration only.");
-    println!("\nYou can now use these files with the secure_media_streaming example.");
+    println!("\nDTLS-SRTP remains unavailable; these files are certificate-format fixtures only.");
     Ok(())
 }

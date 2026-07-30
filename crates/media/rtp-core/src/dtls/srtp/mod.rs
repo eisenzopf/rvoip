@@ -1,6 +1,7 @@
-//! DTLS-SRTP integration
+//! Retained DTLS-SRTP key-material types
 //!
-//! This module provides SRTP key extraction from DTLS handshakes.
+//! These low-level helpers do not make the unavailable DTLS connection stack
+//! complete or negotiable.
 
 pub mod extractor;
 

@@ -1,7 +1,7 @@
-//! MIKEY message implementation
+//! Retained MIKEY message-format primitives
 //!
-//! This module implements the MIKEY message format as defined in RFC 3830.
-//! MIKEY messages consist of a common header followed by a sequence of payloads.
+//! These serialization types are not a complete RFC 3830 exchange. All MIKEY
+//! key-exchange modes remain unavailable in 0.3.5.
 
 use super::payloads::{
     CertificatePayload, CommonHeader, EncryptedPayload, KeyDataPayload, PayloadType,

@@ -73,8 +73,8 @@ async fn main() -> Result<(), ExampleError> {
     // Demo 4: SDP Integration Examples
     demo_sdp_integration().await?;
 
-    info!("✅ All SDES demos completed successfully!");
-    info!("🎯 Phase 2 SDES integration is ready for production SIP systems");
+    info!("✅ SDES signaling demonstrations completed successfully.");
+    info!("Directional offerer/answerer key-state repair remains required before production use.");
 
     Ok(())
 }
@@ -84,7 +84,7 @@ async fn demo_basic_sdes_exchange() -> Result<(), ExampleError> {
     info!("📡 Demo 1: Basic SDES Server/Client Exchange");
     info!("--------------------------------------------");
 
-    // Create SDES server with enterprise-grade configuration
+    // Create an SDES signaling configuration for this compatibility demo.
     let server_config = SdesServerConfig {
         supported_profiles: vec![
             SrtpProfile::AesCm128HmacSha1_80,
@@ -95,7 +95,8 @@ async fn demo_basic_sdes_exchange() -> Result<(), ExampleError> {
         max_concurrent_exchanges: 100,
     };
 
-    let sdes_server = SdesServer::new(server_config);
+    let sdes_server = SdesServer::new(server_config)
+        .map_err(|e| ExampleError(format!("Failed to create SDES server: {e}")))?;
     info!("Created SDES server with enterprise configuration");
 
     // Create a session for a SIP call
@@ -129,7 +130,8 @@ async fn demo_basic_sdes_exchange() -> Result<(), ExampleError> {
         max_crypto_attributes: 8,
     };
 
-    let sdes_client = SdesClient::new(client_config);
+    let sdes_client = SdesClient::new(client_config)
+        .map_err(|e| ExampleError(format!("Failed to create SDES client: {e}")))?;
     info!("Created SDES client representing remote SIP endpoint");
 
     // Client processes offer and generates answer
@@ -188,7 +190,8 @@ async fn demo_multi_client_sessions() -> Result<(), ExampleError> {
     info!("----------------------------------");
 
     // Create SDES server
-    let sdes_server = SdesServer::from_security_config(&SecurityConfig::sip_operator());
+    let sdes_server = SdesServer::from_security_config(&SecurityConfig::sip_operator())
+        .map_err(|e| ExampleError(format!("Failed to create SDES server: {e}")))?;
     info!("Created SDES server with SIP operator configuration");
 
     // Simulate multiple SIP calls
@@ -224,7 +227,8 @@ async fn demo_multi_client_sessions() -> Result<(), ExampleError> {
         );
 
         // Create client for this call
-        let client = SdesClient::from_security_config(&SecurityConfig::sip_operator());
+        let client = SdesClient::from_security_config(&SecurityConfig::sip_operator())
+            .map_err(|e| ExampleError(format!("Failed to create SDES client: {e}")))?;
 
         // Process offer -> answer
         let answer = client.process_offer(&offer).await.map_err(|e| {
@@ -375,7 +379,8 @@ async fn demo_sdp_integration() -> Result<(), ExampleError> {
     info!("");
     info!("Example 2: Generate SIP-compatible offer");
 
-    let sip_server = SdesServer::from_security_config(&SecurityConfig::sip_enterprise());
+    let sip_server = SdesServer::from_security_config(&SecurityConfig::sip_enterprise())
+        .map_err(|e| ExampleError(format!("Failed to create SDES server: {e}")))?;
     let session = sip_server
         .create_session("sip-demo-session".to_string())
         .await

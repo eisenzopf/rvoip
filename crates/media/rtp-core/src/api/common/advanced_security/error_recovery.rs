@@ -126,6 +126,7 @@ impl FailureType {
     /// Classify an error into a failure type
     pub fn from_error(error: &SecurityError) -> Self {
         match error {
+            SecurityError::UnsupportedFeature(_) => Self::ConfigurationFailure,
             SecurityError::NotInitialized(_) => Self::InitializationFailure,
             SecurityError::CryptoError(_) => Self::CryptoFailure,
             SecurityError::InvalidState(_) => Self::ConfigurationFailure,
@@ -172,18 +173,9 @@ impl Default for FallbackConfig {
     fn default() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(KeyExchangeMethod::DtlsSrtp, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(
-            KeyExchangeMethod::PreSharedKey,
-            RecoveryStrategy::ImmediateFallback,
-        );
 
         Self {
-            method_priority: vec![
-                KeyExchangeMethod::Sdes,
-                KeyExchangeMethod::DtlsSrtp,
-                KeyExchangeMethod::PreSharedKey,
-            ],
+            method_priority: vec![KeyExchangeMethod::Sdes],
             recovery_strategies,
             max_fallback_attempts: 3,
             method_cooldown: Duration::from_secs(60),
@@ -196,19 +188,10 @@ impl FallbackConfig {
     /// Configuration for enterprise environments
     pub fn enterprise() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
-        recovery_strategies.insert(KeyExchangeMethod::Mikey, RecoveryStrategy::enterprise());
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(
-            KeyExchangeMethod::DtlsSrtp,
-            RecoveryStrategy::high_availability(),
-        );
 
         Self {
-            method_priority: vec![
-                KeyExchangeMethod::Mikey,
-                KeyExchangeMethod::Sdes,
-                KeyExchangeMethod::DtlsSrtp,
-            ],
+            method_priority: vec![KeyExchangeMethod::Sdes],
             recovery_strategies,
             max_fallback_attempts: 5,
             method_cooldown: Duration::from_secs(30),
@@ -219,22 +202,10 @@ impl FallbackConfig {
     /// Configuration for peer-to-peer scenarios
     pub fn peer_to_peer() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
-        recovery_strategies.insert(
-            KeyExchangeMethod::Zrtp,
-            RecoveryStrategy::high_availability(),
-        );
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(
-            KeyExchangeMethod::PreSharedKey,
-            RecoveryStrategy::ImmediateFallback,
-        );
 
         Self {
-            method_priority: vec![
-                KeyExchangeMethod::Zrtp,
-                KeyExchangeMethod::Sdes,
-                KeyExchangeMethod::PreSharedKey,
-            ],
+            method_priority: vec![KeyExchangeMethod::Sdes],
             recovery_strategies,
             max_fallback_attempts: 3,
             method_cooldown: Duration::from_secs(45),
@@ -245,14 +216,10 @@ impl FallbackConfig {
     /// Configuration for development/testing
     pub fn development() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
-        recovery_strategies.insert(
-            KeyExchangeMethod::PreSharedKey,
-            RecoveryStrategy::development(),
-        );
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::development());
 
         Self {
-            method_priority: vec![KeyExchangeMethod::PreSharedKey, KeyExchangeMethod::Sdes],
+            method_priority: vec![KeyExchangeMethod::Sdes],
             recovery_strategies,
             max_fallback_attempts: 2,
             method_cooldown: Duration::from_secs(5),
@@ -557,14 +524,19 @@ impl ErrorRecoveryManager {
         &self,
         method: KeyExchangeMethod,
     ) -> Result<(), SecurityError> {
-        // This is a simplified implementation
-        // In practice, you'd need to create appropriate SecurityConfig for the method
         let config = match method {
-            KeyExchangeMethod::PreSharedKey => SecurityConfig::srtp_with_key(vec![0u8; 32]),
             KeyExchangeMethod::Sdes => SecurityConfig::sdes_srtp(),
-            KeyExchangeMethod::DtlsSrtp => SecurityConfig::webrtc_compatible(),
-            KeyExchangeMethod::Mikey => SecurityConfig::mikey_psk(),
-            KeyExchangeMethod::Zrtp => SecurityConfig::zrtp_p2p(),
+            KeyExchangeMethod::PreSharedKey => {
+                return Err(SecurityError::Configuration(
+                    "PSK fallback requires explicitly provisioned key and salt material"
+                        .to_string(),
+                ));
+            }
+            KeyExchangeMethod::DtlsSrtp | KeyExchangeMethod::Mikey | KeyExchangeMethod::Zrtp => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "{method:?} fallback is unavailable"
+                )));
+            }
         };
 
         let new_context = UnifiedSecurityContext::new(config)?;
@@ -687,5 +659,46 @@ impl FailureStatistics {
 
         let method_failures = self.failures_by_method.get(&method).unwrap_or(&0);
         (*method_failures as f64) / (self.total_failures as f64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_built_in_methods_are_implemented(config: FallbackConfig) {
+        for unavailable in [
+            KeyExchangeMethod::DtlsSrtp,
+            KeyExchangeMethod::Mikey,
+            KeyExchangeMethod::Zrtp,
+            KeyExchangeMethod::PreSharedKey,
+        ] {
+            assert!(!config.method_priority.contains(&unavailable));
+            assert!(!config.recovery_strategies.contains_key(&unavailable));
+        }
+        assert!(config
+            .method_priority
+            .iter()
+            .all(|method| config.recovery_strategies.contains_key(method)));
+    }
+
+    #[test]
+    fn built_in_fallbacks_do_not_advertise_incomplete_methods() {
+        assert_built_in_methods_are_implemented(FallbackConfig::default());
+        assert_built_in_methods_are_implemented(FallbackConfig::enterprise());
+        assert_built_in_methods_are_implemented(FallbackConfig::peer_to_peer());
+        assert_built_in_methods_are_implemented(FallbackConfig::development());
+    }
+
+    #[tokio::test]
+    async fn unprovisioned_psk_fallback_never_synthesizes_key_material() {
+        let manager = ErrorRecoveryManager::new(FallbackConfig::default());
+        assert!(matches!(
+            manager
+                .create_fallback_context(KeyExchangeMethod::PreSharedKey)
+                .await,
+            Err(SecurityError::Configuration(message)) if message.contains("provisioned")
+        ));
+        assert!(manager.security_context.read().await.is_none());
     }
 }

@@ -6,10 +6,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use crate::api::common::config::{SecurityInfo, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::config::ServerConfig;
-use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
+use crate::api::server::security::ServerSecurityContext;
 
 /// Initialize security context if needed
 pub async fn init_security_if_needed(
@@ -25,7 +25,7 @@ pub async fn init_security_if_needed(
 
         if !security_exists {
             // Create security context
-            let context = DefaultServerSecurityContext::new(config.security_config.clone())
+            let context = crate::api::server::security::new(config.security_config.clone())
                 .await
                 .map_err(|e| {
                     MediaTransportError::Security(format!(
@@ -60,6 +60,10 @@ pub async fn get_security_info(
     let security_context_guard = security_context.read().await;
 
     if let Some(security_ctx) = security_context_guard.as_ref() {
+        if config.security_config.security_mode == crate::api::common::config::SecurityMode::Srtp {
+            return Ok(security_ctx.get_security_info());
+        }
+
         // Get the fingerprint and algorithm directly from the concrete context
         let fingerprint = security_ctx.get_fingerprint().await.map_err(|e| {
             MediaTransportError::Security(format!("Failed to get fingerprint: {}", e))
@@ -76,16 +80,11 @@ pub async fn get_security_info(
         let profiles = security_ctx.get_supported_srtp_profiles().await;
 
         // Create crypto suites list from profiles
-        let crypto_suites = profiles
-            .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = crate::api::common::config::implemented_srtp_profile_names(&profiles)
+            .map_err(|error| {
+            MediaTransportError::Security(format!("invalid SRTP profile advertisement: {error}"))
+        })?;
+        let srtp_profile = crypto_suites.first().cloned();
 
         // Create security info
         Ok(SecurityInfo {
@@ -94,7 +93,7 @@ pub async fn get_security_info(
             fingerprint_algorithm: Some(algorithm),
             crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+            srtp_profile,
         })
     } else {
         Err(MediaTransportError::Security(

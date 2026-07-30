@@ -6,6 +6,14 @@ use crate::security::SecurityKeyExchange;
 use crate::srtp::SRTP_AES128_CM_SHA1_80;
 
 #[test]
+fn checked_construction_rejects_zrtp() {
+    assert!(matches!(
+        Zrtp::try_new(ZrtpConfig::default(), ZrtpRole::Initiator),
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
+}
+
+#[test]
 fn test_zrtp_packet_formats() {
     // Create Hello packet
     let mut hello = ZrtpPacket::new(ZrtpMessageType::Hello);
@@ -114,11 +122,7 @@ fn test_zrtp_basic_init() {
 
     // Initialize key exchange
     let result = initiator.init();
-    assert!(
-        result.is_ok(),
-        "Failed to initialize initiator: {:?}",
-        result
-    );
+    assert!(matches!(result, Err(crate::Error::UnsupportedFeature(_))));
 
     // Create Hello message
     let hello_result = initiator.create_hello();

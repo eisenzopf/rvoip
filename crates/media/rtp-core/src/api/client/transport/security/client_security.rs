@@ -45,13 +45,20 @@ pub async fn initialize_security(
     }
 }
 
-/// Check if secure transport is being used
+/// Compatibility helper that cannot observe transport crypto readiness.
+///
+/// Use [`crate::api::client::transport::MediaTransportClient::is_secure`] on
+/// the client instead. Returning `false` here avoids treating configured mode
+/// or a configuration-only context as proof of on-wire protection.
+#[deprecated(
+    since = "0.3.5",
+    note = "use MediaTransportClient::is_secure, which checks connection and crypto readiness"
+)]
 pub fn is_secure(
-    security: &Option<Arc<dyn ClientSecurityContext>>,
-    security_mode_enabled: bool,
+    _security: &Option<Arc<dyn ClientSecurityContext>>,
+    _security_mode_enabled: bool,
 ) -> bool {
-    // Placeholder for the extracted is_secure functionality
-    security.is_some() && security_mode_enabled
+    false
 }
 
 /// Get security information for SDP exchange

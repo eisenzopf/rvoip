@@ -83,6 +83,10 @@ pub enum MediaTransportError {
 /// Error related to security operations
 #[derive(Debug, thiserror::Error)]
 pub enum SecurityError {
+    /// Requested security feature is present in the API but not implemented.
+    #[error("Unsupported security feature: {0}")]
+    UnsupportedFeature(String),
+
     /// Configuration error
     #[error("Security configuration error: {0}")]
     Configuration(String),
@@ -134,6 +138,18 @@ pub enum SecurityError {
     /// Security policy violation
     #[error("Security policy violation: {0}")]
     PolicyViolation(String),
+}
+
+impl From<crate::Error> for SecurityError {
+    fn from(error: crate::Error) -> Self {
+        match error {
+            crate::Error::UnsupportedFeature(message) => Self::UnsupportedFeature(message),
+            crate::Error::InvalidParameter(message) => Self::Configuration(message),
+            crate::Error::InvalidState(message) => Self::InvalidState(message),
+            crate::Error::DtlsHandshakeError(message) => Self::Handshake(message),
+            other => Self::Internal(other.to_string()),
+        }
+    }
 }
 
 /// Error types for buffer operations

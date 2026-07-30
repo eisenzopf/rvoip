@@ -10,7 +10,7 @@ use rvoip_rtp_core::api::{
         transport::{DefaultMediaTransportClient, MediaTransportClient},
     },
     common::{
-        config::SecurityMode,
+        config::{SecurityMode, SrtpProfile},
         error::MediaTransportError,
         frame::{MediaFrame, MediaFrameType},
     },
@@ -129,6 +129,7 @@ async fn main() -> Result<(), ExampleError> {
         .security_config(ServerSecurityConfig {
             security_mode: SecurityMode::Srtp, // Use SRTP with pre-shared keys, NOT DTLS-SRTP
             srtp_key: Some(combined.clone()),  // 🔧 FIX: Pass the actual SRTP key!
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             ..Default::default()
         })
         .build()?;
@@ -151,6 +152,7 @@ async fn main() -> Result<(), ExampleError> {
         .security_config(ClientSecurityConfig {
             security_mode: SecurityMode::Srtp, // Use SRTP with pre-shared keys, NOT DTLS-SRTP
             srtp_key: Some(combined.clone()),  // 🔧 FIX: Pass the actual SRTP key!
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             ..Default::default()
         })
         .build();

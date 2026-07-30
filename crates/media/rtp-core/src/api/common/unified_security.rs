@@ -1,8 +1,9 @@
 //! Unified Security Context
 //!
-//! This module provides a unified interface for all SRTP key exchange methods,
-//! including DTLS-SRTP, SDES, MIKEY, and ZRTP. It abstracts away the differences
-//! between these methods and provides a consistent API.
+//! This module provides one interface for the implemented SDES exchange and
+//! directly provisioned PSK SRTP. Public DTLS-SRTP, MIKEY, and ZRTP variants
+//! and factory methods are retained for compatibility, but construction fails
+//! with a typed unsupported-feature error before state or key mutation.
 
 #[cfg(test)]
 use crate::api::common::config::SecurityMode;
@@ -32,7 +33,7 @@ pub enum SecurityState {
 /// Configuration for specific key exchange methods
 #[derive(Debug, Clone)]
 pub enum KeyExchangeConfig {
-    /// DTLS-SRTP configuration (handled by existing security contexts)
+    /// Retained DTLS-SRTP configuration shape; unavailable in 0.3.5.
     DtlsSrtp {
         certificate_path: Option<String>,
         private_key_path: Option<String>,
@@ -43,13 +44,13 @@ pub enum KeyExchangeConfig {
         crypto_suites: Vec<SrtpCryptoSuite>,
         offer_count: usize,
     },
-    /// MIKEY configuration
+    /// Retained MIKEY configuration shape; unavailable in 0.3.5.
     Mikey {
         psk: Option<Vec<u8>>,
         identity: Option<String>,
         mode: MikeyMode,
     },
-    /// ZRTP configuration
+    /// Retained ZRTP configuration shape; unavailable in 0.3.5.
     Zrtp {
         enable_sas: bool,
         cache_expiry: std::time::Duration,
@@ -67,7 +68,7 @@ pub enum MikeyMode {
     Pke,
 }
 
-/// Unified security context that can handle multiple key exchange methods
+/// Unified security context for implemented SDES and direct PSK methods.
 pub struct UnifiedSecurityContext {
     /// Security configuration
     config: SecurityConfig,
@@ -80,7 +81,7 @@ pub struct UnifiedSecurityContext {
     /// The underlying key exchange implementation
     key_exchange: Arc<RwLock<Option<Box<dyn SecurityKeyExchange + Send + Sync>>>>,
     /// SRTP context once keys are established
-    srtp_context: Arc<RwLock<Option<SrtpContext>>>,
+    srtp_context: Arc<RwLock<Option<Arc<RwLock<SrtpContext>>>>>,
 }
 
 impl std::fmt::Debug for UnifiedSecurityContext {
@@ -91,7 +92,10 @@ impl std::fmt::Debug for UnifiedSecurityContext {
             .field("method_config", &self.method_config)
             .field("state", &"<RwLock<SecurityState>>")
             .field("key_exchange", &"<Box<dyn SecurityKeyExchange>>")
-            .field("srtp_context", &"<RwLock<Option<SrtpContext>>>")
+            .field(
+                "srtp_context",
+                &"<RwLock<Option<Arc<RwLock<SrtpContext>>>>>",
+            )
             .finish()
     }
 }
@@ -99,6 +103,7 @@ impl std::fmt::Debug for UnifiedSecurityContext {
 impl UnifiedSecurityContext {
     /// Create a new unified security context
     pub fn new(config: SecurityConfig) -> Result<Self, SecurityError> {
+        config.validate()?;
         let method = match config.mode.key_exchange_method() {
             Some(method) => method,
             None => {
@@ -126,73 +131,59 @@ impl UnifiedSecurityContext {
         method: KeyExchangeMethod,
     ) -> Result<KeyExchangeConfig, SecurityError> {
         match method {
-            KeyExchangeMethod::DtlsSrtp => Ok(KeyExchangeConfig::DtlsSrtp {
-                certificate_path: config.certificate_path.clone(),
-                private_key_path: config.private_key_path.clone(),
-                fingerprint_algorithm: config.fingerprint_algorithm.clone(),
-            }),
+            KeyExchangeMethod::DtlsSrtp => Err(SecurityError::UnsupportedFeature(
+                "DTLS-SRTP is not complete and is unavailable".to_string(),
+            )),
             KeyExchangeMethod::Sdes => {
-                // Convert SrtpProfile to SrtpCryptoSuite
-                let crypto_suites = config
-                    .srtp_profiles
-                    .iter()
-                    .filter_map(|profile| match profile {
-                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80 => {
-                            Some(crate::srtp::SRTP_AES128_CM_SHA1_80)
-                        }
-                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32 => {
-                            Some(crate::srtp::SRTP_AES128_CM_SHA1_32)
-                        }
-                        _ => None, // Other profiles not implemented yet
-                    })
-                    .collect();
+                let crypto_suites =
+                    crate::api::common::config::implemented_srtp_suites(&config.srtp_profiles)?;
 
                 Ok(KeyExchangeConfig::Sdes {
                     crypto_suites,
                     offer_count: 2,
                 })
             }
-            KeyExchangeMethod::Mikey => {
-                Ok(KeyExchangeConfig::Mikey {
-                    psk: config.srtp_key.clone(),
-                    identity: None,
-                    mode: MikeyMode::Psk, // Default to PSK mode
-                })
-            }
-            KeyExchangeMethod::Zrtp => {
-                Ok(KeyExchangeConfig::Zrtp {
-                    enable_sas: true,
-                    cache_expiry: std::time::Duration::from_secs(3600), // 1 hour
-                })
-            }
-            KeyExchangeMethod::PreSharedKey => {
-                match &config.srtp_key {
-                    Some(key) => {
-                        // For simplicity, use the first 14 bytes as salt if key is long enough
-                        let salt = if key.len() >= 30 {
-                            key[16..30].to_vec()
-                        } else {
-                            vec![0u8; 14] // Default salt
-                        };
-                        let actual_key = if key.len() >= 16 {
-                            key[0..16].to_vec()
-                        } else {
-                            return Err(SecurityError::Configuration(
-                                "Pre-shared key too short".to_string(),
+            KeyExchangeMethod::Mikey => Err(SecurityError::UnsupportedFeature(
+                "MIKEY key exchange is not complete and is unavailable".to_string(),
+            )),
+            KeyExchangeMethod::Zrtp => Err(SecurityError::UnsupportedFeature(
+                "ZRTP key exchange is not complete and is unavailable".to_string(),
+            )),
+            KeyExchangeMethod::PreSharedKey => match &config.srtp_key {
+                Some(key) => {
+                    if key.len() != 30 {
+                        return Err(SecurityError::Configuration(
+                                format!(
+                                    "Pre-shared AES-128 SRTP key material must be exactly a 16-byte key and 14-byte salt, got {} bytes",
+                                    key.len()
+                                ),
                             ));
-                        };
-
-                        Ok(KeyExchangeConfig::PreSharedKey {
-                            key: actual_key,
-                            salt,
-                        })
                     }
-                    None => Err(SecurityError::Configuration(
-                        "Pre-shared key required for PSK mode".to_string(),
-                    )),
+
+                    Ok(KeyExchangeConfig::PreSharedKey {
+                        key: key[..16].to_vec(),
+                        salt: key[16..30].to_vec(),
+                    })
                 }
-            }
+                None => Err(SecurityError::Configuration(
+                    "Pre-shared key required for PSK mode".to_string(),
+                )),
+            },
         }
+    }
+
+    fn selected_srtp_suite(&self) -> Result<SrtpCryptoSuite, SecurityError> {
+        self.config
+            .srtp_profiles
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                SecurityError::Configuration(
+                    "at least one implemented SRTP profile is required".to_string(),
+                )
+            })?
+            .crypto_suite()
+            .map_err(SecurityError::from)
     }
 
     /// Initialize the key exchange process
@@ -246,34 +237,23 @@ impl UnifiedSecurityContext {
                             let mikey_config = crate::security::mikey::MikeyConfig {
                                 method: crate::security::mikey::MikeyKeyExchangeMethod::Psk,
                                 psk: psk.clone(),
-                                srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
+                                srtp_profile: self.selected_srtp_suite()?,
                                 ..Default::default()
                             };
 
                             // Default to initiator role - would be determined by call setup in real usage
-                            let mikey = crate::security::mikey::Mikey::new(
+                            let mikey = crate::security::mikey::Mikey::try_new(
                                 mikey_config,
                                 crate::security::mikey::MikeyRole::Initiator,
-                            );
+                            )
+                            .map_err(SecurityError::from)?;
                             Box::new(mikey)
                         }
                         MikeyMode::Pke => {
-                            // Create MIKEY-PKE configuration
-                            let mikey_config = crate::security::mikey::MikeyConfig {
-                                method: crate::security::mikey::MikeyKeyExchangeMethod::Pk,
-                                certificate: self.config.certificate_data.clone(),
-                                private_key: self.config.private_key_data.clone(),
-                                peer_certificate: self.config.peer_certificate_data.clone(),
-                                srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
-                                ..Default::default()
-                            };
-
-                            // Default to initiator role - would be determined by call setup in real usage
-                            let mikey = crate::security::mikey::Mikey::new(
-                                mikey_config,
-                                crate::security::mikey::MikeyRole::Initiator,
-                            );
-                            Box::new(mikey)
+                            return Err(SecurityError::UnsupportedFeature(
+                                "MIKEY public-key exchange is not complete and is unavailable"
+                                    .to_string(),
+                            ));
                         }
                     }
                 } else {
@@ -283,54 +263,23 @@ impl UnifiedSecurityContext {
                 }
             }
             KeyExchangeMethod::Zrtp => {
-                if let KeyExchangeConfig::Zrtp {
-                    enable_sas,
-                    cache_expiry: _,
-                } = &self.method_config
-                {
-                    // Create ZRTP configuration based on security config
-                    let zrtp_config = crate::security::zrtp::ZrtpConfig {
-                        ciphers: vec![crate::security::zrtp::ZrtpCipher::Aes1],
-                        hashes: vec![crate::security::zrtp::ZrtpHash::S256],
-                        auth_tags: vec![
-                            crate::security::zrtp::ZrtpAuthTag::HS80,
-                            crate::security::zrtp::ZrtpAuthTag::HS32,
-                        ],
-                        key_agreements: vec![crate::security::zrtp::ZrtpKeyAgreement::EC25],
-                        sas_types: if *enable_sas {
-                            vec![crate::security::zrtp::ZrtpSasType::B32]
-                        } else {
-                            vec![]
-                        },
-                        client_id: "RVOIP Unified Security".to_string(),
-                        srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
-                    };
-
-                    // Default to initiator role - would be determined by call setup in real usage
-                    let zrtp = crate::security::zrtp::Zrtp::new(
-                        zrtp_config,
-                        crate::security::zrtp::ZrtpRole::Initiator,
-                    );
-                    Box::new(zrtp)
-                } else {
-                    return Err(SecurityError::Configuration(
-                        "Invalid ZRTP configuration".to_string(),
-                    ));
-                }
+                return Err(SecurityError::UnsupportedFeature(
+                    "ZRTP key exchange is not complete and is unavailable".to_string(),
+                ));
             }
             KeyExchangeMethod::PreSharedKey => {
                 if let KeyExchangeConfig::PreSharedKey { key, salt } = &self.method_config {
                     // For pre-shared keys, we can immediately set up SRTP
                     let srtp_key = SrtpCryptoKey::new(key.clone(), salt.clone());
-                    let srtp_context = SrtpContext::new(
-                        crate::srtp::SRTP_AES128_CM_SHA1_80, // Default profile
-                        srtp_key,
-                    )
-                    .map_err(|e| {
-                        SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
-                    })?;
+                    let srtp_context = SrtpContext::new(self.selected_srtp_suite()?, srtp_key)
+                        .map_err(|e| {
+                            SecurityError::CryptoError(format!(
+                                "Failed to create SRTP context: {}",
+                                e
+                            ))
+                        })?;
 
-                    *self.srtp_context.write().await = Some(srtp_context);
+                    *self.srtp_context.write().await = Some(Arc::new(RwLock::new(srtp_context)));
                     *state = SecurityState::Established;
                     return Ok(());
                 } else {
@@ -343,9 +292,7 @@ impl UnifiedSecurityContext {
 
         // Initialize the key exchange
         let mut key_exchange_mut = key_exchange_impl;
-        key_exchange_mut.init().map_err(|e| {
-            SecurityError::CryptoError(format!("Failed to initialize key exchange: {}", e))
-        })?;
+        key_exchange_mut.init().map_err(SecurityError::from)?;
 
         *self.key_exchange.write().await = Some(key_exchange_mut);
         *state = SecurityState::Negotiating;
@@ -370,7 +317,7 @@ impl UnifiedSecurityContext {
 
         let response = key_exchange
             .process_message(message)
-            .map_err(|e| SecurityError::CryptoError(format!("Key exchange failed: {}", e)))?;
+            .map_err(SecurityError::from)?;
 
         // Check if key exchange is complete
         if key_exchange.is_complete() {
@@ -382,7 +329,7 @@ impl UnifiedSecurityContext {
                     SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
                 })?;
 
-                *self.srtp_context.write().await = Some(srtp_context);
+                *self.srtp_context.write().await = Some(Arc::new(RwLock::new(srtp_context)));
                 *self.state.write().await = SecurityState::Established;
             } else {
                 *self.state.write().await = SecurityState::Failed;
@@ -393,6 +340,48 @@ impl UnifiedSecurityContext {
         }
 
         Ok(response)
+    }
+
+    /// Generate a fresh SDES offer using the configured implemented suites.
+    pub async fn create_sdes_offer(&self) -> Result<Vec<String>, SecurityError> {
+        if self.method != KeyExchangeMethod::Sdes {
+            return Err(SecurityError::UnsupportedFeature(
+                "offer generation is only implemented for SDES".to_string(),
+            ));
+        }
+
+        match self.get_state().await {
+            SecurityState::Initial => self.initialize().await?,
+            SecurityState::Negotiating => {}
+            state => {
+                return Err(SecurityError::InvalidState(format!(
+                    "cannot generate an SDES offer while security is {state:?}"
+                )))
+            }
+        }
+
+        let offer = self.process_message(b"").await?.ok_or_else(|| {
+            SecurityError::CryptoError("SDES did not generate an offer".to_string())
+        })?;
+        let offer = String::from_utf8(offer).map_err(|error| {
+            SecurityError::CryptoError(format!("SDES generated non-UTF-8 signaling: {error}"))
+        })?;
+        let lines = offer
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if lines.is_empty()
+            || lines
+                .iter()
+                .any(|line| !line.starts_with("a=crypto:") || line.contains("placeholder"))
+        {
+            return Err(SecurityError::CryptoError(
+                "SDES generated an invalid security offer".to_string(),
+            ));
+        }
+        Ok(lines)
     }
 
     /// Check if the security context is established
@@ -412,15 +401,7 @@ impl UnifiedSecurityContext {
 
     /// Get access to the SRTP context (if established)
     pub async fn get_srtp_context(&self) -> Option<Arc<RwLock<SrtpContext>>> {
-        let guard = self.srtp_context.read().await;
-        if guard.is_some() {
-            // Return a clone of the Arc pointing to a new RwLock containing the context
-            // This is a bit complex due to the nested locking structure
-            // In practice, you might want to redesign this API
-            None // Placeholder - would need better design for safe access
-        } else {
-            None
-        }
+        self.srtp_context.read().await.clone()
     }
 
     /// Protect an RTP packet using SRTP
@@ -428,14 +409,16 @@ impl UnifiedSecurityContext {
         &self,
         packet: &crate::packet::RtpPacket,
     ) -> Result<crate::srtp::ProtectedRtpPacket, SecurityError> {
-        let mut srtp_guard = self.srtp_context.write().await;
-        let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
+        let srtp_context = self.get_srtp_context().await.ok_or_else(|| {
             SecurityError::NotInitialized("SRTP context not established".to_string())
         })?;
 
-        srtp_context
+        let result = srtp_context
+            .write()
+            .await
             .protect(packet)
-            .map_err(|e| SecurityError::CryptoError(format!("SRTP encryption failed: {}", e)))
+            .map_err(|e| SecurityError::CryptoError(format!("SRTP encryption failed: {}", e)));
+        result
     }
 
     /// Unprotect an RTP packet using SRTP
@@ -443,18 +426,20 @@ impl UnifiedSecurityContext {
         &self,
         data: &[u8],
     ) -> Result<crate::packet::RtpPacket, SecurityError> {
-        let mut srtp_guard = self.srtp_context.write().await;
-        let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
+        let srtp_context = self.get_srtp_context().await.ok_or_else(|| {
             SecurityError::NotInitialized("SRTP context not established".to_string())
         })?;
 
-        srtp_context
+        let result = srtp_context
+            .write()
+            .await
             .unprotect(data)
-            .map_err(|e| SecurityError::CryptoError(format!("SRTP decryption failed: {}", e)))
+            .map_err(|e| SecurityError::CryptoError(format!("SRTP decryption failed: {}", e)));
+        result
     }
 }
 
-/// Factory for creating unified security contexts
+/// Factory for implemented contexts and retained unavailable-method shims.
 pub struct SecurityContextFactory;
 
 impl SecurityContextFactory {
@@ -469,14 +454,14 @@ impl SecurityContextFactory {
         Self::create_context(config)
     }
 
-    /// Create a context for MIKEY-SRTP with PSK
+    /// Retained MIKEY-PSK factory; returns `UnsupportedFeature` in 0.3.5.
     pub fn create_mikey_psk_context(psk: Vec<u8>) -> Result<UnifiedSecurityContext, SecurityError> {
         let mut config = SecurityConfig::mikey_psk();
         config.srtp_key = Some(psk);
         Self::create_context(config)
     }
 
-    /// Create a context for ZRTP
+    /// Retained ZRTP factory; returns `UnsupportedFeature` in 0.3.5.
     pub fn create_zrtp_context() -> Result<UnifiedSecurityContext, SecurityError> {
         let config = SecurityConfig::zrtp_p2p();
         Self::create_context(config)
@@ -534,14 +519,18 @@ mod tests {
     #[test]
     fn test_create_mikey_context() {
         let key = test_srtp_key();
-        let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
-        assert_eq!(context.get_method(), KeyExchangeMethod::Mikey);
+        assert!(matches!(
+            SecurityContextFactory::create_mikey_psk_context(key),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 
     #[test]
     fn test_create_zrtp_context() {
-        let context = SecurityContextFactory::create_zrtp_context().unwrap();
-        assert_eq!(context.get_method(), KeyExchangeMethod::Zrtp);
+        assert!(matches!(
+            SecurityContextFactory::create_zrtp_context(),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 
     #[test]
@@ -555,6 +544,10 @@ mod tests {
         let mikey_config = SecurityConfig::mikey_psk();
         assert_eq!(mikey_config.mode, SecurityMode::MikeySrtp);
         assert_eq!(mikey_config.profile, SecurityProfile::MikeyPsk);
+        assert!(matches!(
+            mikey_config.validate(),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
 
         // Test ZRTP config
         let zrtp_config = SecurityConfig::zrtp_p2p();
@@ -612,14 +605,14 @@ mod tests {
 
     #[test]
     fn test_invalid_psk_key() {
-        // Test with key that's too short
-        let short_key = vec![0x01, 0x02, 0x03]; // Only 3 bytes
-        let result = SecurityContextFactory::create_psk_context(short_key);
-        assert!(result.is_err());
+        for length in [3, 16, 29, 31, 32] {
+            let result = SecurityContextFactory::create_psk_context(vec![0x01; length]);
+            assert!(matches!(result, Err(SecurityError::Configuration(_))));
+        }
     }
 
     #[tokio::test]
-    async fn test_sdes_initialization_placeholder() {
+    async fn test_sdes_initialization() {
         // Test SDES initialization (should work once SDES is fully implemented)
         let context = SecurityContextFactory::create_sdes_context().unwrap();
 
@@ -630,24 +623,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mikey_initialization_placeholder() {
-        // Test MIKEY initialization - now fully implemented
+    async fn test_mikey_initialization() {
         let key = test_srtp_key();
-        let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
-
-        let result = context.initialize().await;
-        assert!(result.is_ok()); // MIKEY is now fully implemented
-        assert_eq!(context.get_state().await, SecurityState::Negotiating);
+        assert!(matches!(
+            SecurityContextFactory::create_mikey_psk_context(key),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 
     #[tokio::test]
-    async fn test_zrtp_initialization_success() {
-        // Test ZRTP initialization (now should work with real implementation)
-        let context = SecurityContextFactory::create_zrtp_context().unwrap();
-
-        let result = context.initialize().await;
-        assert!(result.is_ok()); // Should now succeed with actual ZRTP implementation
-        assert_eq!(context.get_state().await, SecurityState::Negotiating);
+    async fn test_zrtp_initialization_is_rejected() {
+        assert!(matches!(
+            SecurityContextFactory::create_zrtp_context(),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 
     #[test]
@@ -661,7 +650,7 @@ mod tests {
 
         // Check the internal method config
         match &context.method_config {
-            KeyExchangeConfig::PreSharedKey { key, salt } => {
+            KeyExchangeConfig::PreSharedKey { key, salt, .. } => {
                 assert_eq!(key.len(), 16); // AES-128 key
                 assert_eq!(salt.len(), 14); // Standard SRTP salt
             }
@@ -670,16 +659,58 @@ mod tests {
     }
 
     #[test]
+    fn every_implemented_key_exchange_method_preserves_the_configured_suite() {
+        let mut configs = vec![
+            SecurityConfig::sdes_srtp(),
+            SecurityConfig::srtp_with_key(test_srtp_key()),
+        ];
+        for config in &mut configs {
+            config.srtp_profiles =
+                vec![crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32];
+            let context = UnifiedSecurityContext::new(config.clone()).unwrap();
+            assert_eq!(
+                context.selected_srtp_suite().unwrap(),
+                crate::srtp::SRTP_AES128_CM_SHA1_32
+            );
+            if let KeyExchangeConfig::Sdes { crypto_suites, .. } = &context.method_config {
+                assert_eq!(crypto_suites[0], crate::srtp::SRTP_AES128_CM_SHA1_32);
+            }
+        }
+
+        for mut unavailable in [SecurityConfig::mikey_psk(), SecurityConfig::zrtp_p2p()] {
+            unavailable.srtp_profiles =
+                vec![crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32];
+            assert!(matches!(
+                UnifiedSecurityContext::new(unavailable),
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn mixed_supported_and_gcm_profiles_are_rejected_as_a_whole() {
+        let mut config = SecurityConfig::sdes_srtp();
+        config.srtp_profiles = vec![
+            crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80,
+            crate::api::common::config::SrtpProfile::AesGcm128,
+        ];
+        assert!(matches!(
+            UnifiedSecurityContext::new(config),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+    }
+
+    #[test]
     fn test_sip_scenario_configs() {
         // Test predefined SIP scenario configurations
         let enterprise = SecurityConfig::sip_enterprise();
-        assert_eq!(enterprise.mode, SecurityMode::MikeySrtp);
+        assert_eq!(enterprise.mode, SecurityMode::SdesSrtp);
 
         let operator = SecurityConfig::sip_operator();
         assert_eq!(operator.mode, SecurityMode::SdesSrtp);
 
         let p2p = SecurityConfig::sip_peer_to_peer();
-        assert_eq!(p2p.mode, SecurityMode::ZrtpSrtp);
+        assert_eq!(p2p.mode, SecurityMode::SdesSrtp);
 
         let bridge = SecurityConfig::sip_webrtc_bridge();
         assert_eq!(bridge.mode, SecurityMode::SdesSrtp); // Primary method

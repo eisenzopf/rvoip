@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, error};
 
 use crate::api::client::security::{ClientSecurityConfig, ClientSecurityContext};
-use crate::api::common::config::{SecurityInfo, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
 use crate::dtls::DtlsConnection;
@@ -30,6 +30,8 @@ use crate::api::client::security::packet::processor;
 pub struct DefaultClientSecurityContext {
     /// Security configuration
     config: ClientSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// DTLS connection for handshake
     connection: Arc<Mutex<Option<DtlsConnection>>>,
     /// SRTP context for secure media
@@ -52,20 +54,33 @@ pub struct DefaultClientSecurityContext {
 impl DefaultClientSecurityContext {
     /// Create a new DefaultClientSecurityContext
     pub async fn new(config: ClientSecurityConfig) -> Result<Arc<Self>, SecurityError> {
-        // Create context
-        let ctx = Self {
-            config,
-            connection: Arc::new(Mutex::new(None)),
-            srtp_context: Arc::new(Mutex::new(None)),
-            remote_addr: Arc::new(Mutex::new(None)),
-            remote_fingerprint: Arc::new(Mutex::new(None)),
-            socket: Arc::new(Mutex::new(None)),
-            handshake_completed: Arc::new(Mutex::new(false)),
-            remote_fingerprint_algorithm: Arc::new(Mutex::new(None)),
-            handshake_monitor_running: Arc::new(AtomicBool::new(false)),
-        };
+        config.validate()?;
+        if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "DTLS client context cannot implement {:?}",
+                config.security_mode
+            )));
+        }
+        if config.srtp_profiles.is_empty() {
+            return Err(SecurityError::Configuration(
+                "No SRTP profiles specified in client config".to_string(),
+            ));
+        }
+        if let Some(profile) = config
+            .srtp_profiles
+            .iter()
+            .copied()
+            .find(|profile| !profile.is_supported())
+        {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "SRTP profile {profile:?} is not implemented"
+            )));
+        }
+        crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
 
-        Ok(Arc::new(ctx))
+        Err(SecurityError::UnsupportedFeature(
+            "DTLS client security context construction is unavailable in this release".to_string(),
+        ))
     }
 
     /// Initialize DTLS connection
@@ -209,23 +224,11 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         }
 
         // Calculate crypto suites based on our SRTP profiles
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
+        let srtp_profile = crypto_suites.first().cloned();
 
         // Get the fingerprint from our connection
-        let fingerprint = self.get_fingerprint().await.unwrap_or_else(|_| {
-            "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF".to_string()
-        });
+        let fingerprint = self.get_fingerprint().await?;
 
         Ok(SecurityInfo {
             mode: self.config.security_mode,
@@ -233,7 +236,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
             fingerprint_algorithm: self.remote_fingerprint_algorithm.lock().await.clone(),
             crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         })
     }
 
@@ -269,13 +272,15 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 
     fn get_security_info_sync(&self) -> SecurityInfo {
+        let crypto_suites = self.advertised_profiles.clone();
+        let srtp_profile = crypto_suites.first().cloned();
         SecurityInfo {
             mode: self.config.security_mode,
             fingerprint: None, // Will be filled by async get_security_info method
             fingerprint_algorithm: None, // Can't await in a sync function
-            crypto_suites: vec!["AES_CM_128_HMAC_SHA1_80".to_string()],
+            crypto_suites,
             key_params: None,
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            srtp_profile,
         }
     }
 

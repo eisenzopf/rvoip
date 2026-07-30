@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SrtpProfile};
 use crate::api::common::error::SecurityError;
@@ -154,60 +154,11 @@ impl KeyStore {
         &self,
         stream_type: StreamType,
     ) -> Result<SrtpCryptoKey, SecurityError> {
-        // Use HKDF-like key derivation (simplified for this implementation)
-        let label = stream_type.derivation_label();
-        let mut derived_key = Vec::with_capacity(30); // 16 bytes key + 14 bytes salt
-
-        // Simple key derivation: master_key || label || generation
-        derived_key.extend_from_slice(&self.master_key[0..16.min(self.master_key.len())]);
-
-        // XOR with stream label hash for differentiation
-        let label_hash = self.hash_label(label);
-        for (i, &byte) in label_hash.iter().take(16).enumerate() {
-            if i < derived_key.len() {
-                derived_key[i] ^= byte;
-            }
-        }
-
-        // Add generation counter
-        let gen_bytes = self.generation.to_be_bytes();
-        for (i, &byte) in gen_bytes.iter().enumerate() {
-            if i < derived_key.len() {
-                derived_key[i] ^= byte;
-            }
-        }
-
-        // Derive salt from the latter part of master key
-        let mut salt = vec![0u8; 14];
-        if self.master_key.len() >= 30 {
-            salt.copy_from_slice(&self.master_key[16..30]);
-        } else {
-            // Use a default salt if master key is too short
-            salt = vec![
-                0x9e, 0x7c, 0xa4, 0xf0, 0x85, 0x2d, 0x1c, 0x22, 0xf9, 0x8a, 0x1b, 0x5e, 0x6c, 0x3d,
-            ];
-        }
-
-        // XOR salt with generation for uniqueness
-        for (i, &byte) in gen_bytes.iter().cycle().take(salt.len()).enumerate() {
-            salt[i] ^= byte;
-        }
-
-        Ok(SrtpCryptoKey::new(derived_key, salt))
-    }
-
-    /// Simple hash function for label differentiation
-    fn hash_label(&self, label: &str) -> Vec<u8> {
-        // Simple hash: just use the bytes of the label with some mixing
-        let mut hash = vec![0u8; 16];
-        let label_bytes = label.as_bytes();
-
-        for (i, &byte) in label_bytes.iter().enumerate() {
-            let hash_len = hash.len();
-            hash[i % hash_len] ^= byte.wrapping_add(i as u8);
-        }
-
-        hash
+        let _ = (&self.master_key, stream_type);
+        Err(SecurityError::UnsupportedFeature(
+            "multi-stream SRTP key derivation is unavailable until a standard reviewed KDF is implemented"
+                .to_string(),
+        ))
     }
 
     /// Set up SRTP context for a stream type
@@ -243,19 +194,10 @@ impl KeyStore {
 
     /// Rotate all keys (increment generation and re-derive)
     pub fn rotate_keys(&mut self) -> Result<(), SecurityError> {
-        self.generation += 1;
-        self.last_rotation = Some(Instant::now());
-        self.packet_count = 0;
-
-        info!("Rotating keys to generation {}", self.generation);
-
-        // Re-setup all existing stream contexts with new keys
-        let stream_types: Vec<StreamType> = self.stream_contexts.keys().cloned().collect();
-        for stream_type in stream_types {
-            self.setup_stream(stream_type)?;
-        }
-
-        Ok(())
+        Err(SecurityError::UnsupportedFeature(
+            "automatic SRTP key rotation is unavailable until a standard reviewed KDF is implemented"
+                .to_string(),
+        ))
     }
 
     /// Increment packet count (for packet-based rotation)
@@ -442,7 +384,7 @@ pub struct SecurityPolicy {
 impl Default for SecurityPolicy {
     fn default() -> Self {
         Self {
-            required_methods: vec![KeyExchangeMethod::Sdes, KeyExchangeMethod::DtlsSrtp],
+            required_methods: vec![KeyExchangeMethod::Sdes],
             min_rotation_interval: Some(Duration::from_secs(3600)), // 1 hour
             max_key_lifetime: Some(Duration::from_secs(86400)),     // 24 hours
             required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
@@ -456,35 +398,31 @@ impl SecurityPolicy {
     /// Enterprise security policy
     pub fn enterprise() -> Self {
         Self {
-            required_methods: vec![KeyExchangeMethod::Mikey, KeyExchangeMethod::Sdes],
+            required_methods: vec![KeyExchangeMethod::Sdes],
             min_rotation_interval: Some(Duration::from_secs(1800)), // 30 minutes
             max_key_lifetime: Some(Duration::from_secs(7200)),      // 2 hours
             required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             strict_validation: true,
-            require_pfs: true,
+            require_pfs: false,
         }
     }
 
     /// High security policy
     pub fn high_security() -> Self {
         Self {
-            required_methods: vec![KeyExchangeMethod::Zrtp, KeyExchangeMethod::Mikey],
+            required_methods: vec![KeyExchangeMethod::Sdes],
             min_rotation_interval: Some(Duration::from_secs(900)), // 15 minutes
             max_key_lifetime: Some(Duration::from_secs(3600)),     // 1 hour
-            required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
+            required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             strict_validation: true,
-            require_pfs: true,
+            require_pfs: false,
         }
     }
 
     /// Development/testing policy (relaxed)
     pub fn development() -> Self {
         Self {
-            required_methods: vec![
-                KeyExchangeMethod::PreSharedKey,
-                KeyExchangeMethod::Sdes,
-                KeyExchangeMethod::DtlsSrtp,
-            ],
+            required_methods: vec![KeyExchangeMethod::Sdes],
             min_rotation_interval: None,
             max_key_lifetime: None,
             required_srtp_profiles: vec![
@@ -496,8 +434,26 @@ impl SecurityPolicy {
         }
     }
 
-    /// Validate a security configuration against this policy
+    /// Validate a security configuration against this policy.
+    ///
+    /// Rotation, lifetime, and PFS requirements are retained in the public
+    /// policy type, but their enforcement is unavailable in 0.3.5. A policy
+    /// that asks for any of them is rejected rather than reported as active.
     pub fn validate_config(&self, config: &SecurityConfig) -> Result<(), SecurityError> {
+        config.validate()?;
+
+        if self.min_rotation_interval.is_some() || self.max_key_lifetime.is_some() {
+            return Err(SecurityError::UnsupportedFeature(
+                "security-policy key rotation and maximum-lifetime enforcement are unavailable"
+                    .to_string(),
+            ));
+        }
+        if self.require_pfs {
+            return Err(SecurityError::UnsupportedFeature(
+                "security-policy perfect-forward-secrecy enforcement is unavailable".to_string(),
+            ));
+        }
+
         // Check if the configured method is allowed
         let method = config.mode.key_exchange_method().ok_or_else(|| {
             SecurityError::PolicyViolation("No key exchange method configured".to_string())
@@ -519,8 +475,6 @@ impl SecurityPolicy {
                 )));
             }
         }
-
-        // Additional checks would go here (PFS, validation strictness, etc.)
 
         Ok(())
     }
@@ -590,55 +544,11 @@ impl KeyManager {
 
     /// Initialize with master key material
     pub async fn initialize(&self, master_key: Vec<u8>) -> Result<(), SecurityError> {
-        let key_store = KeyStore::new(master_key)?;
-        *self.key_store.write().await = Some(key_store);
-
-        // Start automatic rotation task if needed
-        self.start_rotation_task().await;
-
-        Ok(())
-    }
-
-    /// Start automatic key rotation task
-    async fn start_rotation_task(&self) {
-        let policy = self.rotation_policy.read().await.clone();
-
-        match policy {
-            KeyRotationPolicy::TimeInterval(interval) => {
-                let key_store = self.key_store.clone();
-                let _rotation_policy = self.rotation_policy.clone();
-
-                let handle = tokio::spawn(async move {
-                    let mut rotation_interval = tokio::time::interval(interval);
-                    rotation_interval
-                        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                    loop {
-                        rotation_interval.tick().await;
-
-                        if let Some(store) = key_store.write().await.as_mut() {
-                            if let Err(e) = store.rotate_keys() {
-                                error!("Automatic key rotation failed: {}", e);
-                            } else {
-                                info!(
-                                    "Automatic key rotation completed (generation {})",
-                                    store.generation()
-                                );
-                            }
-                        }
-                    }
-                });
-
-                *self.rotation_task.write().await = Some(handle);
-                info!(
-                    "Started automatic key rotation task with interval {:?}",
-                    interval
-                );
-            }
-            _ => {
-                debug!("No automatic rotation task needed for policy: {:?}", policy);
-            }
-        }
+        let _ = master_key;
+        Err(SecurityError::UnsupportedFeature(
+            "key-manager initialization is unavailable until a standard reviewed SRTP key-derivation and rotation path is implemented"
+                .to_string(),
+        ))
     }
 
     /// Stop automatic rotation task
@@ -651,15 +561,10 @@ impl KeyManager {
 
     /// Manually trigger key rotation
     pub async fn rotate_keys(&self) -> Result<(), SecurityError> {
-        if let Some(key_store) = self.key_store.write().await.as_mut() {
-            key_store.rotate_keys()?;
-            info!(
-                "Manual key rotation completed (generation {})",
-                key_store.generation()
-            );
-        }
-
-        Ok(())
+        Err(SecurityError::UnsupportedFeature(
+            "automatic SRTP key rotation is unavailable until a standard reviewed KDF is implemented"
+                .to_string(),
+        ))
     }
 
     /// Check if rotation is needed and perform it
@@ -729,5 +634,106 @@ impl Drop for KeyManager {
         // Note: This won't work with async, but it's here for documentation
         // In practice, you'd call stop_rotation_task() before dropping
         debug!("KeyManager dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn policies_never_claim_unavailable_rotation_lifetime_or_pfs_enforcement() {
+        for policy in [
+            SecurityPolicy::default(),
+            SecurityPolicy::enterprise(),
+            SecurityPolicy::high_security(),
+        ] {
+            assert_eq!(policy.required_methods, vec![KeyExchangeMethod::Sdes]);
+            assert!(!policy.require_pfs);
+            assert!(matches!(
+                policy.validate_config(&SecurityConfig::sdes_srtp()),
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+        }
+
+        let development = SecurityPolicy::development();
+        assert!(development
+            .validate_config(&SecurityConfig::sdes_srtp())
+            .is_ok());
+
+        let mut pfs = SecurityPolicy::development();
+        pfs.require_pfs = true;
+        assert!(matches!(
+            pfs.validate_config(&SecurityConfig::sdes_srtp()),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+
+        for config in [
+            SecurityConfig::webrtc_compatible(),
+            SecurityConfig::mikey_psk(),
+            SecurityConfig::zrtp_p2p(),
+        ] {
+            assert!(matches!(
+                development.validate_config(&config),
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn placeholder_derivation_and_rotation_fail_without_state_mutation() {
+        let mut store = KeyStore::new(vec![0x42; 32]).unwrap();
+        store.packet_count = 9;
+        let initial_created_at = store.created_at;
+
+        assert!(matches!(
+            store.derive_stream_key(StreamType::Audio),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            store.setup_stream(StreamType::Audio),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            store.rotate_keys(),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert_eq!(store.generation, 0);
+        assert_eq!(store.packet_count, 9);
+        assert_eq!(store.created_at, initial_created_at);
+        assert!(store.last_rotation.is_none());
+        assert!(store.stream_contexts.is_empty());
+    }
+
+    #[test]
+    fn failed_auto_setup_does_not_insert_a_syndication_session() {
+        let mut syndication = KeySyndication::new(KeySyndicationConfig::default());
+        assert!(matches!(
+            syndication.create_session("call-1".to_string(), vec![0x24; 32]),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert_eq!(syndication.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn key_manager_initialization_and_rotation_fail_before_mutation() {
+        let manager = KeyManager::new(
+            KeyRotationPolicy::TimeInterval(Duration::from_secs(1)),
+            KeySyndicationConfig::default(),
+            SecurityPolicy::default(),
+        );
+
+        assert!(matches!(
+            manager.initialize(vec![0x66; 32]).await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(manager.key_store.read().await.is_none());
+        assert!(manager.rotation_task.read().await.is_none());
+        assert!(matches!(
+            manager.rotate_keys().await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(manager.key_store.read().await.is_none());
+        assert!(manager.rotation_task.read().await.is_none());
     }
 }

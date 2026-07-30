@@ -1,6 +1,8 @@
-//! DTLS connection implementation
+//! Retained internal DTLS connection state machine
 //!
-//! This module handles the DTLS connection state and lifecycle.
+//! This state machine is incomplete and is not publicly constructible in
+//! 0.3.5. Use `dtls::create_connection`, which fails closed with a typed
+//! unsupported-feature error.
 
 use bytes::Bytes;
 use std::net::SocketAddr;
@@ -91,8 +93,12 @@ struct ConnectionResult {
 }
 
 impl DtlsConnection {
-    /// Create a new DTLS connection with the given configuration
-    pub fn new(config: DtlsConfig) -> Self {
+    /// Construct the incomplete state machine for unit tests only.
+    ///
+    /// Production callers must use [`super::create_connection`], which fails
+    /// closed until this DTLS implementation is complete and interoperable.
+    #[cfg(test)]
+    pub(super) fn new_for_test(config: DtlsConfig) -> Self {
         let (handshake_complete_tx, handshake_complete_rx) = mpsc::channel(1);
         Self {
             config,
@@ -118,6 +124,7 @@ impl DtlsConnection {
 
     /// Start the DTLS handshake
     pub async fn start_handshake(&mut self, remote_addr: SocketAddr) -> Result<()> {
+        self.config.validate()?;
         self.remote_addr = Some(remote_addr);
         self.state = ConnectionState::Handshaking;
 

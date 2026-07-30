@@ -1,6 +1,7 @@
-use crate::security::sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole};
+use crate::security::sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole, SdesState};
 use crate::security::SecurityKeyExchange;
 use crate::srtp::{SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
+use crate::Error;
 
 #[test]
 fn test_sdes_crypto_attribute_parsing() {
@@ -192,4 +193,71 @@ fn test_sdes_error_handling() {
     let invalid_offer = b"a=crypto:1 INVALID_SUITE inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR";
     let result = answerer.process_message(invalid_offer);
     assert!(result.is_err());
+}
+
+#[test]
+fn unsupported_sdes_parameters_fail_without_answerer_state_or_key_mutation() {
+    let base = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:PS1uQCVeeCFCanVmcjkpPywjNWhcYD0mXXtxaVBR";
+    let offers = [
+        format!("{base} KDR=1"),
+        format!("{base} UNENCRYPTED_SRTP"),
+        format!("{base} UNENCRYPTED_SRTCP"),
+        format!("{base} UNAUTHENTICATED_SRTP"),
+        format!("{base} FEC_ORDER=SRTP_FEC"),
+        format!("{base}|2^20"),
+        format!("{base}|1:4"),
+    ];
+
+    for offer in offers {
+        let mut answerer = Sdes::new(SdesConfig::default(), SdesRole::Answerer);
+        let result = answerer.process_message(offer.as_bytes());
+        assert!(
+            matches!(result, Err(Error::UnsupportedFeature(_))),
+            "unexpected result for {offer:?}: {result:?}"
+        );
+        assert_eq!(answerer.state, SdesState::Initial);
+        assert!(answerer.local_attrs.is_empty());
+        assert!(answerer.remote_attrs.is_empty());
+        assert!(answerer.selected_attr.is_none());
+        assert!(answerer.srtp_key.is_none());
+        assert!(answerer.srtp_suite.is_none());
+    }
+}
+
+#[test]
+fn unsupported_sdes_parameters_fail_without_offerer_state_or_key_mutation() {
+    let suffixes = [
+        " KDR=1",
+        " UNENCRYPTED_SRTP",
+        " UNENCRYPTED_SRTCP",
+        " UNAUTHENTICATED_SRTP",
+        " FEC_ORDER=FEC_SRTP",
+        "|2^20",
+        "|1:4",
+    ];
+
+    for suffix in suffixes {
+        let mut offerer = Sdes::new(SdesConfig::default(), SdesRole::Offerer);
+        let offer = offerer.process_message(b"").unwrap().unwrap();
+        let first_line = std::str::from_utf8(&offer).unwrap().lines().next().unwrap();
+        let invalid_answer = format!("{first_line}{suffix}");
+
+        let before_state = offerer.state.clone();
+        let before_key = offerer.get_srtp_key().unwrap();
+        let before_suite = offerer.get_srtp_suite();
+        let before_local_attrs = offerer.local_attrs.clone();
+        let result = offerer.process_message(invalid_answer.as_bytes());
+        assert!(
+            matches!(result, Err(Error::UnsupportedFeature(_))),
+            "unexpected result for {invalid_answer:?}: {result:?}"
+        );
+        assert_eq!(offerer.state, before_state);
+        assert_eq!(offerer.state, SdesState::OfferSent);
+        assert_eq!(offerer.local_attrs, before_local_attrs);
+        assert!(offerer.remote_attrs.is_empty());
+        assert!(offerer.selected_attr.is_none());
+        assert_eq!(offerer.get_srtp_key().unwrap().key(), before_key.key());
+        assert_eq!(offerer.get_srtp_key().unwrap().salt(), before_key.salt());
+        assert_eq!(offerer.get_srtp_suite(), before_suite);
+    }
 }

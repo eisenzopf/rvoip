@@ -22,11 +22,13 @@ pub async fn create_server_connection(
         version: crate::dtls::DtlsVersion::Dtls12,
         mtu: 1500,
         max_retransmissions: 5,
-        srtp_profiles: keys::convert_profiles(&config.srtp_profiles),
+        srtp_profiles: keys::convert_profiles(&config.srtp_profiles)?,
     };
 
     // Create connection
-    let connection = DtlsConnection::new(dtls_config);
+    let connection = crate::dtls::create_connection(dtls_config)
+        .await
+        .map_err(SecurityError::from)?;
 
     // Generate or load certificate based on config
     let _cert = if let (Some(cert_path), Some(key_path)) =
@@ -168,29 +170,9 @@ pub async fn get_fingerprint_from_connection(
 
 /// Create a DTLS transport for a socket
 pub async fn create_dtls_transport(
-    socket: &SocketHandle,
+    _socket: &SocketHandle,
 ) -> Result<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>, SecurityError> {
-    // Create a transport for packet reception
-    let transport =
-        match crate::dtls::transport::udp::UdpTransport::new(socket.socket.clone(), 1500).await {
-            Ok(mut t) => {
-                // Start the transport (CRUCIAL)
-                if let Err(e) = t.start().await {
-                    return Err(SecurityError::Configuration(format!(
-                        "Failed to start DTLS transport: {}",
-                        e
-                    )));
-                }
-                t
-            }
-            Err(e) => {
-                return Err(SecurityError::Configuration(format!(
-                    "Failed to create DTLS transport: {}",
-                    e
-                )))
-            }
-        };
-
-    // Wrap in Arc<Mutex<>>
-    Ok(Arc::new(Mutex::new(transport)))
+    Err(SecurityError::UnsupportedFeature(
+        "DTLS transport construction is unavailable in rvoip 0.3.5".to_string(),
+    ))
 }

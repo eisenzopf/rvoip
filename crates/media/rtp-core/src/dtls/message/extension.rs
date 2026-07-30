@@ -6,6 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io::Cursor;
 
 use crate::dtls::Result;
+use crate::error::Error;
 
 /// DTLS extension type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +189,12 @@ impl Extension {
 
     /// Serialize the extension to bytes
     pub fn serialize(&self) -> Result<Bytes> {
+        if matches!(self, Self::Unknown { typ: 14, .. }) {
+            return Err(Error::UnsupportedFeature(
+                "raw extension type 14 cannot bypass use_srtp profile validation".to_string(),
+            ));
+        }
+
         let mut buf = BytesMut::new();
 
         // Extension type (2 bytes)
@@ -296,6 +303,21 @@ impl From<SrtpProtectionProfile> for u16 {
     }
 }
 
+impl SrtpProtectionProfile {
+    /// Return an error for protection profiles that have no implementation.
+    pub fn ensure_supported(self) -> Result<()> {
+        match self {
+            Self::Aes128CmSha1_80 | Self::Aes128CmSha1_32 => Ok(()),
+            Self::AeadAes128Gcm | Self::AeadAes256Gcm => Err(Error::UnsupportedFeature(
+                "DTLS-SRTP AES-GCM profiles are not implemented".to_string(),
+            )),
+            Self::Unknown(value) => Err(Error::UnsupportedFeature(format!(
+                "unknown DTLS-SRTP protection profile 0x{value:04x}"
+            ))),
+        }
+    }
+}
+
 /// Use SRTP extension (RFC 5764)
 #[derive(Debug, Clone)]
 pub struct UseSrtpExtension {
@@ -322,6 +344,14 @@ impl UseSrtpExtension {
 
     /// Serialize the extension to bytes
     pub fn serialize(&self) -> Result<Bytes> {
+        if self.profiles.is_empty() {
+            return Err(Error::InvalidParameter(
+                "use_srtp must advertise at least one profile".to_string(),
+            ));
+        }
+        for profile in &self.profiles {
+            profile.ensure_supported()?;
+        }
         // Calculate profiles length (2 bytes per profile)
         let profiles_len = self.profiles.len() * 2;
 
@@ -360,6 +390,11 @@ impl UseSrtpExtension {
         // Profiles length (2 bytes)
         let profiles_len = cursor.get_u16() as usize;
 
+        if profiles_len == 0 {
+            return Err(crate::error::Error::InvalidPacket(
+                "use_srtp contains no protection profiles".to_string(),
+            ));
+        }
         if profiles_len % 2 != 0 {
             return Err(crate::error::Error::InvalidPacket(
                 "SRTP profiles length must be a multiple of 2".to_string(),
@@ -383,6 +418,11 @@ impl UseSrtpExtension {
         if data.len() < 3 + profiles_len + mki_len {
             return Err(crate::error::Error::PacketTooShort);
         }
+        if data.len() != 3 + profiles_len + mki_len {
+            return Err(crate::error::Error::InvalidPacket(
+                "use_srtp extension has trailing bytes".to_string(),
+            ));
+        }
 
         // MKI value
         let mki = if mki_len > 0 {
@@ -393,5 +433,52 @@ impl UseSrtpExtension {
         };
 
         Ok(Self { profiles, mki })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn use_srtp_refuses_to_advertise_unimplemented_profiles() {
+        for profile in [
+            SrtpProtectionProfile::AeadAes128Gcm,
+            SrtpProtectionProfile::AeadAes256Gcm,
+            SrtpProtectionProfile::Unknown(0xbeef),
+        ] {
+            let error = UseSrtpExtension::with_profiles(vec![profile])
+                .serialize()
+                .expect_err("unsupported profile must not reach the wire");
+            assert!(matches!(error, Error::UnsupportedFeature(_)));
+        }
+    }
+
+    #[test]
+    fn use_srtp_rejects_an_empty_profile_list() {
+        assert!(UseSrtpExtension::with_profiles(Vec::new())
+            .serialize()
+            .is_err());
+        assert!(UseSrtpExtension::parse(&[0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn unknown_variant_cannot_serialize_raw_use_srtp_bytes() {
+        // RFC 7714 AEAD_AES_128_GCM encoded as a use_srtp profile list.
+        let raw_gcm = Extension::Unknown {
+            typ: 14,
+            data: Bytes::from_static(&[0, 2, 0, 7, 0]),
+        };
+
+        assert!(matches!(
+            raw_gcm.serialize(),
+            Err(Error::UnsupportedFeature(_))
+        ));
+
+        let ordinary_unknown = Extension::Unknown {
+            typ: 0xbeef,
+            data: Bytes::from_static(&[1, 2, 3]),
+        };
+        assert!(ordinary_unknown.serialize().is_ok());
     }
 }

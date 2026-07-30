@@ -10,10 +10,7 @@ use crate::api::common::config::SrtpProfile;
 use crate::api::common::error::SecurityError;
 use crate::dtls::DtlsConnection;
 use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{
-    SrtpContext, SrtpCryptoSuite, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
-    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
-};
+use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 
 /// Extract SRTP keys from a DTLS connection
 pub async fn extract_srtp_keys(
@@ -78,12 +75,13 @@ pub async fn extract_srtp_keys(
 }
 
 /// Convert an SrtpProfile to an SrtpCryptoSuite
-pub fn profile_to_suite(profile: SrtpProfile) -> SrtpCryptoSuite {
+pub fn profile_to_suite(profile: SrtpProfile) -> Result<SrtpCryptoSuite, SecurityError> {
     match profile {
-        SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
-        SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
-        SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
-        SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
+        SrtpProfile::AesCm128HmacSha1_80 => Ok(SRTP_AES128_CM_SHA1_80),
+        SrtpProfile::AesCm128HmacSha1_32 => Ok(SRTP_AES128_CM_SHA1_32),
+        SrtpProfile::AesGcm128 | SrtpProfile::AesGcm256 => Err(SecurityError::UnsupportedFeature(
+            format!("SRTP profile {profile:?} is not implemented"),
+        )),
     }
 }
 

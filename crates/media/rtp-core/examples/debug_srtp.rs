@@ -110,9 +110,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("🔐 Encrypted payload preview: {}", preview);
     }
 
-    info!("\n🎉 ALL SRTP TESTS PASSED!");
-    info!("The SRTP implementation works correctly.");
-    info!("The issue is that the transport layer is NOT using SRTP encryption.");
+    info!("\nReviewed low-level SRTP round-trip passed.");
+    info!("Production transports must install approved per-direction contexts before reporting secure media.");
 
     Ok(())
 }

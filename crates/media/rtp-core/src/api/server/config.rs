@@ -94,7 +94,10 @@ impl ServerConfigBuilder {
         }
     }
 
-    /// Create a builder with WebRTC-optimized defaults
+    /// Create a retained WebRTC configuration template.
+    ///
+    /// DTLS-SRTP is unavailable in 0.3.5; constructing a server from this
+    /// template returns a typed security error.
     pub fn webrtc() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode =
@@ -104,7 +107,11 @@ impl ServerConfigBuilder {
         builder
     }
 
-    /// Create a builder with SIP-optimized defaults
+    /// Create an unprovisioned SIP/direct-SRTP template.
+    ///
+    /// This intentionally contains no invented key material. Call
+    /// `with_srtp_key` before `build`, or select an explicit signaling security
+    /// path. `build` fails until security is provisioned.
     pub fn sip() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode =
@@ -242,6 +249,10 @@ impl ServerConfigBuilder {
             ));
         }
 
+        self.config.security_config.validate().map_err(|error| {
+            crate::api::common::error::MediaTransportError::Security(error.to_string())
+        })?;
+
         Ok(self.config)
     }
 }
@@ -288,5 +299,29 @@ mod tests {
         assert_eq!(config.rtp_session_buffer_config, session_buffers);
         assert_eq!(config.rtp_transport_buffer_config, transport_buffers);
         assert_eq!(config.frame_channel_capacity, 7);
+    }
+
+    #[test]
+    fn build_rejects_unavailable_or_incoherent_security() {
+        assert!(ServerConfigBuilder::webrtc().build().is_err());
+        assert!(ServerConfigBuilder::sip().build().is_err());
+
+        let gcm = ServerSecurityConfig {
+            security_mode: crate::api::common::config::SecurityMode::Srtp,
+            srtp_profiles: vec![crate::api::common::config::SrtpProfile::AesGcm128],
+            srtp_key: Some(vec![0x43; 30]),
+            ..ServerSecurityConfig::default()
+        };
+        assert!(ServerConfigBuilder::new()
+            .security_config(gcm)
+            .build()
+            .is_err());
+
+        let mut plain_with_key = ServerSecurityConfig::unsecured();
+        plain_with_key.srtp_key = Some(vec![0x54; 30]);
+        assert!(ServerConfigBuilder::new()
+            .security_config(plain_with_key)
+            .build()
+            .is_err());
     }
 }

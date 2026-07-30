@@ -1,6 +1,7 @@
-//! MIKEY payload definitions
+//! Retained MIKEY payload-format definitions
 //!
-//! This module defines the payload types used in MIKEY messages as specified in RFC 3830.
+//! These types exist for compatibility and parser tests; they do not advertise
+//! an available RFC 3830 key exchange.
 
 /// MIKEY payload types as defined in RFC 3830
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

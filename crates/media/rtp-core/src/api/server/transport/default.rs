@@ -27,7 +27,7 @@ use crate::api::server::config::ServerConfig;
 use crate::api::server::security::ServerSecurityContext;
 use crate::api::server::transport::{ClientInfo, HeaderExtension, MediaTransportServer};
 use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::SrtpContext;
 use crate::transport::{RtpTransport, RtpTransportConfig, SecurityRtpTransport, UdpRtpTransport};
 use crate::{CsrcManager, CsrcMapping, RtpCsrc, RtpSsrc};
 
@@ -151,6 +151,36 @@ impl Clone for DefaultMediaTransportServer {
 impl DefaultMediaTransportServer {
     /// Create a new DefaultMediaTransportServer
     pub async fn new(config: ServerConfig) -> Result<Self, MediaTransportError> {
+        config
+            .security_config
+            .validate()
+            .map_err(|error| MediaTransportError::Security(error.to_string()))?;
+        let initial_security_context = match config.security_config.security_mode {
+            SecurityMode::None => {
+                if !config.security_config.srtp_profiles.is_empty()
+                    || config.security_config.srtp_key.is_some()
+                    || config.security_config.certificate_path.is_some()
+                    || config.security_config.private_key_path.is_some()
+                    || config.security_config.require_client_certificate
+                {
+                    return Err(MediaTransportError::Security(
+                        "plain RTP server configuration cannot retain security requirements or key material"
+                            .to_string(),
+                    ));
+                }
+                None
+            }
+            _ => Some(
+                crate::api::server::security::new(config.security_config.clone())
+                    .await
+                    .map_err(|error| {
+                        MediaTransportError::Security(format!(
+                            "failed to construct requested server security context: {error}"
+                        ))
+                    })?,
+            ),
+        };
+
         // Extract configuration values
         let csrc_management_enabled = config.csrc_management_enabled;
         let header_extensions_enabled = config.header_extensions_enabled;
@@ -169,7 +199,7 @@ impl DefaultMediaTransportServer {
             transport: Arc::new(RwLock::new(None)),
             client_sockets: Arc::new(RwLock::new(HashMap::new())),
             client_transports: Arc::new(RwLock::new(HashMap::new())),
-            security_context: Arc::new(RwLock::new(None)),
+            security_context: Arc::new(RwLock::new(initial_security_context)),
             clients: Arc::new(DashMap::new()),
             event_callbacks: Arc::new(RwLock::new(Vec::new())),
             client_connected_callbacks: Arc::new(RwLock::new(Vec::new())),
@@ -254,7 +284,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         })?;
 
         // Create SecurityRtpTransport wrapper
-        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), true)
+        let srtp_enabled = self.config.security_config.security_mode.requires_srtp();
+        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), srtp_enabled)
             .await
             .map_err(|e| {
                 MediaTransportError::Transport(format!(
@@ -273,6 +304,10 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             // For now, we'll extract the SRTP key directly from the config
             // In a full implementation, we'd access it through security_ctx.get_config()
             if self.config.security_config.security_mode == SecurityMode::Srtp {
+                let crypto_suite = crate::api::common::config::implemented_single_srtp_suite(
+                    &self.config.security_config.srtp_profiles,
+                )
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?;
                 if let Some(srtp_key) = &self.config.security_config.srtp_key {
                     debug!("Configuring server SRTP context with pre-shared keys");
                     debug!(
@@ -281,7 +316,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                     );
 
                     // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
-                    if srtp_key.len() >= 30 {
+                    if srtp_key.len() == 30 {
                         let key = srtp_key[0..16].to_vec();
                         let salt = srtp_key[16..30].to_vec();
 
@@ -292,7 +327,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         );
                         let crypto_key = SrtpCryptoKey::new(key, salt);
 
-                        match SrtpContext::new(SRTP_AES128_CM_SHA1_80, crypto_key) {
+                        match SrtpContext::new(crypto_suite, crypto_key) {
                             Ok(srtp_context) => {
                                 debug!("Successfully created server SRTP context");
 
@@ -301,7 +336,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     .as_any()
                                     .downcast_ref::<SecurityRtpTransport>()
                                 {
-                                    sec_transport.set_srtp_context(srtp_context).await;
+                                    sec_transport.set_srtp_context(srtp_context).await.map_err(
+                                        |error| MediaTransportError::Security(error.to_string()),
+                                    )?;
                                     info!(
                                         "SRTP context successfully configured on server transport"
                                     );
@@ -319,11 +356,11 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         }
                     } else {
                         error!(
-                            "Server SRTP key too short: {} bytes (expected at least 30)",
+                            "Invalid server AES-128 SRTP key material length: {} bytes (expected exactly 30)",
                             srtp_key.len()
                         );
                         return Err(MediaTransportError::Security(
-                            "Server SRTP key too short".to_string(),
+                            "Server AES-128 SRTP key material must be exactly 30 bytes".to_string(),
                         ));
                     }
                 } else {
@@ -346,6 +383,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let ssrc_demux_enabled_clone = self.ssrc_demultiplexing_enabled.clone();
         let session_buffer_config = self.config.rtp_session_buffer_config;
         let transport_buffer_config = self.config.rtp_transport_buffer_config;
+        let secure_media_required = self.config.security_config.security_mode.requires_srtp();
 
         let task = tokio::spawn(async move {
             debug!("Started transport event task");
@@ -496,14 +534,16 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         if !client_exists {
                             // New client - handle it
                             debug!("New client detected at {}, handling...", source);
-                            let client_result = super::core::handle_client_static(
-                                source,
-                                &clients_clone,
-                                &sender_clone,
-                                session_buffer_config,
-                                transport_buffer_config,
-                            )
-                            .await;
+                            let client_result =
+                                super::core::handle_client_static_with_security_requirement(
+                                    source,
+                                    &clients_clone,
+                                    &sender_clone,
+                                    session_buffer_config,
+                                    transport_buffer_config,
+                                    secure_media_required,
+                                )
+                                .await;
 
                             match client_result {
                                 Ok(client_id) => debug!(
@@ -1129,5 +1169,67 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     ) -> Result<bool, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::common::config::{SecurityConfig, SrtpProfile};
+    use crate::api::server::{MediaTransportServer, ServerConfigBuilder};
+    use crate::packet::{RtpHeader, RtpPacket};
+
+    #[tokio::test]
+    async fn direct_psk_server_uses_configured_suite_on_wire() {
+        for (profile, suite_name, tag_len) in [
+            (
+                SrtpProfile::AesCm128HmacSha1_80,
+                "AES_CM_128_HMAC_SHA1_80",
+                10,
+            ),
+            (
+                SrtpProfile::AesCm128HmacSha1_32,
+                "AES_CM_128_HMAC_SHA1_32",
+                4,
+            ),
+        ] {
+            let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut security = SecurityConfig::srtp_with_key(vec![0x77; 30]);
+            security.srtp_profiles = vec![profile];
+            let config = ServerConfigBuilder::new()
+                .local_address("127.0.0.1:0".parse().unwrap())
+                .rtcp_mux(true)
+                .with_security(security)
+                .build()
+                .unwrap();
+            let server = DefaultMediaTransportServer::new(config).await.unwrap();
+            server.start().await.unwrap();
+
+            let info = server.get_security_info().await.unwrap();
+            assert_eq!(info.crypto_suites, [suite_name]);
+            assert_eq!(info.srtp_profile.as_deref(), Some(suite_name));
+
+            let payload = bytes::Bytes::from_static(b"psk-suite");
+            let packet = RtpPacket::new(RtpHeader::new(0, 10, 1234, 0x1122_3344), payload.clone());
+            server
+                .main_socket
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .send_rtp(&packet, sink.local_addr().unwrap())
+                .await
+                .unwrap();
+
+            let mut wire = [0_u8; 2048];
+            let (wire_len, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), sink.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(wire_len, 12 + payload.len() + tag_len);
+
+            server.stop().await.unwrap();
+        }
     }
 }

@@ -37,10 +37,12 @@ pub async fn init_connection(
     }
 
     // Create DTLS connection config from our API config
-    let dtls_config = api_create_dtls_config(config);
+    let dtls_config = api_create_dtls_config(config)?;
 
     // Create DTLS connection
-    let mut connection_obj = DtlsConnection::new(dtls_config);
+    let mut connection_obj = crate::dtls::create_connection(dtls_config)
+        .await
+        .map_err(SecurityError::from)?;
 
     // Generate or load certificate based on config
     let cert = if let (Some(cert_path), Some(key_path)) =
@@ -158,7 +160,9 @@ pub async fn create_connection(
     };
 
     // Create new DTLS connection
-    let mut connection = DtlsConnection::new(dtls_config);
+    let mut connection = crate::dtls::create_connection(dtls_config)
+        .await
+        .map_err(SecurityError::from)?;
 
     // Generate a self-signed certificate
     debug!("Generating self-signed certificate for new connection");
@@ -210,6 +214,6 @@ pub async fn create_connection(
 }
 
 /// Create a DTLS configuration from the client security configuration
-pub fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
+pub fn create_dtls_config(config: &ClientSecurityConfig) -> Result<DtlsConfig, SecurityError> {
     api_create_dtls_config(config)
 }

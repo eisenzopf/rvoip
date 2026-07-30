@@ -16,7 +16,7 @@ use crate::api::common::config::SecurityMode;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::security::SocketHandle;
 use crate::srtp::crypto::SrtpCryptoKey;
-use crate::srtp::{SrtpContext, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::SrtpContext;
 use crate::transport::{
     RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, SecurityRtpTransport,
     UdpRtpTransport,
@@ -96,14 +96,21 @@ pub async fn connect(
     // Wire SRTP context if security is enabled
     if let Some(security_ctx) = security {
         // Check if this is SRTP mode (not DTLS-SRTP) and we have keys
-        if security_ctx.get_security_info_sync().mode == SecurityMode::Srtp {
+        let security_info = security_ctx.get_security_info_sync();
+        if security_info.mode == SecurityMode::Srtp {
             debug!("Configuring SRTP context with pre-shared keys");
+
+            let crypto_suite =
+                crate::api::common::config::implemented_single_srtp_suite_from_names(
+                    &security_info.crypto_suites,
+                )
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?;
 
             if let Some(combined_key) = &srtp_key {
                 debug!("Creating SRTP context from {} byte key", combined_key.len());
 
                 // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
-                if combined_key.len() >= 30 {
+                if combined_key.len() == 30 {
                     let key = combined_key[0..16].to_vec();
                     let salt = combined_key[16..30].to_vec();
 
@@ -114,7 +121,7 @@ pub async fn connect(
                     );
                     let crypto_key = SrtpCryptoKey::new(key, salt);
 
-                    match SrtpContext::new(SRTP_AES128_CM_SHA1_80, crypto_key) {
+                    match SrtpContext::new(crypto_suite, crypto_key) {
                         Ok(srtp_context) => {
                             debug!("Successfully created SRTP context");
 
@@ -123,7 +130,9 @@ pub async fn connect(
                                 .as_any()
                                 .downcast_ref::<SecurityRtpTransport>()
                             {
-                                sec_transport.set_srtp_context(srtp_context).await;
+                                sec_transport.set_srtp_context(srtp_context).await.map_err(
+                                    |error| MediaTransportError::Security(error.to_string()),
+                                )?;
                                 info!("SRTP context successfully configured on client transport");
                             } else {
                                 warn!("Failed to downcast to SecurityRtpTransport for SRTP context setting");
@@ -139,11 +148,11 @@ pub async fn connect(
                     }
                 } else {
                     error!(
-                        "SRTP key too short: {} bytes (expected at least 30)",
+                        "Invalid AES-128 SRTP key material length: {} bytes (expected exactly 30)",
                         combined_key.len()
                     );
                     return Err(MediaTransportError::Security(
-                        "SRTP key too short".to_string(),
+                        "AES-128 SRTP key material must be exactly 30 bytes".to_string(),
                     ));
                 }
             } else {

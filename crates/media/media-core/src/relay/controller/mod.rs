@@ -1082,7 +1082,10 @@ impl MediaSessionController {
                     "install_srtp_contexts: RTP session is not a UdpRtpTransport".to_string(),
                 )
             })?;
-        udp_transport.set_srtp_contexts(send_ctx, recv_ctx).await;
+        udp_transport
+            .set_srtp_contexts(send_ctx, recv_ctx)
+            .await
+            .map_err(|error| Error::config(format!("failed to install SRTP contexts: {error}")))?;
         info!("Installed SDES-SRTP contexts on dialog {}", dialog_id);
         Ok(())
     }

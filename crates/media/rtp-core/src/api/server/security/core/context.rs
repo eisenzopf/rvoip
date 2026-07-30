@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::api::common::config::{SecurityInfo, SrtpProfile};
+use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::{ServerSecurityConfig, SocketHandle};
 use crate::dtls::DtlsConnection;
@@ -44,23 +44,16 @@ pub async fn get_security_info(
     };
 
     // Create security info
+    let crypto_suites =
+        crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+    let srtp_profile = crypto_suites.first().cloned();
     let security_info = SecurityInfo {
         mode: config.security_mode,
         fingerprint: fingerprint,
         fingerprint_algorithm: Some(config.fingerprint_algorithm.clone()),
-        crypto_suites: config
-            .srtp_profiles
-            .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
-            .map(|s| s.to_string())
-            .collect(),
+        crypto_suites,
         key_params: None,
-        srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+        srtp_profile,
     };
 
     Ok(security_info)

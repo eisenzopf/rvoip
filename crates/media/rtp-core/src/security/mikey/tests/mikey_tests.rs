@@ -1,89 +1,69 @@
-use crate::security::mikey::{Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole};
+use crate::security::mikey::{Mikey, MikeyConfig, MikeyKeyExchangeMethod, MikeyRole, MikeyState};
 use crate::security::SecurityKeyExchange;
 use crate::srtp::{SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 
 #[test]
-fn test_mikey_init() {
-    // Create pre-shared key
-    let psk = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-
-    // Configure initiator
-    let initiator_config = MikeyConfig {
-        method: MikeyKeyExchangeMethod::Psk,
-        psk: Some(psk.clone()),
-        srtp_profile: SRTP_AES128_CM_SHA1_80,
-        ..Default::default()
-    };
-
-    let mut initiator = Mikey::new(initiator_config, MikeyRole::Initiator);
-
-    // Initialize initiator
-    let result = initiator.init();
-    assert!(
-        result.is_ok(),
-        "Failed to initialize initiator: {:?}",
-        result
-    );
+fn checked_construction_rejects_incomplete_mikey_modes() {
+    for method in [
+        MikeyKeyExchangeMethod::Psk,
+        MikeyKeyExchangeMethod::Pk,
+        MikeyKeyExchangeMethod::Dh,
+    ] {
+        let config = MikeyConfig {
+            method,
+            ..Default::default()
+        };
+        assert!(matches!(
+            Mikey::try_new(config, MikeyRole::Initiator),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+    }
 }
 
 #[test]
-fn test_mikey_status_check() {
-    // Create pre-shared key
-    let psk = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-
-    // Configure initiator
+fn mikey_psk_operations_fail_before_mutating_state_or_keys() {
     let initiator_config = MikeyConfig {
         method: MikeyKeyExchangeMethod::Psk,
-        psk: Some(psk.clone()),
+        psk: Some(vec![0x42; 16]),
         srtp_profile: SRTP_AES128_CM_SHA1_80,
         ..Default::default()
     };
 
     let mut initiator = Mikey::new(initiator_config, MikeyRole::Initiator);
-
-    // Check initial state
+    assert_eq!(initiator.state, MikeyState::Initial);
     assert!(!initiator.is_complete());
     assert!(initiator.get_srtp_key().is_none());
     assert!(initiator.get_srtp_suite().is_none());
 
-    // Initialize
-    initiator.init().expect("Failed to initialize");
+    for result in [
+        initiator.init(),
+        initiator.init(),
+        initiator
+            .process_message(b"untrusted MIKEY message")
+            .map(|_| ()),
+    ] {
+        assert!(matches!(result, Err(crate::Error::UnsupportedFeature(_))));
+        assert_eq!(initiator.state, MikeyState::Initial);
+        assert!(!initiator.is_complete());
+        assert!(initiator.get_srtp_key().is_none());
+        assert!(initiator.get_srtp_suite().is_none());
+        assert!(initiator.rand_i.is_none());
+        assert!(initiator.rand_r.is_none());
+        assert!(initiator.generated_tek.is_none());
+        assert!(initiator.generated_salt.is_none());
+    }
 
-    // Status should still be incomplete
-    assert!(!initiator.is_complete());
-}
-
-#[test]
-fn test_mikey_crypto_suites() {
-    // Create pre-shared key
-    let psk = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-
-    // Configure initiator with a specific SRTP profile
-    let initiator_config = MikeyConfig {
+    // Profile selection cannot make the unavailable PSK exchange usable.
+    let config = MikeyConfig {
         method: MikeyKeyExchangeMethod::Psk,
-        psk: Some(psk.clone()),
-        srtp_profile: SRTP_AES128_CM_SHA1_80,
-        ..Default::default()
-    };
-
-    let mut initiator = Mikey::new(initiator_config, MikeyRole::Initiator);
-    initiator.init().expect("Failed to initialize");
-
-    // Create another initiator with a different SRTP profile
-    let initiator_config2 = MikeyConfig {
-        method: MikeyKeyExchangeMethod::Psk,
-        psk: Some(psk.clone()),
+        psk: Some(vec![0x24; 16]),
         srtp_profile: SRTP_AES128_CM_SHA1_32,
         ..Default::default()
     };
-
-    let mut initiator2 = Mikey::new(initiator_config2, MikeyRole::Initiator);
-    initiator2.init().expect("Failed to initialize");
-
-    // If the implementation was complete, we could test the derived keys,
-    // but for now we'll just verify the basic APIs work.
-    assert!(!initiator.is_complete());
-    assert!(!initiator2.is_complete());
+    assert!(matches!(
+        Mikey::try_new(config, MikeyRole::Responder),
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
 }
 
 #[test]
@@ -154,34 +134,18 @@ fn test_mikey_pke_ca_generation() {
 }
 
 #[test]
-fn test_mikey_pke_certificate_signing() {
+fn test_mikey_pke_certificate_signing_fails_closed() {
     use crate::security::mikey::crypto::{
-        extract_certificate_info, generate_ca_certificate, sign_certificate_with_ca,
-        CertificateConfig,
+        generate_ca_certificate, sign_certificate_with_ca, CertificateConfig,
     };
 
     // Generate CA
     let ca_config = CertificateConfig::enterprise_server("Test CA");
     let ca_key_pair = generate_ca_certificate(ca_config).unwrap();
 
-    // Generate certificate signed by CA
     let subject_config = CertificateConfig::enterprise_client("test-user@example.com");
     let result = sign_certificate_with_ca(&ca_key_pair, subject_config);
-    assert!(
-        result.is_ok(),
-        "Failed to sign certificate with CA: {:?}",
-        result
-    );
-
-    let signed_cert = result.unwrap();
-
-    // Verify the signed certificate
-    let cert_info = extract_certificate_info(&signed_cert.certificate).unwrap();
-    assert_eq!(cert_info.subject_cn, "User test-user@example.com");
-
-    // Note: Since rcgen doesn't support proper CA signing in the current version,
-    // we'll skip the issuer check for now. In a full implementation, this would verify:
-    // assert!(cert_info.issuer_cn.contains("Test CA"));
+    assert!(matches!(result, Err(crate::Error::UnsupportedFeature(_))));
 }
 
 #[test]
@@ -209,25 +173,13 @@ fn test_mikey_pke_init() {
 
     // Initialize PKE mode
     let result = initiator.init();
-    assert!(
-        result.is_ok(),
-        "Failed to initialize MIKEY-PKE initiator: {:?}",
-        result
-    );
-
-    // Should have generated SRTP keys during initialization
-    assert!(
-        initiator.get_srtp_key().is_some(),
-        "MIKEY-PKE should generate SRTP keys"
-    );
-    assert!(
-        initiator.get_srtp_suite().is_some(),
-        "MIKEY-PKE should have SRTP suite"
-    );
+    assert!(matches!(result, Err(crate::Error::UnsupportedFeature(_))));
+    assert!(initiator.get_srtp_key().is_none());
+    assert!(initiator.get_srtp_suite().is_none());
 }
 
 #[test]
-fn test_mikey_pke_vs_psk_mode() {
+fn test_mikey_pke_and_psk_modes_are_unavailable() {
     use crate::security::mikey::crypto::{generate_key_pair_and_certificate, CertificateConfig};
 
     // Test PSK mode
@@ -241,10 +193,12 @@ fn test_mikey_pke_vs_psk_mode() {
 
     let mut psk_mikey = Mikey::new(psk_config, MikeyRole::Initiator);
     let psk_result = psk_mikey.init();
-    assert!(
-        psk_result.is_ok(),
-        "PSK mode should initialize successfully"
-    );
+    assert!(matches!(
+        psk_result,
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
+    assert_eq!(psk_mikey.state, MikeyState::Initial);
+    assert!(psk_mikey.get_srtp_key().is_none());
 
     // Test PKE mode
     let server_config = CertificateConfig::enterprise_server("test.example.com");
@@ -264,16 +218,11 @@ fn test_mikey_pke_vs_psk_mode() {
 
     let mut pke_mikey = Mikey::new(pke_config, MikeyRole::Initiator);
     let pke_result = pke_mikey.init();
-    assert!(
-        pke_result.is_ok(),
-        "PKE mode should initialize successfully"
-    );
-
-    // Both should have SRTP keys available
-    assert!(
-        psk_mikey.get_srtp_key().is_some() || pke_mikey.get_srtp_key().is_some(),
-        "At least one method should provide SRTP keys"
-    );
+    assert!(matches!(
+        pke_result,
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
+    assert!(pke_mikey.get_srtp_key().is_none());
 }
 
 #[test]
@@ -298,41 +247,34 @@ fn test_mikey_pke_unified_security_integration() {
 
     // Create unified security context
     let result = SecurityContextFactory::create_context(security_config);
-    assert!(
-        result.is_ok(),
-        "Failed to create unified security context for MIKEY-PKE: {:?}",
-        result
-    );
-
-    let context = result.unwrap();
-    assert_eq!(
-        context.get_method(),
-        crate::api::common::config::KeyExchangeMethod::Mikey
-    );
+    assert!(matches!(
+        result,
+        Err(crate::api::common::error::SecurityError::UnsupportedFeature(_))
+    ));
 }
 
 #[test]
-fn test_mikey_certificate_validation() {
+fn test_mikey_certificate_validation_fails_closed() {
     use crate::security::mikey::crypto::{
-        generate_ca_certificate, sign_certificate_with_ca, validate_certificate_chain,
-        CertificateConfig,
+        generate_ca_certificate, validate_certificate_chain, CertificateConfig,
     };
 
     // Generate CA
     let ca_config = CertificateConfig::enterprise_server("Validation Test CA");
     let ca_keys = generate_ca_certificate(ca_config).unwrap();
 
-    // Generate subject certificate
-    let subject_config = CertificateConfig::enterprise_client("validation-test@example.com");
-    let subject_keys = sign_certificate_with_ca(&ca_keys, subject_config).unwrap();
+    // Even parseable, currently valid certificates cannot be elevated to a
+    // trusted chain without issuer/signature verification.
+    let validation_result = validate_certificate_chain(&ca_keys.certificate, &ca_keys.certificate);
+    assert!(matches!(
+        validation_result,
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
 
-    // Validate certificate chain
-    let validation_result =
-        validate_certificate_chain(&subject_keys.certificate, &ca_keys.certificate);
-
-    assert!(
-        validation_result.is_ok(),
-        "Certificate chain validation should succeed: {:?}",
-        validation_result
-    );
+    // Malformed inputs take the same fail-closed capability path and cannot
+    // accidentally be reported as an ordinary validation result.
+    assert!(matches!(
+        validate_certificate_chain(b"not-a-certificate", b"not-a-ca"),
+        Err(crate::Error::UnsupportedFeature(_))
+    ));
 }

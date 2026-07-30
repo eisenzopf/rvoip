@@ -24,13 +24,14 @@ use crate::api::server::security::core::connection;
 use crate::api::server::security::core::context;
 use crate::api::server::security::dtls::transport;
 use crate::api::server::security::srtp::keys;
-use crate::api::server::security::util::conversion;
 
 /// Default implementation of the ServerSecurityContext
 #[derive(Clone)]
 pub struct DefaultServerSecurityContext {
     /// Configuration
     config: ServerSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// Main DTLS connection template (for certificate/settings)
     connection_template: Arc<Mutex<Option<DtlsConnection>>>,
     /// Client security contexts
@@ -47,16 +48,37 @@ impl DefaultServerSecurityContext {
     pub async fn new(
         config: ServerSecurityConfig,
     ) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
+        config.validate()?;
+        if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "DTLS server context cannot implement {:?}",
+                config.security_mode
+            )));
+        }
         // Verify we have SRTP profiles configured
         if config.srtp_profiles.is_empty() {
             return Err(SecurityError::Configuration(
                 "No SRTP profiles specified in server config".to_string(),
             ));
         }
+        if let Some(profile) = config
+            .srtp_profiles
+            .iter()
+            .copied()
+            .find(|profile| !profile.is_supported())
+        {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "SRTP profile {profile:?} is not implemented"
+            )));
+        }
+
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
 
         // Create the server context
         let ctx = Self {
             config: config.clone(),
+            advertised_profiles,
             connection_template: Arc::new(Mutex::new(None)),
             clients: Arc::new(RwLock::new(HashMap::new())),
             socket: Arc::new(Mutex::new(None)),
@@ -146,9 +168,11 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             version: crate::dtls::DtlsVersion::Dtls12,
             mtu: 1500,
             max_retransmissions: 5,
-            srtp_profiles: keys::convert_profiles(&self.config.srtp_profiles),
+            srtp_profiles: keys::convert_profiles(&self.config.srtp_profiles)?,
         };
-        let mut connection = crate::dtls::DtlsConnection::new(dtls_config);
+        let mut connection = crate::dtls::create_connection(dtls_config)
+            .await
+            .map_err(SecurityError::from)?;
 
         // Set certificate
         let cert = match self.connection_template.lock().await.as_ref() {
@@ -193,7 +217,7 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
             Some(socket.clone()),
             self.config.clone(),
             Some(transport.clone()),
-        ));
+        )?);
 
         // Start a task to monitor the handshake
         let client_ctx_clone = client_ctx.clone();
@@ -277,13 +301,15 @@ impl ServerSecurityContext for DefaultServerSecurityContext {
     }
 
     fn get_security_info(&self) -> SecurityInfo {
-        // Create a basic security info with what we know synchronously
-        conversion::create_security_info(
-            self.config.security_mode,
-            None, // Will be filled by async get_fingerprint method
-            &self.config.fingerprint_algorithm,
-            &self.config.srtp_profiles,
-        )
+        let crypto_suites = self.advertised_profiles.clone();
+        SecurityInfo {
+            mode: self.config.security_mode,
+            fingerprint: None,
+            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
+            srtp_profile: crypto_suites.first().cloned(),
+            crypto_suites,
+            key_params: None,
+        }
     }
 
     async fn process_client_packet(

@@ -19,7 +19,7 @@ use crate::security::{
     sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
     SecurityKeyExchange,
 };
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
+use crate::srtp::SrtpContext;
 
 /// SDES server configuration
 #[derive(Debug, Clone)]
@@ -85,16 +85,17 @@ pub struct SdesServerSession {
 
 impl SdesServerSession {
     /// Create a new SDES server session
-    pub fn new(session_id: String, config: SdesServerConfig) -> Self {
-        // Convert API config to core SDES config
+    pub fn new(session_id: String, config: SdesServerConfig) -> Result<Self, SecurityError> {
+        let crypto_suites =
+            crate::api::common::config::implemented_srtp_suites(&config.supported_profiles)?;
         let sdes_config = SdesConfig {
-            crypto_suites: Self::convert_srtp_profiles(&config.supported_profiles),
+            crypto_suites,
             offer_count: config.offer_count,
         };
 
         let sdes = Sdes::new(sdes_config, SdesRole::Offerer);
 
-        Self {
+        Ok(Self {
             session_id,
             config,
             state: Arc::new(RwLock::new(SdesServerState::Initial)),
@@ -102,11 +103,14 @@ impl SdesServerSession {
             srtp_context: Arc::new(RwLock::new(None)),
             generated_crypto: Arc::new(RwLock::new(Vec::new())),
             selected_crypto: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Create SDES server session from security config
-    pub fn from_security_config(session_id: String, config: &SecurityConfig) -> Self {
+    pub fn from_security_config(
+        session_id: String,
+        config: &SecurityConfig,
+    ) -> Result<Self, SecurityError> {
         let server_config = SdesServerConfig {
             supported_profiles: config.srtp_profiles.clone(),
             offer_count: config.srtp_profiles.len().min(4),
@@ -114,29 +118,6 @@ impl SdesServerSession {
             max_concurrent_exchanges: 100,
         };
         Self::new(session_id, server_config)
-    }
-
-    /// Convert API SRTP profiles to core crypto suites
-    fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<SrtpCryptoSuite> {
-        profiles
-            .iter()
-            .filter_map(|profile| {
-                match profile {
-                    SrtpProfile::AesCm128HmacSha1_80 => Some(SRTP_AES128_CM_SHA1_80),
-                    SrtpProfile::AesCm128HmacSha1_32 => Some(SRTP_AES128_CM_SHA1_32),
-                    SrtpProfile::AesGcm128 => {
-                        // AES-GCM not implemented in core yet
-                        debug!("AES-GCM profile not yet supported, skipping");
-                        None
-                    }
-                    SrtpProfile::AesGcm256 => {
-                        // AES-GCM not implemented in core yet
-                        debug!("AES-GCM-256 profile not yet supported, skipping");
-                        None
-                    }
-                }
-            })
-            .collect()
     }
 
     /// Get current state
@@ -368,15 +349,16 @@ pub struct SdesServer {
 
 impl SdesServer {
     /// Create a new SDES server
-    pub fn new(config: SdesServerConfig) -> Self {
-        Self {
+    pub fn new(config: SdesServerConfig) -> Result<Self, SecurityError> {
+        crate::api::common::config::implemented_srtp_suites(&config.supported_profiles)?;
+        Ok(Self {
             config,
             sessions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        }
+        })
     }
 
     /// Create SDES server from security config
-    pub fn from_security_config(config: &SecurityConfig) -> Self {
+    pub fn from_security_config(config: &SecurityConfig) -> Result<Self, SecurityError> {
         let server_config = SdesServerConfig {
             supported_profiles: config.srtp_profiles.clone(),
             offer_count: config.srtp_profiles.len().min(4),
@@ -409,7 +391,7 @@ impl SdesServer {
         let session = Arc::new(SdesServerSession::new(
             session_id.clone(),
             self.config.clone(),
-        ));
+        )?);
         sessions.insert(session_id.clone(), session.clone());
 
         info!(
@@ -453,12 +435,18 @@ impl SdesServer {
     }
 }
 
-/// SRTP-only server security context (no DTLS handshake)
-/// This implementation uses pre-shared keys negotiated through SIP/SDP
+/// Configuration-only companion for a pre-shared-key SRTP server.
+///
+/// This type validates and describes key material but does not own or install
+/// the [`crate::srtp::SrtpContext`] that protects media. The default media
+/// transport installs that crypto context separately; a standalone instance
+/// therefore reports [`ServerSecurityContext::is_secure`] as `false`.
 #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct SrtpServerSecurityContext {
     /// Configuration
     config: ServerSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// SDES server for key management
     #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     sdes_server: Arc<SdesServer>,
@@ -471,6 +459,11 @@ pub struct SrtpServerSecurityContext {
 impl SrtpServerSecurityContext {
     /// Create a new SRTP-only server security context
     pub async fn new(config: ServerSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        config.validate()?;
+
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+
         // Create SDES server config from security config
         let sdes_config = SdesServerConfig {
             supported_profiles: config.srtp_profiles.clone(),
@@ -479,10 +472,11 @@ impl SrtpServerSecurityContext {
             max_concurrent_exchanges: 100,
         };
 
-        let sdes_server = Arc::new(SdesServer::new(sdes_config));
+        let sdes_server = Arc::new(SdesServer::new(sdes_config)?);
 
         let ctx = Self {
             config,
+            advertised_profiles,
             sdes_server,
             socket: Arc::new(RwLock::new(None)),
             client_contexts: Arc::new(RwLock::new(Vec::new())),
@@ -586,30 +580,22 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
     }
 
     fn is_secure(&self) -> bool {
-        true // Pre-shared key SRTP is secure
+        false
     }
 
     fn get_security_info(&self) -> SecurityInfo {
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
+        let srtp_profile = crypto_suites.first().cloned();
 
         SecurityInfo {
             mode: SecurityMode::Srtp,
             fingerprint: None, // No fingerprint for pre-shared keys
             fingerprint_algorithm: None,
             crypto_suites,
-            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            key_params: Some(
+                "Configured pre-shared key; media crypto not installed here".to_string(),
+            ),
+            srtp_profile,
         }
     }
 
@@ -640,12 +626,15 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
     }
 }
 
-/// SRTP client context for server-side client handling
+/// Configuration-only SRTP client companion for server-side client handling.
+///
+/// It does not own or install media crypto and cannot by itself attest that
+/// the client connection is secure.
 pub struct SrtpServerClientContext {
     /// Client address
     addr: SocketAddr,
-    /// Server config
-    config: ServerSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// Socket handle
     socket: Arc<RwLock<Option<SocketHandle>>>,
 }
@@ -656,9 +645,12 @@ impl SrtpServerClientContext {
         addr: SocketAddr,
         config: ServerSecurityConfig,
     ) -> Result<Self, SecurityError> {
+        config.validate()?;
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
         Ok(Self {
             addr,
-            config,
+            advertised_profiles,
             socket: Arc::new(RwLock::new(None)),
         })
     }
@@ -695,30 +687,22 @@ impl ClientSecurityContext for SrtpServerClientContext {
     }
 
     fn is_secure(&self) -> bool {
-        true // Pre-shared key SRTP is secure
+        false
     }
 
     fn get_security_info(&self) -> SecurityInfo {
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .map(|p| match p {
-                SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
-                SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-                SrtpProfile::AesGcm128 => "AEAD_AES_128_GCM",
-                SrtpProfile::AesGcm256 => "AEAD_AES_256_GCM",
-            })
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
+        let srtp_profile = crypto_suites.first().cloned();
 
         SecurityInfo {
             mode: SecurityMode::Srtp,
             fingerprint: None,
             fingerprint_algorithm: None,
             crypto_suites,
-            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
-            srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
+            key_params: Some(
+                "Configured pre-shared key; media crypto not installed here".to_string(),
+            ),
+            srtp_profile,
         }
     }
 

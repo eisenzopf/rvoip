@@ -1,11 +1,14 @@
 //! Security Manager
 //!
-//! This module provides a high-level security manager that abstracts away
-//! the details of setting up secure connections.
+//! This module retains the high-level security-manager API. DTLS-SRTP is
+//! unavailable in 0.3.5, and its direct-PSK setup helpers are also unavailable
+//! because these manager contexts do not install crypto into a media transport.
 
+use crate::api::client::security::srtp::SrtpClientSecurityContext;
 use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
 use crate::api::common::config::{SecurityConfig, SecurityMode};
 use crate::api::common::error::SecurityError;
+use crate::api::server::security::srtp::SrtpServerSecurityContext;
 use crate::api::server::security::{
     DefaultServerSecurityContext, ServerSecurityContext, SocketHandle,
 };
@@ -15,9 +18,10 @@ use tokio::net::UdpSocket;
 
 /// High-level security manager for RTP transport
 ///
-/// This struct abstracts away the details of setting up secure connections
-/// between clients and servers, handling the DTLS handshake process, and
-/// managing security contexts.
+/// The configuration and method names are retained for compatibility. Use the
+/// default media client/server for direct PSK SRTP, or the unified security
+/// context's protect/unprotect API. This manager fails closed instead of
+/// reporting a configuration-only context as an active secure transport.
 pub struct SecurityManager {
     config: SecurityConfig,
     client_context: Option<Arc<dyn ClientSecurityContext>>,
@@ -34,7 +38,10 @@ impl SecurityManager {
         }
     }
 
-    /// Create a SecurityManager with WebRTC-compatible settings
+    /// Create a retained WebRTC/DTLS-SRTP manager configuration.
+    ///
+    /// DTLS-SRTP is unavailable in 0.3.5; setup and handshake methods return a
+    /// typed unsupported-feature error.
     pub fn webrtc_compatible() -> Self {
         Self::new(SecurityConfig::webrtc_compatible())
     }
@@ -49,11 +56,23 @@ impl SecurityManager {
         Self::new(SecurityConfig::srtp_with_key(key))
     }
 
+    fn validate_setup_request(&self) -> Result<(), SecurityError> {
+        self.config.validate()?;
+        if self.config.mode == SecurityMode::Srtp {
+            return Err(SecurityError::UnsupportedFeature(
+                "SecurityManager direct-PSK setup does not install SRTP crypto into the media transport; use the default media transport or unified protect/unprotect API"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Set up a server for secure communications
     pub async fn setup_server(
         &mut self,
         socket_addr: SocketAddr,
     ) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
+        self.validate_setup_request()?;
         // Create a security context for the server
         let server_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -94,7 +113,17 @@ impl SecurityManager {
         };
 
         // Create the server security context
-        let server_ctx = DefaultServerSecurityContext::new(server_security_config).await?;
+        let server_ctx: Arc<dyn ServerSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpServerSecurityContext::new(server_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultServerSecurityContext::new(server_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "server context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Bind a socket for DTLS
         let socket =
@@ -129,6 +158,7 @@ impl SecurityManager {
         &mut self,
         socket: Arc<UdpSocket>,
     ) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
+        self.validate_setup_request()?;
         // Create a security context for the server
         let server_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -169,7 +199,17 @@ impl SecurityManager {
         };
 
         // Create the server security context
-        let server_ctx = DefaultServerSecurityContext::new(server_security_config).await?;
+        let server_ctx: Arc<dyn ServerSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpServerSecurityContext::new(server_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultServerSecurityContext::new(server_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "server context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Create a socket handle for the server
         let socket_handle = SocketHandle {
@@ -198,6 +238,7 @@ impl SecurityManager {
         &mut self,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
+        self.validate_setup_request()?;
         // Create a security context for the client
         let client_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -242,7 +283,17 @@ impl SecurityManager {
         };
 
         // Create the client security context
-        let client_ctx = DefaultClientSecurityContext::new(client_security_config).await?;
+        let client_ctx: Arc<dyn ClientSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpClientSecurityContext::new(client_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultClientSecurityContext::new(client_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "client context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Bind a socket for DTLS
         let local_addr = SocketAddr::new(remote_addr.ip(), 0); // Use ephemeral port
@@ -277,6 +328,7 @@ impl SecurityManager {
         socket: Arc<UdpSocket>,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
+        self.validate_setup_request()?;
         // Create a security context for the client
         let client_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -321,7 +373,17 @@ impl SecurityManager {
         };
 
         // Create the client security context
-        let client_ctx = DefaultClientSecurityContext::new(client_security_config).await?;
+        let client_ctx: Arc<dyn ClientSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpClientSecurityContext::new(client_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultClientSecurityContext::new(client_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "client context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Create a socket handle for the client
         let socket_handle = SocketHandle {
@@ -343,12 +405,15 @@ impl SecurityManager {
         Ok(client_ctx)
     }
 
-    /// Perform a DTLS handshake for a client to connect to a server
-    /// This method automatically handles packet processing until completion or timeout
+    /// Retained DTLS handshake entry point.
+    ///
+    /// DTLS-SRTP is unavailable in 0.3.5, so this returns a typed
+    /// unsupported-feature error before examining or mutating manager state.
     pub async fn perform_handshake(
         &self,
         remote_fingerprint: Option<String>,
     ) -> Result<(), SecurityError> {
+        self.config.validate()?;
         if self.config.mode != SecurityMode::DtlsSrtp {
             return Err(SecurityError::Configuration(
                 "Handshake only applicable for DTLS-SRTP mode".to_string(),
@@ -579,5 +644,63 @@ impl SecurityManager {
                 "Server context not initialized".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn srtp_config() -> SecurityConfig {
+        SecurityConfig::srtp_with_key(vec![0x42; 30])
+    }
+
+    #[tokio::test]
+    async fn all_security_manager_psk_setup_paths_fail_before_state_mutation() {
+        let bind_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+        let mut server_manager = SecurityManager::new(srtp_config());
+        assert!(matches!(
+            server_manager.setup_server(bind_addr).await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(server_manager.server_context.is_none());
+
+        let server_socket = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
+        let mut existing_server_manager = SecurityManager::new(srtp_config());
+        assert!(matches!(
+            existing_server_manager
+                .setup_server_with_socket(server_socket)
+                .await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(existing_server_manager.server_context.is_none());
+
+        let remote = SocketAddr::from(([127, 0, 0, 1], 9));
+        let mut client_manager = SecurityManager::new(srtp_config());
+        assert!(matches!(
+            client_manager.setup_client(remote).await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(client_manager.client_context.is_none());
+
+        let client_socket = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
+        let mut existing_client_manager = SecurityManager::new(srtp_config());
+        assert!(matches!(
+            existing_client_manager
+                .setup_client_with_socket(client_socket, remote)
+                .await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        assert!(existing_client_manager.client_context.is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_dtls_handshake_entry_point_returns_typed_unsupported() {
+        let manager = SecurityManager::webrtc_compatible();
+        assert!(matches!(
+            manager.perform_handshake(None).await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 }
