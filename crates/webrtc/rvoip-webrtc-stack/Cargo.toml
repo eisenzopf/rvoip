@@ -189,6 +189,10 @@ path = "tests/peer_connection_test.rs"
 name = "simulcast_rtc_to_webrtc_interop"
 path = "tests/simulcast_rtc_to_webrtc_interop.rs"
 
+[[test]]
+name = "tokio_only_runtime"
+path = "tests/tokio_only_runtime.rs"
+
 [dependencies.async-broadcast]
 version = "0.7"
 optional = true
