@@ -10,7 +10,11 @@ use crate::utils::validate_opus_frame;
 use std::sync::Mutex;
 use tracing::{debug, trace};
 
-const MAX_OPUS_PACKET_BYTES: usize = 1275;
+// libopus permits callers to provide up to 4,000 bytes to one encode call.
+// RFC 6716's 1,275-byte limit is per frame; a packet can contain multiple
+// frames (including a 60 ms high-bitrate packet), so it is not a safe output
+// buffer contract for the encoder API.
+const MAX_OPUS_PACKET_BYTES: usize = 4_000;
 
 // Re-export OpusApplication from types to avoid duplication
 pub use crate::types::OpusApplication;
@@ -695,6 +699,25 @@ mod tests {
                 .unwrap(),
             5_760
         );
+    }
+
+    #[test]
+    fn max_bitrate_sixty_ms_encode_uses_the_libopus_packet_contract() {
+        let config = create_test_config()
+            .with_channels(2)
+            .with_frame_size_ms(60.0)
+            .with_bitrate(510_000);
+        let mut codec = OpusCodec::new(config).unwrap();
+        let samples: Vec<i16> = (0_usize..2_880)
+            .flat_map(|index| {
+                let left = ((index.wrapping_mul(7_919) % 65_535) as i32 - 32_767) as i16;
+                [left, left.wrapping_neg()]
+            })
+            .collect();
+        let encoded = codec.encode(&samples).unwrap();
+        assert!(!encoded.is_empty());
+        assert!(encoded.len() <= MAX_OPUS_PACKET_BYTES);
+        assert_eq!(codec.max_encoded_size(samples.len()), MAX_OPUS_PACKET_BYTES);
     }
 
     #[test]

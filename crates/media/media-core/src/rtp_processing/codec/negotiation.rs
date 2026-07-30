@@ -78,6 +78,15 @@ impl CodecCapability {
             return false;
         }
 
+        // RTP clock rates and audio channel counts are part of a codec's
+        // encoding identity. Choosing the smaller value would describe a
+        // format neither endpoint actually advertised.
+        if self.codec.clock_rate != other.codec.clock_rate
+            || (self.codec.is_audio() && self.codec.channels != other.codec.channels)
+        {
+            return false;
+        }
+
         // Check direction compatibility
         match (self.direction, other.direction) {
             (MediaDirection::SendOnly, MediaDirection::ReceiveOnly) => true,
@@ -293,17 +302,19 @@ impl CodecNegotiator {
         remote: &CodecCapability,
     ) -> Result<NegotiationResult, MediaError> {
         // Create negotiated codec
-        let mut codec = local.codec.clone();
+        let codec = local.codec.clone();
 
-        // Negotiate clock rate (use minimum of both)
-        if local.codec.clock_rate != remote.codec.clock_rate {
-            codec.clock_rate = local.codec.clock_rate.min(remote.codec.clock_rate);
-            debug!("Negotiated clock rate: {} Hz", codec.clock_rate);
-        }
-
-        // Negotiate channels (use minimum for audio)
-        if let (Some(local_ch), Some(remote_ch)) = (local.codec.channels, remote.codec.channels) {
-            codec.channels = Some(local_ch.min(remote_ch));
+        if local.codec.clock_rate != remote.codec.clock_rate
+            || (local.codec.is_audio() && local.codec.channels != remote.codec.channels)
+        {
+            return Err(MediaError::ConfigError(format!(
+                "Codec shape mismatch for {}: local {}Hz/{:?}ch, remote {}Hz/{:?}ch",
+                codec.name,
+                local.codec.clock_rate,
+                local.codec.channels,
+                remote.codec.clock_rate,
+                remote.codec.channels
+            )));
         }
 
         // Negotiate parameters
@@ -489,6 +500,18 @@ mod tests {
         );
 
         assert!(!opus_cap.is_compatible_with(&pcmu_cap));
+    }
+
+    #[test]
+    fn matching_name_with_different_rate_or_channels_is_incompatible() {
+        let capability = |rate, channels| {
+            CodecCapability::new(
+                MediaCodec::new("Opus".to_string(), 111, rate).with_channels(channels),
+                MediaDirection::SendReceive,
+            )
+        };
+        assert!(!capability(48_000, 2).is_compatible_with(&capability(16_000, 2)));
+        assert!(!capability(48_000, 2).is_compatible_with(&capability(48_000, 1)));
     }
 
     #[cfg(feature = "opus")]

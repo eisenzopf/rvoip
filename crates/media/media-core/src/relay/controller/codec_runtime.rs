@@ -106,6 +106,15 @@ fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
     }
 
     if codec.name.eq_ignore_ascii_case("opus") {
+        if codec.payload_type < 96 || codec.payload_type == 101 {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "Opus requires a negotiated dynamic RTP payload type, got {}",
+                    codec.payload_type
+                ),
+            }
+            .into());
+        }
         if codec.clock_rate != 48_000 || !matches!(codec.channels, 1 | 2) {
             return Err(CodecError::InvalidParameters {
                 details: format!(
@@ -115,6 +124,30 @@ fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
             }
             .into());
         }
+    } else if codec.name.eq_ignore_ascii_case("PCMU") && codec.payload_type != 0 {
+        return Err(CodecError::InvalidParameters {
+            details: format!(
+                "PCMU requires static RTP payload type 0, got {}",
+                codec.payload_type
+            ),
+        }
+        .into());
+    } else if codec.name.eq_ignore_ascii_case("PCMA") && codec.payload_type != 8 {
+        return Err(CodecError::InvalidParameters {
+            details: format!(
+                "PCMA requires static RTP payload type 8, got {}",
+                codec.payload_type
+            ),
+        }
+        .into());
+    } else if normalized_codec_name(&codec.name).starts_with("G729") && codec.payload_type != 18 {
+        return Err(CodecError::InvalidParameters {
+            details: format!(
+                "G.729 requires static RTP payload type 18, got {}",
+                codec.payload_type
+            ),
+        }
+        .into());
     } else if codec.clock_rate != 8_000 || codec.channels != 1 {
         return Err(CodecError::InvalidParameters {
             details: format!(
@@ -305,6 +338,32 @@ mod tests {
             assert!(matches!(
                 resolve_codec(&config(name)),
                 Err(Error::Codec(CodecError::UnsupportedCodec { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn static_codec_payload_identity_is_enforced() {
+        for invalid in [
+            config("PCMU").with_negotiated_audio_codec("PCMU", 8, 8_000, 1),
+            config("PCMA").with_negotiated_audio_codec("PCMA", 0, 8_000, 1),
+        ] {
+            assert!(matches!(
+                resolve_codec(&invalid),
+                Err(Error::Codec(CodecError::InvalidParameters { .. }))
+            ));
+        }
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn opus_requires_a_dynamic_non_dtmf_payload() {
+        for payload_type in [0, 8, 18, 101] {
+            let invalid =
+                config("opus").with_negotiated_audio_codec("opus", payload_type, 48_000, 2);
+            assert!(matches!(
+                resolve_codec(&invalid),
+                Err(Error::Codec(CodecError::InvalidParameters { .. }))
             ));
         }
     }

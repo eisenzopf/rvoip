@@ -359,6 +359,11 @@ impl SdpMediaProcessor {
                     || crate::codec::audio_codec_available(&capability.codec.name)
             })
             .collect();
+        if capabilities.is_empty() {
+            return Err(MediaError::ConfigError(format!(
+                "No available {media_type} codecs remain after capability filtering"
+            )));
+        }
         let payload_types: Vec<u8> = capabilities
             .iter()
             .map(|capability| capability.codec.payload_type)
@@ -660,5 +665,18 @@ mod tests {
         #[cfg(not(feature = "opus"))]
         assert!(!description.media_line.payload_types.contains(&111));
         assert!(description.media_line.payload_types.contains(&0));
+    }
+
+    #[test]
+    fn filtered_audio_capabilities_cannot_create_an_empty_media_line() {
+        let processor = SdpMediaProcessor::new();
+        let unsupported = [CodecCapability::new(
+            MediaCodec::new("G722".to_string(), 9, 8_000).with_channels(1),
+            MediaDirection::SendOnly,
+        )];
+        assert!(matches!(
+            processor.capabilities_to_sdp(&unsupported, "audio", 5_004),
+            Err(MediaError::ConfigError(_))
+        ));
     }
 }
