@@ -122,6 +122,29 @@ fn active_auth_required_retries_for_uac_and_uas_dialog_roles() {
 }
 
 #[test]
+fn outbound_reinvite_applies_answer_and_acknowledges_before_commit() {
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
+    let transition = table
+        .get(&StateKey {
+            role: Role::Both,
+            state: CallState::Active,
+            event: EventType::Dialog200OK,
+        })
+        .expect("outbound re-INVITE success transition");
+
+    assert_eq!(
+        transition.actions.first(),
+        Some(&Action::NegotiateSDPAsUAC),
+        "the received SDP answer must be applied before pending renegotiation state is committed"
+    );
+    assert_eq!(
+        transition.actions.get(1),
+        Some(&Action::SendACK),
+        "a successful re-INVITE must be acknowledged before its pending state is committed"
+    );
+}
+
+#[test]
 fn test_hold_resume_transitions() {
     let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
