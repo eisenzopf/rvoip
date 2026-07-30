@@ -84,12 +84,19 @@ pub struct CodecConfig {
 
 impl Default for CodecConfig {
     fn default() -> Self {
+        let enabled_payload_types = vec![
+            0, // PCMU
+            8, // PCMA
+        ];
+        #[cfg(feature = "opus")]
+        let enabled_payload_types = {
+            let mut payload_types = enabled_payload_types;
+            payload_types.push(111); // Common dynamic Opus mapping
+            payload_types
+        };
+
         Self {
-            enabled_payload_types: vec![
-                0,   // PCMU
-                8,   // PCMA
-                111, // Opus (dynamic)
-            ],
+            enabled_payload_types,
             preferred_codec: 0,        // PCMU by default
             enable_transcoding: false, // Disabled by default
             max_complexity: 5,         // Medium complexity

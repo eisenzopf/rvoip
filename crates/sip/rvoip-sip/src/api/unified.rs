@@ -2264,10 +2264,10 @@ pub struct Config {
     /// Beta validation intentionally rejects audio payload types that
     /// media-core cannot encode/decode end to end. The advertised full-media
     /// set is limited to PCMU (`0`), PCMA (`8`), telephone-event (`101`),
-    /// comfort noise (`13`) when `comfort_noise_enabled = true`, and G.729
-    /// (`18`) when the `g729` feature is enabled. Opus (`111`) and G.722 (`9`)
-    /// remain post-beta or signaling-only experiments until media-core support
-    /// is wired through and covered by interop/perf tests.
+    /// comfort noise (`13`) when `comfort_noise_enabled = true`, G.729 (`18`)
+    /// when the `g729` feature is enabled, and Opus (`111`) when the `opus`
+    /// feature is enabled. G.722 (`9`) retains wire metadata support but is
+    /// rejected because no working encoder/decoder is implemented.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,

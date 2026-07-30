@@ -18,80 +18,16 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::codec::audio::common::AudioCodec;
 use crate::error::{Error, Result};
-use crate::types::{DialogId, MediaDirection};
+use crate::types::{AudioFrame, DialogId, MediaDirection};
 use rvoip_rtp_core::RtpSession;
 
 use super::{
     audio_generation::{AudioSource, AudioTransmitter, AudioTransmitterConfig},
     MediaSessionController,
 };
-
-#[cfg(feature = "g729")]
-fn g729_annex_b_enabled(codec_name: Option<&str>) -> bool {
-    match codec_name {
-        Some(name)
-            if name.eq_ignore_ascii_case("G729A")
-                || name.eq_ignore_ascii_case("G.729A")
-                || name.eq_ignore_ascii_case("G729 annex A") =>
-        {
-            false
-        }
-        Some(name)
-            if name.eq_ignore_ascii_case("G729BA")
-                || name.eq_ignore_ascii_case("G729AB")
-                || name.eq_ignore_ascii_case("G.729AB")
-                || name.eq_ignore_ascii_case("G.729BA") =>
-        {
-            true
-        }
-        _ => true,
-    }
-}
-
-#[cfg(feature = "g729")]
-fn g729_config(annex_b: bool) -> crate::codec::audio::G729Config {
-    crate::codec::audio::G729Config {
-        annexes: crate::codec::audio::G729Annexes {
-            annex_a: true,
-            annex_b,
-        },
-        frame_size_ms: 10.0,
-        enable_vad: annex_b,
-        enable_cng: annex_b,
-    }
-}
-
-#[cfg(feature = "g729")]
-fn encode_g729_payload(
-    codec: &mut crate::codec::audio::G729Codec,
-    audio_frame: &crate::types::AudioFrame,
-) -> Result<Vec<u8>> {
-    const G729_SAMPLES_PER_FRAME: usize = 80;
-
-    if audio_frame.samples.len() % G729_SAMPLES_PER_FRAME != 0 {
-        return Err(crate::error::CodecError::InvalidFrameSize {
-            expected: G729_SAMPLES_PER_FRAME,
-            actual: audio_frame.samples.len(),
-        }
-        .into());
-    }
-
-    let mut encoded = Vec::with_capacity(audio_frame.samples.len() / G729_SAMPLES_PER_FRAME * 10);
-    for chunk in audio_frame.samples.chunks_exact(G729_SAMPLES_PER_FRAME) {
-        let frame = crate::types::AudioFrame::new(
-            chunk.to_vec(),
-            audio_frame.sample_rate,
-            audio_frame.channels,
-            audio_frame.timestamp,
-        );
-        encoded.extend(codec.encode(&frame)?);
-    }
-    Ok(encoded)
-}
 
 impl MediaSessionController {
     /// Apply RTP/audio direction for SIP offer/answer changes.
@@ -161,7 +97,13 @@ impl MediaSessionController {
                 } else {
                     // Replace with a freshly-started transmitter.
                     let config = AudioTransmitterConfig::default();
-                    let mut replacement = AudioTransmitter::new_with_config(session, config);
+                    let runtime = self
+                        .codec_runtimes
+                        .get(dialog_id)
+                        .map(|entry| Arc::clone(entry.value()))
+                        .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+                    let mut replacement =
+                        AudioTransmitter::new_with_config(session, config, runtime);
                     replacement.start().await;
                     if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
                         entry.value_mut().audio_transmitter = Some(replacement);
@@ -203,6 +145,34 @@ impl MediaSessionController {
         payload: Vec<u8>,
         timestamp: u32,
     ) -> Result<()> {
+        self.send_rtp_packet_inner(dialog_id, payload, timestamp, None)
+            .await
+    }
+
+    /// Send an RTP packet with an explicit payload type from the same codec
+    /// generation that produced the encoded bytes.
+    ///
+    /// This prevents an in-flight frame from being relabeled if a concurrent
+    /// renegotiation changes the session's default payload type between encode
+    /// and enqueue.
+    pub async fn send_rtp_packet_with_payload_type(
+        &self,
+        dialog_id: &DialogId,
+        payload: Vec<u8>,
+        timestamp: u32,
+        payload_type: u8,
+    ) -> Result<()> {
+        self.send_rtp_packet_inner(dialog_id, payload, timestamp, Some(payload_type))
+            .await
+    }
+
+    async fn send_rtp_packet_inner(
+        &self,
+        dialog_id: &DialogId,
+        payload: Vec<u8>,
+        timestamp: u32,
+        payload_type: Option<u8>,
+    ) -> Result<()> {
         let rtp_session = self
             .get_rtp_session(dialog_id)
             .await
@@ -216,19 +186,27 @@ impl MediaSessionController {
 
         let payload_bytes = Bytes::from(payload);
         if let Some(handle) = send_handle {
-            handle
-                .send_packet(timestamp, payload_bytes, false)
-                .await
-                .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+            let result = if let Some(payload_type) = payload_type {
+                handle
+                    .send_packet_with_pt(timestamp, payload_bytes, false, payload_type)
+                    .await
+            } else {
+                handle.send_packet(timestamp, payload_bytes, false).await
+            };
+            result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         } else {
             // Fallback: session has no scheduler (shouldn't happen in
             // production; see RtpSession::new). Lock and call send_packet
             // through the legacy path.
             let session = rtp_session.lock().await;
-            session
-                .send_packet(timestamp, payload_bytes, false)
-                .await
-                .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+            let result = if let Some(payload_type) = payload_type {
+                session
+                    .send_packet_with_pt(timestamp, payload_bytes, false, payload_type)
+                    .await
+            } else {
+                session.send_packet(timestamp, payload_bytes, false).await
+            };
+            result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
 
         info!(
@@ -408,7 +386,7 @@ impl MediaSessionController {
         // Snapshot the per-session Arc + check the already-started
         // guard inside the shard guard, drop the guard, then build &
         // start the transmitter outside the lock.
-        let session_arc = {
+        let (session_arc, codec_runtime) = {
             let entry = self
                 .rtp_sessions
                 .get(dialog_id)
@@ -417,10 +395,16 @@ impl MediaSessionController {
             if wrapper.transmission_enabled && wrapper.audio_transmitter.is_some() {
                 return Ok(()); // Already started
             }
-            wrapper.session.clone()
+            let runtime = self
+                .codec_runtimes
+                .get(dialog_id)
+                .map(|entry| Arc::clone(entry.value()))
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            (wrapper.session.clone(), runtime)
         };
 
-        let mut audio_transmitter = AudioTransmitter::new_with_config(session_arc, config);
+        let mut audio_transmitter =
+            AudioTransmitter::new_with_config(session_arc, config, codec_runtime);
         audio_transmitter.start().await;
 
         // Re-acquire the shard guard to install the transmitter.
@@ -740,10 +724,34 @@ impl MediaSessionController {
         pcm_samples: Vec<i16>,
         timestamp: u32,
     ) -> Result<()> {
+        let runtime = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        self.encode_and_send_audio(
+            dialog_id,
+            AudioFrame::new(
+                pcm_samples,
+                runtime.format.clock_rate,
+                runtime.format.channels,
+                timestamp,
+            ),
+        )
+        .await
+    }
+
+    /// Encode and send a PCM frame without discarding its negotiated sample
+    /// rate or channel shape.
+    pub async fn encode_and_send_audio(
+        &self,
+        dialog_id: &DialogId,
+        audio_frame: AudioFrame,
+    ) -> Result<()> {
         info!(
             "🎯 encode_and_send_audio_frame called for dialog: {} with {} samples",
             dialog_id,
-            pcm_samples.len()
+            audio_frame.samples.len()
         );
 
         // Check if transmission is enabled and if audio is muted.
@@ -778,12 +786,23 @@ impl MediaSessionController {
         }
 
         // Replace with silence if muted
-        let pcm_samples = if is_muted {
+        let audio_frame = if is_muted {
             debug!("🔇 Audio muted for dialog: {}, sending silence", dialog_id);
-            vec![0i16; pcm_samples.len()] // PCM silence is zero
+            AudioFrame::new(
+                vec![0i16; audio_frame.samples.len()],
+                audio_frame.sample_rate,
+                audio_frame.channels,
+                audio_frame.timestamp,
+            )
         } else {
-            pcm_samples
+            audio_frame
         };
+
+        let codec_runtime = self
+            .codec_runtimes
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
         // Sprint 3.6 C1 follow-up — RFC 3389 Comfort Noise gating.
         // When CN is enabled at the controller level, run the
@@ -791,9 +810,10 @@ impl MediaSessionController {
         // whether to send the audio normally, suppress it (a recent
         // CN packet already covers this silence run), or emit one PT
         // 13 CN packet now and then suppress.
-        if self
-            .comfort_noise_enabled
-            .load(std::sync::atomic::Ordering::Relaxed)
+        if codec_runtime.format.clock_rate == 8_000
+            && self
+                .comfort_noise_enabled
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             // Build (or retrieve) the per-dialog gate. The gate's
             // CnTransmitter shares this dialog's RtpSession arc so PT
@@ -813,10 +833,9 @@ impl MediaSessionController {
                 gate_arc
             };
 
-            let frame = crate::types::AudioFrame::new(pcm_samples.clone(), 8000, 1, timestamp);
             let decision = {
                 let mut gate = gate_arc.lock().await;
-                gate.process_frame(&frame)
+                gate.process_frame(&audio_frame)
             };
             use crate::relay::controller::cn_gate::CnGateDecision;
             match decision {
@@ -847,78 +866,9 @@ impl MediaSessionController {
             }
         }
 
-        // Get session info to determine codec. DashMap shard guard
-        // is held only for the synchronous codec-mapper lookup.
-        info!("🔍 Looking for session for dialog: {}", dialog_id);
-        let (codec_payload_type, _preferred_codec) = self
-            .sessions
-            .get(dialog_id)
-            .ok_or_else(|| {
-                error!("❌ Session not found for dialog: {}", dialog_id);
-                Error::session_not_found(dialog_id.as_str())
-            })
-            .map(|entry| {
-                info!("✅ Found session for dialog: {}", dialog_id);
-                let preferred_codec = entry.value().config.preferred_codec.clone();
-                let pt = preferred_codec
-                    .as_ref()
-                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                    .unwrap_or(0); // Default to PCMU
-                info!("📝 Using payload type {} for dialog: {}", pt, dialog_id);
-                (pt, preferred_codec)
-            })?;
-
-        // Create AudioFrame for codec interface
-        let audio_frame = crate::types::AudioFrame::new(
-            pcm_samples,
-            8000, // Default for G.711
-            1,    // Default mono
-            timestamp,
-        );
-
-        // Encode based on payload type
-        let encoded_payload = match codec_payload_type {
-            0 => {
-                // PCMU encoding using media-core's G711Codec. Per
-                // Phase C5: G711Codec is stateless, so we instantiate
-                // per call instead of through a shared tokio::Mutex
-                // (which serialised every encode in every session).
-                use crate::codec::audio::G711Codec;
-                let mut codec = G711Codec::mu_law(8000, 1)?;
-                codec.encode(&audio_frame)?
-            }
-            8 => {
-                // PCMA encoding - create temporary codec
-                use crate::codec::audio::G711Codec;
-                let mut codec = G711Codec::a_law(8000, 1)?;
-                codec.encode(&audio_frame)?
-            }
-            #[cfg(feature = "g729")]
-            18 => {
-                let annex_b = g729_annex_b_enabled(_preferred_codec.as_deref());
-                let codec = if let Some(existing) = self.g729_tx_codecs.get(dialog_id) {
-                    existing.value().clone()
-                } else {
-                    let codec = crate::codec::audio::G729Codec::new(
-                        crate::types::SampleRate::Rate8000,
-                        1,
-                        g729_config(annex_b),
-                    )?;
-                    let codec = Arc::new(tokio::sync::Mutex::new(codec));
-                    self.g729_tx_codecs.insert(dialog_id.clone(), codec.clone());
-                    codec
-                };
-                let mut codec = codec.lock().await;
-                encode_g729_payload(&mut codec, &audio_frame)?
-            }
-            #[cfg(not(feature = "g729"))]
-            18 => return Err(Error::unsupported_payload_type(codec_payload_type)),
-            _ => {
-                // For other codecs, we would need to instantiate them here
-                // For now, return an error
-                return Err(Error::unsupported_payload_type(codec_payload_type));
-            }
-        };
+        let timestamp = audio_frame.timestamp;
+        let codec_payload_type = codec_runtime.format.payload_type;
+        let encoded_payload = codec_runtime.encode(&audio_frame).await?;
 
         // Send the encoded packet via RTP
         info!(
@@ -926,8 +876,13 @@ impl MediaSessionController {
             dialog_id,
             encoded_payload.len()
         );
-        self.send_rtp_packet(dialog_id, encoded_payload, timestamp)
-            .await?;
+        self.send_rtp_packet_with_payload_type(
+            dialog_id,
+            encoded_payload,
+            timestamp,
+            codec_payload_type,
+        )
+        .await?;
 
         info!(
             "✅ Encoded and sent audio frame for dialog: {} (codec PT: {}, timestamp: {})",

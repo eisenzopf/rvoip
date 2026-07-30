@@ -48,6 +48,10 @@ pub trait AudioCodec: Send + Sync {
     ///
     /// This clears all internal state and prepares the codec for fresh input.
     /// Useful for handling stream discontinuities.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the codec cannot reset its internal state.
     fn reset(&mut self) -> Result<()>;
 
     /// Get the expected frame size in samples
@@ -71,6 +75,11 @@ pub trait AudioCodecExt: AudioCodec {
     /// # Returns
     ///
     /// Number of bytes written to output buffer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the input is invalid, encoding fails, or the
+    /// output buffer is too small.
     fn encode_to_buffer(&mut self, samples: &[i16], output: &mut [u8]) -> Result<usize>;
 
     /// Decode with pre-allocated output buffer (zero-copy)
@@ -83,6 +92,11 @@ pub trait AudioCodecExt: AudioCodec {
     /// # Returns
     ///
     /// Number of samples written to output buffer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the packet is invalid, decoding fails, or the
+    /// output buffer is too small.
     fn decode_to_buffer(&mut self, data: &[u8], output: &mut [i16]) -> Result<usize>;
 
     /// Get maximum encoded size for a given input size
@@ -133,7 +147,8 @@ pub enum CodecType {
 
 impl CodecType {
     /// Get the codec name
-    pub fn name(self) -> &'static str {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::G711Pcmu => "PCMU",
             Self::G711Pcma => "PCMA",
@@ -146,27 +161,26 @@ impl CodecType {
     }
 
     /// Get the default sample rate
-    pub fn default_sample_rate(self) -> u32 {
+    #[must_use]
+    pub const fn default_sample_rate(self) -> u32 {
         match self {
-            Self::G711Pcmu | Self::G711Pcma => 8000,
-
-            Self::G729 | Self::G729A | Self::G729BA => 8000,
+            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => 8000,
             Self::Opus => 48000,
         }
     }
 
     /// Get the default bitrate
-    pub fn default_bitrate(self) -> u32 {
+    #[must_use]
+    pub const fn default_bitrate(self) -> u32 {
         match self {
-            Self::G711Pcmu | Self::G711Pcma => 64000,
-
+            Self::G711Pcmu | Self::G711Pcma | Self::Opus => 64000,
             Self::G729 | Self::G729A | Self::G729BA => 8000,
-            Self::Opus => 64000,
         }
     }
 
     /// Get the standard RTP payload type
-    pub fn payload_type(self) -> Option<u8> {
+    #[must_use]
+    pub const fn payload_type(self) -> Option<u8> {
         match self {
             Self::G711Pcmu => Some(0),
             Self::G711Pcma => Some(8),
@@ -177,17 +191,17 @@ impl CodecType {
     }
 
     /// Get supported sample rates
-    pub fn supported_sample_rates(self) -> &'static [u32] {
+    #[must_use]
+    pub const fn supported_sample_rates(self) -> &'static [u32] {
         match self {
-            Self::G711Pcmu | Self::G711Pcma => &[8000],
-
-            Self::G729 | Self::G729A | Self::G729BA => &[8000],
+            Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => &[8000],
             Self::Opus => &[8000, 12000, 16000, 24000, 48000],
         }
     }
 
     /// Get supported channel counts
-    pub fn supported_channels(self) -> &'static [u8] {
+    #[must_use]
+    pub const fn supported_channels(self) -> &'static [u8] {
         match self {
             Self::G711Pcmu | Self::G711Pcma | Self::G729 | Self::G729A | Self::G729BA => &[1],
             Self::Opus => &[1, 2],
@@ -224,7 +238,8 @@ pub enum SampleRate {
 
 impl SampleRate {
     /// Get the sample rate value in Hz
-    pub fn hz(self) -> u32 {
+    #[must_use]
+    pub const fn hz(self) -> u32 {
         match self {
             Self::Rate8000 => 8000,
             Self::Rate12000 => 12000,
@@ -238,7 +253,8 @@ impl SampleRate {
     }
 
     /// Create from Hz value
-    pub fn from_hz(hz: u32) -> Self {
+    #[must_use]
+    pub const fn from_hz(hz: u32) -> Self {
         match hz {
             8000 => Self::Rate8000,
             12000 => Self::Rate12000,
@@ -252,12 +268,14 @@ impl SampleRate {
     }
 
     /// Check if this is a standard telephony rate
-    pub fn is_telephony(self) -> bool {
+    #[must_use]
+    pub const fn is_telephony(self) -> bool {
         matches!(self, Self::Rate8000 | Self::Rate16000)
     }
 
     /// Check if this is a standard audio rate
-    pub fn is_audio(self) -> bool {
+    #[must_use]
+    pub const fn is_audio(self) -> bool {
         matches!(self, Self::Rate44100 | Self::Rate48000)
     }
 }
@@ -283,7 +301,8 @@ pub struct AudioFrame {
 
 impl AudioFrame {
     /// Create a new audio frame
-    pub fn new(samples: Vec<i16>, sample_rate: SampleRate, channels: u8) -> Self {
+    #[must_use]
+    pub const fn new(samples: Vec<i16>, sample_rate: SampleRate, channels: u8) -> Self {
         Self {
             samples,
             sample_rate,
@@ -293,7 +312,8 @@ impl AudioFrame {
     }
 
     /// Create a new audio frame with timestamp
-    pub fn new_with_timestamp(
+    #[must_use]
+    pub const fn new_with_timestamp(
         samples: Vec<i16>,
         sample_rate: SampleRate,
         channels: u8,
@@ -308,17 +328,25 @@ impl AudioFrame {
     }
 
     /// Get the frame duration in milliseconds
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
     pub fn duration_ms(&self) -> f64 {
-        let samples_per_channel = self.samples.len() / self.channels as usize;
-        (samples_per_channel as f64 * 1000.0) / self.sample_rate.hz() as f64
+        let samples_per_channel = self.samples.len() / usize::from(self.channels);
+        (samples_per_channel as f64 * 1000.0) / f64::from(self.sample_rate.hz())
     }
 
     /// Get the frame size in samples per channel
-    pub fn frame_size(&self) -> usize {
+    #[must_use]
+    pub const fn frame_size(&self) -> usize {
         self.samples.len() / self.channels as usize
     }
 
     /// Validate the frame structure
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the channel count is zero, the frame is empty,
+    /// or the samples cannot be divided evenly among the channels.
     pub fn validate(&self) -> Result<()> {
         if self.channels == 0 {
             return Err(CodecError::InvalidChannelCount {
@@ -327,7 +355,11 @@ impl AudioFrame {
             });
         }
 
-        if self.samples.len() % self.channels as usize != 0 {
+        if !self
+            .samples
+            .len()
+            .is_multiple_of(usize::from(self.channels))
+        {
             return Err(CodecError::invalid_format(
                 "Sample count must be divisible by channel count",
             ));
@@ -360,6 +392,7 @@ pub struct CodecConfig {
 
 impl CodecConfig {
     /// Create a new codec configuration
+    #[must_use]
     pub fn new(codec_type: CodecType) -> Self {
         Self {
             codec_type,
@@ -372,85 +405,107 @@ impl CodecConfig {
     }
 
     /// Create G.711 PCMU configuration
+    #[must_use]
     pub fn g711_pcmu() -> Self {
         Self::new(CodecType::G711Pcmu)
     }
 
     /// Create G.711 PCMA configuration
+    #[must_use]
     pub fn g711_pcma() -> Self {
         Self::new(CodecType::G711Pcma)
     }
 
     /// Create G.729 configuration
+    #[must_use]
     pub fn g729() -> Self {
         Self::new(CodecType::G729)
     }
 
     /// Create G.729 Annex A configuration
+    #[must_use]
     pub fn g729a() -> Self {
         Self::new(CodecType::G729A).with_g729_annex_b(false)
     }
 
     /// Create G.729 Annex A plus Annex B configuration
+    #[must_use]
     pub fn g729ba() -> Self {
         Self::new(CodecType::G729BA).with_g729_annex_b(true)
     }
 
     /// Create Opus configuration
+    #[must_use]
     pub fn opus() -> Self {
         Self::new(CodecType::Opus)
     }
 
     /// Set sample rate
-    pub fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
+    #[must_use]
+    pub const fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
         self.sample_rate = sample_rate;
         self
     }
 
     /// Set channel count
-    pub fn with_channels(mut self, channels: u8) -> Self {
+    #[must_use]
+    pub const fn with_channels(mut self, channels: u8) -> Self {
         self.channels = channels;
         self
     }
 
     /// Set bitrate
+    #[must_use]
     pub fn with_bitrate(mut self, bitrate: u32) -> Self {
         self.bitrate = Some(bitrate);
+        // Opus historically treated the codec-specific bitrate as the
+        // authoritative value. Keep the generic convenience setter and that
+        // public field synchronized so existing callers do not silently get
+        // the default 64 kbit/s configuration.
+        if self.codec_type == CodecType::Opus {
+            self.parameters.opus.bitrate = bitrate;
+        }
         self
     }
 
     /// Set frame size in milliseconds
-    pub fn with_frame_size_ms(mut self, frame_size_ms: f32) -> Self {
+    #[must_use]
+    pub const fn with_frame_size_ms(mut self, frame_size_ms: f32) -> Self {
         self.frame_size_ms = Some(frame_size_ms);
         self
     }
 
     /// Set codec parameters
-    pub fn with_parameters(mut self, parameters: CodecParameters) -> Self {
+    #[must_use]
+    pub const fn with_parameters(mut self, parameters: CodecParameters) -> Self {
         self.parameters = parameters;
         self
     }
 
     /// Set Opus application type
-    pub fn with_opus_application(mut self, application: OpusApplication) -> Self {
+    #[must_use]
+    pub const fn with_opus_application(mut self, application: OpusApplication) -> Self {
         self.parameters.opus.application = application;
         self
     }
 
     /// Set Opus VBR mode
-    pub fn with_opus_vbr(mut self, vbr: bool) -> Self {
+    #[must_use]
+    pub const fn with_opus_vbr(mut self, vbr: bool) -> Self {
         self.parameters.opus.vbr = vbr;
         self
     }
 
     /// Set Opus complexity
-    pub fn with_opus_complexity(mut self, complexity: u8) -> Self {
+    #[must_use]
+    pub const fn with_opus_complexity(mut self, complexity: u8) -> Self {
         self.parameters.opus.complexity = complexity;
         self
     }
 
     /// Set Opus FEC
-    pub fn with_opus_fec(mut self, fec: bool) -> Self {
+    #[must_use]
+    pub const fn with_opus_fec(mut self, fec: bool) -> Self {
         self.parameters.opus.inband_fec = fec;
         self
     }
@@ -459,16 +514,18 @@ impl CodecConfig {
     ///
     /// Setting this to `false` requests full-complexity base G.729, which is
     /// not implemented by the built-in G.729 codec and will be rejected.
+    #[must_use]
     #[allow(deprecated)] // keep the legacy mirror field in sync
-    pub fn with_g729_annex_a(mut self, annex_a: bool) -> Self {
+    pub const fn with_g729_annex_a(mut self, annex_a: bool) -> Self {
         self.parameters.g729.annex_a = annex_a;
         self.parameters.g729.reduced_complexity = annex_a;
         self
     }
 
     /// Set whether G.729 Annex B VAD/DTX/CNG is enabled.
+    #[must_use]
     #[allow(deprecated)] // keep legacy VAD/CNG mirror fields in sync
-    pub fn with_g729_annex_b(mut self, annex_b: bool) -> Self {
+    pub const fn with_g729_annex_b(mut self, annex_b: bool) -> Self {
         self.parameters.g729.annex_b = annex_b;
         self.parameters.g729.vad_enabled = annex_b;
         self.parameters.g729.cng_enabled = annex_b;
@@ -476,20 +533,27 @@ impl CodecConfig {
     }
 
     /// Set G.729 VAD
+    #[must_use]
     #[allow(deprecated)] // intentionally writes the legacy field for backward compat
-    pub fn with_g729_vad(mut self, vad: bool) -> Self {
+    pub const fn with_g729_vad(mut self, vad: bool) -> Self {
         self.parameters.g729.vad_enabled = vad;
         self
     }
 
     /// Set G.729 CNG
+    #[must_use]
     #[allow(deprecated)] // intentionally writes the legacy field for backward compat
-    pub fn with_g729_cng(mut self, cng: bool) -> Self {
+    pub const fn with_g729_cng(mut self, cng: bool) -> Self {
         self.parameters.g729.cng_enabled = cng;
         self
     }
 
     /// Validate the configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sample rate, channel count, or bitrate is not
+    /// supported by the selected codec.
     pub fn validate(&self) -> Result<()> {
         // Check if sample rate is supported
         let supported_rates = self.codec_type.supported_sample_rates();
@@ -527,18 +591,19 @@ impl CodecConfig {
 
 impl CodecType {
     /// Get the bitrate range for this codec type
-    pub fn bitrate_range(self) -> (u32, u32) {
+    #[must_use]
+    pub const fn bitrate_range(self) -> (u32, u32) {
         match self {
             Self::G711Pcmu | Self::G711Pcma => (64000, 64000),
 
             Self::G729 | Self::G729A | Self::G729BA => (8000, 8000),
-            Self::Opus => (6000, 510000),
+            Self::Opus => (6_000, 510_000),
         }
     }
 }
 
 /// Codec-specific parameters
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CodecParameters {
     /// G.711 specific parameters
     pub g711: G711Parameters,
@@ -557,6 +622,7 @@ pub struct G711Parameters {
 }
 
 /// G.729 codec parameters
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G729Parameters {
     /// Enable G.729 Annex A (reduced complexity - ~40% faster)
@@ -565,13 +631,13 @@ pub struct G729Parameters {
     pub annex_b: bool,
 
     // Legacy fields for backward compatibility (deprecated)
-    /// Use reduced complexity mode (Annex A) - DEPRECATED: use annex_a instead
+    /// Use reduced complexity mode (Annex A) - DEPRECATED: use `annex_a` instead
     #[deprecated(since = "0.1.14", note = "use annex_a instead")]
     pub reduced_complexity: bool,
-    /// Enable Voice Activity Detection (VAD) - DEPRECATED: use annex_b instead
+    /// Enable Voice Activity Detection (VAD) - DEPRECATED: use `annex_b` instead
     #[deprecated(since = "0.1.14", note = "use annex_b instead")]
     pub vad_enabled: bool,
-    /// Enable Comfort Noise Generation (CNG) - DEPRECATED: use annex_b instead
+    /// Enable Comfort Noise Generation (CNG) - DEPRECATED: use `annex_b` instead
     #[deprecated(since = "0.1.14", note = "use annex_b instead")]
     pub cng_enabled: bool,
 }
@@ -592,7 +658,8 @@ impl Default for G729Parameters {
 }
 
 /// Opus codec parameters
-#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpusParameters {
     /// Application type
     pub application: OpusApplication,
@@ -633,7 +700,7 @@ impl Default for OpusParameters {
 /// Opus application type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpusApplication {
-    /// VoIP application
+    /// `VoIP` application
     Voip,
     /// Audio application
     Audio,
@@ -658,6 +725,7 @@ pub struct CodecCapability {
 
 impl CodecCapability {
     /// Create capability info for a codec type
+    #[must_use]
     pub fn for_codec(codec_type: CodecType) -> Self {
         Self {
             codec_type,
@@ -671,7 +739,8 @@ impl CodecCapability {
 
 impl CodecType {
     /// Get the quality score for this codec type
-    pub fn quality_score(self) -> u8 {
+    #[must_use]
+    pub const fn quality_score(self) -> u8 {
         match self {
             Self::G711Pcmu | Self::G711Pcma => 70,
 
@@ -706,7 +775,7 @@ mod tests {
         assert_eq!(frame.samples, samples);
         assert_eq!(frame.sample_rate, SampleRate::Rate8000);
         assert_eq!(frame.channels, 1);
-        assert_eq!(frame.duration_ms(), 20.0);
+        assert!((frame.duration_ms() - 20.0).abs() < f64::EPSILON);
     }
 
     #[test]

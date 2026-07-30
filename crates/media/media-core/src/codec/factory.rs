@@ -7,10 +7,12 @@ use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::g711::G711Codec;
 #[cfg(feature = "g729")]
 use crate::codec::audio::g729::{G729Codec, G729Config};
+#[cfg(feature = "opus")]
+use crate::codec::audio::opus::{OpusCodec, OpusConfig};
 use crate::codec::audio::payload_type::PCM_S16LE;
 use crate::codec::audio::pcm::PcmS16LeCodec;
 use crate::error::{Error, Result};
-#[cfg(feature = "g729")]
+#[cfg(any(feature = "g729", feature = "opus"))]
 use crate::types::SampleRate;
 
 pub struct CodecFactory;
@@ -23,12 +25,12 @@ impl CodecFactory {
         channels: Option<u16>,
     ) -> Result<Box<dyn AudioCodec>> {
         // Default values if not specified
-        let sample_rate = sample_rate.unwrap_or(if payload_type == PCM_S16LE {
-            16_000
-        } else {
-            8_000
+        let sample_rate = sample_rate.unwrap_or(match payload_type {
+            PCM_S16LE => 16_000,
+            111 => 48_000,
+            _ => 8_000,
         });
-        let channels = channels.unwrap_or(1);
+        let channels = channels.unwrap_or(if payload_type == 111 { 2 } else { 1 });
 
         match payload_type {
             0 => Ok(Box::new(G711Codec::mu_law(sample_rate, channels)?)),
@@ -39,6 +41,31 @@ impl CodecFactory {
                 1,
                 G729Config::default(),
             )?)),
+            #[cfg(feature = "opus")]
+            111 => {
+                let sample_rate = SampleRate::from_hz(sample_rate).ok_or_else(|| {
+                    Error::Codec(crate::error::CodecError::InvalidParameters {
+                        details: format!("Invalid Opus sample rate: {sample_rate}"),
+                    })
+                })?;
+                let channels = u8::try_from(channels).map_err(|_| {
+                    Error::Codec(crate::error::CodecError::InvalidParameters {
+                        details: format!("Invalid channel count: {channels}"),
+                    })
+                })?;
+                Ok(Box::new(OpusCodec::new(
+                    sample_rate,
+                    channels,
+                    OpusConfig::default(),
+                )?))
+            }
+            // G.722 RTP payload handling remains available, but there is no
+            // encoder/decoder implementation to construct.
+            9 => Err(Error::unsupported_codec(
+                "G.722 (encoder/decoder is not implemented)",
+            )),
+            #[cfg(not(feature = "opus"))]
+            111 => Err(Error::unsupported_codec("Opus (enable the `opus` feature)")),
             PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
                 sample_rate,
                 u8::try_from(channels).map_err(|_| {
@@ -94,6 +121,31 @@ mod tests {
         assert!(result.is_err());
         // Can't unwrap error because AudioCodec doesn't implement Debug
         // Just verify that creating codec with unsupported type fails
+    }
+
+    #[test]
+    fn test_g722_codec_is_explicitly_unsupported() {
+        let error = CodecFactory::create_codec_default(9).err().unwrap();
+        assert!(error.to_string().contains("G.722"));
+        assert!(error.to_string().contains("not implemented"));
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn test_real_opus_codec_is_constructible_with_feature() {
+        let codec = CodecFactory::create_codec_default(111).unwrap();
+        let info = codec.get_info();
+        assert_eq!(info.sample_rate, 48_000);
+        assert_eq!(info.channels, 2);
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn test_opus_codec_is_unavailable_without_feature() {
+        let error = CodecFactory::create_codec(111, Some(48_000), Some(1))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("enable the `opus` feature"));
     }
 
     #[test]

@@ -309,15 +309,13 @@ fn negotiated_g729_annex_b(session: &SdpSession, local_annex_b: bool) -> bool {
 }
 
 fn select_primary_audio_payload(formats: &[String]) -> Option<u8> {
-    let mut parsed = formats.iter().filter_map(|fmt| fmt.parse::<u8>().ok());
-    parsed.find(|pt| !matches!(*pt, 13 | 101)).or_else(|| {
-        formats
-            .iter()
-            .filter_map(|fmt| fmt.parse::<u8>().ok())
-            .next()
-    })
+    formats
+        .iter()
+        .filter_map(|format| format.parse::<u8>().ok())
+        .find(|payload_type| !matches!(*payload_type, 13 | 101))
 }
 
+#[cfg(test)]
 fn select_primary_audio_payload_from_session(session: &SdpSession) -> Option<u8> {
     session
         .media_descriptions
@@ -326,6 +324,7 @@ fn select_primary_audio_payload_from_session(session: &SdpSession) -> Option<u8>
         .and_then(|m| select_primary_audio_payload(&m.formats))
 }
 
+#[cfg(test)]
 fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
     match payload_type {
         0 => "PCMU",
@@ -339,6 +338,212 @@ fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
         _ => return format!("PT{}", payload_type),
     }
     .to_string()
+}
+
+fn payload_codec_available(payload_type: u8) -> bool {
+    match payload_type {
+        0 | 8 | 13 | 101 => true,
+        18 => cfg!(feature = "g729"),
+        111 => cfg!(feature = "opus"),
+        // G.722 remains wire-parseable but has no encoder/decoder.
+        9 => false,
+        _ => false,
+    }
+}
+
+fn sdp_payload_codec_available(session: &SdpSession, payload_type: u8) -> bool {
+    let mapping = audio_rtpmap(session, payload_type);
+    let mapping_matches = |name: &str, rate: u32, channels: &[u8]| {
+        mapping.is_some_and(|mapping| {
+            let mapped_channels = mapping
+                .encoding_params
+                .as_deref()
+                .unwrap_or("1")
+                .parse::<u8>()
+                .ok();
+            mapping.encoding_name.eq_ignore_ascii_case(name)
+                && mapping.clock_rate == rate
+                && mapped_channels.is_some_and(|value| channels.contains(&value))
+        })
+    };
+    match payload_type {
+        0 => mapping.is_none() || mapping_matches("PCMU", 8_000, &[1]),
+        8 => mapping.is_none() || mapping_matches("PCMA", 8_000, &[1]),
+        13 => mapping.is_none() || mapping_matches("CN", 8_000, &[1]),
+        18 => cfg!(feature = "g729") && (mapping.is_none() || mapping_matches("G729", 8_000, &[1])),
+        // Telephone-event uses a dynamic PT in this stack and therefore
+        // always requires an explicit RFC 4733 mapping.
+        101 => mapping_matches("telephone-event", 8_000, &[1]),
+        96..=127 => cfg!(feature = "opus") && mapping_matches("opus", 48_000, &[1, 2]),
+        _ => false,
+    }
+}
+
+fn audio_rtpmap(
+    session: &SdpSession,
+    payload_type: u8,
+) -> Option<&rvoip_sip_core::types::sdp::RtpMapAttribute> {
+    session
+        .media_descriptions
+        .iter()
+        .find(|media| media.media.eq_ignore_ascii_case("audio"))?
+        .generic_attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            ParsedAttribute::RtpMap(mapping) if mapping.payload_type == payload_type => {
+                Some(mapping)
+            }
+            _ => None,
+        })
+}
+
+fn negotiated_audio_shape_from_sdp(
+    session: &SdpSession,
+    payload_type: u8,
+    g729_annex_b: bool,
+) -> Result<(String, u32, u8)> {
+    let mapping = audio_rtpmap(session, payload_type);
+    let (wire_name, clock_rate, channels) = if let Some(mapping) = mapping {
+        let channels = mapping
+            .encoding_params
+            .as_deref()
+            .unwrap_or("1")
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("codec", "invalid-channels"))?;
+        (mapping.encoding_name.as_str(), mapping.clock_rate, channels)
+    } else {
+        match payload_type {
+            0 => ("PCMU", 8_000, 1),
+            8 => ("PCMA", 8_000, 1),
+            9 => ("G722", 8_000, 1),
+            18 => ("G729", 8_000, 1),
+            _ => return Err(bounded_sdp_failure("codec", "missing-rtpmap")),
+        }
+    };
+
+    let canonical = if wire_name.eq_ignore_ascii_case("PCMU") {
+        "PCMU"
+    } else if wire_name.eq_ignore_ascii_case("PCMA") {
+        "PCMA"
+    } else if wire_name.eq_ignore_ascii_case("G729") {
+        if !cfg!(feature = "g729") {
+            return Err(bounded_sdp_failure("codec", "g729-disabled"));
+        }
+        if g729_annex_b {
+            "G729BA"
+        } else {
+            "G729A"
+        }
+    } else if wire_name.eq_ignore_ascii_case("opus") {
+        if !cfg!(feature = "opus") {
+            return Err(bounded_sdp_failure("codec", "opus-disabled"));
+        }
+        "opus"
+    } else if wire_name.eq_ignore_ascii_case("G722") {
+        return Err(bounded_sdp_failure("codec", "g722-unsupported"));
+    } else {
+        return Err(bounded_sdp_failure("codec", "unsupported"));
+    };
+
+    let valid_shape = if canonical.eq_ignore_ascii_case("opus") {
+        clock_rate == 48_000 && matches!(channels, 1 | 2)
+    } else {
+        clock_rate == 8_000 && channels == 1
+    };
+    if !valid_shape {
+        return Err(bounded_sdp_failure("codec", "invalid-shape"));
+    }
+    let valid_payload_identity = match payload_type {
+        0 => canonical == "PCMU",
+        8 => canonical == "PCMA",
+        18 => canonical.starts_with("G729"),
+        96..=127 if payload_type != 101 => canonical.eq_ignore_ascii_case("opus"),
+        _ => false,
+    };
+    if !valid_payload_identity {
+        return Err(bounded_sdp_failure("codec", "payload-identity"));
+    }
+
+    Ok((canonical.to_string(), clock_rate, channels))
+}
+
+fn validate_uac_audio_answer(
+    offer: &SdpSession,
+    answer: &SdpSession,
+    g729_annex_b: bool,
+) -> Result<(u8, String, u32, u8)> {
+    let offered_audio = offer
+        .media_descriptions
+        .iter()
+        .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-audio-offer"))?;
+    let answered_audio = answer
+        .media_descriptions
+        .iter()
+        .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-audio"))?;
+
+    let mut primary_payloads = Vec::new();
+    for format in &answered_audio.formats {
+        if !offered_audio
+            .formats
+            .iter()
+            .any(|offered| offered == format)
+        {
+            return Err(bounded_sdp_failure("remote-answer", "unoffered-payload"));
+        }
+        let payload_type = format
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-payload"))?;
+        if !sdp_payload_codec_available(answer, payload_type) {
+            return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
+        }
+        if !matches!(payload_type, 13 | 101) {
+            primary_payloads.push(payload_type);
+        }
+    }
+    let payload_type = match primary_payloads.as_slice() {
+        [payload_type] => *payload_type,
+        [] => {
+            return Err(bounded_sdp_failure(
+                "remote-answer",
+                "missing-primary-payload",
+            ))
+        }
+        _ => {
+            return Err(bounded_sdp_failure(
+                "remote-answer",
+                "multiple-primary-payloads",
+            ))
+        }
+    };
+    if !sdp_payload_codec_available(answer, payload_type) {
+        return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
+    }
+    let negotiated_annex_b = payload_type == 18 && negotiated_g729_annex_b(answer, g729_annex_b);
+    let (codec, clock_rate, channels) =
+        negotiated_audio_shape_from_sdp(answer, payload_type, negotiated_annex_b)?;
+
+    // For dynamic payloads the answer must retain the offered codec identity.
+    if payload_type >= 96 {
+        let offer_map = audio_rtpmap(offer, payload_type)
+            .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-offer-rtpmap"))?;
+        let answer_map = audio_rtpmap(answer, payload_type)
+            .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-answer-rtpmap"))?;
+        if !offer_map
+            .encoding_name
+            .eq_ignore_ascii_case(&answer_map.encoding_name)
+            || offer_map.clock_rate != answer_map.clock_rate
+            || offer_map.encoding_params != answer_map.encoding_params
+        {
+            return Err(bounded_sdp_failure(
+                "remote-answer",
+                "changed-dynamic-payload",
+            ));
+        }
+    }
+
+    Ok((payload_type, codec, clock_rate, channels))
 }
 
 /// Build the SDP answer that declines an offered audio m-line per
@@ -425,12 +630,25 @@ pub struct RecordingStatus {
 }
 
 /// Negotiated media configuration
+const fn default_negotiated_clock_rate() -> u32 {
+    8_000
+}
+
+const fn default_negotiated_channels() -> u8 {
+    1
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NegotiatedConfig {
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub codec: String,
+    #[serde(default)]
     pub payload_type: u8,
+    #[serde(default = "default_negotiated_clock_rate")]
+    pub clock_rate: u32,
+    #[serde(default = "default_negotiated_channels")]
+    pub channels: u8,
     pub local_direction: crate::types::MediaDirection,
     pub remote_direction: crate::types::MediaDirection,
 }
@@ -1074,11 +1292,17 @@ impl MediaAdapter {
     /// of DTMF (PT 101) when enabled, preserving the legacy ordering
     /// the byte-fixture tests pin.
     fn effective_offered_formats(&self) -> Vec<u8> {
+        let offered: Vec<u8> = self
+            .offered_codecs
+            .iter()
+            .copied()
+            .filter(|payload_type| payload_codec_available(*payload_type))
+            .collect();
         if !self.comfort_noise_enabled {
-            return self.offered_codecs.clone();
+            return offered;
         }
-        let mut out = Vec::with_capacity(self.offered_codecs.len() + 1);
-        for pt in &self.offered_codecs {
+        let mut out = Vec::with_capacity(offered.len() + 1);
+        for pt in &offered {
             if *pt == 101 {
                 out.push(13);
             }
@@ -1096,6 +1320,9 @@ impl MediaAdapter {
         dialog_id: &DialogId,
         remote_addr: SocketAddr,
         codec: &str,
+        payload_type: u8,
+        clock_rate: u32,
+        channels: u8,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -1106,7 +1333,12 @@ impl MediaAdapter {
             })?
             .config;
         config.remote_addr = Some(remote_addr);
-        config.preferred_codec = Some(codec.to_string());
+        config = config.with_negotiated_audio_codec(
+            codec.to_string(),
+            payload_type,
+            clock_rate,
+            channels,
+        );
 
         self.controller
             .update_media(dialog_id.clone(), config)
@@ -1317,7 +1549,8 @@ impl MediaAdapter {
         let result = self
             .negotiate_sdp_as_uac_lane_owned(&mut session, remote_sdp)
             .await;
-        let security_observation = (session.media_security != previous_security)
+        let security_changed = result.is_ok() && session.media_security != previous_security;
+        let security_observation = security_changed
             .then(|| {
                 session
                     .lifecycle_handle
@@ -1325,7 +1558,7 @@ impl MediaAdapter {
                     .zip(session.media_security.clone())
             })
             .flatten();
-        if session.media_security != previous_security {
+        if security_changed {
             // The public compatibility commit acquires the same non-reentrant
             // lane and revision-checks this snapshot. Release our exact guard
             // first; any intervening signaling event makes the commit fail
@@ -1347,18 +1580,29 @@ impl MediaAdapter {
         let session_id = session.session_id.clone();
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        let parsed_answer = SdpSession::from_str(remote_sdp)
+            .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
+        let parsed_offer = session
+            .local_sdp
+            .as_deref()
+            .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
+            .and_then(|offer| {
+                SdpSession::from_str(offer)
+                    .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-local-offer"))
+            })?;
+        let (payload_type, negotiated_codec, clock_rate, channels) =
+            validate_uac_audio_answer(&parsed_offer, &parsed_answer, self.g729_annex_b)?;
+        let answer_direction = audio_direction(&parsed_answer);
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
-            if let Ok(parsed) = SdpSession::from_str(remote_sdp) {
-                emit_sdp_diag(format!(
-                    "remote_sdp_answer session={} media={}:{} transport={} {}",
-                    session_id.0,
-                    remote_ip,
-                    remote_port,
-                    audio_transport(&parsed).unwrap_or("unknown"),
-                    crypto_attribute_diag(Self::extract_audio_crypto(&parsed).len())
-                ));
-            }
+            emit_sdp_diag(format!(
+                "remote_sdp_answer session={} media={}:{} transport={} {}",
+                session_id.0,
+                remote_ip,
+                remote_port,
+                audio_transport(&parsed_answer).unwrap_or("unknown"),
+                crypto_attribute_diag(Self::extract_audio_crypto(&parsed_answer).len())
+            ));
         }
 
         // SDES answer-side handling (RFC 4568 §7.5).
@@ -1368,9 +1612,7 @@ impl MediaAdapter {
         // which the executor turns into terminal `CallFailed`.
         if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(&session_id) {
             // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
-            let parsed = SdpSession::from_str(remote_sdp)
-                .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
-            let attrs = Self::extract_audio_crypto(&parsed);
+            let attrs = Self::extract_audio_crypto(&parsed_answer);
             if let Some(chosen) = attrs.first() {
                 let pair = offerer_state.accept_answer(chosen)?;
                 self.negotiated_srtp.insert(session_id.clone(), pair);
@@ -1400,19 +1642,6 @@ impl MediaAdapter {
             }
         }
 
-        let parsed_answer = SdpSession::from_str(remote_sdp).ok();
-        let answer_direction = parsed_answer.as_ref().and_then(audio_direction);
-        let payload_type = parsed_answer
-            .as_ref()
-            .and_then(select_primary_audio_payload_from_session)
-            .unwrap_or(0);
-        let negotiated_annex_b = parsed_answer
-            .as_ref()
-            .filter(|_| payload_type == 18)
-            .map(|answer| negotiated_g729_annex_b(answer, self.g729_annex_b))
-            .unwrap_or(false);
-        let negotiated_codec = codec_name_for_payload(payload_type, negotiated_annex_b);
-
         // Update media session with remote address. SRTP contexts (if
         // negotiated in 2B.1) must be installed *between* updating the
         // remote address and starting the audio transmitter — the
@@ -1429,8 +1658,15 @@ impl MediaAdapter {
             let dialog_id = &exact_media.dialog_id;
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.apply_negotiated_media_config(dialog_id, remote_addr, &negotiated_codec)
-                .await?;
+            self.apply_negotiated_media_config(
+                dialog_id,
+                remote_addr,
+                &negotiated_codec,
+                payload_type,
+                clock_rate,
+                channels,
+            )
+            .await?;
 
             // RFC 4568 SDES: install per-direction contexts before the
             // first wire packet flows.
@@ -1489,6 +1725,8 @@ impl MediaAdapter {
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: negotiated_codec,
             payload_type,
+            clock_rate,
+            channels,
             local_direction: local_direction_from_remote_answer(&answer_direction),
             remote_direction: answer_direction
                 .map(sip_direction_to_session)
@@ -1520,12 +1758,13 @@ impl MediaAdapter {
         let result = self
             .negotiate_sdp_as_uas_lane_owned(&mut session, remote_sdp)
             .await;
-        let state_changed = previous_origin
-            != (
-                session.sdp_origin_session_id.clone(),
-                session.sdp_origin_version,
-            )
-            || session.media_security != previous_security;
+        let state_changed = result.is_ok()
+            && (previous_origin
+                != (
+                    session.sdp_origin_session_id.clone(),
+                    session.sdp_origin_version,
+                )
+                || session.media_security != previous_security);
         let security_observation = (session.media_security != previous_security)
             .then(|| {
                 session
@@ -1576,14 +1815,13 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, srtp_pair, reject_with_port_zero) =
+        let (answer_attr, pending_srtp_pair, reject_with_port_zero) =
             if !offered_crypto.is_empty() && self.offer_srtp {
                 // Both sides want SRTP — negotiate.
                 let answerer = SrtpNegotiator::new_answerer();
                 let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
-                self.negotiated_srtp.insert(session_id.clone(), pair);
                 tracing::info!(
-                    "SDES offer accepted for session {}: tag {} suite {:?}",
+                    "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
                     session_id.0,
                     chosen.tag,
                     chosen.suite
@@ -1594,7 +1832,7 @@ impl MediaAdapter {
                         session_id.0, chosen.suite
                     ));
                 }
-                (Some(chosen), true, false)
+                (Some(chosen), Some(pair), false)
             } else if offered_crypto.is_empty() && self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
                     "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
@@ -1615,11 +1853,10 @@ impl MediaAdapter {
                         session_id.0
                     ));
                 }
-                (None, false, true)
+                (None, None, true)
             } else {
-                (None, false, false)
+                (None, None, false)
             };
-        let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
 
         // Port-zero rejection short-circuit: build a minimal RFC 3264
         // §6 declined m-line answer and return without setting up any
@@ -1642,6 +1879,8 @@ impl MediaAdapter {
                 remote_addr: SocketAddr::new(remote_ip, remote_port),
                 codec: "PCMU".to_string(),
                 payload_type: 0,
+                clock_rate: 8_000,
+                channels: 1,
                 local_direction: crate::types::MediaDirection::Inactive,
                 remote_direction: crate::types::MediaDirection::Inactive,
             };
@@ -1661,13 +1900,18 @@ impl MediaAdapter {
             self.offer_srtp,
             self.srtp_required,
         )?;
-        let negotiated_payload_type = select_primary_audio_payload(&formats).unwrap_or(0);
+        let negotiated_payload_type = select_primary_audio_payload(&formats)
+            .ok_or_else(|| bounded_sdp_failure("remote-offer", "missing-primary-payload"))?;
         let negotiated_annex_b = if negotiated_payload_type == 18 {
             negotiated_g729_annex_b(&parsed_offer, self.g729_annex_b)
         } else {
             false
         };
-        let negotiated_codec = codec_name_for_payload(negotiated_payload_type, negotiated_annex_b);
+        let (negotiated_codec, clock_rate, channels) = negotiated_audio_shape_from_sdp(
+            &parsed_offer,
+            negotiated_payload_type,
+            negotiated_annex_b,
+        )?;
         let offered_direction = audio_direction(&parsed_offer);
         let answer_direction = answer_direction_for_offer(&offered_direction);
 
@@ -1684,10 +1928,17 @@ impl MediaAdapter {
             let dialog_id = &exact_media.dialog_id;
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.apply_negotiated_media_config(dialog_id, remote_addr, &negotiated_codec)
-                .await?;
+            self.apply_negotiated_media_config(
+                dialog_id,
+                remote_addr,
+                &negotiated_codec,
+                negotiated_payload_type,
+                clock_rate,
+                channels,
+            )
+            .await?;
 
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
+            let negotiated_suite = if let Some(pair) = pending_srtp_pair {
                 let suite = pair.suite;
                 self.controller
                     .install_srtp_contexts(dialog_id, pair.send_ctx, pair.recv_ctx)
@@ -1703,14 +1954,16 @@ impl MediaAdapter {
                     session_id.0,
                     suite
                 );
-                Self::record_media_security_negotiated_lane_owned(session, suite, true);
                 if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uas suite={:?}",
                         session_id.0, suite
                     ));
                 }
-            }
+                Some(suite)
+            } else {
+                None
+            };
 
             self.controller
                 .establish_media_flow(dialog_id, remote_addr)
@@ -1729,8 +1982,11 @@ impl MediaAdapter {
                     "media resource changed during UAS negotiation".to_string(),
                 ));
             }
+            if let Some(suite) = negotiated_suite {
+                Self::record_media_security_negotiated_lane_owned(session, suite, true);
+            }
         } else if signaling_only_port.is_some() {
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
+            if let Some(pair) = pending_srtp_pair {
                 Self::record_media_security_negotiated_lane_owned(session, pair.suite, false);
             }
         }
@@ -1740,11 +1996,9 @@ impl MediaAdapter {
         // Sprint 3.5 — `negotiate_sdp_as_uas` now consumes the
         // generic RFC 3264 §6 matcher in
         // `rvoip_sip_dialog::sdp::match_offer`. The strict path
-        // (default) intersects offered formats with our supported
-        // set in offerer-preference order; the permissive path
-        // (`Config::strict_codec_matching = false`) preserves the
-        // pre-Sprint-3.5 "always answer with full set" behaviour
-        // for deployments that depend on it.
+        // (default) additionally applies transport policy; both modes
+        // intersect the offer with our implemented codecs and retain one
+        // primary codec plus auxiliary CN/telephone-event payloads.
         let (origin_session_id, origin_version) = advance_sdp_origin(session);
         let origin_version = origin_version.to_string();
         // Sprint 3 A6 — same public-address override as the offer
@@ -1789,16 +2043,18 @@ impl MediaAdapter {
             .time("0", "0")
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
-        // Emit rtpmap/fmtp ONLY for the formats we kept. In the
-        // permissive branch this is the full set; in the strict
-        // branch the matcher's intersection has already filtered.
+        // Emit rtpmap/fmtp ONLY for the one primary and any auxiliary
+        // formats retained by the validated intersection.
         // NEXT_STEPS C2 — routed through `rtpmap_for_pt` so adding a
         // new codec only requires extending the helper.
         for fmt in &formats {
             let Ok(pt) = fmt.parse::<u8>() else {
                 continue;
             };
-            if let Some(rtpmap) = rtpmap_for_pt(pt) {
+            if pt == negotiated_payload_type && negotiated_codec.eq_ignore_ascii_case("opus") {
+                let rtpmap = format!("opus/{clock_rate}/{channels}");
+                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap.as_str());
+            } else if let Some(rtpmap) = rtpmap_for_pt(pt) {
                 media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
             }
             if let Some(fmtp) = fmtp_for_pt_with_g729_annex_b(pt, negotiated_annex_b) {
@@ -1820,6 +2076,8 @@ impl MediaAdapter {
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: negotiated_codec,
             payload_type: negotiated_payload_type,
+            clock_rate,
+            channels,
             local_direction: answer_direction,
             remote_direction: offered_direction
                 .map(sip_direction_to_session)
@@ -2086,20 +2344,12 @@ impl MediaAdapter {
             audio_frame.samples.len()
         );
 
-        // Move the PCM buffer into media-core instead of cloning it. At soak
-        // scale, the old clone created one extra Vec allocation per outbound
-        // frame and showed up as sustained RSS/CPU pressure.
-        let AudioFrame {
-            samples: pcm_samples,
-            timestamp,
-            ..
-        } = audio_frame;
         self.audio_send_frames_total.fetch_add(1, Ordering::Relaxed);
         self.audio_send_samples_total
-            .fetch_add(pcm_samples.len() as u64, Ordering::Relaxed);
+            .fetch_add(audio_frame.samples.len() as u64, Ordering::Relaxed);
 
         self.controller
-            .encode_and_send_audio_frame(&exact.dialog_id, pcm_samples, timestamp)
+            .encode_and_send_audio(&exact.dialog_id, audio_frame)
             .await
             .map_err(|e| {
                 SessionError::MediaError(format!("Failed to send audio frame via RTP: {}", e))
@@ -2132,14 +2382,9 @@ impl MediaAdapter {
                 handle.session_id().0
             ))
         })?;
-        let AudioFrame {
-            samples: pcm_samples,
-            timestamp,
-            ..
-        } = audio_frame;
         self.audio_send_frames_total.fetch_add(1, Ordering::Relaxed);
         self.audio_send_samples_total
-            .fetch_add(pcm_samples.len() as u64, Ordering::Relaxed);
+            .fetch_add(audio_frame.samples.len() as u64, Ordering::Relaxed);
 
         // `dialog_id` is generation-qualified and the retained resource is a
         // strong exact-lifetime binding. Teardown may make this A operation
@@ -2147,7 +2392,7 @@ impl MediaAdapter {
         // this hot path allocation-free avoids one supervisor task per 20 ms
         // audio frame.
         self.controller
-            .encode_and_send_audio_frame(&exact.dialog_id, pcm_samples, timestamp)
+            .encode_and_send_audio(&exact.dialog_id, audio_frame)
             .await
             .map_err(|error| {
                 SessionError::MediaError(format!("Failed to send audio frame via RTP: {error}"))
@@ -3759,34 +4004,92 @@ pub(crate) fn compute_answer_formats(
     offer_srtp: bool,
     srtp_required: bool,
 ) -> Result<Vec<String>> {
-    let supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
+    let mut supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
 
-    if !strict {
-        // Permissive — answer with our full set regardless. Matches
-        // the pre-Sprint-3.5 shape.
-        return Ok(supported);
+    // Dynamic payload numbers belong to the offer, not to a codec. PT 111 in
+    // the local capability list represents Opus support; when the peer maps
+    // Opus to another dynamic PT, match and answer using that exact number.
+    if cfg!(feature = "opus") && offered_codecs.contains(&111) {
+        if let Some(audio) = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        {
+            for format in &audio.formats {
+                let Ok(payload_type) = format.parse::<u8>() else {
+                    continue;
+                };
+                if (96..=127).contains(&payload_type)
+                    && payload_type != 101
+                    && audio_rtpmap(offer, payload_type)
+                        .is_some_and(|mapping| mapping.encoding_name.eq_ignore_ascii_case("opus"))
+                    && !supported.contains(format)
+                {
+                    supported.push(format.clone());
+                }
+            }
+        }
     }
 
-    let caps = rvoip_sip_dialog::sdp::AnswerCapabilities {
-        supported_formats: supported,
-        accept_srtp: offer_srtp,
-        require_srtp: srtp_required,
+    let candidates = if strict {
+        let caps = rvoip_sip_dialog::sdp::AnswerCapabilities {
+            supported_formats: supported.clone(),
+            accept_srtp: offer_srtp,
+            require_srtp: srtp_required,
+        };
+        let matched = rvoip_sip_dialog::sdp::match_offer(offer, &caps)
+            .map_err(|_| bounded_sdp_failure("format-match", "policy"))?;
+        let line = matched
+            .media_lines
+            .iter()
+            .find(|line| line.media == "audio")
+            .ok_or_else(|| {
+                SessionError::SDPNegotiationFailed("matcher returned no audio media line".into())
+            })?;
+        if !line.accepted {
+            return Err(SessionError::SDPNegotiationFailed(
+                "no codec overlap with offer".into(),
+            ));
+        }
+        line.negotiated_formats.clone()
+    } else {
+        // Even compatibility mode must obey RFC 3264: an answer cannot add
+        // payloads the offer did not contain. It only bypasses the stricter
+        // transport-policy matcher.
+        let audio = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+            .ok_or_else(|| bounded_sdp_failure("format-match", "missing-audio"))?;
+        audio
+            .formats
+            .iter()
+            .filter(|format| supported.contains(format))
+            .cloned()
+            .collect()
     };
-    let m = rvoip_sip_dialog::sdp::match_offer(offer, &caps)
-        .map_err(|_| bounded_sdp_failure("format-match", "policy"))?;
-    let line = m
-        .media_lines
-        .iter()
-        .find(|l| l.media == "audio")
-        .ok_or_else(|| {
-            SessionError::SDPNegotiationFailed("matcher returned no audio media line".into())
-        })?;
-    if !line.accepted {
-        return Err(SessionError::SDPNegotiationFailed(
-            "no codec overlap with offer".into(),
-        ));
+
+    let mut primary = None;
+    let mut auxiliary = Vec::new();
+    for format in candidates {
+        let payload_type = format
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("format-match", "invalid-payload"))?;
+        if !sdp_payload_codec_available(offer, payload_type) {
+            continue;
+        }
+        if matches!(payload_type, 13 | 101) {
+            auxiliary.push(format);
+        } else if primary.is_none() {
+            primary = Some(format);
+        }
     }
-    Ok(line.negotiated_formats.clone())
+
+    let primary = primary.ok_or_else(|| bounded_sdp_failure("format-match", "no-primary"))?;
+    let mut answer = Vec::with_capacity(1 + auxiliary.len());
+    answer.push(primary);
+    answer.extend(auxiliary);
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -4509,10 +4812,10 @@ a=fmtp:101 0-15\r\n";
         );
     }
 
-    /// Sprint 3.5 — permissive mode preserves the legacy
-    /// pre-Sprint-3.5 "always full set" answer shape.
+    /// Compatibility mode still obeys RFC 3264 and cannot add an unoffered
+    /// payload to the answer.
     #[test]
-    fn permissive_mode_answers_with_full_set() {
+    fn compatibility_mode_still_answers_with_the_offered_intersection() {
         let offer_sdp = SdpBuilder::new("Session")
             .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")
@@ -4536,12 +4839,161 @@ a=fmtp:101 0-15\r\n";
             false,        /*srtp_required*/
             false,
         )
-        .expect("permissive mode never errors on overlap");
+        .expect("compatibility mode accepts the offered overlap");
         assert_eq!(
             formats,
-            vec!["0".to_string(), "8".to_string(), "101".to_string()],
-            "permissive answer keeps the full legacy set"
+            vec!["0".to_string(), "101".to_string()],
+            "an answer must not add unoffered PCMA"
         );
+    }
+
+    #[test]
+    fn uas_selects_one_primary_codec_and_keeps_auxiliary_payloads() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["8", "0", "13", "101"])
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("13", "CN/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        let formats = compute_answer_formats(&offer, &[0, 8, 13, 101], true, false, false)
+            .expect("valid mixed offer");
+        assert_eq!(formats, ["8", "13", "101"]);
+    }
+
+    #[test]
+    fn uas_skips_invalid_mappings_and_never_answers_unmapped_dynamic_payloads() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["96", "0", "101"])
+            .rtpmap("0", "PCMU/16000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        assert!(compute_answer_formats(&offer, &[0, 8, 111, 101], true, false, false).is_err());
+    }
+
+    #[test]
+    fn uac_answer_requires_one_primary_and_valid_dynamic_mappings() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let multiple_primary = offer.clone();
+        assert!(validate_uac_audio_answer(&offer, &multiple_primary, true).is_err());
+
+        let missing_dynamic_map = SdpBuilder::new("Session")
+            .origin("-", "2", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["0", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn uas_answer_and_runtime_choose_the_same_single_primary_codec() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_offered_codecs(vec![0, 8, 101]);
+        let mut session = SessionState::new(SessionId("single-primary".into()), Role::UAS);
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(18_000, "RTP/AVP")
+            .formats(&["8", "0", "101"])
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap()
+            .to_string();
+
+        let (answer, config) = adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut session, &offer)
+            .await
+            .unwrap();
+        assert!(answer.contains("m=audio 9 RTP/AVP 8 101\r\n"));
+        assert!(!answer.contains("a=rtpmap:0 "));
+        assert_eq!(config.codec, "PCMA");
+        assert_eq!(config.payload_type, 8);
+    }
+
+    #[tokio::test]
+    async fn invalid_uas_codec_offer_does_not_commit_provisional_srtp_state() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let (_, attrs) =
+            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).expect("offerer keys");
+        let mut media = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(18_000, "RTP/SAVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/16000");
+        for attr in attrs {
+            media = media.crypto_attribute(attr);
+        }
+        let offer = media.done().build().unwrap().to_string();
+        let session_id = SessionId("srtp-codec-rollback".into());
+        let mut session = SessionState::new(session_id.clone(), Role::UAS);
+
+        assert!(adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut session, &offer)
+            .await
+            .is_err());
+        assert!(session.media_security.is_none());
+        assert!(!adapter.negotiated_srtp.contains_key(&session_id));
     }
 
     /// Sprint 3.5 — strict mode + zero overlap returns
@@ -4633,6 +5085,7 @@ a=fmtp:101 0-15\r\n";
         );
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn opus_offered_codec_appears_in_generated_offer() {
         // NEXT_STEPS C2 — when Opus (PT 111) is in the configured
@@ -4688,6 +5141,7 @@ a=fmtp:101 0-15\r\n";
         );
     }
 
+    #[cfg(feature = "g729")]
     #[tokio::test]
     async fn g729_offer_advertises_annex_b_yes() {
         use crate::session_store::SessionStore;
@@ -4739,6 +5193,7 @@ a=fmtp:101 0-15\r\n";
         );
     }
 
+    #[cfg(feature = "g729")]
     #[tokio::test]
     async fn g729_offer_advertises_annex_b_no() {
         use crate::session_store::SessionStore;
@@ -4900,6 +5355,118 @@ a=fmtp:101 0-15\r\n";
             "default offer must not advertise Opus:\n{}",
             sdp
         );
+    }
+
+    #[test]
+    fn configured_formats_filter_unavailable_codecs() {
+        use crate::session_store::SessionStore;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_offered_codecs(vec![9, 111, 0, 8, 101]);
+        let formats = adapter.effective_offered_formats();
+        assert!(!formats.contains(&9), "G.722 must never be advertised");
+        #[cfg(feature = "opus")]
+        assert!(formats.contains(&111));
+        #[cfg(not(feature = "opus"))]
+        assert!(!formats.contains(&111));
+        assert!(formats.contains(&0));
+        assert!(formats.contains(&8));
+    }
+
+    #[test]
+    fn auxiliary_only_audio_formats_do_not_fall_back_to_pcmu() {
+        let formats = vec!["13".to_string(), "101".to_string()];
+        assert_eq!(select_primary_audio_payload(&formats), None);
+    }
+
+    #[test]
+    fn uac_answer_rejects_unoffered_unsupported_and_changed_payloads() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["0", "111"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("111", "opus/48000/2")
+            .done()
+            .build()
+            .unwrap();
+        let unoffered = SdpBuilder::new("Session")
+            .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["96"])
+            .rtpmap("96", "opus/48000/2")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&offer, &unoffered, true).is_err());
+
+        let changed = SdpBuilder::new("Session")
+            .origin("-", "3", "3", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["111"])
+            .rtpmap("111", "PCMU/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&offer, &changed, true).is_err());
+
+        let unsupported_offer = SdpBuilder::new("Session")
+            .origin("-", "4", "4", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["9"])
+            .rtpmap("9", "G722/8000")
+            .done()
+            .build()
+            .unwrap();
+        let unsupported_answer = SdpBuilder::new("Session")
+            .origin("-", "5", "5", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["9"])
+            .rtpmap("9", "G722/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&unsupported_offer, &unsupported_answer, true).is_err());
+    }
+
+    #[cfg(feature = "opus")]
+    #[test]
+    fn dynamic_opus_payload_is_matched_and_preserved() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["96"])
+            .rtpmap("96", "OpUs/48000/1")
+            .done()
+            .build()
+            .unwrap();
+        let formats = compute_answer_formats(&offer, &[0, 8, 111], true, false, false).unwrap();
+        assert_eq!(formats, vec!["96"]);
+        let (codec, clock_rate, channels) =
+            negotiated_audio_shape_from_sdp(&offer, 96, false).unwrap();
+        assert_eq!(codec, "opus");
+        assert_eq!(clock_rate, 48_000);
+        assert_eq!(channels, 1);
     }
 
     #[test]

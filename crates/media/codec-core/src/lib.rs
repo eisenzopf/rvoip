@@ -1,7 +1,7 @@
-//! # Codec-Core: Audio Codec Library for VoIP
+//! # `Codec-Core`: Audio Codec Library for `VoIP`
 //!
-//! A simple implementation of G.711 audio codec for VoIP applications.
-//! This library provides ITU-T compliant G.711 μ-law and A-law encoding/decoding
+//! A simple implementation of G.711 audio codec for `VoIP` applications.
+//! This library provides `ITU-T` compliant G.711 μ-law and A-law encoding/decoding
 //! with lookup table optimizations.
 //!
 //! ## Features
@@ -21,6 +21,8 @@
 //! ### Quick Start
 //!
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::g711::G711Codec;
 //! use codec_core::types::{AudioCodec, CodecConfig, CodecType, SampleRate};
 //!
@@ -36,6 +38,7 @@
 //!
 //! // Decode back to samples
 //! let decoded = codec.decode(&encoded)?;
+//! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -62,6 +65,8 @@
 //! All codec operations return `Result` types with detailed error information:
 //!
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::g711::G711Codec;
 //! use codec_core::types::{CodecConfig, CodecType, SampleRate};
 //! use codec_core::error::CodecError;
@@ -78,6 +83,7 @@
 //!     }
 //!     Err(e) => println!("Other error: {}", e),
 //! }
+//! # }
 //! ```
 //!
 //! ## Performance Tips
@@ -88,6 +94,8 @@
 //! ### Direct G.711 Functions
 //!
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
 //!
 //! // Single sample processing
@@ -97,11 +105,14 @@
 //!
 //! let ulaw_encoded = ulaw_compress(sample);
 //! let ulaw_decoded = ulaw_expand(ulaw_encoded);
+//! # }
 //! ```
 //!
 //! ### Frame-Based Processing
 //!
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::g711::{G711Codec, G711Variant};
 //!
 //! let mut codec = G711Codec::new(G711Variant::MuLaw);
@@ -113,6 +124,7 @@
 //! // Decode back to samples (same count for G.711)
 //! let decoded = codec.expand(&encoded).unwrap();
 //! assert_eq!(input_frame.len(), decoded.len());
+//! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -167,6 +179,8 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "G729A",
     #[cfg(feature = "g729")]
     "G729BA",
+    #[cfg(feature = "opus")]
+    "opus",
 ];
 
 /// Initialize the codec library
@@ -192,6 +206,7 @@ pub fn init() -> Result<()> {
 }
 
 /// Get library information
+#[must_use]
 pub fn info() -> LibraryInfo {
     LibraryInfo {
         version: VERSION,
@@ -221,12 +236,21 @@ mod tests {
     fn test_info() {
         let info = info();
         assert_eq!(info.version, VERSION);
+
+        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
         assert!(!info.supported_codecs.is_empty());
+
+        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        assert!(info.supported_codecs.is_empty());
     }
 
     #[test]
     fn test_supported_codecs() {
+        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
         assert!(!SUPPORTED_CODECS.is_empty());
+
+        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        assert!(SUPPORTED_CODECS.is_empty());
 
         #[cfg(feature = "g711")]
         {
@@ -241,7 +265,7 @@ mod tests {
             assert!(SUPPORTED_CODECS.contains(&"G729BA"));
         }
 
-        #[cfg(any(feature = "opus", feature = "opus-sim"))]
+        #[cfg(feature = "opus")]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
     }
 }

@@ -453,8 +453,6 @@ mod tests {
         }
     }
 
-    // Test removed - Opus codec is not supported
-
     #[tokio::test]
     async fn test_insufficient_data() {
         let mapper = Arc::new(CodecMapper::new());

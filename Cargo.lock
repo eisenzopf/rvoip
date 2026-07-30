@@ -6781,6 +6781,7 @@ name = "rvoip-codec-core"
 version = "0.3.4"
 dependencies = [
  "criterion",
+ "opus",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -6945,7 +6946,6 @@ dependencies = [
  "num-complex",
  "num_cpus",
  "once_cell",
- "opus",
  "parking_lot",
  "rand 0.8.7",
  "rustfft",

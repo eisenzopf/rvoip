@@ -55,6 +55,7 @@ impl G729Codec {
     ///
     /// Returns an error when the configuration requests unsupported audio
     /// format settings or the unimplemented full-complexity base G.729 path.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(config: CodecConfig) -> Result<Self> {
         config.validate()?;
         validate_g729_format(&config)?;
@@ -72,7 +73,8 @@ impl G729Codec {
     }
 
     /// Return whether Annex B VAD/DTX/CNG behavior is enabled.
-    pub fn annex_b_enabled(&self) -> bool {
+    #[must_use]
+    pub const fn annex_b_enabled(&self) -> bool {
         self.profile.annex_b()
     }
 }
@@ -174,6 +176,7 @@ impl AudioCodecExt for G729Codec {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn validate_g729_format(config: &CodecConfig) -> Result<()> {
     if config.sample_rate.hz() != 8000 {
         return Err(CodecError::InvalidSampleRate {
@@ -212,8 +215,8 @@ fn profile_from_config(config: &CodecConfig) -> Result<G729Profile> {
     let params = &config.parameters.g729;
 
     #[allow(deprecated)]
-    let annex_a_enabled = params.annex_a && params.reduced_complexity;
-    if !annex_a_enabled {
+    let reduced_complexity_enabled = params.annex_a && params.reduced_complexity;
+    if !reduced_complexity_enabled {
         return Err(CodecError::invalid_config(
             "Full-complexity base G.729 is not implemented; use Annex A",
         ));
@@ -273,6 +276,12 @@ fn map_g729_error(error: g729_impl::CodecError) -> CodecError {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 mod tests {
     use super::*;
     use crate::codecs::CodecFactory;
@@ -389,7 +398,7 @@ mod tests {
 
         let (decoded, encoded_lengths) = round_trip_frames(&mut codec, &input);
         assert_eq!(decoded.len(), input.len());
-        assert!(encoded_lengths.iter().any(|&len| len == 10));
+        assert!(encoded_lengths.contains(&10));
 
         let warmup = G729Codec::FRAME_SAMPLES * 5;
         let corr = correlation(&input[warmup..], &decoded[warmup..]);
@@ -426,9 +435,8 @@ mod tests {
         let mut config = CodecConfig::new(CodecType::G729);
         config.parameters.g729.annex_a = false;
 
-        let error = match G729Codec::new(config) {
-            Ok(_) => panic!("full-complexity G.729 config should be rejected"),
-            Err(error) => error,
+        let Err(error) = G729Codec::new(config) else {
+            panic!("full-complexity G.729 config should be rejected");
         };
         assert!(matches!(error, CodecError::InvalidConfig { .. }));
     }
@@ -439,9 +447,8 @@ mod tests {
         let mut config = CodecConfig::new(CodecType::G729);
         config.parameters.g729.reduced_complexity = false;
 
-        let error = match G729Codec::new(config) {
-            Ok(_) => panic!("legacy full-complexity G.729 config should be rejected"),
-            Err(error) => error,
+        let Err(error) = G729Codec::new(config) else {
+            panic!("legacy full-complexity G.729 config should be rejected");
         };
         assert!(matches!(error, CodecError::InvalidConfig { .. }));
     }
@@ -449,9 +456,8 @@ mod tests {
     #[test]
     fn g729_validates_frame_size() {
         let config = CodecConfig::new(CodecType::G729A).with_frame_size_ms(20.0);
-        let error = match G729Codec::new(config) {
-            Ok(_) => panic!("20 ms G.729 frames should be rejected"),
-            Err(error) => error,
+        let Err(error) = G729Codec::new(config) else {
+            panic!("20 ms G.729 frames should be rejected");
         };
         assert!(matches!(error, CodecError::InvalidFrameSize { .. }));
     }

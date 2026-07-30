@@ -16,8 +16,15 @@ use crate::processing::audio::{
 use crate::types::DialogId;
 use rvoip_rtp_core::{session::RtpSessionStats, RtpSession};
 
+/// `MediaConfig::parameters` key carrying the negotiated RTP payload type.
+pub const RTP_PAYLOAD_TYPE_PARAMETER: &str = "rtp_payload_type";
+/// `MediaConfig::parameters` key carrying the negotiated RTP clock rate.
+pub const RTP_CLOCK_RATE_PARAMETER: &str = "rtp_clock_rate";
+/// `MediaConfig::parameters` key carrying the negotiated audio channel count.
+pub const AUDIO_CHANNELS_PARAMETER: &str = "audio_channels";
+
 /// Media configuration for a session
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
     /// Local RTP address
     pub local_addr: SocketAddr,
@@ -27,6 +34,46 @@ pub struct MediaConfig {
     pub preferred_codec: Option<String>,
     /// Additional media parameters
     pub parameters: HashMap<String, String>,
+}
+
+impl MediaConfig {
+    /// Attach the exact negotiated RTP identity to a media configuration.
+    ///
+    /// Keeping these values in the existing parameter map preserves source
+    /// compatibility for callers that construct `MediaConfig` with a struct
+    /// literal while allowing dynamic codecs such as Opus to use any payload
+    /// type selected by SDP.
+    pub fn with_negotiated_audio_codec(
+        mut self,
+        codec: impl Into<String>,
+        payload_type: u8,
+        clock_rate: u32,
+        channels: u8,
+    ) -> Self {
+        self.preferred_codec = Some(codec.into());
+        self.parameters.insert(
+            RTP_PAYLOAD_TYPE_PARAMETER.to_string(),
+            payload_type.to_string(),
+        );
+        self.parameters
+            .insert(RTP_CLOCK_RATE_PARAMETER.to_string(), clock_rate.to_string());
+        self.parameters
+            .insert(AUDIO_CHANNELS_PARAMETER.to_string(), channels.to_string());
+        self
+    }
+}
+
+/// Exact audio codec parameters used by one media dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegotiatedAudioCodec {
+    /// Canonical codec name.
+    pub name: String,
+    /// Negotiated RTP payload type.
+    pub payload_type: u8,
+    /// RTP clock and PCM sample rate in hertz.
+    pub clock_rate: u32,
+    /// Number of interleaved PCM channels.
+    pub channels: u8,
 }
 
 /// Media session status
@@ -200,6 +247,9 @@ pub struct AdvancedProcessorSet {
 pub struct RtpSessionWrapper {
     /// The actual RTP session
     pub session: Arc<tokio::sync::Mutex<RtpSession>>,
+    /// Serializes media configuration generations for this dialog. The guard
+    /// is cloned out of the map before awaiting so no DashMap shard is held.
+    pub(super) update_lock: Arc<tokio::sync::Mutex<()>>,
     /// Local RTP address
     pub local_addr: SocketAddr,
     /// Remote RTP address (if known)

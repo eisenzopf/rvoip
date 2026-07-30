@@ -121,18 +121,25 @@ impl MediaCodec {
     /// Check if this is an audio codec
     pub fn is_audio(&self) -> bool {
         matches!(
-            self.name.as_str(),
-            "PCMU" | "PCMA" | "G722" | "G729" | "opus" | "AMR" | "AMR-WB"
+            normalize_codec_name(&self.name).as_str(),
+            "PCMU" | "PCMA" | "G722" | "G729" | "OPUS" | "AMR" | "AMR-WB"
         )
     }
 
     /// Check if this is a video codec
     pub fn is_video(&self) -> bool {
         matches!(
-            self.name.as_str(),
-            "H264" | "H.264" | "H265" | "H.265" | "VP8" | "VP9" | "AV1"
+            normalize_codec_name(&self.name).as_str(),
+            "H264" | "H265" | "VP8" | "VP9" | "AV1"
         )
     }
+}
+
+fn normalize_codec_name(name: &str) -> String {
+    name.chars()
+        .filter(|character| *character != '.')
+        .map(|character| character.to_ascii_uppercase())
+        .collect()
 }
 
 /// Media stream direction
@@ -188,5 +195,26 @@ impl MediaStreamConfig {
     pub fn with_preferred_codec(mut self, codec: String) -> Self {
         self.preferred_codec = Some(codec);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codec(name: &str) -> MediaCodec {
+        MediaCodec::new(name.to_string(), 96, 90_000)
+    }
+
+    #[test]
+    fn codec_media_classification_is_ascii_case_insensitive() {
+        for name in ["opus", "Opus", "OPUS", "pcmu", "PcMa", "g722"] {
+            assert!(codec(name).is_audio(), "{name} should be audio");
+        }
+        for name in ["h264", "H264", "H.264", "h.264", "Vp8", "AV1"] {
+            assert!(codec(name).is_video(), "{name} should be video");
+        }
+        assert!(!codec("not-a-codec").is_audio());
+        assert!(!codec("not-a-codec").is_video());
     }
 }

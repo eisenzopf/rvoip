@@ -95,10 +95,12 @@ Developer-facing auth API and crate-boundary guidance is in
 | SDP RFC 8866 | Supported | SDP parser/builder tests, generated validation, SDP fuzz target | WebRTC attributes are parser/carry-through only unless wired higher. |
 | SDP offer/answer RFC 3264 | Supported | Hold/resume, codec matching, glare tests | Advanced media changes are not beta-scoped. |
 | RTP/RTCP RFC 3550 | Supported | RTP steady-state perf, audio round-trip, bridge round-trip | Full RTCP feedback matrix is not a beta claim. |
-| PCMU/PCMA | Supported | Codec and RTP media tests | Only beta full-media audio codecs. |
+| PCMU/PCMA | Supported | Codec and RTP media tests | Available in the default build. |
 | telephone-event DTMF | Supported | DTMF tests and PBX interop | RFC 4733 behavior must stay covered. |
 | Comfort Noise PT 13 | Supported | Config validation and SDP/media tests | Requires `comfort_noise_enabled=true`. |
-| Opus/G.722/G.729 | Post-beta | Config validation rejects unsupported beta full-media advertising | No beta full-media claim. |
+| Opus | Feature-gated | Real codec round trips plus SIP/RTP dynamic-payload tests | Requires the `opus` feature. |
+| G.729 | Feature-gated | Codec, SDP, and media tests | Requires the `g729` feature. |
+| G.722 | Not supported | Construction/negotiation rejection tests | RTP payload parsing metadata remains available. |
 | SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. |
 | DTLS-SRTP | Post-beta | Explicit non-claim | Do not claim. |
 | ICE/TURN/WebRTC browser | Post-beta | Explicit non-claim | STUN remains limited address discovery. |

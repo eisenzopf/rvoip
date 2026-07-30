@@ -352,7 +352,22 @@ impl SdpMediaProcessor {
         media_type: &str,
         port: u16,
     ) -> Result<SdpMediaDescription, MediaError> {
-        let payload_types: Vec<u8> = capabilities.iter().map(|c| c.codec.payload_type).collect();
+        let capabilities: Vec<&CodecCapability> = capabilities
+            .iter()
+            .filter(|capability| {
+                !media_type.eq_ignore_ascii_case("audio")
+                    || crate::codec::audio_codec_available(&capability.codec.name)
+            })
+            .collect();
+        if capabilities.is_empty() {
+            return Err(MediaError::ConfigError(format!(
+                "No available {media_type} codecs remain after capability filtering"
+            )));
+        }
+        let payload_types: Vec<u8> = capabilities
+            .iter()
+            .map(|capability| capability.codec.payload_type)
+            .collect();
 
         let media_line = SdpMediaLine {
             media_type: media_type.to_string(),
@@ -503,7 +518,7 @@ impl SdpMediaProcessor {
 
     /// Estimate codec quality factor
     fn estimate_codec_quality(&self, codec_name: &str) -> f32 {
-        match codec_name.to_uppercase().as_str() {
+        match codec_name.to_ascii_uppercase().replace('.', "").as_str() {
             "OPUS" => 0.9,
             "G722" => 0.7,
             "PCMU" | "PCMA" => 0.5,
@@ -604,5 +619,64 @@ mod tests {
         assert!(text.contains("m=audio 5004 RTP/AVP 0"));
         assert!(text.contains("a=sendrecv"));
         assert!(text.contains("a=rtpmap:0 PCMU/8000/1"));
+    }
+
+    #[test]
+    fn default_sdp_only_advertises_implemented_audio_codecs() {
+        let processor = SdpMediaProcessor::new();
+        let capabilities = CodecNegotiator::create_default_audio_capabilities();
+        let description = processor
+            .capabilities_to_sdp(&capabilities, "audio", 5004)
+            .unwrap();
+        let text = processor.generate_sdp_text(&description);
+
+        assert!(text.contains("PCMU"));
+        assert!(text.contains("PCMA"));
+        assert!(!text.to_ascii_uppercase().contains("G722"));
+        #[cfg(feature = "opus")]
+        assert!(text.to_ascii_uppercase().contains("OPUS"));
+        #[cfg(not(feature = "opus"))]
+        assert!(!text.to_ascii_uppercase().contains("OPUS"));
+    }
+
+    #[test]
+    fn explicit_local_capabilities_cannot_advertise_unavailable_audio() {
+        let processor = SdpMediaProcessor::new();
+        let capabilities = [
+            CodecCapability::new(
+                MediaCodec::new("G722".to_string(), 9, 8_000).with_channels(1),
+                MediaDirection::SendReceive,
+            ),
+            CodecCapability::new(
+                MediaCodec::new("OpUs".to_string(), 111, 48_000).with_channels(2),
+                MediaDirection::SendReceive,
+            ),
+            CodecCapability::new(
+                MediaCodec::new("PCMU".to_string(), 0, 8_000).with_channels(1),
+                MediaDirection::SendReceive,
+            ),
+        ];
+        let description = processor
+            .capabilities_to_sdp(&capabilities, "audio", 5_004)
+            .unwrap();
+        assert!(!description.media_line.payload_types.contains(&9));
+        #[cfg(feature = "opus")]
+        assert!(description.media_line.payload_types.contains(&111));
+        #[cfg(not(feature = "opus"))]
+        assert!(!description.media_line.payload_types.contains(&111));
+        assert!(description.media_line.payload_types.contains(&0));
+    }
+
+    #[test]
+    fn filtered_audio_capabilities_cannot_create_an_empty_media_line() {
+        let processor = SdpMediaProcessor::new();
+        let unsupported = [CodecCapability::new(
+            MediaCodec::new("G722".to_string(), 9, 8_000).with_channels(1),
+            MediaDirection::SendOnly,
+        )];
+        assert!(matches!(
+            processor.capabilities_to_sdp(&unsupported, "audio", 5_004),
+            Err(MediaError::ConfigError(_))
+        ));
     }
 }

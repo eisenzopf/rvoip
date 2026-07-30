@@ -42,6 +42,33 @@ impl Default for PerformanceLevel {
     }
 }
 
+#[cfg(test)]
+mod codec_capability_tests {
+    use super::*;
+
+    #[test]
+    fn capabilities_only_advertise_implemented_codecs() {
+        let mut config = MediaEngineConfig::default();
+        // Include every disputed payload explicitly. The capability builder
+        // must still reject codecs whose encoder/decoder is unavailable.
+        config.codecs.enabled_payload_types = vec![0, 8, 9, 111];
+        let capabilities = MediaEngine::build_capabilities(&config);
+        let names: Vec<&str> = capabilities
+            .audio_codecs
+            .iter()
+            .map(|codec| codec.name.as_str())
+            .collect();
+
+        assert!(names.contains(&"PCMU"));
+        assert!(names.contains(&"PCMA"));
+        assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("G722")));
+        #[cfg(feature = "opus")]
+        assert!(names.iter().any(|name| name.eq_ignore_ascii_case("opus")));
+        #[cfg(not(feature = "opus"))]
+        assert!(!names.iter().any(|name| name.eq_ignore_ascii_case("opus")));
+    }
+}
+
 /// Parameters for creating a media session
 #[derive(Debug, Clone)]
 pub struct MediaSessionParams {
@@ -806,7 +833,7 @@ impl MediaEngine {
     fn build_capabilities(config: &MediaEngineConfig) -> EngineCapabilities {
         use crate::types::{payload_types, SampleRate};
 
-        let mut audio_codecs: Vec<AudioCodecCapability> = config
+        let audio_codecs: Vec<AudioCodecCapability> = config
             .codecs
             .enabled_payload_types
             .iter()
@@ -841,20 +868,24 @@ impl MediaEngine {
             })
             .collect();
 
-        // Add dynamic codec capabilities that are always supported
-
-        // Add Opus capability (dynamic payload type - will be set during SDP negotiation)
-        audio_codecs.push(AudioCodecCapability {
-            payload_type: 0, // Placeholder - will be set during SDP negotiation
-            name: "opus".to_string(),
-            sample_rates: vec![
-                SampleRate::Rate8000,
-                SampleRate::Rate16000,
-                SampleRate::Rate48000,
-            ],
-            channels: 1, // Mono for now
-            clock_rate: 48000,
-        });
+        #[cfg(feature = "opus")]
+        let audio_codecs = {
+            let mut audio_codecs = audio_codecs;
+            if config.codecs.enabled_payload_types.contains(&111) {
+                audio_codecs.push(AudioCodecCapability {
+                    payload_type: 111,
+                    name: "opus".to_string(),
+                    sample_rates: vec![
+                        SampleRate::Rate8000,
+                        SampleRate::Rate16000,
+                        SampleRate::Rate48000,
+                    ],
+                    channels: 2,
+                    clock_rate: 48000,
+                });
+            }
+            audio_codecs
+        };
 
         EngineCapabilities {
             audio_codecs,

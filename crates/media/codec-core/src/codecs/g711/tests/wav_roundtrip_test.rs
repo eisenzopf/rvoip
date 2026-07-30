@@ -85,11 +85,12 @@ struct WavHeader {
 }
 
 impl WavHeader {
+    #[allow(clippy::cast_possible_truncation)]
     fn new(num_samples: usize) -> Self {
         let data_size = (num_samples * 2) as u32; // 16-bit samples
         let file_size = data_size + 36; // 44 - 8
 
-        WavHeader {
+        Self {
             riff_id: *b"RIFF",
             file_size,
             wave_id: *b"WAVE",
@@ -108,6 +109,7 @@ impl WavHeader {
 }
 
 /// Download a file from a URL
+#[allow(clippy::unused_async)]
 async fn download_file(url: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Simple HTTP client without external dependencies
     let response = std::process::Command::new("curl")
@@ -268,14 +270,14 @@ mod tests {
         let original_wav_path = test_dir.join("OSR_us_000_0010_8k.wav");
 
         // Only download if file doesn't exist (to avoid unnecessary downloads)
-        if !original_wav_path.exists() {
+        if original_wav_path.exists() {
+            println!("Using existing WAV file: {:?}", original_wav_path);
+        } else {
             println!("Downloading WAV file from: {}", WAV_URL);
             download_file(WAV_URL, &original_wav_path)
                 .await
                 .expect("Failed to download WAV file");
             println!("Downloaded WAV file to: {:?}", original_wav_path);
-        } else {
-            println!("Using existing WAV file: {:?}", original_wav_path);
         }
 
         // Read the original WAV file

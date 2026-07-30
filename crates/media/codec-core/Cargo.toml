@@ -13,7 +13,7 @@ categories.workspace = true
 keywords.workspace = true
 
 # Crate-specific description
-description = "G.711 and optional G.729A/G.729AB audio codec implementation for RVOIP"
+description = "G.711 and optional G.729/Opus audio codec implementations for RVOIP"
 
 [lib]
 name = "codec_core"
@@ -30,6 +30,7 @@ tracing.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
+opus = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -39,6 +40,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "g711_codec"
 harness = false
+required-features = ["g711"]
 
 [features]
 default = ["g711"]
@@ -46,5 +48,8 @@ default = ["g711"]
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
 g729 = []                    # G.729A/G.729AB codec
-opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
-opus-sim = []                # Opus codec simulator variant
+opus = ["dep:opus"]          # Opus codec backed by libopus
+# Deprecated compatibility alias. This now enables the real backend; it no
+# longer selects a simulated codec.
+opus-sim = ["opus"]
+all-codecs = ["g711", "g729", "opus"]

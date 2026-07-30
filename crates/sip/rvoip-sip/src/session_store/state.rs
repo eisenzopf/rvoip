@@ -22,6 +22,8 @@ pub struct NegotiatedConfig {
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub codec: String,
+    #[serde(default)]
+    pub payload_type: u8,
     pub sample_rate: u32,
     pub channels: u8,
 }
@@ -33,6 +35,7 @@ impl fmt::Debug for NegotiatedConfig {
             .field("local_address_present", &true)
             .field("remote_address_present", &true)
             .field("codec_bytes", &self.codec.len())
+            .field("payload_type", &self.payload_type)
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
             .finish()
