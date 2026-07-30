@@ -201,6 +201,18 @@ mod tests {
             .await
             .expect("set audio callback");
 
+        let codec = codec_runtime::resolve_codec(&MediaConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        })
+        .expect("resolve PCMU");
+        controller.codec_runtimes.insert(
+            dialog_id.clone(),
+            Arc::new(codec_runtime::DialogCodecRuntime::new(codec).expect("create PCMU runtime")),
+        );
+
         let (rtp_tx, rtp_rx) = tokio::sync::broadcast::channel(1);
         controller.spawn_rtp_event_handler(dialog_id, rtp_rx, 0);
         let timestamp = 0xf123_4567;
@@ -560,6 +572,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn test_codec_negotiation_opus() {
         println!("🧪 Testing Opus codec negotiation");
@@ -605,9 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_codec_negotiation_fallback() {
-        println!("🧪 Testing codec negotiation fallback for unknown codec");
-
+    async fn test_unknown_codec_fails_without_state_mutation() {
         let controller = MediaSessionController::new();
 
         let config = MediaConfig {
@@ -617,35 +628,19 @@ mod tests {
             parameters: HashMap::new(),
         };
 
-        // Start session with unknown codec (should fallback to PCMU)
         let result = controller
             .start_media(DialogId::new("fallback_dialog"), config)
             .await;
-        assert!(
-            result.is_ok(),
-            "Should successfully start session even with unknown codec"
-        );
-
-        // Verify session was created and stored the original codec name
-        let session_info = controller
+        assert!(matches!(
+            result,
+            Err(Error::Codec(
+                crate::error::CodecError::UnsupportedCodec { .. }
+            ))
+        ));
+        assert!(controller
             .get_session_info(&DialogId::new("fallback_dialog"))
-            .await;
-        assert!(session_info.is_some());
-        let session_info = session_info.unwrap();
-
-        // Check that the original preferred codec is stored (even though it's unknown)
-        assert_eq!(
-            session_info.config.preferred_codec,
-            Some("unknown_codec".to_string())
-        );
-
-        println!("✅ Codec negotiation fallback test completed");
-
-        // Cleanup
-        controller
-            .stop_media(&DialogId::new("fallback_dialog"))
             .await
-            .unwrap();
+            .is_none());
     }
 
     #[tokio::test]
@@ -696,14 +691,13 @@ mod tests {
         let controller = MediaSessionController::new();
 
         // Test different case variations
-        let test_cases = vec![
-            ("pcmu", "pcmu"),
-            ("PCMU", "PCMU"),
-            ("PcMu", "PcMu"),
-            ("opus", "opus"),
-            ("Opus", "Opus"),
-            ("OPUS", "OPUS"),
-        ];
+        let test_cases = vec![("pcmu", "pcmu"), ("PCMU", "PCMU"), ("PcMu", "PcMu")];
+        #[cfg(feature = "opus")]
+        let test_cases = {
+            let mut test_cases = test_cases;
+            test_cases.extend([("opus", "opus"), ("Opus", "Opus"), ("OPUS", "OPUS")]);
+            test_cases
+        };
 
         for (i, (codec_name, expected_stored)) in test_cases.into_iter().enumerate() {
             let dialog_id = format!("case_test_{}", i);
@@ -908,6 +902,7 @@ mod tests {
             ("PCMA", 8, 8000, "G.711 A-law"),
             #[cfg(feature = "g729")]
             ("G729", 18, 8000, "G.729"),
+            #[cfg(feature = "opus")]
             ("opus", 111, 48000, "Opus"),
         ];
 
@@ -958,6 +953,7 @@ mod tests {
         println!("   All RFC 3551 static codecs and Opus tested successfully!");
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn test_update_media_codec_change() {
         println!("🧪 Testing codec change in update_media");
@@ -1038,7 +1034,7 @@ mod tests {
         let updated_config = MediaConfig {
             local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
             remote_addr: Some(remote_addr),
-            preferred_codec: Some("opus".to_string()),
+            preferred_codec: Some("PCMA".to_string()),
             parameters: HashMap::new(),
         };
 
@@ -1055,7 +1051,7 @@ mod tests {
         assert!(session_info.is_some());
         let info = session_info.unwrap();
         assert_eq!(info.config.remote_addr, Some(remote_addr));
-        assert_eq!(info.config.preferred_codec, Some("opus".to_string()));
+        assert_eq!(info.config.preferred_codec, Some("PCMA".to_string()));
 
         println!("✅ Combined change test completed successfully!");
     }
@@ -1091,5 +1087,136 @@ mod tests {
         );
 
         println!("✅ No-change update test completed successfully!");
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[tokio::test]
+    async fn disabled_opus_start_and_update_fail_atomically() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("disabled-opus");
+        let base = MediaConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            remote_addr: None,
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        };
+        controller
+            .start_media(dialog_id.clone(), base.clone())
+            .await
+            .unwrap();
+
+        let mut unsupported = base;
+        unsupported.remote_addr = Some(SocketAddr::from(([203, 0, 113, 10], 9_999)));
+        unsupported.preferred_codec = Some("OpUs".to_string());
+        assert!(matches!(
+            controller
+                .update_media(dialog_id.clone(), unsupported)
+                .await,
+            Err(Error::Codec(
+                crate::error::CodecError::UnsupportedCodec { .. }
+            ))
+        ));
+        let stable = controller.get_session_info(&dialog_id).await.unwrap();
+        assert_eq!(stable.config.preferred_codec.as_deref(), Some("PCMU"));
+        assert_eq!(stable.config.remote_addr, None);
+    }
+
+    #[tokio::test]
+    async fn g722_is_explicitly_unsupported() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("g722-unsupported");
+        let config = MediaConfig {
+            local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            remote_addr: None,
+            preferred_codec: Some("G.722".to_string()),
+            parameters: HashMap::new(),
+        };
+        assert!(matches!(
+            controller.start_media(dialog_id.clone(), config).await,
+            Err(Error::Codec(
+                crate::error::CodecError::UnsupportedCodec { .. }
+            ))
+        ));
+        assert!(controller.get_session_info(&dialog_id).await.is_none());
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn controller_opus_rtp_round_trip_uses_negotiated_payload_and_clock() {
+        let controller = MediaSessionController::with_port_range(31_000, 31_100);
+        let sender = DialogId::new("opus-wire-sender");
+        let receiver = DialogId::new("opus-wire-receiver");
+        let base = |codec: &str| {
+            MediaConfig {
+                local_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+                remote_addr: None,
+                preferred_codec: None,
+                parameters: HashMap::new(),
+            }
+            .with_negotiated_audio_codec(codec, 96, 48_000, 1)
+        };
+        controller
+            .start_media(sender.clone(), base("Opus"))
+            .await
+            .unwrap();
+        controller
+            .start_media(receiver.clone(), base("OPUS"))
+            .await
+            .unwrap();
+        let sender_port = controller
+            .get_session_info(&sender)
+            .await
+            .unwrap()
+            .rtp_port
+            .unwrap();
+        let receiver_port = controller
+            .get_session_info(&receiver)
+            .await
+            .unwrap()
+            .rtp_port
+            .unwrap();
+
+        let mut sender_config = base("opus");
+        sender_config.remote_addr = Some(SocketAddr::from(([127, 0, 0, 1], receiver_port)));
+        controller
+            .update_media(sender.clone(), sender_config)
+            .await
+            .unwrap();
+        let mut receiver_config = base("opus");
+        receiver_config.remote_addr = Some(SocketAddr::from(([127, 0, 0, 1], sender_port)));
+        controller
+            .update_media(receiver.clone(), receiver_config)
+            .await
+            .unwrap();
+
+        let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel(4);
+        controller
+            .set_audio_frame_callback(receiver.clone(), frame_tx)
+            .await
+            .unwrap();
+
+        for timestamp in [0, 960] {
+            let samples = (0..960)
+                .map(|index| (((index as f32 / 20.0).sin()) * 8_000.0) as i16)
+                .collect();
+            controller
+                .encode_and_send_audio(&sender, AudioFrame::new(samples, 48_000, 1, timestamp))
+                .await
+                .unwrap();
+        }
+
+        for expected_timestamp in [0, 960] {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), frame_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.sample_rate, 48_000);
+            assert_eq!(frame.channels, 1);
+            assert_eq!(frame.samples.len(), 960);
+            assert_eq!(frame.timestamp, expected_timestamp);
+        }
+
+        controller.stop_media(&sender).await.unwrap();
+        controller.stop_media(&receiver).await.unwrap();
     }
 }

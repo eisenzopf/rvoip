@@ -115,18 +115,30 @@ impl SipPayloadCodec {
 fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
 ) -> Result<(CodecInfo, u8), &'static str> {
-    let (name, payload_type) = if matches!(
+    let name = if matches!(
         config.codec.to_ascii_lowercase().as_str(),
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
     ) {
-        ("g.711-mu", 0)
+        if config.sample_rate != 8_000 || config.channels != 1 {
+            return Err("invalid-pcmu-shape");
+        }
+        "g.711-mu"
     } else if matches!(
         config.codec.to_ascii_lowercase().as_str(),
         "pcma" | "g.711-a" | "g711-a"
     ) {
-        ("g.711-a", 8)
+        if config.sample_rate != 8_000 || config.channels != 1 {
+            return Err("invalid-pcma-shape");
+        }
+        "g.711-a"
     } else if config.codec.eq_ignore_ascii_case("opus") {
-        ("opus", 111)
+        if !cfg!(feature = "opus") {
+            return Err("opus-feature-disabled");
+        }
+        if config.sample_rate != 48_000 || !matches!(config.channels, 1 | 2) {
+            return Err("invalid-opus-shape");
+        }
+        "opus"
     } else {
         return Err("unsupported-negotiated-codec");
     };
@@ -137,7 +149,7 @@ fn codec_descriptor(
             channels: config.channels,
             fmtp: None,
         },
-        payload_type,
+        config.payload_type,
     ))
 }
 
@@ -845,6 +857,7 @@ async fn run_media_driver(
         Arc::clone(&coordinator),
         session_id.clone(),
         decoder,
+        payload_type,
         channels,
         frames_out_rx,
     );
@@ -896,6 +909,7 @@ async fn run_outbound_pump(
     coordinator: Arc<UnifiedCoordinator>,
     session_id: SessionId,
     mut decoder: SipPayloadCodec,
+    payload_type: u8,
     channels: u8,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
 ) -> &'static str {
@@ -908,6 +922,18 @@ async fn run_outbound_pump(
                     return "sip-dtmf-send-failed";
                 }
             }
+            continue;
+        }
+        if media_frame
+            .payload_type
+            .is_some_and(|actual| actual != payload_type)
+        {
+            tracing::trace!(
+                target: "rvoip_sip",
+                actual = ?media_frame.payload_type,
+                expected = payload_type,
+                "SipMediaStream: dropping unnegotiated payload type"
+            );
             continue;
         }
         let mut audio_frame = match decoder.decode(&media_frame.payload) {
@@ -1171,6 +1197,13 @@ mod negotiated_codec_tests {
             local_addr: SocketAddr::from(([127, 0, 0, 1], 10_000)),
             remote_addr: SocketAddr::from(([127, 0, 0, 1], 20_000)),
             codec: codec.to_string(),
+            payload_type: if codec.eq_ignore_ascii_case("opus") {
+                111
+            } else if codec.eq_ignore_ascii_case("PCMA") {
+                8
+            } else {
+                0
+            },
             sample_rate,
             channels,
         }
@@ -1204,16 +1237,26 @@ mod negotiated_codec_tests {
     #[cfg(feature = "opus")]
     #[test]
     fn opus_descriptor_and_codec_follow_sdp_clock_and_channels() {
-        let config = negotiated("opus", 48_000, 2);
+        let mut config = negotiated("opus", 48_000, 2);
+        config.payload_type = 96;
         let (descriptor, payload_type) = codec_descriptor(&config).unwrap();
         assert_eq!(descriptor.name, "opus");
         assert_eq!(descriptor.clock_rate_hz, 48_000);
         assert_eq!(descriptor.channels, 2);
-        assert_eq!(payload_type, 111);
+        assert_eq!(payload_type, 96);
         assert!(matches!(
             SipPayloadCodec::from_negotiated(&config),
             Ok(SipPayloadCodec::Opus(_))
         ));
+
+        let mut encoder = SipPayloadCodec::from_negotiated(&config).unwrap();
+        let mut decoder = SipPayloadCodec::from_negotiated(&config).unwrap();
+        let frame = rvoip_media_core::types::AudioFrame::new(vec![0; 960 * 2], 48_000, 2, 960);
+        let payload = encoder.encode(&frame).unwrap();
+        let decoded = decoder.decode(&payload).unwrap();
+        assert_eq!(decoded.sample_rate, 48_000);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 960 * 2);
     }
 
     #[test]

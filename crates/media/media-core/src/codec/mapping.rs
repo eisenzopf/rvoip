@@ -514,6 +514,10 @@ pub struct CodecCapability {
 impl CodecMapper {
     /// Get codec capability information
     pub fn get_codec_capability(&self, codec_name: &str) -> Option<CodecCapability> {
+        let base_name = codec_name.split('@').next().unwrap_or(codec_name);
+        if !crate::codec::audio_codec_available(base_name) {
+            return None;
+        }
         let payload_type = self.codec_to_payload(codec_name)?;
         let clock_rate = self.get_clock_rate(codec_name);
         let is_static = !dynamic_range::is_dynamic(payload_type);
@@ -815,12 +819,21 @@ mod tests {
         let opus_config = OpusConfig::new(48000, 2);
         mapper.register_opus_config(opus_config.clone(), 96);
 
-        let opus_cap = mapper.get_codec_capability("opus@48000Hz@2ch").unwrap();
-        assert_eq!(opus_cap.name, "opus@48000Hz@2ch");
-        assert_eq!(opus_cap.payload_type, 96);
-        assert_eq!(opus_cap.clock_rate, 48000);
-        assert!(!opus_cap.is_static);
-        assert_eq!(opus_cap.opus_config, Some(opus_config));
+        #[cfg(feature = "opus")]
+        {
+            let opus_cap = mapper.get_codec_capability("opus@48000Hz@2ch").unwrap();
+            assert_eq!(opus_cap.name, "opus@48000Hz@2ch");
+            assert_eq!(opus_cap.payload_type, 96);
+            assert_eq!(opus_cap.clock_rate, 48000);
+            assert!(!opus_cap.is_static);
+            assert_eq!(opus_cap.opus_config, Some(opus_config));
+        }
+        #[cfg(not(feature = "opus"))]
+        {
+            assert!(mapper.get_codec_capability("opus@48000Hz@2ch").is_none());
+            assert_eq!(mapper.codec_to_payload("opus@48000Hz@2ch"), Some(96));
+            assert_eq!(mapper.get_opus_config(96), Some(&opus_config));
+        }
     }
 
     #[cfg(feature = "g729")]

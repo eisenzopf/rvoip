@@ -214,6 +214,7 @@ async fn release_lane_owned_resources(
     cleanup_lane_owned_media(session, media_adapter).await
 }
 
+#[cfg(test)]
 fn negotiated_audio_shape(codec: &str) -> (u32, u8) {
     if codec.eq_ignore_ascii_case("opus") {
         // The SIP SDP profile advertises `opus/48000/2`; preserve that exact
@@ -2325,13 +2326,13 @@ pub(crate) async fn execute_action(
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
-                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate,
-                    channels,
+                    payload_type: config.payload_type,
+                    sample_rate: config.clock_rate,
+                    channels: config.channels,
                 };
                 session.negotiated_config = Some(session_config);
                 session.local_media_direction = config.local_direction;
@@ -2359,13 +2360,13 @@ pub(crate) async fn execute_action(
                     .await?;
 
                 // Convert to session_store NegotiatedConfig
-                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate,
-                    channels,
+                    payload_type: config.payload_type,
+                    sample_rate: config.clock_rate,
+                    channels: config.channels,
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
@@ -2388,13 +2389,13 @@ pub(crate) async fn execute_action(
                 let (local_sdp, config) = media_adapter
                     .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
                     .await?;
-                let (sample_rate, channels) = negotiated_audio_shape(&config.codec);
                 let session_config = crate::session_store::state::NegotiatedConfig {
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    sample_rate,
-                    channels,
+                    payload_type: config.payload_type,
+                    sample_rate: config.clock_rate,
+                    channels: config.channels,
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
@@ -5123,6 +5124,7 @@ mod lane_owned_action_state_tests {
             local_addr: "127.0.0.1:16000".parse().expect("local address"),
             remote_addr: "127.0.0.1:16002".parse().expect("remote address"),
             codec: "PCMU".to_string(),
+            payload_type: 0,
             sample_rate: 8_000,
             channels: 1,
         });

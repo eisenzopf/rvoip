@@ -94,6 +94,13 @@ impl RtpScheduler {
         );
     }
 
+    /// Update the RTP clock used for subsequent packet scheduling.
+    pub fn set_clock_rate(&mut self, clock_rate: u32) {
+        self.clock_rate = clock_rate;
+        let interval_ms = self.interval.as_millis() as u64;
+        self.timestamp_increment = (f64::from(clock_rate) * (interval_ms as f64 / 1_000.0)) as u32;
+    }
+
     /// Set the output channel
     pub fn set_sender(&mut self, sender: mpsc::Sender<RtpPacket>) {
         self.sender = Some(sender);

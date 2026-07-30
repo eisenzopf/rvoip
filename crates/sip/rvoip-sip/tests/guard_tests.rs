@@ -47,6 +47,7 @@ async fn test_has_negotiated_config_true() {
         local_addr: "127.0.0.1:5000".parse::<SocketAddr>().unwrap(),
         remote_addr: "127.0.0.1:5002".parse::<SocketAddr>().unwrap(),
         codec: "PCMU".into(),
+        payload_type: 0,
         sample_rate: 8000,
         channels: 1,
     });

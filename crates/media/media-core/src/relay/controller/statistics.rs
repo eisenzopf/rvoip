@@ -315,6 +315,7 @@ mod tests {
         controller.stop_media(&dialog_id).await.unwrap();
     }
 
+    #[cfg(feature = "opus")]
     #[tokio::test]
     async fn test_codec_statistics_opus() {
         let controller = create_test_controller().await;
@@ -398,11 +399,11 @@ mod tests {
             Some("PCMU".to_string())
         );
 
-        // Update to Opus codec
+        // Update to another always-available codec.
         let updated_config = MediaConfig {
             local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
             remote_addr: None,
-            preferred_codec: Some("Opus".to_string()),
+            preferred_codec: Some("PCMA".to_string()),
             parameters: HashMap::new(),
         };
 
@@ -415,7 +416,7 @@ mod tests {
         let updated_stats = controller.get_media_statistics(&dialog_id).await.unwrap();
         assert_eq!(
             updated_stats.media_stats.current_codec,
-            Some("Opus".to_string())
+            Some("PCMA".to_string())
         );
 
         // Cleanup
@@ -436,11 +437,11 @@ mod tests {
             parameters: HashMap::new(),
         };
 
-        // Configure second session with Opus
+        // Configure second session with another always-available codec.
         let config_2 = MediaConfig {
             local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0),
             remote_addr: None,
-            preferred_codec: Some("Opus".to_string()),
+            preferred_codec: Some("PCMA".to_string()),
             parameters: HashMap::new(),
         };
 
@@ -460,7 +461,7 @@ mod tests {
 
         // Verify each session has the correct codec
         assert_eq!(stats_1.media_stats.current_codec, Some("PCMU".to_string()));
-        assert_eq!(stats_2.media_stats.current_codec, Some("Opus".to_string()));
+        assert_eq!(stats_2.media_stats.current_codec, Some("PCMA".to_string()));
 
         // Cleanup
         controller.stop_media(&dialog_id_1).await.unwrap();

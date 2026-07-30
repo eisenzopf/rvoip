@@ -352,7 +352,17 @@ impl SdpMediaProcessor {
         media_type: &str,
         port: u16,
     ) -> Result<SdpMediaDescription, MediaError> {
-        let payload_types: Vec<u8> = capabilities.iter().map(|c| c.codec.payload_type).collect();
+        let capabilities: Vec<&CodecCapability> = capabilities
+            .iter()
+            .filter(|capability| {
+                !media_type.eq_ignore_ascii_case("audio")
+                    || crate::codec::audio_codec_available(&capability.codec.name)
+            })
+            .collect();
+        let payload_types: Vec<u8> = capabilities
+            .iter()
+            .map(|capability| capability.codec.payload_type)
+            .collect();
 
         let media_line = SdpMediaLine {
             media_type: media_type.to_string(),
@@ -622,5 +632,33 @@ mod tests {
         assert!(text.to_ascii_uppercase().contains("OPUS"));
         #[cfg(not(feature = "opus"))]
         assert!(!text.to_ascii_uppercase().contains("OPUS"));
+    }
+
+    #[test]
+    fn explicit_local_capabilities_cannot_advertise_unavailable_audio() {
+        let processor = SdpMediaProcessor::new();
+        let capabilities = [
+            CodecCapability::new(
+                MediaCodec::new("G722".to_string(), 9, 8_000).with_channels(1),
+                MediaDirection::SendReceive,
+            ),
+            CodecCapability::new(
+                MediaCodec::new("OpUs".to_string(), 111, 48_000).with_channels(2),
+                MediaDirection::SendReceive,
+            ),
+            CodecCapability::new(
+                MediaCodec::new("PCMU".to_string(), 0, 8_000).with_channels(1),
+                MediaDirection::SendReceive,
+            ),
+        ];
+        let description = processor
+            .capabilities_to_sdp(&capabilities, "audio", 5_004)
+            .unwrap();
+        assert!(!description.media_line.payload_types.contains(&9));
+        #[cfg(feature = "opus")]
+        assert!(description.media_line.payload_types.contains(&111));
+        #[cfg(not(feature = "opus"))]
+        assert!(!description.media_line.payload_types.contains(&111));
+        assert!(description.media_line.payload_types.contains(&0));
     }
 }

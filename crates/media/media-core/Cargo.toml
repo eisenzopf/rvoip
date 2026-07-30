@@ -94,7 +94,7 @@ g729 = ["rvoip-codec-core/g729"]
 opus = ["rvoip-codec-core/opus"]
 # Deprecated compatibility alias. It enables the real Opus backend.
 opus-sim = ["opus"]
-all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
+all-codecs = ["pcmu", "pcma", "g729", "opus"]
 
 [dev-dependencies]
 serial_test = "3.0"

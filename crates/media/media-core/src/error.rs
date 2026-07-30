@@ -70,6 +70,12 @@ pub enum MediaSessionError {
 /// Codec-related errors
 #[derive(Debug, Error)]
 pub enum CodecError {
+    /// The requested codec is known but no usable encoder/decoder is
+    /// available in this build. This is deliberately distinct from an
+    /// unknown payload type so callers can fail negotiation explicitly.
+    #[error("Unsupported codec: {name}")]
+    UnsupportedCodec { name: String },
+
     #[error("Unsupported payload type: {payload_type}")]
     UnsupportedPayloadType { payload_type: u8 },
 
@@ -186,6 +192,11 @@ impl Error {
     /// Create a codec not found error
     pub fn codec_not_found(name: impl Into<String>) -> Self {
         Self::Codec(CodecError::NotFound { name: name.into() })
+    }
+
+    /// Create an unsupported-codec error.
+    pub fn unsupported_codec(name: impl Into<String>) -> Self {
+        Self::Codec(CodecError::UnsupportedCodec { name: name.into() })
     }
 
     /// Create an unsupported payload type error

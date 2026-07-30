@@ -115,12 +115,13 @@ Clean separation of concerns across the rvoip stack:
   - ✅ 8-sample parallel processing for audio operations
 
 #### **Codec Support and Transcoding**
-- ✅ **Multi-Codec Support**: Wired beta codecs plus optional G.729A/G.729AB
+- ✅ **Multi-Codec Support**: G.711 plus feature-gated G.729A/G.729AB and Opus
   - ✅ **G.711**: μ-law/A-law (PCMU/PCMA) with ITU-T compliance
   - ✅ **G.729A/G.729AB**: optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG under the `g729` feature
-  - 🔮 **Opus/G.722**: post-beta full-media paths
+  - ✅ **Opus**: real libopus-backed encode/decode under the `opus` feature
+  - ⛔ **G.722**: RTP payload metadata only; encoder/decoder construction and negotiation are rejected
 - ✅ **Real-Time Transcoding**: Seamless format conversion
-  - ✅ PCMU ↔ PCMA and optional G.729A/G.729AB transcoding paths
+  - ✅ PCMU ↔ PCMA plus feature-gated G.729A/G.729AB and Opus paths
   - ✅ Session management with performance statistics
   - ✅ Format conversion with sample rate adaptation
 
@@ -474,11 +475,12 @@ The library provides cutting-edge audio processing algorithms competitive with c
 
 - **G.711 (PCMU/PCMA)**: ITU-T compliant μ-law/A-law implementation
 - **G.729A/G.729AB**: Optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG
-- **Opus/G.722**: Post-beta full-media paths
+- **Opus**: Optional real libopus-backed codec
+- **G.722**: Unsupported as a working codec; low-level RTP payload handling remains available
 
 ### Transcoding Capabilities
 
-- **Real-Time Transcoding**: PCMU/PCMA and optional G.729A/G.729AB paths
+- **Real-Time Transcoding**: PCMU/PCMA and feature-gated G.729A/G.729AB and Opus paths
 - **Format Conversion**: Automatic sample rate and channel conversion
 - **Session Management**: Performance statistics and caching
 - **Quality Preservation**: Optimal transcoding paths to minimize quality loss

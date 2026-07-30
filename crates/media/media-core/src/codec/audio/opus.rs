@@ -104,7 +104,7 @@ impl OpusCodec {
         #[cfg(not(feature = "opus"))]
         {
             let _ = (sample_rate_hz, channels, config);
-            return Err(CodecError::NotFound {
+            return Err(CodecError::UnsupportedCodec {
                 name: "Opus (enable the `opus` feature)".to_string(),
             }
             .into());
@@ -155,7 +155,7 @@ impl AudioCodec for OpusCodec {
         #[cfg(not(feature = "opus"))]
         {
             let _ = audio_frame;
-            Err(CodecError::NotFound {
+            Err(CodecError::UnsupportedCodec {
                 name: "Opus (enable the `opus` feature)".to_string(),
             }
             .into())
@@ -196,7 +196,7 @@ impl AudioCodec for OpusCodec {
         #[cfg(not(feature = "opus"))]
         {
             let _ = encoded_data;
-            Err(CodecError::NotFound {
+            Err(CodecError::UnsupportedCodec {
                 name: "Opus (enable the `opus` feature)".to_string(),
             }
             .into())
@@ -270,7 +270,9 @@ mod tests {
     fn opus_construction_fails_without_feature() {
         assert!(matches!(
             OpusCodec::new(SampleRate::Rate48000, 1, OpusConfig::default()),
-            Err(crate::error::Error::Codec(CodecError::NotFound { .. }))
+            Err(crate::error::Error::Codec(
+                CodecError::UnsupportedCodec { .. }
+            ))
         ));
     }
 

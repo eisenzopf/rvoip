@@ -174,11 +174,14 @@ impl Transcoder {
                 Ok(Box::new(codec))
             }
             #[cfg(not(feature = "g729"))]
-            18 => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
+            18 => Err(CodecError::UnsupportedCodec {
+                name: "G.729 (enable the `g729` feature)".to_string(),
+            }
+            .into()),
             #[cfg(feature = "opus")]
             111 => CodecFactory::create_codec(111, Some(48_000), Some(2)),
             #[cfg(not(feature = "opus"))]
-            111 => Err(CodecError::NotFound {
+            111 => Err(CodecError::UnsupportedCodec {
                 name: "Opus (enable the `opus` feature)".to_string(),
             }
             .into()),

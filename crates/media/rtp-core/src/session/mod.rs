@@ -13,7 +13,7 @@ use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
 use rand::Rng;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -508,6 +508,10 @@ pub struct RtpSession {
     /// Session configuration
     config: RtpSessionConfig,
 
+    /// Live RTP clock used when receive streams are created after a codec
+    /// renegotiation.
+    clock_rate: Arc<AtomicU32>,
+
     /// SSRC for this session
     ssrc: RtpSsrc,
 
@@ -678,8 +682,10 @@ impl RtpSession {
         );
         let rtcp_generator = crate::stats::reports::RtcpReportGenerator::new(ssrc, cname);
 
+        let clock_rate = Arc::new(AtomicU32::new(config.clock_rate));
         let mut session = Self {
             config,
+            clock_rate,
             ssrc,
             transport,
             streams: Arc::new(DashMap::new()),
@@ -736,7 +742,7 @@ impl RtpSession {
         let stats_recv = self.stats.clone();
         let remote_addr = self.config.remote_addr;
         let event_tx_recv = self.event_tx.clone();
-        let clock_rate = self.config.clock_rate;
+        let clock_rate = self.clock_rate.clone();
         let _payload_type = self.config.payload_type;
         let ssrc = self.ssrc;
         let streams_map = self.streams.clone();
@@ -764,7 +770,8 @@ impl RtpSession {
         if let Some(scheduler) = &mut self.scheduler {
             // Set appropriate timestamp increment based on packet interval
             let interval_ms = 20; // Default 20ms packet interval
-            let samples_per_packet = (clock_rate as f64 * (interval_ms as f64 / 1000.0)) as u32;
+            let samples_per_packet = (f64::from(clock_rate.load(Ordering::Relaxed))
+                * (interval_ms as f64 / 1000.0)) as u32;
             scheduler.set_interval(interval_ms, samples_per_packet);
         }
 
@@ -978,7 +985,10 @@ impl RtpSession {
                             let mut entry = streams_map.entry(packet_ssrc).or_insert_with(|| {
                                 created = true;
                                 info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
-                                let mut stream = RtpStream::new(packet_ssrc, clock_rate);
+                                let mut stream = RtpStream::new(
+                                    packet_ssrc,
+                                    clock_rate.load(Ordering::Relaxed),
+                                );
                                 if let Some(sender_report) =
                                     received_sender_reports.get(&packet_ssrc)
                                 {
@@ -1439,6 +1449,18 @@ impl RtpSession {
     /// Set the payload type
     pub fn set_payload_type(&mut self, payload_type: u8) {
         self.config.payload_type = payload_type;
+    }
+
+    /// Set the RTP clock after a completed codec renegotiation.
+    /// Existing receive-stream timing state belongs to the preceding codec
+    /// generation and is discarded so the next packet starts a fresh stream.
+    pub fn set_clock_rate(&mut self, clock_rate: u32) {
+        self.config.clock_rate = clock_rate;
+        self.clock_rate.store(clock_rate, Ordering::Release);
+        self.streams.clear();
+        if let Some(scheduler) = &mut self.scheduler {
+            scheduler.set_clock_rate(clock_rate);
+        }
     }
 
     /// Get a stream by SSRC, if it exists

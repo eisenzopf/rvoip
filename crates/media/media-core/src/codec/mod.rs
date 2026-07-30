@@ -22,6 +22,24 @@ pub use mapping::{CodecCapability, CodecMapper};
 // Re-export codec factory
 pub use factory::CodecFactory;
 
+/// Whether this build can construct a working encoder and decoder for an
+/// audio codec name. Wire registries may still retain metadata for unsupported
+/// codecs so remote SDP can be parsed without advertising them locally.
+pub fn audio_codec_available(name: &str) -> bool {
+    let normalized: String = name
+        .chars()
+        .filter(|character| !matches!(character, '.' | '-' | '_' | ' '))
+        .map(|character| character.to_ascii_uppercase())
+        .collect();
+    match normalized.as_str() {
+        "PCMU" | "PCMA" | "G711MU" | "G711U" | "G711A" => true,
+        "G729" | "G729A" | "G729BA" | "G729AB" => cfg!(feature = "g729"),
+        "OPUS" => cfg!(feature = "opus"),
+        "G722" => false,
+        _ => false,
+    }
+}
+
 /// Basic codec trait for RTP payload processing
 pub trait Codec: Send + Sync {
     /// Get the RTP payload type for this codec

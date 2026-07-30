@@ -94,6 +94,13 @@ impl CodecFactory {
     ///
     /// Returns an error when the configuration is invalid, the codec feature
     /// is disabled, or codec construction fails.
+    // Preserve the public by-value constructor in a build where every codec
+    // branch is compiled out; feature-enabled branches transfer ownership to
+    // their concrete codec constructors.
+    #[cfg_attr(
+        not(any(feature = "g711", feature = "g729", feature = "opus")),
+        allow(clippy::needless_pass_by_value)
+    )]
     pub fn create(config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
         // Validate configuration first
         config.validate()?;

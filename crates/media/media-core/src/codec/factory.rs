@@ -61,13 +61,11 @@ impl CodecFactory {
             }
             // G.722 RTP payload handling remains available, but there is no
             // encoder/decoder implementation to construct.
-            9 => Err(Error::Codec(crate::error::CodecError::NotFound {
-                name: "G.722 encoder/decoder is not implemented".to_string(),
-            })),
+            9 => Err(Error::unsupported_codec(
+                "G.722 (encoder/decoder is not implemented)",
+            )),
             #[cfg(not(feature = "opus"))]
-            111 => Err(Error::Codec(crate::error::CodecError::NotFound {
-                name: "Opus (enable the `opus` feature)".to_string(),
-            })),
+            111 => Err(Error::unsupported_codec("Opus (enable the `opus` feature)")),
             PCM_S16LE => Ok(Box::new(PcmS16LeCodec::new(
                 sample_rate,
                 u8::try_from(channels).map_err(|_| {

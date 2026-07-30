@@ -159,7 +159,11 @@ impl CodecNegotiator {
 
     /// Add local codec capability
     pub fn add_local_capability(&mut self, capability: CodecCapability) {
-        self.local_capabilities.push(capability);
+        if !capability.codec.is_audio()
+            || crate::codec::audio_codec_available(&capability.codec.name)
+        {
+            self.local_capabilities.push(capability);
+        }
     }
 
     /// Add remote codec capability
@@ -169,7 +173,13 @@ impl CodecNegotiator {
 
     /// Set local capabilities from a list
     pub fn set_local_capabilities(&mut self, capabilities: Vec<CodecCapability>) {
-        self.local_capabilities = capabilities;
+        self.local_capabilities = capabilities
+            .into_iter()
+            .filter(|capability| {
+                !capability.codec.is_audio()
+                    || crate::codec::audio_codec_available(&capability.codec.name)
+            })
+            .collect();
     }
 
     /// Set remote capabilities from a list
