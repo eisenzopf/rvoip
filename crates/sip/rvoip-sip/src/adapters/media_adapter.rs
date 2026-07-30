@@ -2811,15 +2811,15 @@ impl MediaAdapter {
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
         let session_id = session.session_id.clone();
-        // Resolve the exact managed resource once and prime the cached session
-        // info. Both SRTP and plaintext paths share this canonical owner.
-        let exact_media = self.lane_owned_media(session)?;
-        let dialog_id = &exact_media.dialog_id;
         if self.signaling_only_local_port().is_some() {
             return self
                 .generate_signaling_only_sdp_offer_lane_owned(session, direction)
                 .await;
         }
+        // Resolve the exact managed resource once and prime the cached session
+        // info. Both SRTP and plaintext paths share this canonical owner.
+        let exact_media = self.lane_owned_media(session)?;
+        let dialog_id = &exact_media.dialog_id;
         let info = self
             .controller
             .get_session_info(dialog_id)
@@ -4186,6 +4186,46 @@ mod sdp_format_tests {
                 "retired facade remains: {retired}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn signaling_only_hold_and_resume_sdp_need_no_media_allocation() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("signaling-only-hold-resume".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create signaling-only session");
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            store,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+
+        let hold = adapter
+            .create_hold_sdp_for_session(&session_id)
+            .await
+            .expect("signaling-only hold SDP");
+        let resume = adapter
+            .create_active_sdp_for_session(&session_id)
+            .await
+            .expect("signaling-only resume SDP");
+
+        assert!(hold.contains("m=audio 9 RTP/AVP"), "{hold}");
+        assert!(hold.contains("a=sendonly"), "{hold}");
+        assert!(resume.contains("m=audio 9 RTP/AVP"), "{resume}");
+        assert!(resume.contains("a=sendrecv"), "{resume}");
+        assert!(adapter.media_sessions.is_empty());
+        assert!(adapter.media_resources.is_empty());
     }
 
     #[cfg(feature = "perf-tests")]

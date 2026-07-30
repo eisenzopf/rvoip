@@ -758,6 +758,20 @@ transitions:
       - type: "SendReINVITE"
     description: "Send hold re-INVITE; stay on current media until 2xx (RFC 3261 §14.1)"
 
+  # Repeating an already-satisfied local direction request is a successful
+  # no-op. In particular, do not create another offer or re-INVITE.
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "HoldCall"
+    description: "Already held — idempotent success without another re-INVITE"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "ResumeCall"
+    description: "Already active — idempotent success without another re-INVITE"
+
   - role: "Both"
     state: "HoldPending"
     event:

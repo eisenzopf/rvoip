@@ -1982,7 +1982,7 @@ impl StateMachine {
                                             return Err(error);
                                         }
                                     };
-                                    session.local_sdp = Some(sdp.clone());
+                                    actions::stage_reinvite_local_sdp(&mut session, sdp.clone());
                                     let committed = commit_lane_state(&dispatch_store, session)
                                         .map_err(|error| error.to_string())?;
 

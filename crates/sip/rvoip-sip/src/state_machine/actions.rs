@@ -173,6 +173,23 @@ fn prepare_session_refresh_reinvite(
     Ok(ActionOutcome::with_event(EventType::SendOutboundReInvite))
 }
 
+pub(crate) fn stage_reinvite_local_sdp(session: &mut SessionState, offer: String) {
+    if session.stable_local_sdp_before_reinvite.is_none() {
+        session.stable_local_sdp_before_reinvite = Some(session.local_sdp.clone());
+    }
+    session.local_sdp = Some(offer);
+}
+
+fn commit_reinvite_local_sdp(session: &mut SessionState) {
+    session.stable_local_sdp_before_reinvite = None;
+}
+
+fn rollback_reinvite_local_sdp(session: &mut SessionState) {
+    if let Some(stable) = session.stable_local_sdp_before_reinvite.take() {
+        session.local_sdp = stable;
+    }
+}
+
 /// Retire every lifecycle attachment derived from one media allocation in the
 /// lane-owned working state. The executor publishes this mutation exactly once
 /// after all ordered actions have finished.
@@ -181,6 +198,7 @@ fn retire_lane_owned_media_identity(session: &mut SessionState) {
     session.media_session_ready = false;
     session.sdp_negotiated = false;
     session.local_sdp = None;
+    session.stable_local_sdp_before_reinvite = None;
     session.negotiated_config = None;
 }
 
@@ -2019,6 +2037,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::ClearPendingReinvite => {
+            rollback_reinvite_local_sdp(session);
             session.pending_reinvite = None;
             session.reinvite_retry_attempts = 0;
             debug!(
@@ -2036,6 +2055,7 @@ pub(crate) async fn execute_action(
             use crate::state_table::types::Role;
             const MAX_GLARE_RETRIES: u8 = 3;
             if session.reinvite_retry_attempts >= MAX_GLARE_RETRIES {
+                rollback_reinvite_local_sdp(session);
                 session.pending_reinvite = None;
                 return Err(format!(
                     "491 glare retry limit ({}) exceeded for session {}",
@@ -2224,7 +2244,7 @@ pub(crate) async fn execute_action(
                 .create_hold_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
-            session.local_sdp = Some(hold_sdp.clone());
+            stage_reinvite_local_sdp(session, hold_sdp.clone());
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Hold);
             dialog_adapter
                 .send_reinvite_with_options_lane_owned(
@@ -2242,7 +2262,7 @@ pub(crate) async fn execute_action(
                 .create_active_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_active_sdp failed: {}", e))?;
-            session.local_sdp = Some(active_sdp.clone());
+            stage_reinvite_local_sdp(session, active_sdp.clone());
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Resume);
             dialog_adapter
                 .send_reinvite_with_options_lane_owned(
@@ -2338,6 +2358,7 @@ pub(crate) async fn execute_action(
                 session.local_media_direction = config.local_direction;
                 session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
+                commit_reinvite_local_sdp(session);
                 info!("SDP negotiated as UAC for session {}", session.session_id);
             }
         }
@@ -2515,7 +2536,7 @@ pub(crate) async fn execute_action(
                     .await
                     .map_err(|e| format!("create_active_sdp failed: {}", e))?
             };
-            session.local_sdp = Some(sdp.clone());
+            stage_reinvite_local_sdp(session, sdp.clone());
             session.pending_reinvite = Some(kind);
             // A 491/ReinviteGlare response is queued on the same exact-session
             // lane. It observes this SDP and retry intent only after the
@@ -2813,22 +2834,22 @@ pub(crate) async fn execute_action(
                         Some(("SIP".to_string(), 408, Some("Session expired".to_string())));
                 }
                 "SuspendMedia" => {
+                    let direction = crate::types::MediaDirection::SendOnly;
                     if let Some(media_id) = &session.media_session_id {
-                        let direction = crate::types::MediaDirection::SendOnly;
                         media_adapter
                             .set_media_direction(media_id.clone(), direction)
                             .await?;
-                        session.local_media_direction = direction;
                     }
+                    session.local_media_direction = direction;
                 }
                 "ResumeMedia" => {
+                    let direction = crate::types::MediaDirection::SendRecv;
                     if let Some(media_id) = &session.media_session_id {
-                        let direction = crate::types::MediaDirection::SendRecv;
                         media_adapter
                             .set_media_direction(media_id.clone(), direction)
                             .await?;
-                        session.local_media_direction = direction;
                     }
+                    session.local_media_direction = direction;
                 }
                 "CheckReadiness" => {
                     return Ok(ActionOutcome::with_event(EventType::CheckConditions));
@@ -4984,6 +5005,49 @@ mod negotiated_audio_shape_tests {
         assert_eq!(negotiated_audio_shape("PCMA"), (8_000, 1));
         assert_eq!(negotiated_audio_shape("opus"), (48_000, 2));
         assert_eq!(negotiated_audio_shape("OPUS"), (48_000, 2));
+    }
+}
+
+#[cfg(test)]
+mod reinvite_sdp_snapshot_tests {
+    use super::{commit_reinvite_local_sdp, rollback_reinvite_local_sdp, stage_reinvite_local_sdp};
+    use crate::session_store::state::SessionState;
+    use crate::state_table::{Role, SessionId};
+
+    #[test]
+    fn failed_reinvite_restores_the_preceding_stable_local_sdp() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.local_sdp = Some("stable".to_string());
+
+        stage_reinvite_local_sdp(&mut session, "hold-offer".to_string());
+        stage_reinvite_local_sdp(&mut session, "hold-retry".to_string());
+        rollback_reinvite_local_sdp(&mut session);
+
+        assert_eq!(session.local_sdp.as_deref(), Some("stable"));
+        assert!(session.stable_local_sdp_before_reinvite.is_none());
+    }
+
+    #[test]
+    fn successful_reinvite_commits_the_new_local_sdp() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.local_sdp = Some("stable".to_string());
+
+        stage_reinvite_local_sdp(&mut session, "resume-offer".to_string());
+        commit_reinvite_local_sdp(&mut session);
+
+        assert_eq!(session.local_sdp.as_deref(), Some("resume-offer"));
+        assert!(session.stable_local_sdp_before_reinvite.is_none());
+    }
+
+    #[test]
+    fn failed_reinvite_preserves_an_absent_stable_local_sdp() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+
+        stage_reinvite_local_sdp(&mut session, "offer".to_string());
+        rollback_reinvite_local_sdp(&mut session);
+
+        assert!(session.local_sdp.is_none());
+        assert!(session.stable_local_sdp_before_reinvite.is_none());
     }
 }
 

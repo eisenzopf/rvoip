@@ -168,6 +168,10 @@ pub struct SessionStateCold {
     pub redirect_targets: Vec<String>,
     pub redirect_attempts: u8,
     pub pending_reinvite: Option<PendingReinvite>,
+    /// Stable local SDP captured before an outbound re-INVITE replaces the
+    /// working offer. The outer option marks an in-flight snapshot; the inner
+    /// option preserves whether the stable dialog had local SDP at all.
+    pub(crate) stable_local_sdp_before_reinvite: Option<Option<String>>,
     pub reinvite_retry_attempts: u8,
     pub session_timer_min_se: Option<u32>,
     pub session_timer_retry_count: u8,
@@ -417,6 +421,10 @@ impl fmt::Debug for SessionState {
             )
             .field("local_sdp_present", &self.local_sdp.is_some())
             .field("remote_sdp_present", &self.remote_sdp.is_some())
+            .field(
+                "stable_local_sdp_before_reinvite_present",
+                &self.stable_local_sdp_before_reinvite.is_some(),
+            )
             .field(
                 "negotiated_config_present",
                 &self.negotiated_config.is_some(),
@@ -889,6 +897,7 @@ impl SessionState {
                 redirect_targets: Vec::new(),
                 redirect_attempts: 0,
                 pending_reinvite: None,
+                stable_local_sdp_before_reinvite: None,
                 reinvite_retry_attempts: 0,
                 session_timer_min_se: None,
                 session_timer_retry_count: 0,
