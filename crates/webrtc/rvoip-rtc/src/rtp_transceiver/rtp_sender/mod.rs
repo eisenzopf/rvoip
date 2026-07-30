@@ -228,6 +228,40 @@ where
     pub(crate) peer_connection: &'a mut RTCPeerConnection<I>,
 }
 
+fn outbound_payload_type(
+    requested_payload_type: crate::rtp_transceiver::PayloadType,
+    selected_codec: &RTCRtpCodecParameters,
+    codecs: &[RTCRtpCodecParameters],
+    encodings: &[RTCRtpEncodingParameters],
+) -> crate::rtp_transceiver::PayloadType {
+    let Some(requested_codec) = codecs
+        .iter()
+        .find(|codec| codec.payload_type == requested_payload_type)
+    else {
+        return selected_codec.payload_type;
+    };
+
+    // A negotiated codec is eligible on this track only when a coding on the
+    // track represents that exact negotiated payload type. This prevents an
+    // arbitrary codec from the m-line from being injected through an SSRC
+    // owned by this sender.
+    let represented_by_track = encodings.iter().any(|encoding| {
+        let (represented_codec, match_type) =
+            codec_parameters_fuzzy_search(&encoding.codec, codecs);
+        match_type != CodecMatch::None && represented_codec.payload_type == requested_payload_type
+    });
+
+    if represented_by_track
+        && requested_codec.rtp_codec.clock_rate == selected_codec.rtp_codec.clock_rate
+    {
+        requested_payload_type
+    } else {
+        // Preserve the legacy behavior for unnegotiated, unrepresented, or
+        // clock-rate-changing payload types.
+        selected_codec.payload_type
+    }
+}
+
 impl<I> RTCRtpSender<'_, I>
 where
     I: Interceptor,
@@ -392,8 +426,9 @@ where
             return Err(Error::ErrRTPTransceiverCodecUnsupported);
         }
 
+        packet.header.payload_type =
+            outbound_payload_type(packet.header.payload_type, &codec, codecs, encodings);
         let track_id = sender.track().track_id().to_string();
-        packet.header.payload_type = codec.payload_type;
         self.peer_connection
             .handle_write(RTCMessage::RtpPacket(track_id, packet))
     }
@@ -423,5 +458,95 @@ where
         let track_id = sender.track().track_id().to_string();
         self.peer_connection
             .handle_write(RTCMessage::RtcpPacket(track_id, packets))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
+
+    fn codec(
+        payload_type: crate::rtp_transceiver::PayloadType,
+        mime_type: &str,
+        clock_rate: u32,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels: 1,
+                ..Default::default()
+            },
+            payload_type,
+        }
+    }
+
+    fn encoding(ssrc: u32, codec: &RTCRtpCodecParameters) -> RTCRtpEncodingParameters {
+        RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: codec.rtp_codec.clone(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn outbound_payload_type_preserves_represented_same_clock_supplemental_codec() {
+        let opus = codec(111, "audio/opus", 48_000);
+        let telephone_event = codec(110, "audio/telephone-event", 48_000);
+        let codecs = vec![opus.clone(), telephone_event.clone()];
+        let encodings = vec![
+            encoding(0x0102_0304, &opus),
+            encoding(0x0506_0708, &telephone_event),
+        ];
+
+        assert_eq!(
+            outbound_payload_type(telephone_event.payload_type, &opus, &codecs, &encodings),
+            telephone_event.payload_type
+        );
+    }
+
+    #[test]
+    fn outbound_payload_type_rejects_represented_codec_with_different_clock() {
+        let opus = codec(111, "audio/opus", 48_000);
+        let telephone_event = codec(101, "audio/telephone-event", 8_000);
+        let codecs = vec![opus.clone(), telephone_event.clone()];
+        let encodings = vec![
+            encoding(0x0102_0304, &opus),
+            encoding(0x0506_0708, &telephone_event),
+        ];
+
+        assert_eq!(
+            outbound_payload_type(telephone_event.payload_type, &opus, &codecs, &encodings),
+            opus.payload_type
+        );
+    }
+
+    #[test]
+    fn outbound_payload_type_rejects_negotiated_but_unrepresented_codec() {
+        let opus = codec(111, "audio/opus", 48_000);
+        let supplemental = codec(112, "audio/example", 48_000);
+        let codecs = vec![opus.clone(), supplemental.clone()];
+        let encodings = vec![encoding(0x0102_0304, &opus)];
+
+        assert_eq!(
+            outbound_payload_type(supplemental.payload_type, &opus, &codecs, &encodings),
+            opus.payload_type
+        );
+    }
+
+    #[test]
+    fn outbound_payload_type_rejects_unnegotiated_codec() {
+        let opus = codec(111, "audio/opus", 48_000);
+        let codecs = vec![opus.clone()];
+        let encodings = vec![encoding(0x0102_0304, &opus)];
+
+        assert_eq!(
+            outbound_payload_type(127, &opus, &codecs, &encodings),
+            opus.payload_type
+        );
     }
 }

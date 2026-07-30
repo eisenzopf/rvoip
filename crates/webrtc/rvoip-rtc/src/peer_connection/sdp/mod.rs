@@ -164,6 +164,7 @@ use crate::peer_connection::transport::ice::parameters::RTCIceParameters;
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::{RTCRtpCodec, RtpCodecKind};
 use crate::rtp_transceiver::rtp_sender::rtp_codec_parameters::RTCRtpCodecParameters;
+use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
 use crate::rtp_transceiver::{
     PayloadType, RtpStreamId, SSRC, internal::RTCRtpTransceiverInternal,
     rtp_sender::rtcp_parameters::RTCPFeedback,
@@ -825,6 +826,7 @@ where
         write_ssrc_attributes_for_simulcast: bool,
     ) -> (MediaDescription, Vec<RtpStreamId>) {
         let mut send_rids = vec![];
+        let media_kind = transceiver.kind();
 
         if let Some(sender) = transceiver.sender_mut() {
             let (encodings, track) = (
@@ -832,7 +834,23 @@ where
                 sender.track(),
             );
 
-            let is_simulcast = encodings.len() > 1;
+            // Multiple codec-distinct SSRCs on one audio sender are internal
+            // supplemental RTP bindings (for example Opus plus RFC 4733), not
+            // simulcast or additional MediaStreamTracks. RID simulcast
+            // requires multiple non-empty RIDs and a common codec identity.
+            let is_simulcast = encodings_are_rid_simulcast(&encodings);
+            let advertised_encoding_count =
+                if media_kind == RtpCodecKind::Audio && encodings.len() > 1 && !is_simulcast {
+                    // Unified Plan permits one MediaStreamTrack per audio
+                    // m-section. Advertising every codec-specific binding with
+                    // the same msid/track creates duplicate track ownership that
+                    // Chromium rejects. Only the first (primary) audio source is
+                    // SDP-signaled; RFC 8834 requires receivers to accept later
+                    // RTP from otherwise valid, un-signaled SSRCs.
+                    1
+                } else {
+                    encodings.len()
+                };
 
             media = media.with_property_attribute(format!(
                 "msid:{} {}",
@@ -841,7 +859,7 @@ where
             ));
 
             if write_ssrc_attributes_for_simulcast || !is_simulcast {
-                for encoding in &encodings {
+                for encoding in encodings.iter().take(advertised_encoding_count) {
                     if let Some(&ssrc) = encoding.rtp_coding_parameters.ssrc.as_ref() {
                         if let Some(rtx) = encoding.rtp_coding_parameters.rtx.as_ref() {
                             media = media.with_value_attribute(
@@ -1475,6 +1493,121 @@ pub(crate) fn has_ice_trickle_option(desc: &SessionDescription) -> bool {
     }
 
     false
+}
+
+fn encodings_are_rid_simulcast(encodings: &[RTCRtpEncodingParameters]) -> bool {
+    let Some(first) = encodings.first() else {
+        return false;
+    };
+    encodings.len() > 1
+        && encodings
+            .iter()
+            .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty())
+        && encodings
+            .iter()
+            .all(|encoding| encoding.codec == first.codec)
+}
+
+#[cfg(test)]
+mod supplemental_encoding_tests {
+    use super::*;
+    use crate::media_stream::track::MediaStreamTrack;
+    use crate::peer_connection::configuration::media_engine::{
+        MIME_TYPE_OPUS, MIME_TYPE_TELEPHONE_EVENT,
+    };
+    use crate::rtp_transceiver::RTCRtpTransceiverInit;
+    use crate::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpEncodingParameters};
+    use interceptor::NoopInterceptor;
+
+    fn encoding(
+        ssrc: u32,
+        rid: &str,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+    ) -> RTCRtpEncodingParameters {
+        RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                rid: rid.to_owned(),
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: String::new(),
+                rtcp_feedback: vec![],
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn codec_distinct_audio_encodings_are_not_rid_simulcast() {
+        let encodings = vec![
+            encoding(1001, "", MIME_TYPE_OPUS, 48_000, 2),
+            encoding(2002, "", MIME_TYPE_TELEPHONE_EVENT, 48_000, 1),
+        ];
+        assert!(!encodings_are_rid_simulcast(&encodings));
+
+        let simulcast = vec![
+            encoding(3003, "h", MIME_TYPE_OPUS, 48_000, 2),
+            encoding(4004, "l", MIME_TYPE_OPUS, 48_000, 2),
+        ];
+        assert!(encodings_are_rid_simulcast(&simulcast));
+    }
+
+    #[test]
+    fn supplemental_audio_encodings_signal_only_the_primary_track_ssrc() {
+        let encodings = vec![
+            encoding(1001, "", MIME_TYPE_OPUS, 48_000, 2),
+            encoding(2002, "", MIME_TYPE_TELEPHONE_EVENT, 48_000, 1),
+        ];
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "audio".to_owned(),
+            RtpCodecKind::Audio,
+            encodings.clone(),
+        );
+        let mut transceiver = RTCRtpTransceiverInternal::<NoopInterceptor>::new(
+            RtpCodecKind::Audio,
+            Some(track),
+            RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Sendrecv,
+                streams: vec![],
+                send_encodings: encodings,
+            },
+        );
+
+        let (media, send_rids) = RTCPeerConnection::<NoopInterceptor>::add_sender_sdp(
+            MediaDescription::default(),
+            &MediaEngine::default(),
+            &mut transceiver,
+            false,
+        );
+
+        let ssrc_values = media
+            .attributes
+            .iter()
+            .filter(|attribute| attribute.key == ATTR_KEY_SSRC)
+            .filter_map(|attribute| attribute.value.as_deref())
+            .collect::<Vec<_>>();
+        assert!(ssrc_values.iter().any(|value| value.starts_with("1001 ")));
+        assert!(
+            ssrc_values.iter().all(|value| !value.starts_with("2002 ")),
+            "supplemental codec bindings must not masquerade as another copy of the track"
+        );
+        assert!(send_rids.is_empty());
+        assert!(
+            media
+                .attributes
+                .iter()
+                .all(|attribute| attribute.key != SDP_ATTRIBUTE_RID
+                    && attribute.key != SDP_ATTRIBUTE_SIMULCAST)
+        );
+    }
 }
 
 #[cfg(test)]

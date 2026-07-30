@@ -1,8 +1,8 @@
 use super::*;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
 use crate::peer_connection::sdp::{
-    MediaSection, PopulateSdpParams, add_candidates_to_media_descriptions, get_by_mid,
-    get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
+    MediaSection, PopulateSdpParams, TrackDetails, add_candidates_to_media_descriptions,
+    get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
     rtp_extensions_from_media_description, track_details_from_sdp,
 };
 use crate::peer_connection::state::signaling_state::check_next_signaling_state;
@@ -21,6 +21,24 @@ use crate::statistics::accumulator::IceCandidateAccumulator;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
 use std::collections::HashSet;
+
+fn group_track_details_by_media_stream(tracks: Vec<TrackDetails>) -> Vec<Vec<TrackDetails>> {
+    let mut groups: Vec<Vec<TrackDetails>> = Vec::new();
+    for track in tracks {
+        if let Some(group) = groups.iter_mut().find(|group| {
+            let first = &group[0];
+            first.mid == track.mid
+                && first.kind == track.kind
+                && first.stream_id == track.stream_id
+                && first.track_id == track.track_id
+        }) {
+            group.push(track);
+        } else {
+            groups.push(vec![track]);
+        }
+    }
+    groups
+}
 
 impl<I> RTCPeerConnection<I>
 where
@@ -683,10 +701,12 @@ where
         } else {
             vec![]
         };
+        let incoming_track_groups = group_track_details_by_media_stream(incoming_tracks);
 
         let only_one_rtp_transceiver = self.rtp_transceivers.len() == 1;
 
-        for incoming_track in incoming_tracks.into_iter() {
+        for incoming_track_group in incoming_track_groups {
+            let incoming_track = incoming_track_group[0].clone();
             if let Some(transceiver) = self.rtp_transceivers.iter_mut().find(|transceiver| {
                 transceiver.mid().as_ref() == Some(&incoming_track.mid)
                     && incoming_track.kind == transceiver.kind()
@@ -724,30 +744,42 @@ where
                         incoming_track.kind,
                         codings,
                     ));
-                } else if let Some(ssrc) = incoming_track.ssrc {
-                    let rtp_coding_parameters = RTCRtpCodingParameters {
-                        rid: "".to_string(),
-                        ssrc: Some(ssrc),
-                        rtx: incoming_track
-                            .rtx_ssrc
-                            .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
-                        fec: incoming_track
-                            .fec_ssrc
-                            .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
-                    };
+                } else if incoming_track_group
+                    .iter()
+                    .any(|track| track.ssrc.is_some())
+                {
+                    let mut codings = Vec::new();
+                    for declared_track in incoming_track_group {
+                        let Some(ssrc) = declared_track.ssrc else {
+                            continue;
+                        };
+                        let rtp_coding_parameters = RTCRtpCodingParameters {
+                            rid: "".to_string(),
+                            ssrc: Some(ssrc),
+                            rtx: declared_track
+                                .rtx_ssrc
+                                .map(|rtx_ssrc| RTCRtpRtxParameters { ssrc: rtx_ssrc }),
+                            fec: declared_track
+                                .fec_ssrc
+                                .map(|fec_ssrc| RTCRtpFecParameters { ssrc: fec_ssrc }),
+                        };
 
-                    receive_codings.push(rtp_coding_parameters.clone());
+                        receive_codings.push(rtp_coding_parameters.clone());
+                        codings.push(RTCRtpEncodingParameters {
+                            rtp_coding_parameters,
+                            // Defer each SSRC's codec until its first RTP
+                            // packet supplies the negotiated payload type.
+                            codec: Default::default(),
+                            ..Default::default()
+                        });
+                    }
 
                     receiver.set_track(MediaStreamTrack::new(
                         incoming_track.stream_id,
                         incoming_track.track_id,
                         format!("remote-{}-{}", incoming_track.kind, math_rand_alpha(16)), //TODO:// Label
                         incoming_track.kind,
-                        vec![RTCRtpEncodingParameters {
-                            rtp_coding_parameters,
-                            codec: Default::default(), // Defer receiver's track's codec until received the first RTP packet with payload_type in endpoint handler
-                            ..Default::default()
-                        }],
+                        codings,
                     ));
 
                     receiver.interceptor_remote_streams_op(
@@ -1325,5 +1357,40 @@ where
 
         // Clean up unreferenced codecs
         self.pipeline_context.stats.cleanup_unreferenced_codecs();
+    }
+}
+
+#[cfg(test)]
+mod supplemental_receiver_tests {
+    use super::{TrackDetails, group_track_details_by_media_stream};
+    use crate::rtp_transceiver::rtp_sender::RtpCodecKind;
+
+    fn track(track_id: &str, ssrc: u32) -> TrackDetails {
+        TrackDetails {
+            mid: "audio".to_owned(),
+            kind: RtpCodecKind::Audio,
+            stream_id: "stream".to_owned(),
+            track_id: track_id.to_owned(),
+            ssrc: Some(ssrc),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn same_msid_track_ssrcs_are_grouped_for_one_receiver_track() {
+        let groups = group_track_details_by_media_stream(vec![
+            track("shared", 1001),
+            track("shared", 2002),
+            track("other", 3003),
+        ]);
+
+        assert_eq!(groups.len(), 2);
+        let shared = groups
+            .iter()
+            .find(|group| group[0].track_id == "shared")
+            .expect("shared media track group");
+        assert_eq!(shared.len(), 2);
+        assert_eq!(shared[0].ssrc, Some(1001));
+        assert_eq!(shared[1].ssrc, Some(2002));
     }
 }

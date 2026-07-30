@@ -11,8 +11,12 @@ use crate::media_stream::track::MediaStreamTrackId;
 use crate::peer_connection::configuration::media_engine::MediaEngine;
 use crate::peer_connection::event::track_event::{RTCTrackEvent, RTCTrackEventInit};
 use crate::rtp_transceiver::rtp_receiver::internal::RTCRtpReceiverInternal;
-use crate::rtp_transceiver::rtp_sender::{RTCRtpCodingParameters, RTCRtpHeaderExtensionCapability};
-use crate::rtp_transceiver::{RTCRtpReceiverId, SSRC, internal::RTCRtpTransceiverInternal};
+use crate::rtp_transceiver::rtp_sender::{
+    RTCRtpCodingParameters, RTCRtpHeaderExtensionCapability, RtpCodecKind,
+};
+use crate::rtp_transceiver::{
+    PayloadType, RTCRtpReceiverId, SSRC, internal::RTCRtpTransceiverInternal,
+};
 use crate::statistics::accumulator::RTCStatsAccumulator;
 use interceptor::{Interceptor, Packet};
 use log::{debug, trace, warn};
@@ -40,6 +44,89 @@ where
     media_engine: &'a MediaEngine,
     interceptor: &'a mut I,
     stats: &'a mut RTCStatsAccumulator,
+}
+
+/// Select the receiver that can own an un-signaled SSRC. An explicit MID is
+/// authoritative for every media kind. Without a MID, payload type may select
+/// a unique audio receiver so codec-distinct supplemental audio (notably RFC
+/// 4733) can join its primary stream. The historical sole-transceiver fallback
+/// remains available for audio or video when that receiver has no RID codings.
+///
+/// This deliberately refuses ambiguous ownership instead of routing media to
+/// whichever transceiver happens to appear first.
+fn unique_receiver_index(mut matches: impl Iterator<Item = usize>) -> Option<usize> {
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
+fn undeclared_receiver_index<I: Interceptor>(
+    rtp_transceivers: &[RTCRtpTransceiverInternal<I>],
+    payload_type: PayloadType,
+    signaled_mid: Option<&str>,
+) -> Option<usize> {
+    let signaled_mid = signaled_mid.filter(|mid| !mid.is_empty());
+    let matches_payload = |transceiver: &RTCRtpTransceiverInternal<I>| {
+        transceiver.direction().has_recv()
+            && !transceiver.stopped()
+            && transceiver.receiver().as_ref().is_some_and(|receiver| {
+                receiver
+                    .get_codec_preferences()
+                    .iter()
+                    .any(|codec| codec.payload_type == payload_type)
+            })
+    };
+    if let Some(mid) = signaled_mid {
+        return unique_receiver_index(
+            rtp_transceivers
+                .iter()
+                .enumerate()
+                .filter(|(_, transceiver)| {
+                    transceiver.mid().as_deref() == Some(mid) && matches_payload(transceiver)
+                })
+                .map(|(index, _)| index),
+        );
+    }
+
+    if let Some(index) = unique_receiver_index(
+        rtp_transceivers
+            .iter()
+            .enumerate()
+            .filter(|(_, transceiver)| {
+                transceiver.kind() == RtpCodecKind::Audio && matches_payload(transceiver)
+            })
+            .map(|(index, _)| index),
+    ) {
+        return Some(index);
+    }
+
+    let [transceiver] = rtp_transceivers else {
+        return None;
+    };
+    (matches_payload(transceiver)
+        && transceiver
+            .receiver()
+            .as_ref()
+            .is_some_and(|receiver| receiver.track().codings().is_empty()))
+    .then_some(0)
+}
+
+/// Add an un-signaled SSRC without discarding the receiver's SDP-declared
+/// primary, RTX, FEC, or earlier supplemental codings. Returns whether a new
+/// coding was inserted so retransmitted packets reuse the existing route.
+fn append_undeclared_coding(receive_codings: &mut Vec<RTCRtpCodingParameters>, ssrc: SSRC) -> bool {
+    if receive_codings
+        .iter()
+        .any(|coding| coding.ssrc == Some(ssrc))
+    {
+        return false;
+    }
+    receive_codings.push(RTCRtpCodingParameters {
+        rid: String::new(),
+        ssrc: Some(ssrc),
+        rtx: None,
+        fec: None,
+    });
+    true
 }
 
 impl<'a, I> EndpointHandler<'a, I>
@@ -408,25 +495,23 @@ where
         ssrc: SSRC,
         rtp_header: &rtp::Header,
     ) -> Option<MediaStreamTrackId> {
-        // If the remote SDP was only one media section the ssrc doesn't have to be explicitly declared
-        let track_id = self.handle_undeclared_ssrc(rtp_header);
-        if track_id.is_some() {
-            return track_id;
-        }
+        let (mid, rid, rrid) = self
+            .get_rtp_header_extension_ids(rtp_header)
+            .unwrap_or_default();
 
-        let (mid, rid, rrid) =
-            if let Some((mid, rid, rrid)) = self.get_rtp_header_extension_ids(rtp_header) {
-                // MID alone is sufficient to bind a negotiated supplemental
-                // SSRC (for example RFC 4733 telephone-event) to its exact
-                // BUNDLE media section. RID/RRID remain required only for
-                // identifying encodings within a simulcast stream.
-                if mid.is_empty() {
-                    return None;
-                }
-                (mid, rid, rrid)
-            } else {
-                return None;
-            };
+        // RFC 8834 requires WebRTC receivers to accept SSRCs that were not
+        // signaled in SDP. Codec-distinct supplemental audio (notably RFC
+        // 4733) has no RID, so bind it to an explicit MID when available or
+        // to the unique audio receiver that negotiated its payload type. The
+        // same path retains the sole-transceiver fallback for un-signaled
+        // video RTP without header extensions.
+        if rid.is_empty() && rrid.is_empty() {
+            return self
+                .handle_undeclared_ssrc(rtp_header, (!mid.is_empty()).then_some(mid.as_str()));
+        }
+        if mid.is_empty() {
+            return None;
+        }
 
         // If rtp header extension has valid mid, find receiver based on mid, instead of rid,
         // since rid is not unique across m= lines
@@ -454,23 +539,7 @@ where
                 if !rrid.is_empty() {
                     //TODO: Add support of handling repair rtp stream id (rrid) #12
                 } else {
-                    let mid_only = rid.is_empty();
-                    if mid_only {
-                        // Preserve every SDP-declared coding and append this
-                        // exact MID/PT/SSRC binding. Replacing the empty-RID
-                        // primary coding would make subsequent primary RTP
-                        // disappear when a supplemental SSRC arrives first.
-                        let mut receive_codings = receiver.get_coding_parameters().to_vec();
-                        receive_codings.push(RTCRtpCodingParameters {
-                            rid: String::new(),
-                            ssrc: Some(ssrc),
-                            rtx: None,
-                            fec: None,
-                        });
-                        receiver.set_coding_parameters(receive_codings);
-                    } else if let Some(coding) =
-                        receiver.get_coding_parameter_mut_by_rid(rid.as_str())
-                    {
+                    if let Some(coding) = receiver.get_coding_parameter_mut_by_rid(rid.as_str()) {
                         coding.ssrc = Some(ssrc);
                     }
 
@@ -484,16 +553,11 @@ where
                         &parameters.rtp_parameters.header_extensions,
                     );
 
-                    let new_entry = if mid_only {
+                    let new_entry =
                         receiver
                             .track_mut()
-                            .set_codec_by_ssrc(codec.rtp_codec, ssrc)
-                    } else {
-                        receiver
-                            .track_mut()
-                            .set_codec_ssrc_by_rid(codec.rtp_codec, ssrc, &rid)
-                    };
-                    assert_eq!(new_entry, mid_only);
+                            .set_codec_ssrc_by_rid(codec.rtp_codec, ssrc, &rid);
+                    assert!(!new_entry);
 
                     let track_id = receiver.track().track_id().to_owned();
 
@@ -525,7 +589,7 @@ where
                                     track_id: track_id.clone(),
                                     stream_ids: vec![receiver.track().stream_id().to_owned()],
                                     ssrc,
-                                    rid: (!rid.is_empty()).then_some(rid),
+                                    rid: Some(rid),
                                 },
                             )),
                         ));
@@ -536,86 +600,73 @@ where
         None
     }
 
-    fn handle_undeclared_ssrc(&mut self, rtp_header: &rtp::Header) -> Option<MediaStreamTrackId> {
-        if self.rtp_transceivers.len() != 1 {
-            // it is multi-media-section case, let's use find_track_id_by_rid
-            return None;
+    fn handle_undeclared_ssrc(
+        &mut self,
+        rtp_header: &rtp::Header,
+        signaled_mid: Option<&str>,
+    ) -> Option<MediaStreamTrackId> {
+        let receiver_index = undeclared_receiver_index(
+            self.rtp_transceivers,
+            rtp_header.payload_type,
+            signaled_mid,
+        )?;
+        let transceiver = &mut self.rtp_transceivers[receiver_index];
+        let kind = transceiver.kind();
+        let mid = transceiver.mid().clone().unwrap_or_default();
+        let receiver = transceiver.receiver_mut().as_mut()?;
+        let codec = receiver
+            .get_codec_preferences()
+            .iter()
+            .find(|codec| codec.payload_type == rtp_header.payload_type)
+            .cloned()?;
+
+        let mut receive_codings = receiver.get_coding_parameters().to_vec();
+        if !append_undeclared_coding(&mut receive_codings, rtp_header.ssrc) {
+            // The normal SSRC lookup owns established routes. This branch is
+            // defensive against a repeated packet racing route publication.
+            return Some(receiver.track().track_id().to_owned());
+        }
+        receiver.set_coding_parameters(receive_codings);
+
+        let parameters = receiver.get_parameters(self.media_engine);
+        RTCRtpReceiverInternal::interceptor_remote_stream_op(
+            self.interceptor,
+            true,
+            rtp_header.ssrc,
+            codec.payload_type,
+            &codec.rtp_codec,
+            &parameters.rtp_parameters.header_extensions,
+        );
+
+        let new_entry = receiver
+            .track_mut()
+            .set_codec_by_ssrc(codec.rtp_codec, rtp_header.ssrc);
+        if !new_entry {
+            return Some(receiver.track().track_id().to_owned());
         }
 
-        if let Some(transceiver) = self.rtp_transceivers.first()
-            && let Some(receiver) = transceiver.receiver()
-            && !receiver.track().codings().is_empty()
-        {
-            // it is rid-based, let's use find_track_id_by_rid
-            return None;
-        }
-
-        if let Some(transceiver) = self.rtp_transceivers.first_mut() {
-            // Get kind and mid before borrowing receiver mutably
-            let kind = transceiver.kind();
-            let mid = transceiver.mid().clone().unwrap_or_default();
-
-            if let Some(receiver) = transceiver.receiver_mut()
-                && let Some(codec) = receiver
-                    .get_codec_preferences()
-                    .iter()
-                    .find(|codec| codec.payload_type == rtp_header.payload_type) //TODO: what about RTX/FEC stream?
-                    .cloned()
-            {
-                let receive_codings = vec![RTCRtpCodingParameters {
-                    rid: "".to_string(),
-                    ssrc: Some(rtp_header.ssrc),
-                    rtx: None,
-                    fec: None,
-                }];
-                receiver.set_coding_parameters(receive_codings);
-
-                let parameters = receiver.get_parameters(self.media_engine);
-                RTCRtpReceiverInternal::interceptor_remote_stream_op(
-                    self.interceptor,
-                    true,
-                    rtp_header.ssrc,
-                    codec.payload_type,
-                    &codec.rtp_codec,
-                    &parameters.rtp_parameters.header_extensions,
-                );
-
-                // assert it inserts a new entry
-                let new_entry = receiver
-                    .track_mut()
-                    .set_codec_by_ssrc(codec.rtp_codec, rtp_header.ssrc);
-                assert!(new_entry);
-
-                let track_id = receiver.track().track_id().to_owned();
-
-                // Create inbound stream accumulator before firing OnOpen event
-                // Note: undeclared SSRC case doesn't have RTX/FEC info
-                self.stats.get_or_create_inbound_rtp_streams(
-                    rtp_header.ssrc,
-                    kind,
-                    &track_id,
-                    &mid,
-                    None,
-                    None,
-                    0, // Undeclared SSRC is always for the first transceiver
-                );
-
-                // Fire RTCTrackEvent::OnOpen event when received the first RTP packet for such ssrc stream
-                self.ctx
-                    .event_outs
-                    .push_back(RTCEventInternal::RTCPeerConnectionEvent(
-                        RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(RTCTrackEventInit {
-                            receiver_id: RTCRtpReceiverId(0),
-                            track_id: track_id.clone(),
-                            stream_ids: vec![receiver.track().stream_id().to_owned()],
-                            ssrc: rtp_header.ssrc,
-                            rid: None,
-                        })),
-                    ));
-                return Some(track_id);
-            }
-        }
-        None
+        let track_id = receiver.track().track_id().to_owned();
+        self.stats.get_or_create_inbound_rtp_streams(
+            rtp_header.ssrc,
+            kind,
+            &track_id,
+            &mid,
+            None,
+            None,
+            receiver_index,
+        );
+        self.ctx
+            .event_outs
+            .push_back(RTCEventInternal::RTCPeerConnectionEvent(
+                RTCPeerConnectionEvent::OnTrack(RTCTrackEvent::OnOpen(RTCTrackEventInit {
+                    receiver_id: RTCRtpReceiverId(receiver_index),
+                    track_id: track_id.clone(),
+                    stream_ids: vec![receiver.track().stream_id().to_owned()],
+                    ssrc: rtp_header.ssrc,
+                    rid: None,
+                })),
+            ));
+        Some(track_id)
     }
 
     fn get_rtp_header_extension_ids(
@@ -637,11 +688,12 @@ where
         }
 
         // Get RID extension ID
-        let (rid_extension_id, rid_audio_supported, rid_video_supported) = self
+        let (rid_extension_id, audio_supported, video_supported) = self
             .media_engine
             .get_header_extension_id(RTCRtpHeaderExtensionCapability {
                 uri: ::sdp::extmap::SDES_RTP_STREAM_ID_URI.to_owned(),
             });
+        let rid_supported = audio_supported || video_supported;
 
         // Get RRID extension ID
         let (rrid_extension_id, rrid_audio_supported, rrid_video_supported) = self
@@ -649,6 +701,7 @@ where
             .get_header_extension_id(RTCRtpHeaderExtensionCapability {
                 uri: ::sdp::extmap::SDES_REPAIR_RTP_STREAM_ID_URI.to_owned(),
             });
+        let rrid_supported = rrid_audio_supported || rrid_video_supported;
 
         let mid = if let Some(payload) = rtp_header.get_extension(mid_extension_id as u8) {
             String::from_utf8(payload.to_vec()).unwrap_or_default()
@@ -656,24 +709,170 @@ where
             String::new()
         };
 
-        let rid = if rid_audio_supported || rid_video_supported {
-            rtp_header
-                .get_extension(rid_extension_id as u8)
-                .map(|payload| String::from_utf8(payload.to_vec()).unwrap_or_default())
-                .unwrap_or_default()
+        let rid = if rid_supported
+            && let Some(payload) = rtp_header.get_extension(rid_extension_id as u8)
+        {
+            String::from_utf8(payload.to_vec()).unwrap_or_default()
         } else {
             String::new()
         };
 
-        let rrid = if rrid_audio_supported || rrid_video_supported {
-            rtp_header
-                .get_extension(rrid_extension_id as u8)
-                .map(|payload| String::from_utf8(payload.to_vec()).unwrap_or_default())
-                .unwrap_or_default()
+        let rrid = if rrid_supported
+            && let Some(payload) = rtp_header.get_extension(rrid_extension_id as u8)
+        {
+            String::from_utf8(payload.to_vec()).unwrap_or_default()
         } else {
             String::new()
         };
 
         Some((mid, rid, rrid))
+    }
+}
+
+#[cfg(test)]
+mod undeclared_ssrc_tests {
+    use super::{
+        RTCRtpCodingParameters, RTCRtpTransceiverInternal, RtpCodecKind, append_undeclared_coding,
+        undeclared_receiver_index,
+    };
+    use crate::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodecParameters};
+    use crate::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
+    use interceptor::NoopInterceptor;
+
+    fn receiver(
+        kind: RtpCodecKind,
+        mid: &str,
+        payload_types: &[u8],
+    ) -> RTCRtpTransceiverInternal<NoopInterceptor> {
+        let mut transceiver = RTCRtpTransceiverInternal::new(
+            kind,
+            None,
+            RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Recvonly,
+                ..Default::default()
+            },
+        );
+        transceiver.set_mid(mid.to_owned()).expect("unique MID");
+        transceiver
+            .receiver_mut()
+            .as_mut()
+            .expect("receive-capable transceiver")
+            .set_codec_preferences(
+                payload_types
+                    .iter()
+                    .copied()
+                    .map(|payload_type| RTCRtpCodecParameters {
+                        rtp_codec: RTCRtpCodec {
+                            mime_type: match kind {
+                                RtpCodecKind::Audio if payload_type == 111 => {
+                                    "audio/opus".to_owned()
+                                }
+                                RtpCodecKind::Audio => "audio/telephone-event".to_owned(),
+                                RtpCodecKind::Video => "video/VP8".to_owned(),
+                                RtpCodecKind::Unspecified => String::new(),
+                            },
+                            clock_rate: 48_000,
+                            channels: 1,
+                            ..Default::default()
+                        },
+                        payload_type,
+                    })
+                    .collect(),
+            );
+        transceiver
+    }
+
+    #[test]
+    fn payload_type_requires_unique_receiver_unless_mid_selects_one() {
+        let transceivers = vec![
+            receiver(RtpCodecKind::Audio, "audio-0", &[111, 110]),
+            receiver(RtpCodecKind::Audio, "audio-1", &[111, 110]),
+            receiver(RtpCodecKind::Audio, "audio-2", &[126]),
+        ];
+
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 126, None),
+            Some(2),
+            "a unique negotiated payload type identifies its receiver"
+        );
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 110, None),
+            None,
+            "an ambiguous payload type must not use vector order as ownership"
+        );
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 110, Some("audio-1")),
+            Some(1),
+            "a negotiated MID disambiguates equal payload types"
+        );
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 126, Some("audio-1")),
+            None,
+            "MID selection still requires that receiver to negotiate the payload type"
+        );
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 110, Some("unknown")),
+            None,
+            "an unknown MID cannot escape its signaling context"
+        );
+    }
+
+    #[test]
+    fn mid_only_video_routes_to_its_authoritative_receiver() {
+        let transceivers = vec![
+            receiver(RtpCodecKind::Audio, "audio-0", &[111]),
+            receiver(RtpCodecKind::Video, "video-0", &[96]),
+        ];
+
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 96, Some("video-0")),
+            Some(1),
+            "an explicit MID must route an undeclared video SSRC"
+        );
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 96, Some("audio-0")),
+            None,
+            "the payload type cannot escape its authoritative MID"
+        );
+    }
+
+    #[test]
+    fn sole_video_without_header_extensions_uses_generic_fallback() {
+        let transceivers = vec![receiver(RtpCodecKind::Video, "video-0", &[96])];
+
+        assert_eq!(
+            undeclared_receiver_index(&transceivers, 96, None),
+            Some(0),
+            "a sole video receiver with no RID codings accepts an undeclared SSRC"
+        );
+
+        let bundled = vec![
+            receiver(RtpCodecKind::Video, "video-0", &[96]),
+            receiver(RtpCodecKind::Audio, "audio-0", &[111]),
+        ];
+        assert_eq!(
+            undeclared_receiver_index(&bundled, 96, None),
+            None,
+            "without MID, a video receiver is not selected from multiple media sections"
+        );
+    }
+
+    #[test]
+    fn supplemental_coding_is_appended_once_without_replacing_primary() {
+        let mut codings = vec![RTCRtpCodingParameters {
+            rid: String::new(),
+            ssrc: Some(1001),
+            rtx: None,
+            fec: None,
+        }];
+
+        assert!(append_undeclared_coding(&mut codings, 2002));
+        assert_eq!(codings.len(), 2);
+        assert_eq!(codings[0].ssrc, Some(1001));
+        assert_eq!(codings[1].ssrc, Some(2002));
+        assert!(!append_undeclared_coding(&mut codings, 2002));
+        assert!(!append_undeclared_coding(&mut codings, 1001));
+        assert_eq!(codings.len(), 2, "repeated packets reuse their coding");
+        assert_eq!(codings[0].ssrc, Some(1001));
     }
 }
