@@ -1,7 +1,11 @@
 //! Performance optimization tests
 //!
-//! This module tests the zero-copy and object pooling optimizations
-//! to validate performance improvements.
+//! This module tests the zero-copy and object pooling optimizations.
+//!
+//! Wall-clock measurements are printed as local diagnostics only. Comparative
+//! timing belongs in the Criterion benchmarks (`cargo bench -p
+//! rvoip-media-core`), because a single sample inside `cargo test` is sensitive
+//! to scheduler contention on hosted CI.
 
 use rvoip_media_core::performance::{
     metrics::{BenchmarkConfig, BenchmarkResults, PerformanceMetrics},
@@ -162,6 +166,35 @@ impl AudioFrameBenchmark {
     }
 }
 
+/// Validate the deterministic work and allocation invariants behind a benchmark
+/// run. Timing is intentionally excluded: ordinary tests should prove that each
+/// strategy did equivalent work and retained its allocation characteristics,
+/// while Criterion owns comparative timing.
+fn assert_benchmark_invariants(results: &BenchmarkResults) {
+    let iterations = results.test_config.iterations as u64;
+    let frame_bytes = results.test_config.frame_size as u64
+        * u64::from(results.test_config.channels)
+        * std::mem::size_of::<i16>() as u64;
+
+    assert_eq!(results.traditional_metrics.operation_count, iterations);
+    assert_eq!(results.zero_copy_metrics.operation_count, iterations);
+    assert_eq!(results.pooled_metrics.operation_count, iterations);
+
+    assert_eq!(results.traditional_metrics.allocation_count, iterations);
+    assert_eq!(results.zero_copy_metrics.allocation_count, iterations);
+    assert_eq!(results.pooled_metrics.allocation_count, 0);
+
+    assert_eq!(
+        results.traditional_metrics.memory_allocated,
+        iterations * frame_bytes * 3
+    );
+    assert_eq!(
+        results.zero_copy_metrics.memory_allocated,
+        iterations * frame_bytes
+    );
+    assert_eq!(results.pooled_metrics.memory_allocated, 0);
+}
+
 #[tokio::test]
 #[serial]
 async fn test_zero_copy_audio_frame() {
@@ -276,23 +309,9 @@ async fn test_performance_benchmark_small() {
     let results = benchmark.run_comprehensive_benchmark();
 
     results.print_results();
+    assert_benchmark_invariants(&results);
 
-    // Verify improvements
-    let summary = results.calculate_improvements();
-
-    // Zero-copy should be at least as fast as traditional
-    assert!(
-        summary.zero_copy_speedup >= 0.8,
-        "Zero-copy should be competitive"
-    );
-
-    // Pooled should be at least as fast as traditional
-    assert!(
-        summary.pooled_speedup >= 0.8,
-        "Pooled should be competitive"
-    );
-
-    println!("✅ Performance improvements validated");
+    println!("✅ Benchmark work and allocation invariants validated");
 }
 
 #[tokio::test]
@@ -313,20 +332,9 @@ async fn test_performance_benchmark_large() {
     let results = benchmark.run_comprehensive_benchmark();
 
     results.print_results();
+    assert_benchmark_invariants(&results);
 
-    // Verify improvements are more pronounced with larger frames
-    let summary = results.calculate_improvements();
-
-    assert!(
-        summary.zero_copy_speedup >= 1.0,
-        "Zero-copy should show improvement with larger frames"
-    );
-    assert!(
-        summary.pooled_speedup >= 1.0,
-        "Pooled should show improvement with larger frames"
-    );
-
-    println!("✅ Large frame performance improvements validated");
+    println!("✅ Large-frame work and allocation invariants validated");
 }
 
 #[tokio::test]
@@ -376,7 +384,9 @@ async fn test_audio_processing_pipeline_performance() {
     let frame_size = 160;
     let sample_rate = 8000;
 
-    // Traditional pipeline timing
+    // Traditional pipeline timing. Retain the final output so this ordinary
+    // test gates semantic equivalence instead of a scheduler-sensitive ratio.
+    let mut traditional_output = None;
     let start = Instant::now();
     for _i in 0..iterations {
         let samples = vec![100i16; frame_size];
@@ -400,16 +410,18 @@ async fn test_audio_processing_pipeline_performance() {
         );
 
         let final_samples = stage2_frame.samples.clone();
-        let _final_frame = AudioFrame::new(
+        let final_frame = AudioFrame::new(
             final_samples,
             stage2_frame.sample_rate,
             stage2_frame.channels,
             stage2_frame.timestamp,
         );
+        traditional_output = Some(final_frame);
     }
     let traditional_time = start.elapsed();
 
     // Zero-copy pipeline timing
+    let mut zero_copy_output = None;
     let start = Instant::now();
     for _i in 0..iterations {
         let samples = vec![100i16; frame_size];
@@ -418,7 +430,8 @@ async fn test_audio_processing_pipeline_performance() {
         // Simulate 3-stage processing pipeline with no copies
         let stage1_frame = input_frame.clone();
         let stage2_frame = stage1_frame.clone();
-        let _final_frame = stage2_frame.clone();
+        let final_frame = stage2_frame.clone();
+        zero_copy_output = Some(final_frame);
     }
     let zero_copy_time = start.elapsed();
 
@@ -428,12 +441,14 @@ async fn test_audio_processing_pipeline_performance() {
     println!("Zero-copy pipeline:   {:?}", zero_copy_time);
     println!("Speedup: {:.2}x", speedup);
 
-    assert!(
-        speedup >= 1.0,
-        "Zero-copy pipeline should be at least as fast as traditional, got {:.2}x",
-        speedup
-    );
-    println!("✅ Zero-copy pipeline performance improvement verified");
+    let traditional_output = traditional_output.expect("traditional pipeline produced a frame");
+    let zero_copy_output = zero_copy_output.expect("zero-copy pipeline produced a frame");
+    assert_eq!(traditional_output.samples, zero_copy_output.samples());
+    assert_eq!(traditional_output.sample_rate, zero_copy_output.sample_rate);
+    assert_eq!(traditional_output.channels, zero_copy_output.channels);
+    assert_eq!(traditional_output.timestamp, zero_copy_output.timestamp);
+
+    println!("✅ Pipeline output equivalence verified");
 }
 
 #[tokio::test]
@@ -448,19 +463,24 @@ async fn test_pool_vs_allocation_performance() {
 
     // Pre-warm pool
     pool.prewarm(50);
+    let warmed_pool_size = pool.get_stats().pool_size;
 
     // Fresh allocation timing
+    let mut allocated_sample_total = 0i64;
     let start = Instant::now();
     for _i in 0..iterations {
         let samples = vec![100i16; 160];
-        let _frame = ZeroCopyAudioFrame::new(samples, 8000, 1, 0);
+        let frame = ZeroCopyAudioFrame::new(samples, 8000, 1, 0);
+        allocated_sample_total += i64::from(frame.samples()[0]);
     }
     let allocation_time = start.elapsed();
 
     // Pool reuse timing
+    let mut pooled_sample_total = 0i64;
     let start = Instant::now();
     for _i in 0..iterations {
-        let _frame = pool.get_frame();
+        let frame = pool.get_frame();
+        pooled_sample_total += i64::from(frame.samples()[0]);
     }
     let pool_time = start.elapsed();
 
@@ -476,10 +496,13 @@ async fn test_pool_vs_allocation_performance() {
         pool_stats.pool_hits, pool_stats.pool_misses
     );
 
-    assert!(
-        speedup >= 0.9,
-        "Pool should be competitive with fresh allocation, got {:.2}x",
-        speedup
-    );
-    println!("✅ Pool performance improvement verified");
+    assert_eq!(allocated_sample_total, iterations as i64 * 100);
+    assert_eq!(pooled_sample_total, 0);
+    assert_eq!(pool_stats.pool_hits, iterations);
+    assert_eq!(pool_stats.pool_misses, 0);
+    assert_eq!(pool_stats.allocated_count, iterations);
+    assert_eq!(pool_stats.returned_count, iterations);
+    assert_eq!(pool_stats.pool_size, warmed_pool_size);
+
+    println!("✅ Pool reuse and accounting invariants verified");
 }

@@ -1,7 +1,9 @@
 //! G.711 Codec Performance Benchmark
 //!
-//! This test verifies that our optimized G.711 codec provides significant performance
-//! improvements over naive implementations.
+//! These tests verify G.711 output and buffer-reuse behavior while printing timing
+//! for local diagnostics. Comparative timing is intentionally not a `cargo test`
+//! pass/fail condition; release performance is measured by the Criterion and beta
+//! qualification lanes, where scheduler noise can be sampled properly.
 
 use codec_core::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
 use rvoip_media_core::codec::audio::common::AudioCodec;
@@ -239,10 +241,14 @@ async fn test_g711_codec_api_performance() {
     let mut decode_buffer = vec![0i16; frame_size];
 
     // Benchmark traditional API (with allocations)
+    let mut traditional_encoded = Vec::new();
+    let mut traditional_decoded = None;
     let start = Instant::now();
     for _ in 0..iterations {
         let encoded = codec.encode(&test_frame).unwrap();
-        let _decoded = codec.decode(&encoded).unwrap();
+        let decoded = codec.decode(&encoded).unwrap();
+        traditional_encoded = encoded;
+        traditional_decoded = Some(decoded);
     }
     let traditional_time = start.elapsed();
 
@@ -264,11 +270,11 @@ async fn test_g711_codec_api_performance() {
     println!("Zero-allocation API: {:?}", zero_alloc_time);
     println!("Zero-alloc speedup:  {:.2}x", speedup);
 
-    // Zero-allocation should be at least competitive (allow for small variance)
-    // Note: Performance is similar between APIs
-    println!("(Performance ratio is expected)");
+    let traditional_decoded = traditional_decoded.expect("traditional decode produced a frame");
+    assert_eq!(encode_buffer, traditional_encoded);
+    assert_eq!(decode_buffer, traditional_decoded.samples);
 
-    println!("✅ Zero-allocation API provides competitive performance");
+    println!("✅ Allocating and buffer-reuse APIs produce identical output");
 }
 
 #[tokio::test]
@@ -362,19 +368,12 @@ async fn test_g711_realtime_performance() {
         realtime_factor
     );
 
-    // Should use much less than 1% of CPU time for real-time processing
-    assert!(
-        cpu_usage_percent < 1.0,
-        "Should use <1% CPU time, got {:.3}%",
-        cpu_usage_percent
-    );
-    assert!(
-        realtime_factor > 100.0,
-        "Should be 100x faster than real-time, got {:.1}x",
-        realtime_factor
-    );
+    let expected_encoded: Vec<u8> = test_samples.iter().copied().map(ulaw_compress).collect();
+    let expected_decoded: Vec<i16> = expected_encoded.iter().copied().map(ulaw_expand).collect();
+    assert_eq!(encoded, expected_encoded);
+    assert_eq!(decoded, expected_decoded);
 
-    println!("✅ G.711 codec meets real-time performance requirements");
+    println!("✅ G.711 encode/decode correctness verified");
 }
 
 #[tokio::test]
@@ -414,13 +413,17 @@ async fn test_g711_memory_efficiency() {
     println!("Average per encode/decode cycle: {:?}", avg_time_per_cycle);
     println!("Memory allocations: 0 (buffers reused)");
 
-    // Verify consistent performance (no allocation overhead)
-    assert!(
-        avg_time_per_cycle < std::time::Duration::from_micros(50),
-        "Average cycle should be <50μs with buffer reuse"
-    );
+    let expected_encoded: Vec<u8> = test_frame
+        .samples
+        .iter()
+        .copied()
+        .map(ulaw_compress)
+        .collect();
+    let expected_decoded: Vec<i16> = expected_encoded.iter().copied().map(ulaw_expand).collect();
+    assert_eq!(encode_buffer, expected_encoded);
+    assert_eq!(decode_buffer, expected_decoded);
 
-    println!("✅ Zero-allocation G.711 processing achieved");
+    println!("✅ Reused buffers retain correct G.711 output");
 }
 
 #[tokio::test]

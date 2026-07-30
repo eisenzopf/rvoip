@@ -1,8 +1,9 @@
 //! RTP-Core Performance Integration Tests
 //!
 //! This module tests the integration between media-core's performance optimizations
-//! and rtp-core's RTP packet handling, validating zero-copy performance across
-//! the complete RTP → Audio Processing → RTP pipeline.
+//! and rtp-core's RTP packet handling across the complete RTP → Audio Processing
+//! → RTP pipeline. Wall-clock values are diagnostic only; Criterion and beta
+//! qualification own comparative performance gates.
 
 use rvoip_media_core::performance::{
     pool::{AudioFramePool, PoolConfig},
@@ -401,8 +402,19 @@ async fn test_rtp_pooled_performance() {
             create_test_rtp_packet(1000 + i, 160000 + (i as u32 * 160), config.frame_size);
 
         let start = Instant::now();
-        let _output_packet = pipeline.process_rtp_packet_pooled(&input_packet).unwrap();
+        let output_packet = pipeline.process_rtp_packet_pooled(&input_packet).unwrap();
         total_processing_time += start.elapsed();
+
+        assert_eq!(
+            output_packet.header.sequence_number,
+            input_packet.header.sequence_number.wrapping_add(1)
+        );
+        assert_eq!(
+            output_packet.header.timestamp,
+            input_packet.header.timestamp
+        );
+        assert_eq!(output_packet.header.ssrc, input_packet.header.ssrc);
+        assert_eq!(output_packet.payload.len(), input_packet.payload.len());
     }
 
     let avg_processing_time = total_processing_time / 10;
@@ -416,14 +428,14 @@ async fn test_rtp_pooled_performance() {
         100.0 * pool_stats.pool_hits as f32 / pool_stats.allocated_count as f32
     );
 
-    // Pool should be highly efficient
-    assert!(pool_stats.pool_hits >= 8, "Pool should have high hit rate");
-    assert!(
-        avg_processing_time < std::time::Duration::from_micros(500),
-        "Should be reasonably fast with pooling"
-    );
+    // The pool was prewarmed and every checkout is returned before the next
+    // iteration, so misses would indicate a functional pooling regression.
+    assert_eq!(pool_stats.pool_hits, 10);
+    assert_eq!(pool_stats.pool_misses, 0);
+    assert_eq!(pool_stats.allocated_count, 10);
+    assert_eq!(pool_stats.returned_count, 10);
 
-    println!("✅ Pooled RTP processing highly efficient");
+    println!("✅ Pooled RTP processing and reuse accounting verified");
 }
 
 #[tokio::test]
@@ -463,6 +475,14 @@ async fn test_rtp_performance_comparison() {
             .process_rtp_packet_pooled(&test_packets[0])
             .unwrap(),
     );
+
+    let zero_copy_output = pipeline
+        .process_rtp_packet_zero_copy(&test_packets[0])
+        .unwrap();
+    let pooled_output = pipeline
+        .process_rtp_packet_pooled(&test_packets[0])
+        .unwrap();
+    assert_eq!(zero_copy_output, pooled_output);
 
     let measure_zero_copy = || {
         let start = Instant::now();
@@ -509,25 +529,7 @@ async fn test_rtp_performance_comparison() {
         100.0 * pool_stats.pool_hits as f32 / pool_stats.allocated_count as f32
     );
 
-    // Pooled should remain competitive. Under `memory-diagnostics`, every pool
-    // checkout and return intentionally records lifecycle evidence while the
-    // zero-copy comparator has no equivalent instrumentation, so allow that
-    // bounded diagnostic overhead. Release performance regressions are gated
-    // by the dedicated criterion/beta performance profiles, not this
-    // debug-build integration smoke test.
-    let minimum_competitive_ratio = if cfg!(feature = "memory-diagnostics") {
-        0.75
-    } else {
-        0.85
-    };
-    assert!(
-        speedup >= minimum_competitive_ratio,
-        "Pooled processing should be competitive with zero-copy, got {:.2}x (minimum {:.2}x)",
-        speedup,
-        minimum_competitive_ratio,
-    );
-
-    println!("✅ Performance comparison validates optimization benefits");
+    println!("✅ Pooled and zero-copy RTP paths produce identical output");
 }
 
 #[tokio::test]
@@ -594,13 +596,7 @@ async fn test_rtp_simd_integration() {
     // Verify audio was processed (gain applied)
     assert_ne!(output_packet.payload, input_packet.payload);
 
-    // Should be reasonably fast with SIMD
-    assert!(
-        simd_time < std::time::Duration::from_millis(1),
-        "SIMD processing should be fast"
-    );
-
-    println!("✅ SIMD integration working with RTP processing");
+    println!("✅ SIMD integration output verified");
 }
 
 #[tokio::test]
@@ -638,7 +634,8 @@ async fn test_rtp_end_to_end_latency() {
 
         // Step 3: RTP packet serialization (rtp-core)
         let serialize_start = Instant::now();
-        let _final_bytes = processed_packet.serialize().unwrap();
+        let final_bytes = processed_packet.serialize().unwrap();
+        std::hint::black_box(final_bytes);
         serialize_time = serialize_time.min(serialize_start.elapsed());
 
         total_time = total_time.min(start.elapsed());
@@ -649,19 +646,15 @@ async fn test_rtp_end_to_end_latency() {
     println!("RTP serialize time:   {:?}", serialize_time);
     println!("Total end-to-end:     {:?}", total_time);
 
-    // Total latency should be well under 1ms for real-time processing
-    assert!(
-        total_time < std::time::Duration::from_millis(1),
-        "End-to-end latency should be <1ms, got {:?}",
-        total_time
-    );
+    let serialized = input_packet.serialize().unwrap();
+    let parsed_packet = RtpPacket::parse(&serialized).unwrap();
+    assert_eq!(parsed_packet, input_packet);
+    let processed_packet = pipeline
+        .process_rtp_packet_zero_copy(&parsed_packet)
+        .unwrap();
+    let final_bytes = processed_packet.serialize().unwrap();
+    let reparsed_packet = RtpPacket::parse(&final_bytes).unwrap();
+    assert_eq!(reparsed_packet, processed_packet);
 
-    // Audio processing should be fast enough for real-time (under 100µs in debug builds)
-    assert!(
-        process_time < std::time::Duration::from_micros(100),
-        "Audio processing should be <100µs for real-time, got {:?}",
-        process_time
-    );
-
-    println!("✅ End-to-end latency achieves real-time performance target");
+    println!("✅ End-to-end RTP processing and serialization verified");
 }
