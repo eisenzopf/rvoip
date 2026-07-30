@@ -120,10 +120,10 @@ impl SrtpAuthenticator {
 /// SRTP Replay Protection
 pub struct SrtpReplayProtection {
     /// Window size in packets
-    window_size: u64,
+    window_size: usize,
 
     /// Highest sequence number received
-    highest_seq: u64,
+    highest_seq: Option<u64>,
 
     /// Replay window bitmap (using index relative to highest seq)
     window: Vec<bool>,
@@ -135,12 +135,15 @@ pub struct SrtpReplayProtection {
 impl SrtpReplayProtection {
     /// Create a new replay protection context
     pub fn new(window_size: u64) -> Self {
-        let mut window = Vec::new();
-        window.resize(window_size as usize, false);
+        // A zero-sized replay window cannot remember even the packet that
+        // established it. Preserve the infallible constructor while treating
+        // zero as the smallest useful window.
+        let window_size = usize::try_from(window_size.max(1)).unwrap_or(usize::MAX);
+        let window = vec![false; window_size];
 
         Self {
             window_size,
-            highest_seq: 0,
+            highest_seq: None,
             window,
             enabled: true,
         }
@@ -152,45 +155,42 @@ impl SrtpReplayProtection {
             return Ok(true); // Always allow if disabled
         }
 
-        // Check if this is the first packet
-        if self.highest_seq == 0 {
-            self.highest_seq = seq;
+        // Sequence number zero is valid, so absence of a highest sequence
+        // must be represented explicitly rather than with a zero sentinel.
+        let Some(highest_seq) = self.highest_seq else {
+            self.highest_seq = Some(seq);
             // Mark first packet as received in the bitmap
             self.window[0] = true;
             return Ok(true);
-        }
+        };
 
         // Check if the sequence number is too old (outside the replay window)
         // The window covers [highest_seq - window_size + 1, highest_seq]
-        let window_lower_bound = self.highest_seq.saturating_sub(self.window_size - 1);
+        let window_lower_bound =
+            highest_seq.saturating_sub(self.window_size.saturating_sub(1) as u64);
         if seq < window_lower_bound {
             // Too old, reject
             return Ok(false);
         }
 
         // Check if this is a higher sequence number
-        if seq > self.highest_seq {
-            let diff = seq - self.highest_seq;
+        if seq > highest_seq {
+            let diff = seq - highest_seq;
 
-            // Shift the window
-            if diff >= self.window_size {
+            // Move every remembered packet back by the amount the highest
+            // index advanced. Position zero always represents highest_seq.
+            if diff >= self.window_size as u64 {
                 // If the gap is larger than our window, clear the entire window
-                for i in 0..self.window.len() {
-                    self.window[i] = false;
-                }
+                self.window.fill(false);
             } else {
-                // Shift the window by the number of new positions
-                // We use the logical position within the window, not raw indices
-                for i in 0..diff as usize {
-                    // For each position we're shifting, clear the corresponding bit
-                    // This is (window_size - diff + i) positions back from highest_seq
-                    let idx = (self.window_size - diff as u64 + i as u64) % self.window_size;
-                    self.window[idx as usize] = false;
-                }
+                let shift = diff as usize;
+                let retained = self.window_size - shift;
+                self.window.copy_within(..retained, shift);
+                self.window[..shift].fill(false);
             }
 
             // Update highest sequence
-            self.highest_seq = seq;
+            self.highest_seq = Some(seq);
 
             // Mark this sequence as received (position 0 in the window)
             self.window[0] = true;
@@ -205,7 +205,7 @@ impl SrtpReplayProtection {
         // Calculate the position in the window
         // The window is indexed relative to highest_seq
         // Position 0 = highest_seq, position 1 = highest_seq-1, etc.
-        let window_pos = self.highest_seq - seq;
+        let window_pos = highest_seq - seq;
 
         // Check if we've already seen this sequence
         if self.window[window_pos as usize] {
@@ -225,10 +225,8 @@ impl SrtpReplayProtection {
 
     /// Reset the replay protection
     pub fn reset(&mut self) {
-        self.highest_seq = 0;
-        for i in 0..self.window.len() {
-            self.window[i] = false;
-        }
+        self.highest_seq = None;
+        self.window.fill(false);
     }
 }
 
@@ -379,14 +377,14 @@ mod tests {
 
         // First packet should always be accepted
         assert!(replay.check(100).unwrap());
-        assert_eq!(replay.highest_seq, 100);
+        assert_eq!(replay.highest_seq, Some(100));
 
         // Duplicate packet should be rejected
         assert!(!replay.check(100).unwrap());
 
         // Higher sequence should be accepted
         assert!(replay.check(101).unwrap());
-        assert_eq!(replay.highest_seq, 101);
+        assert_eq!(replay.highest_seq, Some(101));
 
         // Lower but still in window should be accepted (if not seen before)
         assert!(replay.check(90).unwrap());
@@ -396,7 +394,7 @@ mod tests {
 
         // Jump ahead to force window shift
         assert!(replay.check(200).unwrap());
-        assert_eq!(replay.highest_seq, 200);
+        assert_eq!(replay.highest_seq, Some(200));
 
         // Old packet should be rejected (outside window)
         assert!(!replay.check(90).unwrap());
@@ -411,8 +409,8 @@ mod tests {
         replay.set_enabled(true);
         replay.reset();
 
-        // After reset, highest_seq should be 0
-        assert_eq!(replay.highest_seq, 0);
+        // After reset, no highest sequence should be recorded.
+        assert_eq!(replay.highest_seq, None);
 
         // Should accept a new first packet
         assert!(replay.check(300).unwrap());
@@ -427,7 +425,7 @@ mod tests {
         // First packet should always be accepted
         println!("TEST: Checking first packet seq=100");
         assert!(replay.check(100).unwrap());
-        assert_eq!(replay.highest_seq, 100);
+        assert_eq!(replay.highest_seq, Some(100));
         println!("TEST: First packet accepted, highest_seq=100");
 
         // Duplicate packet should be rejected
@@ -438,13 +436,13 @@ mod tests {
         // Higher sequence should be accepted
         println!("TEST: Checking higher sequence seq=101");
         assert!(replay.check(101).unwrap());
-        assert_eq!(replay.highest_seq, 101);
+        assert_eq!(replay.highest_seq, Some(101));
         println!("TEST: Higher sequence accepted, highest_seq=101");
 
         // Jump ahead to force window shift
         println!("TEST: Jumping ahead to seq=200");
         assert!(replay.check(200).unwrap());
-        assert_eq!(replay.highest_seq, 200);
+        assert_eq!(replay.highest_seq, Some(200));
         println!("TEST: Jump accepted, highest_seq=200");
 
         // Old packet should be rejected (outside window)
@@ -471,13 +469,43 @@ mod tests {
         replay.set_enabled(true);
         replay.reset();
 
-        // After reset, highest_seq should be 0
-        assert_eq!(replay.highest_seq, 0);
-        println!("TEST: After reset, highest_seq=0");
+        // After reset, no highest sequence should be recorded.
+        assert_eq!(replay.highest_seq, None);
+        println!("TEST: After reset, highest_seq=None");
 
         // Should accept a new first packet
         println!("TEST: Checking new packet after reset");
         assert!(replay.check(300).unwrap());
         println!("TEST: New packet accepted after reset");
+    }
+
+    #[test]
+    fn replay_bitmap_tracks_zero_advances_duplicates_and_age() {
+        let mut replay = SrtpReplayProtection::new(4);
+
+        assert!(replay.check(0).unwrap(), "packet index zero is valid");
+        assert!(!replay.check(0).unwrap(), "zero must not be a sentinel");
+
+        assert!(replay.check(1).unwrap());
+        assert!(
+            !replay.check(0).unwrap(),
+            "advancing the window must retain the preceding packet bit"
+        );
+
+        assert!(replay.check(3).unwrap());
+        assert!(replay.check(2).unwrap(), "unseen in-window packet is valid");
+        assert!(!replay.check(2).unwrap(), "in-window duplicate is rejected");
+
+        assert!(replay.check(4).unwrap());
+        assert!(
+            !replay.check(0).unwrap(),
+            "packet outside window is rejected"
+        );
+
+        let mut minimum_window = SrtpReplayProtection::new(0);
+        assert!(minimum_window.check(0).unwrap());
+        assert!(!minimum_window.check(0).unwrap());
+        assert!(minimum_window.check(1).unwrap());
+        assert!(!minimum_window.check(0).unwrap());
     }
 }

@@ -64,7 +64,10 @@ pub struct SrtpCryptoSuite {
     /// Master key length in bytes
     pub key_length: usize,
 
-    /// Authentication tag length in bytes
+    /// SRTP authentication tag length in bytes.
+    ///
+    /// SRTCP can require a different length for the same profile; use
+    /// [`Self::srtcp_tag_length`] for RTCP packets.
     pub tag_length: usize,
 }
 
@@ -133,6 +136,22 @@ pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
 };
 
 impl SrtpCryptoSuite {
+    /// Authentication tag length used by SRTCP.
+    ///
+    /// The RFC 5764 `AES_CM_128_HMAC_SHA1_32` profile shortens only the SRTP
+    /// tag. SRTCP continues to use the 80-bit HMAC-SHA1 tag required by its
+    /// crypto policy. Keeping this derived from the public suite fields avoids
+    /// changing the construction API for downstream users.
+    #[must_use]
+    pub const fn srtcp_tag_length(&self) -> usize {
+        match self.authentication {
+            SrtpAuthenticationAlgorithm::HmacSha1_80 | SrtpAuthenticationAlgorithm::HmacSha1_32 => {
+                10
+            }
+            SrtpAuthenticationAlgorithm::Null => 0,
+        }
+    }
+
     /// Validate that the suite's parameters are internally consistent.
     ///
     /// The HMAC-SHA1 authentication tag is truncated from a fixed 20-byte
@@ -281,33 +300,51 @@ impl ReplayWindow {
     }
 }
 
-fn candidate_rtp_index(state: Option<&RtpStreamState>, seq: u16) -> (u32, u64) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RtpIndexCandidate {
+    roc: u32,
+    index: u64,
+    before_roc_zero: bool,
+}
+
+fn candidate_rtp_index(state: Option<&RtpStreamState>, seq: u16) -> RtpIndexCandidate {
     let Some(state) = state else {
-        return (0, u64::from(seq));
+        return RtpIndexCandidate {
+            roc: 0,
+            index: u64::from(seq),
+            before_roc_zero: false,
+        };
     };
     let Some(highest_seq) = state.highest_seq else {
-        return (state.roc, (u64::from(state.roc) << 16) | u64::from(seq));
+        return RtpIndexCandidate {
+            roc: state.roc,
+            index: (u64::from(state.roc) << 16) | u64::from(seq),
+            before_roc_zero: false,
+        };
     };
 
     // RFC 3711 Appendix A.1 index estimation. A large apparent jump across
     // the half-range belongs to the adjacent rollover cycle.
-    let candidate_roc = if highest_seq < 0x8000 {
+    let (candidate_roc, before_roc_zero) = if highest_seq < 0x8000 {
         if seq > highest_seq && seq - highest_seq > 0x8000 {
-            // A previous rollover cycle cannot exist while ROC is zero.
-            state.roc.saturating_sub(1)
+            // RFC 3711 performs this subtraction modulo 2^32. At ROC zero
+            // that wrapped value is still required for authentication, but
+            // it cannot represent a packet in the receiver's valid history.
+            (state.roc.wrapping_sub(1), state.roc == 0)
         } else {
-            state.roc
+            (state.roc, false)
         }
     } else if highest_seq > seq && highest_seq - seq > 0x8000 {
-        state.roc.wrapping_add(1)
+        (state.roc.wrapping_add(1), false)
     } else {
-        state.roc
+        (state.roc, false)
     };
 
-    (
-        candidate_roc,
-        (u64::from(candidate_roc) << 16) | u64::from(seq),
-    )
+    RtpIndexCandidate {
+        roc: candidate_roc,
+        index: (u64::from(candidate_roc) << 16) | u64::from(seq),
+        before_roc_zero,
+    }
 }
 
 fn commit_rtp_index(state: &mut RtpStreamState, roc: u32, seq: u16, index: u64) {
@@ -463,7 +500,14 @@ impl SrtpContext {
 
         let ssrc = packet.header.ssrc;
         let seq = packet.header.sequence_number;
-        let (roc, packet_index) = candidate_rtp_index(self.outbound_rtp.get(&ssrc), seq);
+        let candidate = candidate_rtp_index(self.outbound_rtp.get(&ssrc), seq);
+        if candidate.before_roc_zero {
+            return Err(crate::Error::SrtpError(
+                "outbound SRTP sequence maps before ROC zero".to_string(),
+            ));
+        }
+        let roc = candidate.roc;
+        let packet_index = candidate.index;
         if self
             .outbound_rtp
             .get(&ssrc)
@@ -502,11 +546,20 @@ impl SrtpContext {
         let (header, _) = crate::packet::RtpHeader::parse_without_consuming(data)?;
         let ssrc = header.ssrc;
         let seq = header.sequence_number;
-        let (roc, packet_index) = candidate_rtp_index(self.inbound_rtp.get(&ssrc), seq);
+        let candidate = candidate_rtp_index(self.inbound_rtp.get(&ssrc), seq);
 
         // Authentication deliberately happens before the replay decision is
         // applied or any state entry is inserted.
-        let packet = self.inbound_crypto.decrypt_rtp_with_roc(data, roc)?;
+        let packet = self
+            .inbound_crypto
+            .decrypt_rtp_with_roc(data, candidate.roc)?;
+        if candidate.before_roc_zero {
+            return Err(crate::Error::SrtpError(
+                "SRTP packet maps before ROC zero".to_string(),
+            ));
+        }
+        let roc = candidate.roc;
+        let packet_index = candidate.index;
         if self
             .inbound_rtp
             .get(&ssrc)
@@ -594,7 +647,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
-    fn contexts() -> (SrtpContext, SrtpContext) {
+    fn contexts_with_suite(suite: SrtpCryptoSuite) -> (SrtpContext, SrtpContext) {
         let a_key = vec![0x11; 16];
         let a_salt = vec![0x22; 14];
         let b_key = vec![0x33; 16];
@@ -604,12 +657,15 @@ mod tests {
             b_key.clone(),
             a_salt.clone(),
             b_salt.clone(),
-            SRTP_AES128_CM_SHA1_80,
+            suite.clone(),
         )
         .unwrap();
-        let b = SrtpContext::new_from_keys(b_key, a_key, b_salt, a_salt, SRTP_AES128_CM_SHA1_80)
-            .unwrap();
+        let b = SrtpContext::new_from_keys(b_key, a_key, b_salt, a_salt, suite).unwrap();
         (a, b)
+    }
+
+    fn contexts() -> (SrtpContext, SrtpContext) {
+        contexts_with_suite(SRTP_AES128_CM_SHA1_80)
     }
 
     fn packet(ssrc: u32, seq: u16) -> crate::packet::RtpPacket {
@@ -624,6 +680,37 @@ mod tests {
 
     fn protect_bytes(context: &mut SrtpContext, packet: &crate::packet::RtpPacket) -> Bytes {
         context.protect(packet).unwrap().serialize().unwrap()
+    }
+
+    fn protect_bytes_with_roc(
+        context: &SrtpContext,
+        packet: &crate::packet::RtpPacket,
+        roc: u32,
+    ) -> Bytes {
+        let (encrypted, auth_tag) = context
+            .outbound_crypto
+            .encrypt_rtp_with_roc(packet, roc)
+            .unwrap();
+        ProtectedRtpPacket {
+            packet: encrypted,
+            auth_tag,
+        }
+        .serialize()
+        .unwrap()
+    }
+
+    fn inbound_state_snapshot(
+        context: &SrtpContext,
+        ssrc: u32,
+    ) -> Option<(u32, Option<u16>, Option<u64>, u64)> {
+        context.inbound_rtp.get(&ssrc).map(|state| {
+            (
+                state.roc,
+                state.highest_seq,
+                state.replay.highest,
+                state.replay.bitmap,
+            )
+        })
     }
 
     #[test]
@@ -665,6 +752,10 @@ mod tests {
             let wire = protect_bytes(&mut a, &packet(ssrc, seq));
             b.unprotect(&wire).unwrap();
         }
+        let state = b.inbound_rtp.get(&ssrc).unwrap();
+        assert_eq!(state.roc, 1);
+        assert_eq!(state.highest_seq, Some(1));
+        assert_eq!(state.replay.highest, Some((1_u64 << 16) | 1));
 
         let other_wire = protect_bytes(&mut a, &packet(0xaabb_ccdd, 0));
         b.unprotect(&other_wire).unwrap();
@@ -672,6 +763,63 @@ mod tests {
         let duplicate = protect_bytes(&mut a, &packet(0x9999_0001, 9));
         b.unprotect(&duplicate).unwrap();
         assert!(b.unprotect(&duplicate).is_err());
+    }
+
+    #[test]
+    fn roc_zero_uses_wrapped_candidate_for_auth_without_state_poisoning() {
+        let (mut a, mut b) = contexts();
+        let ssrc = 0x1357_2468;
+
+        let first = protect_bytes(&mut a, &packet(ssrc, 0));
+        b.unprotect(&first).unwrap();
+        let stable = inbound_state_snapshot(&b, ssrc);
+
+        // The old saturating ROC calculation authenticated this packet under
+        // ROC zero. RFC 3711 requires the wrapped previous-cycle ROC instead.
+        let wrong_roc = protect_bytes_with_roc(&a, &packet(ssrc, u16::MAX), 0);
+        assert!(matches!(
+            b.unprotect(&wrong_roc),
+            Err(crate::Error::AuthenticationFailed(_))
+        ));
+        assert_eq!(inbound_state_snapshot(&b, ssrc), stable);
+
+        // A packet carrying a valid tag for the RFC candidate authenticates,
+        // but that impossible pre-zero cycle must not advance either ROC or
+        // the replay window.
+        let wrapped_roc = protect_bytes_with_roc(&a, &packet(ssrc, u16::MAX), u32::MAX);
+        assert!(matches!(
+            b.unprotect(&wrapped_roc),
+            Err(crate::Error::SrtpError(message)) if message.contains("before ROC zero")
+        ));
+        assert_eq!(inbound_state_snapshot(&b, ssrc), stable);
+
+        let next = protect_bytes(&mut a, &packet(ssrc, 1));
+        b.unprotect(&next)
+            .expect("valid current-cycle packet succeeds after both failures");
+        let state = b.inbound_rtp.get(&ssrc).unwrap();
+        assert_eq!(state.roc, 0);
+        assert_eq!(state.highest_seq, Some(1));
+    }
+
+    #[test]
+    fn outbound_packet_before_roc_zero_is_rejected_without_state_mutation() {
+        let (mut a, _) = contexts();
+        let ssrc = 0x2468_1357;
+        protect_bytes(&mut a, &packet(ssrc, 0));
+        let stable = a.outbound_rtp.get(&ssrc).cloned().unwrap();
+
+        assert!(matches!(
+            a.protect(&packet(ssrc, u16::MAX)),
+            Err(crate::Error::SrtpError(message)) if message.contains("before ROC zero")
+        ));
+        let current = a.outbound_rtp.get(&ssrc).unwrap();
+        assert_eq!(current.roc, stable.roc);
+        assert_eq!(current.highest_seq, stable.highest_seq);
+        assert_eq!(current.replay.highest, stable.replay.highest);
+        assert_eq!(current.replay.bitmap, stable.replay.bitmap);
+
+        a.protect(&packet(ssrc, 1))
+            .expect("valid current-cycle packet succeeds after rejection");
     }
 
     #[test]
@@ -742,6 +890,22 @@ mod tests {
         assert_eq!(b.unprotect_rtcp(&first).unwrap().as_ref(), plain);
         assert_eq!(b.unprotect_rtcp(&second).unwrap().as_ref(), plain);
         assert!(b.unprotect_rtcp(&first).is_err());
+    }
+
+    #[test]
+    fn sha1_32_uses_four_byte_srtp_and_ten_byte_srtcp_tags() {
+        assert_eq!(SRTP_AES128_CM_SHA1_32.tag_length, 4);
+        assert_eq!(SRTP_AES128_CM_SHA1_32.srtcp_tag_length(), 10);
+
+        let (mut a, mut b) = contexts_with_suite(SRTP_AES128_CM_SHA1_32);
+        let rtp = protect_bytes(&mut a, &packet(0x1020_3040, 1));
+        assert_eq!(rtp.len(), packet(0x1020_3040, 1).size() + 4);
+        b.unprotect(&rtp).unwrap();
+
+        let rtcp = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
+        let srtcp = a.protect_rtcp(&rtcp).unwrap();
+        assert_eq!(srtcp.len(), rtcp.len() + 4 + 10);
+        assert_eq!(b.unprotect_rtcp(&srtcp).unwrap().as_ref(), rtcp);
     }
 
     #[test]

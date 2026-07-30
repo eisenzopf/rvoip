@@ -75,19 +75,28 @@ rvoip_driver() {
         -- "$@"
 }
 
-rvoip_srtp="$(rvoip_driver protect-rtp)"
-[[ "$("${LIBSRTP_DRIVER}" unprotect-rtp "${rvoip_srtp}")" == "ok" ]]
+for profile in sha1-80 sha1-32; do
+    rvoip_srtp="$(rvoip_driver "${profile}" protect-rtp)"
+    [[ "$("${LIBSRTP_DRIVER}" "${profile}" unprotect-rtp "${rvoip_srtp}")" == "ok" ]]
 
-libsrtp_srtp="$("${LIBSRTP_DRIVER}" protect-rtp)"
-[[ "$(rvoip_driver unprotect-rtp "${libsrtp_srtp}")" == "ok" ]]
-[[ "${rvoip_srtp}" == "${libsrtp_srtp}" ]]
+    libsrtp_srtp="$("${LIBSRTP_DRIVER}" "${profile}" protect-rtp)"
+    [[ "$(rvoip_driver "${profile}" unprotect-rtp "${libsrtp_srtp}")" == "ok" ]]
+    [[ "${rvoip_srtp}" == "${libsrtp_srtp}" ]]
 
-rvoip_srtcp="$(rvoip_driver protect-rtcp)"
-[[ "$("${LIBSRTP_DRIVER}" unprotect-rtcp "${rvoip_srtcp}")" == "ok" ]]
+    rvoip_srtcp="$(rvoip_driver "${profile}" protect-rtcp)"
+    [[ "$("${LIBSRTP_DRIVER}" "${profile}" unprotect-rtcp "${rvoip_srtcp}")" == "ok" ]]
 
-libsrtp_srtcp="$("${LIBSRTP_DRIVER}" protect-rtcp)"
-[[ "$(rvoip_driver unprotect-rtcp "${libsrtp_srtcp}")" == "ok" ]]
-[[ "${rvoip_srtcp}" == "${libsrtp_srtcp}" ]]
+    libsrtp_srtcp="$("${LIBSRTP_DRIVER}" "${profile}" protect-rtcp)"
+    [[ "$(rvoip_driver "${profile}" unprotect-rtcp "${libsrtp_srtcp}")" == "ok" ]]
+    [[ "${rvoip_srtcp}" == "${libsrtp_srtcp}" ]]
+
+    rvoip_rollover="$(rvoip_driver "${profile}" protect-rtp-rollover)"
+    [[ "$("${LIBSRTP_DRIVER}" "${profile}" unprotect-rtp-rollover "${rvoip_rollover}")" == "ok" ]]
+
+    libsrtp_rollover="$("${LIBSRTP_DRIVER}" "${profile}" protect-rtp-rollover)"
+    [[ "$(rvoip_driver "${profile}" unprotect-rtp-rollover "${libsrtp_rollover}")" == "ok" ]]
+    [[ "${rvoip_rollover}" == "${libsrtp_rollover}" ]]
+done
 
 echo "SRTP/SRTCP interoperability passed against libSRTP ${LIBSRTP_VERSION} (${LIBSRTP_COMMIT})."
-echo "Verified rvoip -> libSRTP and libSRTP -> rvoip for RTP and RTCP."
+echo "Verified rvoip -> libSRTP and libSRTP -> rvoip for RTP, RTCP, and RTP rollover with SHA1-80 and SHA1-32."

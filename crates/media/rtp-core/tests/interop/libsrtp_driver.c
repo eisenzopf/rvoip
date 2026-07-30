@@ -15,6 +15,11 @@
 
 #define BUFFER_CAPACITY 256
 
+typedef enum {
+    profile_sha1_80,
+    profile_sha1_32,
+} interop_profile_t;
+
 static const uint8_t master_key[30] = {
     0xe1, 0xf9, 0x7a, 0x0d, 0x3e, 0x01, 0x8b, 0xe0,
     0xd6, 0x4f, 0xa3, 0x2c, 0x06, 0xde, 0x41, 0x39,
@@ -34,6 +39,12 @@ static const uint8_t srtp_ciphertext[38] = {
     0xe7, 0x99, 0x78, 0xd8, 0x8c, 0xa4, 0xd2, 0x15,
     0x94, 0x9d, 0x24, 0x02, 0xb7, 0x8d, 0x6a, 0xcc,
     0x99, 0xea, 0x17, 0x9b, 0x8d, 0xbb,
+};
+static const uint8_t srtp_sha1_32_ciphertext[32] = {
+    0x80, 0x0f, 0x12, 0x34, 0xde, 0xca, 0xfb, 0xad,
+    0xca, 0xfe, 0xba, 0xbe, 0x4e, 0x55, 0xdc, 0x4c,
+    0xe7, 0x99, 0x78, 0xd8, 0x8c, 0xa4, 0xd2, 0x15,
+    0x94, 0x9d, 0x24, 0x02, 0xb7, 0x8d, 0x6a, 0xcc,
 };
 
 static const uint8_t rtcp_plaintext[24] = {
@@ -67,6 +78,23 @@ static void fprint_hex(FILE *stream, const uint8_t *bytes, size_t length)
     size_t index;
     for (index = 0; index < length; ++index) {
         fprintf(stream, "%02x", bytes[index]);
+    }
+    fputc('\n', stream);
+}
+
+static void fprint_hex_pair(FILE *stream,
+                            const uint8_t *first,
+                            size_t first_length,
+                            const uint8_t *second,
+                            size_t second_length)
+{
+    size_t index;
+    for (index = 0; index < first_length; ++index) {
+        fprintf(stream, "%02x", first[index]);
+    }
+    fputc(':', stream);
+    for (index = 0; index < second_length; ++index) {
+        fprintf(stream, "%02x", second[index]);
     }
     fputc('\n', stream);
 }
@@ -108,6 +136,40 @@ static size_t parse_hex(const char *input, uint8_t *output, size_t capacity)
     return input_length / 2;
 }
 
+static void parse_hex_pair(const char *input,
+                           uint8_t *first,
+                           size_t *first_length,
+                           uint8_t *second,
+                           size_t *second_length)
+{
+    const char *separator = strchr(input, ':');
+    char first_hex[BUFFER_CAPACITY * 2 + 1];
+    size_t first_hex_length;
+
+    if (separator == NULL || strchr(separator + 1, ':') != NULL) {
+        fprintf(stderr, "rollover input must contain exactly two packets\n");
+        exit(EXIT_FAILURE);
+    }
+    first_hex_length = (size_t)(separator - input);
+    if (first_hex_length >= sizeof(first_hex)) {
+        fprintf(stderr, "first rollover packet is oversized\n");
+        exit(EXIT_FAILURE);
+    }
+    memcpy(first_hex, input, first_hex_length);
+    first_hex[first_hex_length] = '\0';
+
+    *first_length = parse_hex(first_hex, first, BUFFER_CAPACITY);
+    *second_length = parse_hex(separator + 1, second, BUFFER_CAPACITY);
+}
+
+static void rtp_plaintext_with_sequence(uint16_t sequence,
+                                        uint8_t output[sizeof(rtp_plaintext)])
+{
+    memcpy(output, rtp_plaintext, sizeof(rtp_plaintext));
+    output[2] = (uint8_t)(sequence >> 8);
+    output[3] = (uint8_t)sequence;
+}
+
 static void require_bytes(const char *label,
                           const uint8_t *actual,
                           size_t actual_length,
@@ -127,13 +189,30 @@ static void require_bytes(const char *label,
     exit(EXIT_FAILURE);
 }
 
-static srtp_t create_context(void)
+static interop_profile_t parse_profile(const char *profile)
+{
+    if (strcmp(profile, "sha1-80") == 0) {
+        return profile_sha1_80;
+    }
+    if (strcmp(profile, "sha1-32") == 0) {
+        return profile_sha1_32;
+    }
+
+    fprintf(stderr, "unsupported SRTP profile: %s\n", profile);
+    exit(EXIT_FAILURE);
+}
+
+static srtp_t create_context(interop_profile_t profile)
 {
     srtp_policy_t policy;
     srtp_t context = NULL;
 
     memset(&policy, 0, sizeof(policy));
-    srtp_crypto_policy_set_rtp_default(&policy.rtp);
+    if (profile == profile_sha1_32) {
+        srtp_crypto_policy_set_aes_cm_128_hmac_sha1_32(&policy.rtp);
+    } else {
+        srtp_crypto_policy_set_rtp_default(&policy.rtp);
+    }
     srtp_crypto_policy_set_rtcp_default(&policy.rtcp);
     policy.ssrc.type = ssrc_specific;
     policy.ssrc.value = 0xcafebabe;
@@ -146,25 +225,31 @@ static srtp_t create_context(void)
     return context;
 }
 
-static void protect_rtp(void)
+static void protect_rtp(interop_profile_t profile)
 {
     uint8_t packet[BUFFER_CAPACITY] = {0};
     int length = (int)sizeof(rtp_plaintext);
-    srtp_t context = create_context();
+    const uint8_t *expected = profile == profile_sha1_32
+                                  ? srtp_sha1_32_ciphertext
+                                  : srtp_ciphertext;
+    size_t expected_length = profile == profile_sha1_32
+                                 ? sizeof(srtp_sha1_32_ciphertext)
+                                 : sizeof(srtp_ciphertext);
+    srtp_t context = create_context(profile);
 
     memcpy(packet, rtp_plaintext, sizeof(rtp_plaintext));
     require_status("srtp_protect", srtp_protect(context, packet, &length));
     require_bytes("SRTP ciphertext", packet, (size_t)length,
-                  srtp_ciphertext, sizeof(srtp_ciphertext));
+                  expected, expected_length);
     fprint_hex(stdout, packet, (size_t)length);
     require_status("srtp_dealloc", srtp_dealloc(context));
 }
 
-static void unprotect_rtp(const char *input)
+static void unprotect_rtp(interop_profile_t profile, const char *input)
 {
     uint8_t packet[BUFFER_CAPACITY] = {0};
     int length = (int)parse_hex(input, packet, sizeof(packet));
-    srtp_t context = create_context();
+    srtp_t context = create_context(profile);
 
     require_status("srtp_unprotect", srtp_unprotect(context, packet, &length));
     require_bytes("RTP plaintext", packet, (size_t)length,
@@ -173,11 +258,11 @@ static void unprotect_rtp(const char *input)
     require_status("srtp_dealloc", srtp_dealloc(context));
 }
 
-static void protect_rtcp(void)
+static void protect_rtcp(interop_profile_t profile)
 {
     uint8_t packet[BUFFER_CAPACITY] = {0};
     int length = (int)sizeof(rtcp_plaintext);
-    srtp_t context = create_context();
+    srtp_t context = create_context(profile);
 
     memcpy(packet, rtcp_plaintext, sizeof(rtcp_plaintext));
     require_status("srtp_protect_rtcp",
@@ -188,11 +273,11 @@ static void protect_rtcp(void)
     require_status("srtp_dealloc", srtp_dealloc(context));
 }
 
-static void unprotect_rtcp(const char *input)
+static void unprotect_rtcp(interop_profile_t profile, const char *input)
 {
     uint8_t packet[BUFFER_CAPACITY] = {0};
     int length = (int)parse_hex(input, packet, sizeof(packet));
-    srtp_t context = create_context();
+    srtp_t context = create_context(profile);
 
     require_status("srtp_unprotect_rtcp",
                    srtp_unprotect_rtcp(context, packet, &length));
@@ -202,10 +287,60 @@ static void unprotect_rtcp(const char *input)
     require_status("srtp_dealloc", srtp_dealloc(context));
 }
 
+static void protect_rtp_rollover(interop_profile_t profile)
+{
+    uint8_t first[BUFFER_CAPACITY] = {0};
+    uint8_t second[BUFFER_CAPACITY] = {0};
+    int first_length = (int)sizeof(rtp_plaintext);
+    int second_length = (int)sizeof(rtp_plaintext);
+    srtp_t context = create_context(profile);
+
+    rtp_plaintext_with_sequence(UINT16_MAX, first);
+    rtp_plaintext_with_sequence(0, second);
+    require_status("srtp_protect rollover 65535",
+                   srtp_protect(context, first, &first_length));
+    require_status("srtp_protect rollover 0",
+                   srtp_protect(context, second, &second_length));
+    fprint_hex_pair(stdout, first, (size_t)first_length,
+                    second, (size_t)second_length);
+    require_status("srtp_dealloc", srtp_dealloc(context));
+}
+
+static void unprotect_rtp_rollover(interop_profile_t profile, const char *input)
+{
+    uint8_t first[BUFFER_CAPACITY] = {0};
+    uint8_t second[BUFFER_CAPACITY] = {0};
+    uint8_t first_plaintext[sizeof(rtp_plaintext)];
+    uint8_t second_plaintext[sizeof(rtp_plaintext)];
+    size_t parsed_first_length;
+    size_t parsed_second_length;
+    int first_length;
+    int second_length;
+    srtp_t context = create_context(profile);
+
+    parse_hex_pair(input, first, &parsed_first_length,
+                   second, &parsed_second_length);
+    first_length = (int)parsed_first_length;
+    second_length = (int)parsed_second_length;
+    require_status("srtp_unprotect rollover 65535",
+                   srtp_unprotect(context, first, &first_length));
+    require_status("srtp_unprotect rollover 0",
+                   srtp_unprotect(context, second, &second_length));
+
+    rtp_plaintext_with_sequence(UINT16_MAX, first_plaintext);
+    rtp_plaintext_with_sequence(0, second_plaintext);
+    require_bytes("rollover RTP plaintext 65535", first, (size_t)first_length,
+                  first_plaintext, sizeof(first_plaintext));
+    require_bytes("rollover RTP plaintext 0", second, (size_t)second_length,
+                  second_plaintext, sizeof(second_plaintext));
+    puts("ok");
+    require_status("srtp_dealloc", srtp_dealloc(context));
+}
+
 static void usage(const char *program)
 {
     fprintf(stderr,
-            "usage: %s <version|protect-rtp|unprotect-rtp|protect-rtcp|unprotect-rtcp> [hex-packet]\n",
+            "usage: %s version | <sha1-80|sha1-32> <protect-rtp|unprotect-rtp|protect-rtcp|unprotect-rtcp|protect-rtp-rollover|unprotect-rtp-rollover> [hex-packet]\n",
             program);
 }
 
@@ -215,14 +350,18 @@ int main(int argc, char **argv)
 
     if (argc == 2 && strcmp(argv[1], "version") == 0) {
         puts(srtp_get_version_string());
-    } else if (argc == 2 && strcmp(argv[1], "protect-rtp") == 0) {
-        protect_rtp();
-    } else if (argc == 3 && strcmp(argv[1], "unprotect-rtp") == 0) {
-        unprotect_rtp(argv[2]);
-    } else if (argc == 2 && strcmp(argv[1], "protect-rtcp") == 0) {
-        protect_rtcp();
-    } else if (argc == 3 && strcmp(argv[1], "unprotect-rtcp") == 0) {
-        unprotect_rtcp(argv[2]);
+    } else if (argc == 3 && strcmp(argv[2], "protect-rtp") == 0) {
+        protect_rtp(parse_profile(argv[1]));
+    } else if (argc == 4 && strcmp(argv[2], "unprotect-rtp") == 0) {
+        unprotect_rtp(parse_profile(argv[1]), argv[3]);
+    } else if (argc == 3 && strcmp(argv[2], "protect-rtcp") == 0) {
+        protect_rtcp(parse_profile(argv[1]));
+    } else if (argc == 4 && strcmp(argv[2], "unprotect-rtcp") == 0) {
+        unprotect_rtcp(parse_profile(argv[1]), argv[3]);
+    } else if (argc == 3 && strcmp(argv[2], "protect-rtp-rollover") == 0) {
+        protect_rtp_rollover(parse_profile(argv[1]));
+    } else if (argc == 4 && strcmp(argv[2], "unprotect-rtp-rollover") == 0) {
+        unprotect_rtp_rollover(parse_profile(argv[1]), argv[3]);
     } else {
         usage(argv[0]);
         require_status("srtp_shutdown", srtp_shutdown());

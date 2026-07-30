@@ -572,7 +572,11 @@ impl SrtpCrypto {
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
         // Create HMAC-SHA1 instance
-        let tag = hmac_sha1(data, &session_keys.rtcp_auth_key, self.suite.tag_length)?;
+        let tag = hmac_sha1(
+            data,
+            &session_keys.rtcp_auth_key,
+            self.suite.srtcp_tag_length(),
+        )?;
 
         Ok(tag)
     }
@@ -595,7 +599,7 @@ impl SrtpCrypto {
         let min_len = 8
             + 4
             + (if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-                self.suite.tag_length
+                self.suite.srtcp_tag_length()
             } else {
                 0
             });
@@ -608,7 +612,7 @@ impl SrtpCrypto {
         }
 
         // Calculate authentication tag position
-        let auth_tag_pos = data.len() - self.suite.tag_length;
+        let auth_tag_pos = data.len() - self.suite.srtcp_tag_length();
 
         // Verify authentication tag if authentication is enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {

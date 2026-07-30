@@ -6,7 +6,9 @@
 //! release qualification without adding libSRTP to the Rust dependency graph.
 
 use rvoip_rtp_core::packet::RtpPacket;
-use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
+use rvoip_rtp_core::srtp::{
+    SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
+};
 use std::error::Error;
 
 const MASTER_KEY: [u8; 16] = [
@@ -25,6 +27,10 @@ const SRTP_CIPHERTEXT: [u8; 38] = [
     0xe7, 0x99, 0x78, 0xd8, 0x8c, 0xa4, 0xd2, 0x15, 0x94, 0x9d, 0x24, 0x02, 0xb7, 0x8d, 0x6a, 0xcc,
     0x99, 0xea, 0x17, 0x9b, 0x8d, 0xbb,
 ];
+const SRTP_SHA1_32_CIPHERTEXT: [u8; 32] = [
+    0x80, 0x0f, 0x12, 0x34, 0xde, 0xca, 0xfb, 0xad, 0xca, 0xfe, 0xba, 0xbe, 0x4e, 0x55, 0xdc, 0x4c,
+    0xe7, 0x99, 0x78, 0xd8, 0x8c, 0xa4, 0xd2, 0x15, 0x94, 0x9d, 0x24, 0x02, 0xb7, 0x8d, 0x6a, 0xcc,
+];
 
 const RTCP_PLAINTEXT: [u8; 24] = [
     0x81, 0xc8, 0x00, 0x0b, 0xca, 0xfe, 0xba, 0xbe, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab, 0xab,
@@ -35,12 +41,30 @@ const SRTCP_CIPHERTEXT: [u8; 38] = [
     0xbe, 0xf8, 0x90, 0x41, 0xf9, 0x77, 0xa5, 0xa8, 0x80, 0x00, 0x00, 0x01, 0x99, 0x3e, 0x08, 0xcd,
     0x54, 0xd6, 0xc1, 0x23, 0x07, 0x98,
 ];
+const ROLLOVER_SEQUENCES: [u16; 2] = [u16::MAX, 0];
 
-fn context() -> Result<SrtpContext, rvoip_rtp_core::Error> {
+fn suite(profile: &str) -> Result<SrtpCryptoSuite, String> {
+    match profile {
+        "sha1-80" => Ok(SRTP_AES128_CM_SHA1_80),
+        "sha1-32" => Ok(SRTP_AES128_CM_SHA1_32),
+        _ => Err(format!("unsupported SRTP profile `{profile}`")),
+    }
+}
+
+fn expected_srtp(profile: &str) -> Result<&'static [u8], String> {
+    match profile {
+        "sha1-80" => Ok(&SRTP_CIPHERTEXT),
+        "sha1-32" => Ok(&SRTP_SHA1_32_CIPHERTEXT),
+        _ => Err(format!("unsupported SRTP profile `{profile}`")),
+    }
+}
+
+fn context(profile: &str) -> Result<SrtpContext, Box<dyn Error>> {
     SrtpContext::new(
-        SRTP_AES128_CM_SHA1_80,
+        suite(profile)?,
         SrtpCryptoKey::new(MASTER_KEY.to_vec(), MASTER_SALT.to_vec()),
     )
+    .map_err(Into::into)
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
@@ -70,6 +94,12 @@ fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+fn rtp_plaintext_with_sequence(sequence: u16) -> [u8; RTP_PLAINTEXT.len()] {
+    let mut packet = RTP_PLAINTEXT;
+    packet[2..4].copy_from_slice(&sequence.to_be_bytes());
+    packet
+}
+
 fn require_expected(label: &str, actual: &[u8], expected: &[u8]) -> Result<(), String> {
     if actual == expected {
         return Ok(());
@@ -82,48 +112,99 @@ fn require_expected(label: &str, actual: &[u8], expected: &[u8]) -> Result<(), S
     ))
 }
 
-fn protect_rtp() -> Result<(), Box<dyn Error>> {
+fn protect_rtp(profile: &str) -> Result<(), Box<dyn Error>> {
     let packet = RtpPacket::parse(&RTP_PLAINTEXT)?;
-    let wire = context()?.protect(&packet)?.serialize()?;
-    require_expected("SRTP ciphertext", &wire, &SRTP_CIPHERTEXT)?;
+    let wire = context(profile)?.protect(&packet)?.serialize()?;
+    require_expected("SRTP ciphertext", &wire, expected_srtp(profile)?)?;
     println!("{}", encode_hex(&wire));
     Ok(())
 }
 
-fn unprotect_rtp(input: &str) -> Result<(), Box<dyn Error>> {
+fn unprotect_rtp(profile: &str, input: &str) -> Result<(), Box<dyn Error>> {
     let wire = decode_hex(input)?;
-    let plaintext = context()?.unprotect(&wire)?.serialize()?;
+    let plaintext = context(profile)?.unprotect(&wire)?.serialize()?;
     require_expected("RTP plaintext", &plaintext, &RTP_PLAINTEXT)?;
     println!("ok");
     Ok(())
 }
 
-fn protect_rtcp() -> Result<(), Box<dyn Error>> {
-    let wire = context()?.protect_rtcp(&RTCP_PLAINTEXT)?;
+fn protect_rtcp(profile: &str) -> Result<(), Box<dyn Error>> {
+    let wire = context(profile)?.protect_rtcp(&RTCP_PLAINTEXT)?;
     require_expected("SRTCP ciphertext", &wire, &SRTCP_CIPHERTEXT)?;
     println!("{}", encode_hex(&wire));
     Ok(())
 }
 
-fn unprotect_rtcp(input: &str) -> Result<(), Box<dyn Error>> {
+fn unprotect_rtcp(profile: &str, input: &str) -> Result<(), Box<dyn Error>> {
     let wire = decode_hex(input)?;
-    let plaintext = context()?.unprotect_rtcp(&wire)?;
+    let plaintext = context(profile)?.unprotect_rtcp(&wire)?;
     require_expected("RTCP plaintext", &plaintext, &RTCP_PLAINTEXT)?;
     println!("ok");
     Ok(())
 }
 
+fn protect_rtp_rollover(profile: &str) -> Result<(), Box<dyn Error>> {
+    let mut context = context(profile)?;
+    let mut protected = Vec::with_capacity(ROLLOVER_SEQUENCES.len());
+    for sequence in ROLLOVER_SEQUENCES {
+        let plaintext = rtp_plaintext_with_sequence(sequence);
+        let packet = RtpPacket::parse(&plaintext)?;
+        let wire = context.protect(&packet)?.serialize()?;
+        protected.push(encode_hex(&wire));
+    }
+    println!("{}", protected.join(":"));
+    Ok(())
+}
+
+fn unprotect_rtp_rollover(profile: &str, input: &str) -> Result<(), Box<dyn Error>> {
+    let packets: Vec<&str> = input.split(':').collect();
+    if packets.len() != ROLLOVER_SEQUENCES.len() {
+        return Err(format!(
+            "rollover input must contain {} packets, got {}",
+            ROLLOVER_SEQUENCES.len(),
+            packets.len()
+        )
+        .into());
+    }
+
+    let mut context = context(profile)?;
+    for (encoded, sequence) in packets.into_iter().zip(ROLLOVER_SEQUENCES) {
+        let wire = decode_hex(encoded)?;
+        let plaintext = context.unprotect(&wire)?.serialize()?;
+        require_expected(
+            "rollover RTP plaintext",
+            &plaintext,
+            &rtp_plaintext_with_sequence(sequence),
+        )?;
+    }
+    println!("ok");
+    Ok(())
+}
+
 fn usage() -> &'static str {
-    "usage: libsrtp_interop_driver <protect-rtp|unprotect-rtp|protect-rtcp|unprotect-rtcp> [hex-packet]"
+    "usage: libsrtp_interop_driver <sha1-80|sha1-32> <protect-rtp|unprotect-rtp|protect-rtcp|unprotect-rtcp|protect-rtp-rollover|unprotect-rtp-rollover> [hex-packet]"
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);
-    match (args.next().as_deref(), args.next(), args.next()) {
-        (Some("protect-rtp"), None, None) => protect_rtp(),
-        (Some("unprotect-rtp"), Some(input), None) => unprotect_rtp(&input),
-        (Some("protect-rtcp"), None, None) => protect_rtcp(),
-        (Some("unprotect-rtcp"), Some(input), None) => unprotect_rtcp(&input),
+    match (
+        args.next(),
+        args.next().as_deref(),
+        args.next(),
+        args.next(),
+    ) {
+        (Some(profile), Some("protect-rtp"), None, None) => protect_rtp(&profile),
+        (Some(profile), Some("unprotect-rtp"), Some(input), None) => {
+            unprotect_rtp(&profile, &input)
+        }
+        (Some(profile), Some("protect-rtcp"), None, None) => protect_rtcp(&profile),
+        (Some(profile), Some("unprotect-rtcp"), Some(input), None) => {
+            unprotect_rtcp(&profile, &input)
+        }
+        (Some(profile), Some("protect-rtp-rollover"), None, None) => protect_rtp_rollover(&profile),
+        (Some(profile), Some("unprotect-rtp-rollover"), Some(input), None) => {
+            unprotect_rtp_rollover(&profile, &input)
+        }
         _ => Err(usage().into()),
     }
 }
