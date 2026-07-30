@@ -18,10 +18,7 @@ use crate::security::{
     sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole},
     SecurityKeyExchange,
 };
-use crate::srtp::{
-    SrtpContext, SrtpCryptoSuite, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM,
-    SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
-};
+use crate::srtp::SrtpContext;
 
 /// SDES client configuration
 #[derive(Debug, Clone)]
@@ -78,45 +75,33 @@ pub struct SdesClient {
 
 impl SdesClient {
     /// Create a new SDES client
-    pub fn new(config: SdesClientConfig) -> Self {
-        // Convert API config to core SDES config
+    pub fn new(config: SdesClientConfig) -> Result<Self, SecurityError> {
+        let crypto_suites =
+            crate::api::common::config::implemented_srtp_suites(&config.supported_profiles)?;
         let sdes_config = SdesConfig {
-            crypto_suites: Self::convert_srtp_profiles(&config.supported_profiles),
+            crypto_suites,
             offer_count: config.supported_profiles.len().min(4),
         };
 
         let sdes = Sdes::new(sdes_config, SdesRole::Answerer);
 
-        Self {
+        Ok(Self {
             config,
             state: Arc::new(RwLock::new(SdesClientState::Initial)),
             sdes: Arc::new(RwLock::new(sdes)),
             srtp_context: Arc::new(RwLock::new(None)),
             selected_crypto: Arc::new(RwLock::new(None)),
-        }
+        })
     }
 
     /// Create SDES client from security config
-    pub fn from_security_config(config: &SecurityConfig) -> Self {
+    pub fn from_security_config(config: &SecurityConfig) -> Result<Self, SecurityError> {
         let client_config = SdesClientConfig {
             supported_profiles: config.srtp_profiles.clone(),
             strict_validation: config.required,
             max_crypto_attributes: 8,
         };
         Self::new(client_config)
-    }
-
-    /// Convert API SRTP profiles to core crypto suites
-    fn convert_srtp_profiles(profiles: &[SrtpProfile]) -> Vec<SrtpCryptoSuite> {
-        profiles
-            .iter()
-            .map(|profile| match profile {
-                SrtpProfile::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
-                SrtpProfile::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
-                SrtpProfile::AesGcm128 => SRTP_AEAD_AES_128_GCM,
-                SrtpProfile::AesGcm256 => SRTP_AEAD_AES_256_GCM,
-            })
-            .collect()
     }
 
     /// Get current state
@@ -285,7 +270,9 @@ impl SdesClient {
 
         // Change role to offerer temporarily
         let sdes_config = SdesConfig {
-            crypto_suites: Self::convert_srtp_profiles(&self.config.supported_profiles),
+            crypto_suites: crate::api::common::config::implemented_srtp_suites(
+                &self.config.supported_profiles,
+            )?,
             offer_count: self.config.supported_profiles.len().min(4),
         };
 
@@ -331,6 +318,8 @@ impl SdesClient {
 pub struct SrtpClientSecurityContext {
     /// Configuration
     config: ClientSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// SDES client for key management
     #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     sdes_client: Arc<SdesClient>,
@@ -353,6 +342,23 @@ impl SrtpClientSecurityContext {
         for profile in &config.srtp_profiles {
             profile.ensure_supported().map_err(SecurityError::from)?;
         }
+        match &config.srtp_key {
+            Some(key) if key.len() >= 30 => {}
+            Some(key) => {
+                return Err(SecurityError::Configuration(format!(
+                    "SRTP key material must be at least 30 bytes, got {}",
+                    key.len()
+                )))
+            }
+            None => {
+                return Err(SecurityError::Configuration(
+                    "SRTP mode requires a 16-byte key and 14-byte salt".to_string(),
+                ))
+            }
+        }
+
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
 
         // Create SDES client config from security config
         let sdes_config = SdesClientConfig {
@@ -361,10 +367,11 @@ impl SrtpClientSecurityContext {
             max_crypto_attributes: 8,
         };
 
-        let sdes_client = Arc::new(SdesClient::new(sdes_config));
+        let sdes_client = Arc::new(SdesClient::new(sdes_config)?);
 
         let ctx = Self {
             config,
+            advertised_profiles,
             sdes_client,
             remote_addr: Arc::new(RwLock::new(None)),
             socket: Arc::new(RwLock::new(None)),
@@ -455,13 +462,7 @@ impl ClientSecurityContext for SrtpClientSecurityContext {
     }
 
     async fn get_security_info(&self) -> Result<SecurityInfo, SecurityError> {
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .filter_map(|profile| profile.advertised_name().ok())
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
         let srtp_profile = crypto_suites.first().cloned();
 
         Ok(SecurityInfo {
@@ -486,13 +487,7 @@ impl ClientSecurityContext for SrtpClientSecurityContext {
     }
 
     fn get_security_info_sync(&self) -> SecurityInfo {
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .filter_map(|profile| profile.advertised_name().ok())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
         let srtp_profile = crypto_suites.first().cloned();
         SecurityInfo {
             mode: SecurityMode::Srtp,

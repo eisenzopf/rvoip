@@ -167,18 +167,10 @@ impl DefaultMediaTransportClient {
                 crate::api::common::config::SecurityMode::SdesSrtp
                 | crate::api::common::config::SecurityMode::MikeySrtp
                 | crate::api::common::config::SecurityMode::ZrtpSrtp => {
-                    // For now, treat these as DTLS-based (they would need specific implementations)
-                    let dtls_ctx =
-                        DefaultClientSecurityContext::new(config.security_config.clone())
-                            .await
-                            .map_err(|e| {
-                                MediaTransportError::Security(format!(
-                                    "Failed to create DTLS security context: {}",
-                                    e
-                                ))
-                            })?;
-
-                    Some(dtls_ctx as Arc<dyn ClientSecurityContext>)
+                    return Err(MediaTransportError::Security(format!(
+                        "direct client transport for {:?} is not implemented",
+                        config.security_config.security_mode
+                    )));
                 }
                 crate::api::common::config::SecurityMode::None => {
                     // No security context

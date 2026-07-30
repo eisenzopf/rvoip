@@ -21,6 +21,9 @@ pub enum SrtpEncryptionAlgorithm {
     /// AES in f8-mode (Customized for SRTP)
     AesF8,
 
+    /// Null encryption (for debugging/testing only)
+    Null,
+
     /// AEAD AES-128-GCM (RFC 7714).
     ///
     /// The profile identity is retained so configuration and negotiation can
@@ -32,9 +35,6 @@ pub enum SrtpEncryptionAlgorithm {
     /// The profile identity is retained so configuration and negotiation can
     /// fail closed. Encryption is not implemented in this release.
     AeadAes256Gcm,
-
-    /// Null encryption (for debugging/testing only)
-    Null,
 }
 
 /// SRTP authentication algorithms

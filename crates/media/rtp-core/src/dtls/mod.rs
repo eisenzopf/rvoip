@@ -102,7 +102,9 @@ pub type Result<T> = std::result::Result<T, crate::error::Error>;
 /// * `config` - The DTLS connection configuration
 ///
 /// # Returns
-/// A new DTLS connection
+/// A typed unsupported-feature error after validating the configuration. The
+/// signature is retained so callers can handle this release's fail-closed
+/// behavior without a panic.
 pub async fn create_connection(config: DtlsConfig) -> Result<DtlsConnection> {
     config.validate()?;
 

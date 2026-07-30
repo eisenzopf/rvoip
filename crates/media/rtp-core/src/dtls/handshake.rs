@@ -85,10 +85,19 @@ pub enum HandshakeStep {
     Failed,
 }
 
-/// Handshake state machine for DTLS connections
+/// Internal handshake state machine for DTLS connections.
+///
+/// The implementation is intentionally crate-private until the DTLS stack is
+/// complete and interoperable. External callers must use
+/// [`crate::dtls::create_connection`], which currently returns a typed
+/// unsupported error.
+///
+/// ```compile_fail
+/// use rvoip_rtp_core::dtls::handshake::HandshakeState;
+/// ```
 #[derive(Clone)]
 #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
-pub struct HandshakeState {
+pub(crate) struct HandshakeState {
     /// Current handshake step
     step: HandshakeStep,
 
@@ -166,6 +175,7 @@ pub struct HandshakeState {
     change_cipher_spec_received: bool,
 }
 
+#[allow(dead_code)] // Incomplete state machine is retained only for internal tests.
 impl HandshakeState {
     /// Create a new handshake state machine
     pub fn new(role: DtlsRole, version: DtlsVersion, max_retransmissions: usize) -> Self {

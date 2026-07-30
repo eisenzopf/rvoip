@@ -187,6 +187,50 @@ impl SrtpProfile {
             ))),
         }
     }
+
+    /// Convert an API profile to the exact implemented cryptographic suite.
+    pub fn crypto_suite(self) -> crate::Result<crate::srtp::SrtpCryptoSuite> {
+        match self {
+            Self::AesCm128HmacSha1_80 => Ok(crate::srtp::SRTP_AES128_CM_SHA1_80),
+            Self::AesCm128HmacSha1_32 => Ok(crate::srtp::SRTP_AES128_CM_SHA1_32),
+            Self::AesGcm128 | Self::AesGcm256 => Err(crate::Error::UnsupportedFeature(format!(
+                "SRTP profile {self:?} is not implemented"
+            ))),
+        }
+    }
+}
+
+/// Validate and convert a complete profile list without dropping entries.
+pub(crate) fn implemented_srtp_suites(
+    profiles: &[SrtpProfile],
+) -> Result<Vec<crate::srtp::SrtpCryptoSuite>, crate::api::common::error::SecurityError> {
+    if profiles.is_empty() {
+        return Err(crate::api::common::error::SecurityError::Configuration(
+            "at least one implemented SRTP profile is required".to_string(),
+        ));
+    }
+
+    profiles
+        .iter()
+        .copied()
+        .map(|profile| profile.crypto_suite().map_err(Into::into))
+        .collect()
+}
+
+/// Convert a complete profile list to names without dropping unsupported entries.
+pub(crate) fn implemented_srtp_profile_names(
+    profiles: &[SrtpProfile],
+) -> Result<Vec<String>, crate::api::common::error::SecurityError> {
+    profiles
+        .iter()
+        .copied()
+        .map(|profile| {
+            profile
+                .advertised_name()
+                .map(str::to_string)
+                .map_err(Into::into)
+        })
+        .collect()
 }
 
 /// Network condition preset for buffer configuration
@@ -361,6 +405,43 @@ impl Default for SecurityConfig {
 }
 
 impl SecurityConfig {
+    /// Validate all configured profiles before any security method is selected.
+    pub fn validate(&self) -> Result<(), crate::api::common::error::SecurityError> {
+        if self.mode == SecurityMode::None {
+            if self
+                .srtp_profiles
+                .iter()
+                .any(|profile| !profile.is_supported())
+            {
+                return Err(crate::api::common::error::SecurityError::UnsupportedFeature(
+                    "unimplemented SRTP profiles cannot be retained in an unsecured configuration"
+                        .to_string(),
+                ));
+            }
+            return Ok(());
+        }
+
+        implemented_srtp_suites(&self.srtp_profiles)?;
+
+        if self.mode == SecurityMode::Srtp {
+            let key = self.srtp_key.as_ref().ok_or_else(|| {
+                crate::api::common::error::SecurityError::Configuration(
+                    "SRTP mode requires a 16-byte key and 14-byte salt".to_string(),
+                )
+            })?;
+            if key.len() < 30 {
+                return Err(crate::api::common::error::SecurityError::Configuration(
+                    format!(
+                        "SRTP key material must be at least 30 bytes, got {}",
+                        key.len()
+                    ),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create a security configuration from a predefined profile
     pub fn from_profile(profile: SecurityProfile) -> Self {
         match profile {

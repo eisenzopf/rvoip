@@ -12,7 +12,6 @@ use tracing::{debug, error};
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
 use crate::api::server::security::dtls::handshake;
-use crate::api::server::security::util::conversion;
 use crate::api::server::security::{ClientSecurityContext, ServerSecurityConfig, SocketHandle};
 use crate::dtls::DtlsConnection;
 use crate::srtp::SrtpContext;
@@ -31,6 +30,8 @@ pub struct DefaultClientSecurityContext {
     pub socket: Arc<Mutex<Option<SocketHandle>>>,
     /// Server config (shared)
     pub config: ServerSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// Transport used for DTLS
     pub transport: Arc<Mutex<Option<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>>>>,
     /// Flag indicating that handshake is waiting for first packet
@@ -47,18 +48,21 @@ impl DefaultClientSecurityContext {
         socket: Option<SocketHandle>,
         config: ServerSecurityConfig,
         transport: Option<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SecurityError> {
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+        Ok(Self {
             address,
             connection: Arc::new(Mutex::new(connection)),
             srtp_context: Arc::new(Mutex::new(None)),
             handshake_completed: Arc::new(Mutex::new(false)),
             socket: Arc::new(Mutex::new(socket)),
             config,
+            advertised_profiles,
             transport: Arc::new(Mutex::new(transport)),
             initial_packet: Arc::new(Mutex::new(None)),
             waiting_for_first_packet: Arc::new(Mutex::new(false)),
-        }
+        })
     }
 
     /// Process a DTLS packet received from the client
@@ -264,12 +268,15 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 
     fn get_security_info(&self) -> SecurityInfo {
-        conversion::create_security_info(
-            self.config.security_mode,
-            None, // Will be filled by async get_fingerprint method
-            &self.config.fingerprint_algorithm,
-            &self.config.srtp_profiles,
-        )
+        let crypto_suites = self.advertised_profiles.clone();
+        SecurityInfo {
+            mode: self.config.security_mode,
+            fingerprint: None,
+            fingerprint_algorithm: Some(self.config.fingerprint_algorithm.clone()),
+            srtp_profile: crypto_suites.first().cloned(),
+            crypto_suites,
+            key_params: None,
+        }
     }
 
     async fn get_fingerprint(&self) -> Result<String, SecurityError> {

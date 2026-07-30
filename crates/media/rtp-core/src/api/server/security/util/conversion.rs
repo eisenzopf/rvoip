@@ -4,7 +4,6 @@
 //! used in the security module.
 
 use std::net::SocketAddr;
-use tracing::debug;
 
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
 use crate::api::common::error::SecurityError;
@@ -40,21 +39,17 @@ pub fn create_security_info(
     fingerprint: Option<String>,
     fingerprint_algorithm: &str,
     profiles: &[SrtpProfile],
-) -> SecurityInfo {
-    let crypto_suites = profiles
-        .iter()
-        .filter_map(|profile| profile.advertised_name().ok())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+) -> Result<SecurityInfo, SecurityError> {
+    let crypto_suites = crate::api::common::config::implemented_srtp_profile_names(profiles)?;
     let srtp_profile = crypto_suites.first().cloned();
-    SecurityInfo {
+    Ok(SecurityInfo {
         mode,
         fingerprint,
         fingerprint_algorithm: Some(fingerprint_algorithm.to_string()),
         crypto_suites,
         key_params: None,
         srtp_profile,
-    }
+    })
 }
 
 /// Create an address string representation
@@ -63,15 +58,14 @@ pub fn addr_to_string(addr: SocketAddr) -> String {
 }
 
 /// Convert a string to a SecurityMode enum
-pub fn string_to_security_mode(mode: &str) -> SecurityMode {
+pub fn string_to_security_mode(mode: &str) -> Result<SecurityMode, SecurityError> {
     match mode.to_lowercase().as_str() {
-        "dtls-srtp" => SecurityMode::DtlsSrtp,
-        "srtp" => SecurityMode::Srtp,
-        "none" => SecurityMode::None,
-        _ => {
-            debug!("Unknown security mode: {}, defaulting to DTLS-SRTP", mode);
-            SecurityMode::DtlsSrtp
-        }
+        "dtls-srtp" => Ok(SecurityMode::DtlsSrtp),
+        "srtp" => Ok(SecurityMode::Srtp),
+        "none" => Ok(SecurityMode::None),
+        _ => Err(SecurityError::UnsupportedFeature(format!(
+            "unknown security mode {mode:?}"
+        ))),
     }
 }
 

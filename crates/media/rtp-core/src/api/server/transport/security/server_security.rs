@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::config::ServerConfig;
-use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
+use crate::api::server::security::ServerSecurityContext;
 
 /// Initialize security context if needed
 pub async fn init_security_if_needed(
@@ -25,7 +25,7 @@ pub async fn init_security_if_needed(
 
         if !security_exists {
             // Create security context
-            let context = DefaultServerSecurityContext::new(config.security_config.clone())
+            let context = crate::api::server::security::new(config.security_config.clone())
                 .await
                 .map_err(|e| {
                     MediaTransportError::Security(format!(
@@ -60,6 +60,10 @@ pub async fn get_security_info(
     let security_context_guard = security_context.read().await;
 
     if let Some(security_ctx) = security_context_guard.as_ref() {
+        if config.security_config.security_mode == crate::api::common::config::SecurityMode::Srtp {
+            return Ok(security_ctx.get_security_info());
+        }
+
         // Get the fingerprint and algorithm directly from the concrete context
         let fingerprint = security_ctx.get_fingerprint().await.map_err(|e| {
             MediaTransportError::Security(format!("Failed to get fingerprint: {}", e))
@@ -76,11 +80,10 @@ pub async fn get_security_info(
         let profiles = security_ctx.get_supported_srtp_profiles().await;
 
         // Create crypto suites list from profiles
-        let crypto_suites = profiles
-            .iter()
-            .filter_map(|profile| profile.advertised_name().ok())
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = crate::api::common::config::implemented_srtp_profile_names(&profiles)
+            .map_err(|error| {
+            MediaTransportError::Security(format!("invalid SRTP profile advertisement: {error}"))
+        })?;
         let srtp_profile = crypto_suites.first().cloned();
 
         // Create security info

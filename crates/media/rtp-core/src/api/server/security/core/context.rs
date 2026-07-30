@@ -44,12 +44,8 @@ pub async fn get_security_info(
     };
 
     // Create security info
-    let crypto_suites = config
-        .srtp_profiles
-        .iter()
-        .filter_map(|profile| profile.advertised_name().ok())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let crypto_suites =
+        crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
     let srtp_profile = crypto_suites.first().cloned();
     let security_info = SecurityInfo {
         mode: config.security_mode,

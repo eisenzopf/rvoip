@@ -254,7 +254,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         })?;
 
         // Create SecurityRtpTransport wrapper
-        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), true)
+        let srtp_enabled = self.config.security_config.security_mode.requires_srtp();
+        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), srtp_enabled)
             .await
             .map_err(|e| {
                 MediaTransportError::Transport(format!(

@@ -3,9 +3,11 @@
 //! This module provides a high-level security manager that abstracts away
 //! the details of setting up secure connections.
 
+use crate::api::client::security::srtp::SrtpClientSecurityContext;
 use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
 use crate::api::common::config::{SecurityConfig, SecurityMode};
 use crate::api::common::error::SecurityError;
+use crate::api::server::security::srtp::SrtpServerSecurityContext;
 use crate::api::server::security::{
     DefaultServerSecurityContext, ServerSecurityContext, SocketHandle,
 };
@@ -54,6 +56,7 @@ impl SecurityManager {
         &mut self,
         socket_addr: SocketAddr,
     ) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
+        self.config.validate()?;
         // Create a security context for the server
         let server_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -94,7 +97,17 @@ impl SecurityManager {
         };
 
         // Create the server security context
-        let server_ctx = DefaultServerSecurityContext::new(server_security_config).await?;
+        let server_ctx: Arc<dyn ServerSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpServerSecurityContext::new(server_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultServerSecurityContext::new(server_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "server context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Bind a socket for DTLS
         let socket =
@@ -129,6 +142,7 @@ impl SecurityManager {
         &mut self,
         socket: Arc<UdpSocket>,
     ) -> Result<Arc<dyn ServerSecurityContext>, SecurityError> {
+        self.config.validate()?;
         // Create a security context for the server
         let server_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -169,7 +183,17 @@ impl SecurityManager {
         };
 
         // Create the server security context
-        let server_ctx = DefaultServerSecurityContext::new(server_security_config).await?;
+        let server_ctx: Arc<dyn ServerSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpServerSecurityContext::new(server_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultServerSecurityContext::new(server_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "server context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Create a socket handle for the server
         let socket_handle = SocketHandle {
@@ -198,6 +222,7 @@ impl SecurityManager {
         &mut self,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
+        self.config.validate()?;
         // Create a security context for the client
         let client_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -242,7 +267,17 @@ impl SecurityManager {
         };
 
         // Create the client security context
-        let client_ctx = DefaultClientSecurityContext::new(client_security_config).await?;
+        let client_ctx: Arc<dyn ClientSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpClientSecurityContext::new(client_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultClientSecurityContext::new(client_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "client context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Bind a socket for DTLS
         let local_addr = SocketAddr::new(remote_addr.ip(), 0); // Use ephemeral port
@@ -277,6 +312,7 @@ impl SecurityManager {
         socket: Arc<UdpSocket>,
         remote_addr: SocketAddr,
     ) -> Result<Arc<dyn ClientSecurityContext>, SecurityError> {
+        self.config.validate()?;
         // Create a security context for the client
         let client_security_config = match self.config.mode {
             SecurityMode::None => {
@@ -321,7 +357,17 @@ impl SecurityManager {
         };
 
         // Create the client security context
-        let client_ctx = DefaultClientSecurityContext::new(client_security_config).await?;
+        let client_ctx: Arc<dyn ClientSecurityContext> = match self.config.mode {
+            SecurityMode::Srtp => SrtpClientSecurityContext::new(client_security_config).await?,
+            SecurityMode::DtlsSrtp => {
+                DefaultClientSecurityContext::new(client_security_config).await?
+            }
+            mode => {
+                return Err(SecurityError::UnsupportedFeature(format!(
+                    "client context for {mode:?} is not implemented"
+                )))
+            }
+        };
 
         // Create a socket handle for the client
         let socket_handle = SocketHandle {
@@ -579,5 +625,59 @@ impl SecurityManager {
                 "Server context not initialized".to_string(),
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::client::security::srtp::SrtpClientSecurityContext;
+
+    fn srtp_config() -> SecurityConfig {
+        SecurityConfig::srtp_with_key(vec![0x42; 30])
+    }
+
+    #[tokio::test]
+    async fn all_security_manager_srtp_paths_avoid_dtls() {
+        let bind_addr = SocketAddr::from(([127, 0, 0, 1], 0));
+
+        let mut server_manager = SecurityManager::new(srtp_config());
+        let server = server_manager.setup_server(bind_addr).await.unwrap();
+        assert_eq!(server.get_config().security_mode, SecurityMode::Srtp);
+
+        let server_socket = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
+        let mut existing_server_manager = SecurityManager::new(srtp_config());
+        let existing_server = existing_server_manager
+            .setup_server_with_socket(server_socket)
+            .await
+            .unwrap();
+        assert_eq!(
+            existing_server.get_config().security_mode,
+            SecurityMode::Srtp
+        );
+
+        let remote = SocketAddr::from(([127, 0, 0, 1], 9));
+        let mut client_manager = SecurityManager::new(srtp_config());
+        let client = client_manager.setup_client(remote).await.unwrap();
+        assert_eq!(client.get_config().security_mode, SecurityMode::Srtp);
+        assert!(client
+            .as_any()
+            .downcast_ref::<SrtpClientSecurityContext>()
+            .is_some());
+
+        let client_socket = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
+        let mut existing_client_manager = SecurityManager::new(srtp_config());
+        let existing_client = existing_client_manager
+            .setup_client_with_socket(client_socket, remote)
+            .await
+            .unwrap();
+        assert_eq!(
+            existing_client.get_config().security_mode,
+            SecurityMode::Srtp
+        );
+        assert!(existing_client
+            .as_any()
+            .downcast_ref::<SrtpClientSecurityContext>()
+            .is_some());
     }
 }

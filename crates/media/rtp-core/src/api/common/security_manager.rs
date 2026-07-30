@@ -98,6 +98,7 @@ impl SecurityContextManager {
 
     /// Initialize security contexts for supported methods
     pub async fn initialize(&self) -> Result<(), SecurityError> {
+        self.config.validate()?;
         let mut contexts = self.contexts.write().await;
 
         for method in &self.method_preference {
@@ -111,7 +112,17 @@ impl SecurityContextManager {
                 | KeyExchangeMethod::Zrtp
                 | KeyExchangeMethod::PreSharedKey => {
                     // Create unified context for these methods
-                    let method_config = self.create_method_config(*method)?;
+                    let method_config = match self.create_method_config(*method) {
+                        Ok(config) => config,
+                        Err(error) => {
+                            eprintln!(
+                                "Warning: Failed to configure {} context: {}",
+                                self.method_name(*method),
+                                error
+                            );
+                            continue;
+                        }
+                    };
                     match SecurityContextFactory::create_context(method_config) {
                         Ok(unified_context) => {
                             contexts.insert(
@@ -142,6 +153,7 @@ impl SecurityContextManager {
     ) -> Result<SecurityConfig, SecurityError> {
         let mut config = self.config.clone();
         config.mode = method.to_security_mode();
+        config.validate()?;
         Ok(config)
     }
 
@@ -357,12 +369,21 @@ impl SecurityContextManager {
     pub async fn get_capabilities(&self) -> SecurityCapabilities {
         let contexts = self.contexts.read().await;
         let supported_methods: Vec<KeyExchangeMethod> = contexts.keys().copied().collect();
+        let config_is_valid = self.config.validate().is_ok();
 
         SecurityCapabilities {
-            supported_methods,
-            can_offer: true,  // Most methods can offer
-            can_answer: true, // Most methods can answer
-            srtp_profiles: self.config.srtp_profiles.clone(),
+            supported_methods: if config_is_valid {
+                supported_methods
+            } else {
+                Vec::new()
+            },
+            can_offer: config_is_valid,
+            can_answer: config_is_valid,
+            srtp_profiles: if config_is_valid {
+                self.config.srtp_profiles.clone()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -380,16 +401,11 @@ impl SecurityContextManager {
         })?;
 
         match context {
-            SecurityContextType::Unified(_unified) => {
-                // For SDES, we can generate crypto lines
+            SecurityContextType::Unified(unified) => {
                 if method == KeyExchangeMethod::Sdes {
-                    // This would generate SDP crypto attributes
-                    // For now, return a placeholder
-                    Ok(vec![
-                        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:placeholder".to_string(),
-                    ])
+                    unified.create_sdes_offer().await
                 } else {
-                    Err(SecurityError::Configuration(
+                    Err(SecurityError::UnsupportedFeature(
                         "Offer generation not implemented for this method".to_string(),
                     ))
                 }
@@ -536,6 +552,48 @@ mod tests {
         assert!(capabilities.can_answer);
         assert!(!capabilities.supported_methods.is_empty());
         assert!(!capabilities.srtp_profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_profiles_are_neither_initialized_nor_advertised() {
+        let mut config = SecurityConfig::sdes_srtp();
+        config.srtp_profiles = vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128];
+        let manager = SecurityContextManager::new(config);
+
+        assert!(matches!(
+            manager.initialize().await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+        let capabilities = manager.get_capabilities().await;
+        assert!(capabilities.supported_methods.is_empty());
+        assert!(capabilities.srtp_profiles.is_empty());
+        assert!(!capabilities.can_offer);
+        assert!(!capabilities.can_answer);
+    }
+
+    #[tokio::test]
+    async fn sdes_offer_contains_fresh_real_key_material() {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
+        let manager = SecurityContextManager::with_method_preference(
+            SecurityConfig::sdes_srtp(),
+            vec![KeyExchangeMethod::Sdes],
+        );
+        manager.initialize().await.unwrap();
+        let offer = manager
+            .create_security_offer(KeyExchangeMethod::Sdes)
+            .await
+            .unwrap();
+
+        assert!(!offer.is_empty());
+        for line in offer {
+            assert!(!line.contains("placeholder"));
+            let attribute = crate::security::sdes::SdesCryptoAttribute::parse(
+                line.strip_prefix("a=crypto:").unwrap(),
+            )
+            .unwrap();
+            assert_eq!(BASE64.decode(attribute.key_info).unwrap().len(), 30);
+        }
     }
 
     #[test]

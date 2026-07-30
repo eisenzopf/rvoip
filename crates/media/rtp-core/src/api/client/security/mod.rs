@@ -60,6 +60,18 @@ impl Default for ClientSecurityConfig {
     }
 }
 
+impl ClientSecurityConfig {
+    /// Plain RTP configuration with no latent DTLS defaults.
+    pub fn unsecured() -> Self {
+        Self {
+            security_mode: SecurityMode::None,
+            validate_fingerprint: false,
+            srtp_profiles: Vec::new(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Convert API SrtpProfile to internal DTLS SrtpProtectionProfile
 pub(crate) fn convert_to_dtls_profile(
     profile: SrtpProfile,

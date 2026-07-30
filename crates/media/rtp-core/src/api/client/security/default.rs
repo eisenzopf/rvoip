@@ -30,6 +30,8 @@ use crate::api::client::security::packet::processor;
 pub struct DefaultClientSecurityContext {
     /// Security configuration
     config: ClientSecurityConfig,
+    /// Names derived only after the complete profile list validates.
+    advertised_profiles: Vec<String>,
     /// DTLS connection for handshake
     connection: Arc<Mutex<Option<DtlsConnection>>>,
     /// SRTP context for secure media
@@ -52,6 +54,12 @@ pub struct DefaultClientSecurityContext {
 impl DefaultClientSecurityContext {
     /// Create a new DefaultClientSecurityContext
     pub async fn new(config: ClientSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "DTLS client context cannot implement {:?}",
+                config.security_mode
+            )));
+        }
         if config.srtp_profiles.is_empty() {
             return Err(SecurityError::Configuration(
                 "No SRTP profiles specified in client config".to_string(),
@@ -67,9 +75,13 @@ impl DefaultClientSecurityContext {
                 "SRTP profile {profile:?} is not implemented"
             )));
         }
+        let advertised_profiles =
+            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+
         // Create context
         let ctx = Self {
             config,
+            advertised_profiles,
             connection: Arc::new(Mutex::new(None)),
             srtp_context: Arc::new(Mutex::new(None)),
             remote_addr: Arc::new(Mutex::new(None)),
@@ -224,19 +236,11 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
         }
 
         // Calculate crypto suites based on our SRTP profiles
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .filter_map(|profile| profile.advertised_name().ok())
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
         let srtp_profile = crypto_suites.first().cloned();
 
         // Get the fingerprint from our connection
-        let fingerprint = self.get_fingerprint().await.unwrap_or_else(|_| {
-            "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF".to_string()
-        });
+        let fingerprint = self.get_fingerprint().await?;
 
         Ok(SecurityInfo {
             mode: self.config.security_mode,
@@ -280,13 +284,7 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 
     fn get_security_info_sync(&self) -> SecurityInfo {
-        let crypto_suites = self
-            .config
-            .srtp_profiles
-            .iter()
-            .filter_map(|profile| profile.advertised_name().ok())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let crypto_suites = self.advertised_profiles.clone();
         let srtp_profile = crypto_suites.first().cloned();
         SecurityInfo {
             mode: self.config.security_mode,

@@ -80,8 +80,9 @@ impl ServerConfigBuilder {
     ) -> Self {
         match security_config.mode {
             crate::api::common::config::SecurityMode::None => {
-                // No security - use plain RTP
-                // Don't set any security config
+                self = self.security_config(
+                    crate::api::server::security::ServerSecurityConfig::unsecured(),
+                );
             }
             crate::api::common::config::SecurityMode::Srtp => {
                 // Basic SRTP with pre-shared key
@@ -154,5 +155,40 @@ impl ServerConfigBuilder {
         let security_config =
             crate::api::common::config::SecurityConfig::dtls_with_certificate(cert_path, key_path);
         self.with_security(security_config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::common::config::{SecurityConfig, SecurityMode};
+    use crate::api::server::transport::MediaTransportServer;
+
+    #[test]
+    fn unsecured_config_replaces_dtls_defaults() {
+        for config in [
+            ServerConfigBuilder::new()
+                .with_security(SecurityConfig::unsecured())
+                .build()
+                .unwrap(),
+            ServerConfigBuilder::new()
+                .with_no_security()
+                .build()
+                .unwrap(),
+        ] {
+            assert_eq!(config.security_config.security_mode, SecurityMode::None);
+            assert!(config.security_config.srtp_profiles.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_rtp_server_starts_without_dtls() {
+        let config = ServerConfigBuilder::new()
+            .with_no_security()
+            .build()
+            .unwrap();
+        let server = DefaultMediaTransportServer::new(config).await.unwrap();
+        server.start().await.unwrap();
+        server.stop().await.unwrap();
     }
 }

@@ -102,6 +102,17 @@ impl Default for ServerSecurityConfig {
     }
 }
 
+impl ServerSecurityConfig {
+    /// Plain RTP configuration with no latent DTLS defaults.
+    pub fn unsecured() -> Self {
+        Self {
+            security_mode: SecurityMode::None,
+            srtp_profiles: Vec::new(),
+            ..Self::default()
+        }
+    }
+}
+
 /// Client security context for a client connected to the server
 ///
 /// This trait defines the interface for handling security with a specific client.
@@ -236,14 +247,13 @@ pub async fn new(
             Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
         }
         SecurityMode::SdesSrtp | SecurityMode::MikeySrtp | SecurityMode::ZrtpSrtp => {
-            // For now, treat these as DTLS-based (they would need specific implementations)
-            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
-            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
+            Err(SecurityError::UnsupportedFeature(format!(
+                "direct server transport for {:?} is not implemented",
+                config.security_mode
+            )))
         }
-        SecurityMode::None => {
-            // For None, we could return a no-op security context, but for now use DTLS as fallback
-            let dtls_ctx = DefaultServerSecurityContext::new(config).await?;
-            Ok(dtls_ctx as Arc<dyn ServerSecurityContext + Send + Sync>)
-        }
+        SecurityMode::None => Err(SecurityError::Configuration(
+            "plain RTP does not create a security context".to_string(),
+        )),
     }
 }
