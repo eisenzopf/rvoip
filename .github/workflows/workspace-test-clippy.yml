@@ -18,7 +18,9 @@
 #            lint-group-priority misconfig fixed in the root Cargo.toml.
 #            Tightening to `-D warnings` is a follow-up after the warning cleanup.
 #   webrtc-runtime — compile and run the Tokio-only runtime regression under
-#            default, no-default, and all-feature configurations.
+#            default, no-default, and all-feature configurations. The
+#            all-feature lane also rejects alternate executor/reactor packages
+#            anywhere in the workspace dependency graph.
 
 name: workspace-test-clippy
 
@@ -51,6 +53,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify Tokio-only runtime
         run: cargo test -p rvoip-webrtc-stack --locked ${{ matrix.flags }} --test tokio_only_runtime
+      - name: Reject alternate runtime dependencies
+        if: matrix.name == 'all-features'
+        shell: bash
+        run: |
+          if forbidden="$(
+            cargo tree --workspace --all-features --locked --prefix none |
+              grep -E '^(smol|async-std|async-io|async-global-executor|async-executor|async-channel|async-task|async-process|async-net|async-fs|async-signal|async-broadcast|blocking|futures-lite|piper|polling) v'
+          )"; then
+            echo "alternate runtime dependencies are forbidden:"
+            echo "$forbidden"
+            exit 1
+          fi
 
   test:
     name: cargo test (core)
