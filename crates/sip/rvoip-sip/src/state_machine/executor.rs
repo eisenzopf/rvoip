@@ -534,6 +534,10 @@ impl SessionRefreshStateInput {
 #[derive(Default)]
 struct EventStateInput {
     remote_sdp: Option<String>,
+    /// Whether this event authoritatively supplied the remote SDP field.
+    /// `None` with this bit set means the response/request carried no SDP;
+    /// without the bit, the stable remote description is left untouched.
+    remote_sdp_supplied: bool,
     local_sdp: Option<String>,
     sdp_negotiated: Option<bool>,
     response: Option<ResponseStateInput>,
@@ -544,6 +548,41 @@ struct EventStateInput {
     auth_required: Option<AuthRequiredStateInput>,
     session_refresh: Option<SessionRefreshStateInput>,
     inbound_response: Option<InboundResponseStateInput>,
+    invite_2xx_ack: Option<Invite2xxAckStateInput>,
+}
+
+/// Exact successful INVITE response retained until the ordered `SendACK`
+/// action has completed SDP work and written the ACK.
+pub(crate) struct Invite2xxAckStateInput {
+    pub(crate) transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+    pub(crate) response: rvoip_sip_core::Response,
+}
+
+impl Invite2xxAckStateInput {
+    pub(crate) fn new(
+        transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
+        response: rvoip_sip_core::Response,
+    ) -> Self {
+        Self {
+            transaction_id,
+            response,
+        }
+    }
+
+    fn validate_event(&self, event: &EventType) -> crate::errors::Result<()> {
+        if !matches!(event, EventType::Dialog200OK)
+            || self.transaction_id.is_server()
+            || self.transaction_id.method() != &rvoip_sip_core::Method::Invite
+            || !self.response.status().is_success()
+            || rvoip_sip_dialog::transaction::TransactionKey::from_response(&self.response).as_ref()
+                != Some(&self.transaction_id)
+        {
+            return Err(crate::errors::SessionError::InvalidTransition(
+                "deferred INVITE 2xx ACK requires the exact successful response".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Event-local authority for a response to one inbound INVITE or UPDATE.
@@ -833,8 +872,8 @@ impl AuthRequiredStateInput {
 
 impl EventStateInput {
     fn apply(self, session: &mut SessionState) {
-        if let Some(remote_sdp) = self.remote_sdp {
-            session.remote_sdp = Some(remote_sdp);
+        if self.remote_sdp_supplied {
+            session.remote_sdp = self.remote_sdp;
         }
         if let Some(local_sdp) = self.local_sdp {
             session.local_sdp = Some(local_sdp);
@@ -1982,21 +2021,112 @@ impl StateMachine {
                                             return Err(error);
                                         }
                                     };
+                                    session.replace_pending_local_offer(sdp.clone());
                                     actions::stage_reinvite_local_sdp(&mut session, sdp.clone());
                                     let committed = commit_lane_state(&dispatch_store, session)
                                         .map_err(|error| error.to_string())?;
+                                    let options = Arc::new(
+                                        rvoip_sip_dialog::api::unified::ReInviteRequestOptions {
+                                            sdp: Some(sdp),
+                                            ..Default::default()
+                                        },
+                                    );
+                                    let lease = match dialog_adapter
+                                        .outbound_request_tracker
+                                        .prepare(
+                                            &dispatch_handle,
+                                            crate::adapters::outbound_request_tracker::TrackedInDialogOptions::Reinvite(
+                                                Arc::clone(&options),
+                                            ),
+                                        )
+                                    {
+                                        Ok(lease) => lease,
+                                        Err(error) => {
+                                            let mut rollback = committed.state().clone();
+                                            rollback.rollback_offer_answer();
+                                            rollback.pending_reinvite = None;
+                                            rollback.reinvite_retry_attempts = 0;
+                                            media_adapter.discard_pending_srtp_offer(
+                                                &rollback.session_id,
+                                            );
+                                            commit_lane_state(&dispatch_store, rollback)
+                                                .map_err(|commit| commit.to_string())?;
+                                            return Err(error.to_string());
+                                        }
+                                    };
 
-                                    dialog_adapter
+                                    let transaction_id = match dialog_adapter
                                         .send_reinvite_with_options_lane_owned(
                                             committed.state(),
-                                            rvoip_sip_dialog::api::unified::ReInviteRequestOptions {
-                                                sdp: Some(sdp),
-                                                ..Default::default()
-                                            },
+                                            (*options).clone(),
                                         )
                                         .await
-                                        .map(|_| ())
-                                        .map_err(|error| error.to_string())
+                                    {
+                                        Ok(transaction_id) => transaction_id,
+                                        Err(error) => {
+                                            let current = dispatch_store
+                                                .get_session_snapshot_exact(&dispatch_handle)
+                                                .map_err(|lookup| lookup.to_string())?;
+                                            let mut rollback = current.state().clone();
+                                            rollback.rollback_offer_answer();
+                                            rollback.pending_reinvite = None;
+                                            rollback.reinvite_retry_attempts = 0;
+                                            media_adapter.discard_pending_srtp_offer(
+                                                &rollback.session_id,
+                                            );
+                                            commit_lane_state(&dispatch_store, rollback)
+                                                .map_err(|commit| commit.to_string())?;
+                                            return Err(error.to_string());
+                                        }
+                                    };
+
+                                    // A 491 retry has a fresh client branch;
+                                    // correlate the pending answer with this
+                                    // transaction before publishing tracker state.
+                                    let current = dispatch_store
+                                        .get_session_snapshot_exact(&dispatch_handle)
+                                        .map_err(|error| error.to_string())?;
+                                    let mut session = current.state().clone();
+                                    if !reinvite_retry_matches(&session, &kind, attempt) {
+                                        return Err(
+                                            "re-INVITE retry completed after its intent was superseded"
+                                                .to_string(),
+                                        );
+                                    }
+                                    if let Err(error) = session
+                                        .bind_offer_answer_transaction(transaction_id.clone())
+                                    {
+                                        session.rollback_offer_answer();
+                                        session.pending_reinvite = None;
+                                        session.reinvite_retry_attempts = 0;
+                                        media_adapter.discard_pending_srtp_offer(
+                                            &session.session_id,
+                                        );
+                                        commit_lane_state(&dispatch_store, session)
+                                            .map_err(|commit| commit.to_string())?;
+                                        return Err(error.to_string());
+                                    }
+                                    commit_lane_state(&dispatch_store, session)
+                                        .map_err(|error| error.to_string())?;
+                                    if let Err(error) = dialog_adapter
+                                        .outbound_request_tracker
+                                        .activate(lease, transaction_id)
+                                    {
+                                        let current = dispatch_store
+                                            .get_session_snapshot_exact(&dispatch_handle)
+                                            .map_err(|lookup| lookup.to_string())?;
+                                        let mut rollback = current.state().clone();
+                                        rollback.rollback_offer_answer();
+                                        rollback.pending_reinvite = None;
+                                        rollback.reinvite_retry_attempts = 0;
+                                        media_adapter.discard_pending_srtp_offer(
+                                            &rollback.session_id,
+                                        );
+                                        commit_lane_state(&dispatch_store, rollback)
+                                            .map_err(|commit| commit.to_string())?;
+                                        return Err(error.to_string());
+                                    }
+                                    Ok(())
                                 },
                             )
                         },
@@ -2562,6 +2692,26 @@ impl StateMachine {
             event,
             EventStateInput {
                 remote_sdp,
+                remote_sdp_supplied: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn process_invite_2xx_answer_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        remote_sdp: Option<String>,
+        ack: Invite2xxAckStateInput,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        self.process_event_with_state_input_exact(
+            handle,
+            EventType::Dialog200OK,
+            EventStateInput {
+                remote_sdp,
+                remote_sdp_supplied: true,
+                invite_2xx_ack: Some(ack),
                 ..Default::default()
             },
         )
@@ -2849,6 +2999,7 @@ impl StateMachine {
         let mut session = pre_event_snapshot.state().clone();
         let mut refer_notify_input = None;
         let mut inbound_response_input = None;
+        let mut invite_2xx_ack_input = None;
         let mut response_input_active = false;
         let reserved_session_refresh_event = matches!(
             &event,
@@ -2868,8 +3019,12 @@ impl StateMachine {
         if let Some(mut input) = state_input {
             refer_notify_input = input.refer_notify.take();
             inbound_response_input = input.inbound_response.take();
+            invite_2xx_ack_input = input.invite_2xx_ack.take();
             if let Some(inbound_response) = inbound_response_input.as_ref() {
                 inbound_response.validate_event(&event)?;
+            }
+            if let Some(ack) = invite_2xx_ack_input.as_ref() {
+                ack.validate_event(&event)?;
             }
             response_input_active = input.response.is_some();
             input.apply(&mut session);
@@ -2963,7 +3118,8 @@ impl StateMachine {
                 // machine's HoldPending/Resuming rows handle the
                 // hold/resume flavours via state alone.
                 if session.call_state == crate::types::CallState::Active
-                    && session.pending_reinvite.is_some()
+                    && (session.pending_reinvite.is_some()
+                        || session.pending_offer_answer.is_some())
                 {
                     info!(
                         "RFC 3261 §14.1 UAS-side glare: peer re-INVITE arrived while \
@@ -3003,6 +3159,27 @@ impl StateMachine {
             EventType::UpdateReceived {
                 sdp: Some(sdp_data),
             } => {
+                if session.pending_offer_answer.is_some() {
+                    let terminal = actions::send_exact_inbound_final_response(
+                        &session.session_id,
+                        inbound_response_input.as_mut(),
+                        &self.dialog_adapter,
+                        491,
+                        None,
+                        None,
+                    )
+                    .await?;
+                    if let Some(error) = terminal.terminal_error {
+                        return Err(error);
+                    }
+                    return Ok(ProcessEventResult {
+                        old_state,
+                        next_state: None,
+                        transition: None,
+                        actions_executed: vec![],
+                        events_published: vec![],
+                    });
+                }
                 // RFC 4028 UPDATE for session-timer refresh carries no SDP,
                 // but if a peer sends an UPDATE body (RFC 3311 session
                 // modification), record it so a future transition with
@@ -3198,6 +3375,7 @@ impl StateMachine {
                 &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
                 stage_claim.map(Arc::as_ref),
                 inbound_response_input.as_mut(),
+                invite_2xx_ack_input.as_ref(),
             ))
             .await;
             let action_duration = action_start.elapsed().as_millis() as u64;
@@ -5736,6 +5914,7 @@ mod tests {
 
         EventStateInput {
             remote_sdp: Some("remote-sdp".to_string()),
+            remote_sdp_supplied: true,
             local_sdp: Some("local-sdp".to_string()),
             sdp_negotiated: Some(true),
             response: Some(ResponseStateInput::provisional(181, Vec::new())),
@@ -5750,6 +5929,7 @@ mod tests {
             refer_notify: None,
             session_refresh: None,
             inbound_response: None,
+            invite_2xx_ack: None,
             auth_required: Some(AuthRequiredStateInput::new(
                 Some(
                     rvoip_infra_common::events::cross_crate::SipTransportContext::new(

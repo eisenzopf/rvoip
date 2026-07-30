@@ -534,6 +534,11 @@ impl DialogEventHub {
                                 rvoip_sip_core::Message::Response(response.clone()).to_bytes(),
                             ))
                         });
+                    let response_sdp = if response.body().is_empty() {
+                        None
+                    } else {
+                        String::from_utf8(response.body().to_vec()).ok()
+                    };
                     // The transaction key is the locally-owned correlation
                     // authority. A response CSeq is peer input; transaction
                     // matching has already validated it, but it must not
@@ -771,6 +776,7 @@ impl DialogEventHub {
                                         outcome: OutboundRequestOutcome::FinalResponse {
                                             status_code: response.status_code(),
                                         },
+                                        response_sdp: response_sdp.clone(),
                                     },
                                 ))
                             } else if !is_invite_response {
@@ -813,6 +819,7 @@ impl DialogEventHub {
                                     outcome: OutboundRequestOutcome::FinalResponse {
                                         status_code: code,
                                     },
+                                    response_sdp: response_sdp.clone(),
                                 },
                             ))
                         }
@@ -852,6 +859,7 @@ impl DialogEventHub {
                                 transaction_id: transaction_id.to_string(),
                                 method: method.to_string(),
                                 outcome,
+                                response_sdp: None,
                             },
                         )
                     })
@@ -1394,6 +1402,7 @@ mod safe_diagnostic_tests {
                         outcome: OutboundRequestOutcome::FinalResponse {
                             status_code: mapped_status,
                         },
+                        ..
                     }
                 ) if session_id == "session-terminal-test"
                     && mapped_transaction == &transaction_id.to_string()
@@ -1466,6 +1475,7 @@ mod safe_diagnostic_tests {
                     transaction_id: ref mapped_transaction,
                     ref method,
                     outcome: OutboundRequestOutcome::FinalResponse { status_code: 491 },
+                    ..
                 }
             ) if session_id == "session-terminal-test"
                 && mapped_transaction == &update_transaction.to_string()

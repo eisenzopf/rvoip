@@ -373,6 +373,7 @@ transitions:
       type: "DialogACK"
     next_state: "Active"
     actions:
+      - type: "NegotiateSDPAsUAC"
       - type: "StartMediaSession"
       - type: "SwitchToPassThroughOnActive"
       - type: "ArmSessionRefreshTimer"
@@ -398,8 +399,84 @@ transitions:
       type: "DialogACK"
     next_state: "Terminating"
     actions:
+      - type: "NegotiateSDPAsUAC"
       - type: "SendBYE"
     description: "ACK received after pending UAS hangup; send BYE and defer cleanup until terminal confirmation"
+
+  # Once an INVITE 2xx has crossed the mandatory ACK boundary, a later SDP
+  # or media failure cannot be represented as a synthetic rejection. End the
+  # now-confirmed dialog with BYE and preserve the preceding stable snapshot.
+  - role: "Both"
+    state: "Initiating"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "Ringing"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "EarlyMedia"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "Answering"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "AnsweringHangupPending"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "ConfirmedNegotiationFailure"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
 
   # Missing ACK after 200 OK fails the call attempt; BYE is not legal
   # because the dialog was never confirmed by the UAC.
@@ -998,11 +1075,13 @@ transitions:
       type: "Dialog200OK"
     next_state: "Active"
     guards:
-      - "HasPendingReinvite"
+      - "HasPendingOfferAnswer"
     actions:
+      - type: "NegotiateSDPAsUAC"
+      - type: "SendACK"
       - type: "ClearPendingReinvite"
       - type: "ArmSessionRefreshTimer"
-    description: "Clear in-flight builder-API re-INVITE tracker on 2xx (RFC 3261 §14.1)"
+    description: "Apply the answer and acknowledge an outbound builder-API re-INVITE before commit"
 
   - role: "Both"
     state: "Active"
@@ -1010,7 +1089,7 @@ transitions:
       type: "Dialog4xxFailure"
     next_state: "Active"
     guards:
-      - "HasPendingReinvite"
+      - "HasPendingOfferAnswer"
     actions:
       - type: "ClearPendingReinvite"
     description: "Clear in-flight builder-API re-INVITE tracker on 4xx (RFC 3261 §14.1)"
@@ -1021,7 +1100,7 @@ transitions:
       type: "Dialog5xxFailure"
     next_state: "Active"
     guards:
-      - "HasPendingReinvite"
+      - "HasPendingOfferAnswer"
     actions:
       - type: "ClearPendingReinvite"
     description: "Clear in-flight builder-API re-INVITE tracker on 5xx (RFC 3261 §14.1)"
@@ -1032,7 +1111,7 @@ transitions:
       type: "Dialog6xxFailure"
     next_state: "Active"
     guards:
-      - "HasPendingReinvite"
+      - "HasPendingOfferAnswer"
     actions:
       - type: "ClearPendingReinvite"
     description: "Clear in-flight builder-API re-INVITE tracker on 6xx (RFC 3261 §14.1)"
@@ -1043,22 +1122,74 @@ transitions:
       type: "DialogTimeout"
     next_state: "Active"
     guards:
-      - "HasPendingReinvite"
+      - "HasPendingOfferAnswer"
     actions:
       - type: "ClearPendingReinvite"
     description: "Clear in-flight builder-API re-INVITE tracker on Timer B (RFC 3261 §14.1)"
 
-  # RFC 3311 / RFC 4028 §9 — UPDATE for session-timer refresh carries no
-  # SDP, so we skip NegotiateSDPAsUAS. If a future UPDATE body is
-  # present for mid-dialog modification, the executor has already
-  # stashed it into session.remote_sdp; extending this transition to
-  # renegotiate is a future enhancement.
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "Dialog200OK"
+    next_state: "OnHold"
+    guards:
+      - "HasPendingOfferAnswer"
+    actions:
+      - type: "NegotiateSDPAsUAC"
+      - type: "SendACK"
+      - type: "ClearPendingReinvite"
+      - type: "ArmSessionRefreshTimer"
+    description: "Apply and commit an exact outbound UPDATE answer while locally held"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "OnHold"
+    guards:
+      - "HasPendingOfferAnswer"
+    actions:
+      - type: "ClearPendingReinvite"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "OnHold"
+    guards:
+      - "HasPendingOfferAnswer"
+    actions:
+      - type: "ClearPendingReinvite"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "OnHold"
+    guards:
+      - "HasPendingOfferAnswer"
+    actions:
+      - type: "ClearPendingReinvite"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "DialogTimeout"
+    next_state: "OnHold"
+    guards:
+      - "HasPendingOfferAnswer"
+    actions:
+      - type: "ClearPendingReinvite"
+
+  # RFC 3311 / RFC 4028 §9 — negotiate SDP-bearing UPDATE before replying.
+  # NegotiateSDPAsUAS deliberately treats a bodyless timer refresh as a no-op.
   - role: "Both"
     state: "Active"
     event:
       type: "UpdateReceived"
     next_state: "Active"
     actions:
+      - type: "NegotiateSDPAsUAS"
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
@@ -1071,11 +1202,38 @@ transitions:
       type: "UpdateReceived"
     next_state: "OnHold"
     actions:
+      - type: "NegotiateSDPAsUAS"
       - type: "SendSIPResponse"
         code: 200
         reason: "OK"
       - type: "ArmSessionRefreshTimer"
     description: "UAS answers UPDATE while on hold"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "UpdateReceived"
+    next_state: "HoldPending"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "ArmSessionRefreshTimer"
+    description: "Accept bodyless refresh UPDATE while hold negotiation is pending"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "UpdateReceived"
+    next_state: "Resuming"
+    actions:
+      - type: "NegotiateSDPAsUAS"
+      - type: "SendSIPResponse"
+        code: 200
+        reason: "OK"
+      - type: "ArmSessionRefreshTimer"
+    description: "Accept bodyless refresh UPDATE while resume negotiation is pending"
 
   # RFC 4028 lifecycle authority. These reserved MediaEvent spellings are
   # admitted only with a crate-private exact-session sidecar; a public caller
@@ -2083,6 +2241,14 @@ transitions:
     actions:
       - type: "SendUPDATEWithOptions"
     description: "Builder-staged UPDATE dispatch (UAS)"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "SendOutboundUpdate"
+    actions:
+      - type: "SendUPDATEWithOptions"
+    description: "Builder-staged UPDATE dispatch while locally held"
 
   - role: "UAC"
     state: "Idle"

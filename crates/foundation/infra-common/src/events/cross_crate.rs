@@ -1097,6 +1097,9 @@ pub enum DialogToSessionEvent {
         /// SIP method for the completed request attempt.
         method: String,
         outcome: OutboundRequestOutcome,
+        /// Transaction-correlated SDP answer, when present.
+        #[serde(default)]
+        response_sdp: Option<String>,
     },
 
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC
@@ -1498,12 +1501,18 @@ impl fmt::Debug for DialogToSessionEvent {
                 transaction_id,
                 method,
                 outcome,
+                response_sdp,
             } => f
                 .debug_struct("OutboundRequestCompleted")
                 .field("transaction_id_present", &!transaction_id.is_empty())
                 .field("transaction_id_bytes", &transaction_id.len())
                 .field("method", &safe_auth_method_debug_label(method))
                 .field("outcome", outcome)
+                .field("response_sdp_present", &response_sdp.is_some())
+                .field(
+                    "response_sdp_bytes",
+                    &response_sdp.as_ref().map_or(0, String::len),
+                )
                 .finish(),
             Self::CallRedirected {
                 session_id,

@@ -2131,6 +2131,109 @@ impl UnifiedDialogApi {
         .await
     }
 
+    /// Send the SDP-bearing ACK for an offerless initial INVITE, after
+    /// revalidating that the exact client transaction belongs to the session.
+    pub async fn send_delayed_offer_ack_for_session_transaction(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        response: &Response,
+        sdp_answer: &str,
+    ) -> ApiResult<()> {
+        if transaction_id.is_server()
+            || transaction_id.method() != &Method::Invite
+            || !response.status().is_success()
+            || TransactionKey::from_response(response).as_ref() != Some(transaction_id)
+        {
+            return Err(ApiError::Protocol {
+                message: "Delayed-offer ACK requires the exact successful client INVITE response"
+                    .to_string(),
+            });
+        }
+        let dialog_id = self
+            .manager
+            .core()
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| ApiError::Dialog {
+                message: format!("No dialog found for session {session_id}"),
+            })?;
+        let transaction_dialog = self
+            .manager
+            .core()
+            .find_dialog_for_transaction(transaction_id)
+            .map_err(|_| ApiError::Dialog {
+                message: "Delayed-offer ACK transaction is not owned by the session dialog"
+                    .to_string(),
+            })?;
+        if transaction_dialog != dialog_id {
+            return Err(ApiError::Dialog {
+                message: "Delayed-offer ACK transaction is not owned by the session dialog"
+                    .to_string(),
+            });
+        }
+        self.manager
+            .core()
+            .transaction_manager()
+            .send_ack_for_2xx_with_sdp(transaction_id, response, sdp_answer)
+            .await
+            .map_err(|_| ApiError::Dialog {
+                message: "Delayed-offer ACK transport write failed".to_string(),
+            })
+    }
+
+    /// Send a bodyless ACK for an exact successful INVITE response owned by
+    /// this session dialog.
+    pub async fn send_invite_2xx_ack_for_session_transaction(
+        &self,
+        session_id: &str,
+        transaction_id: &TransactionKey,
+        response: &Response,
+    ) -> ApiResult<()> {
+        if transaction_id.is_server()
+            || transaction_id.method() != &Method::Invite
+            || !response.status().is_success()
+            || TransactionKey::from_response(response).as_ref() != Some(transaction_id)
+        {
+            return Err(ApiError::Protocol {
+                message: "INVITE 2xx ACK requires the exact successful client transaction response"
+                    .to_string(),
+            });
+        }
+        let dialog_id = self
+            .manager
+            .core()
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| ApiError::Dialog {
+                message: format!("No dialog found for session {session_id}"),
+            })?;
+        let transaction_dialog = self
+            .manager
+            .core()
+            .find_dialog_for_transaction(transaction_id)
+            .map_err(|_| ApiError::Dialog {
+                message: "INVITE 2xx ACK transaction is not owned by the session dialog"
+                    .to_string(),
+            })?;
+        if transaction_dialog != dialog_id {
+            return Err(ApiError::Dialog {
+                message: "INVITE 2xx ACK transaction is not owned by the session dialog"
+                    .to_string(),
+            });
+        }
+        self.manager
+            .core()
+            .transaction_manager()
+            .send_ack_for_2xx(transaction_id, response)
+            .await
+            .map_err(|_| ApiError::Dialog {
+                message: "INVITE 2xx ACK transport write failed".to_string(),
+            })
+    }
+
     pub async fn send_response_with_extras_for_session_transaction(
         &self,
         session_id: &str,

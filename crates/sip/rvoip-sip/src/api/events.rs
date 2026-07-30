@@ -363,6 +363,17 @@ pub enum Event {
         reason: String,
     },
 
+    /// A mid-dialog or delayed-offer SDP exchange failed. Stable SDP,
+    /// directions, and media state are preserved.
+    RenegotiationFailed {
+        /// Session identifier for the failed exchange.
+        call_id: CallId,
+        /// `INVITE`, `UPDATE`, or `ACK`.
+        method: String,
+        /// Bounded diagnostic category; SDP bodies are never included.
+        reason: String,
+    },
+
     /// RFC 3261 §22.2 — server challenged our INVITE with 401/407 and we're
     /// about to retry with a digest authorization header. Informational; no
     /// action required from the app. If the retry fails (wrong credentials
@@ -804,6 +815,11 @@ impl std::fmt::Debug for Event {
                 .debug_struct("SessionRefreshFailed")
                 .field("reason_bytes", &reason.len())
                 .finish(),
+            Self::RenegotiationFailed { method, reason, .. } => formatter
+                .debug_struct("RenegotiationFailed")
+                .field("method_bytes", &method.len())
+                .field("reason_bytes", &reason.len())
+                .finish(),
             Self::CallAuthRetrying {
                 status_code, realm, ..
             } => formatter
@@ -1043,6 +1059,7 @@ impl Event {
             | Event::CallCancelled { call_id, .. }
             | Event::SessionRefreshed { call_id, .. }
             | Event::SessionRefreshFailed { call_id, .. }
+            | Event::RenegotiationFailed { call_id, .. }
             | Event::CallAuthRetrying { call_id, .. }
             | Event::ReferReceived { call_id, .. }
             | Event::TransferAccepted { call_id, .. }
@@ -1108,6 +1125,7 @@ impl Event {
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
                 | Event::CallFailedDetailed(_)
+                | Event::RenegotiationFailed { .. }
                 | Event::InfoReceived { .. }
                 | Event::MessageReceived { .. }
                 | Event::OptionsReceived { .. }

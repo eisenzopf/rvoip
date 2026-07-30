@@ -1033,6 +1033,10 @@ pub struct MediaAdapter {
 }
 
 impl MediaAdapter {
+    pub(crate) fn discard_pending_srtp_offer(&self, session_id: &SessionId) {
+        self.pending_srtp_offerers.remove(session_id);
+    }
+
     /// Create a new media adapter (no SRTP — equivalent to the
     /// pre-Step-2B behaviour).
     pub fn new(
@@ -1736,6 +1740,50 @@ impl MediaAdapter {
         // Event publishing will be handled by SessionCrossCrateEventHandler
 
         Ok(config)
+    }
+
+    /// Validate a locally supplied offer before an in-dialog request reaches
+    /// the wire. Codec agreement is still determined by the remote answer.
+    pub(crate) fn validate_local_sdp_offer(&self, local_sdp: &str) -> Result<()> {
+        let parsed_offer = SdpSession::from_str(local_sdp)
+            .map_err(|_| bounded_sdp_failure("local-offer", "syntax"))?;
+        self.parse_sdp_connection(local_sdp)?;
+        if !parsed_offer
+            .media_descriptions
+            .iter()
+            .any(|media| media.media == "audio" && !media.formats.is_empty())
+        {
+            return Err(SessionError::SDPNegotiationFailed(
+                "local SDP offer has no usable audio media description".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate an inbound re-INVITE/UPDATE offer without mutating media or
+    /// session state, allowing malformed offers to receive an exact 488.
+    pub(crate) fn validate_inbound_sdp_offer(&self, remote_sdp: &str) -> Result<()> {
+        let parsed_offer = SdpSession::from_str(remote_sdp)
+            .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
+        self.parse_sdp_connection(remote_sdp)?;
+
+        let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
+        if offered_crypto.is_empty() && self.srtp_required {
+            return Err(SessionError::SDPNegotiationFailed(
+                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+            ));
+        }
+        if !offered_crypto.is_empty() && !self.offer_srtp {
+            return Ok(());
+        }
+        compute_answer_formats(
+            &parsed_offer,
+            &self.effective_offered_formats(),
+            self.strict_codec_matching,
+            self.offer_srtp,
+            self.srtp_required,
+        )?;
+        Ok(())
     }
 
     /// Generate SDP answer and negotiate (for UAS)

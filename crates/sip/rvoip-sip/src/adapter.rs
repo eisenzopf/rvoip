@@ -6077,6 +6077,19 @@ Signal=5\r\nDuration=160\r\n";
             HeaderName::Contact,
             HeaderValue::Raw(format!("<{contact_uri}>").into_bytes()),
         ));
+        accepted.headers.push(TypedHeader::ContentType(
+            rvoip_sip_core::types::ContentType::sdp(),
+        ));
+        accepted.body = bytes::Bytes::from(format!(
+            "v=0\r\no=capture 1 1 IN IP4 127.0.0.1\r\ns=bye-compensation\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n",
+            target.port()
+        ));
+        accepted
+            .headers
+            .retain(|header| !matches!(header, TypedHeader::ContentLength(_)));
+        accepted.headers.push(TypedHeader::ContentLength(
+            rvoip_sip_core::types::ContentLength::new(accepted.body.len() as u32),
+        ));
         let accepted_to = accepted
             .raw_header_value(&HeaderName::To)
             .expect("accepted To");
@@ -6245,6 +6258,19 @@ Signal=5\r\nDuration=160\r\n";
             HeaderName::Contact,
             HeaderValue::Raw(format!("<sip:target@{target}>").into_bytes()),
         ));
+        accepted.headers.push(TypedHeader::ContentType(
+            rvoip_sip_core::types::ContentType::sdp(),
+        ));
+        accepted.body = bytes::Bytes::from(format!(
+            "v=0\r\no=capture 1 1 IN IP4 127.0.0.1\r\ns=bye-timeout\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n",
+            target.port()
+        ));
+        accepted
+            .headers
+            .retain(|header| !matches!(header, TypedHeader::ContentLength(_)));
+        accepted.headers.push(TypedHeader::ContentLength(
+            rvoip_sip_core::types::ContentLength::new(accepted.body.len() as u32),
+        ));
         capture
             .send_to(&SipMessage::Response(accepted).to_bytes(), uac)
             .await
@@ -6378,6 +6404,19 @@ Signal=5\r\nDuration=160\r\n";
         accepted.headers.push(TypedHeader::Other(
             HeaderName::Contact,
             HeaderValue::Raw(format!("<sip:target@{target}>").into_bytes()),
+        ));
+        accepted.headers.push(TypedHeader::ContentType(
+            rvoip_sip_core::types::ContentType::sdp(),
+        ));
+        accepted.body = bytes::Bytes::from(format!(
+            "v=0\r\no=capture 1 1 IN IP4 127.0.0.1\r\ns=bye-rejected\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 8 101\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\na=sendrecv\r\n",
+            target.port()
+        ));
+        accepted
+            .headers
+            .retain(|header| !matches!(header, TypedHeader::ContentLength(_)));
+        accepted.headers.push(TypedHeader::ContentLength(
+            rvoip_sip_core::types::ContentLength::new(accepted.body.len() as u32),
         ));
         capture
             .send_to(&SipMessage::Response(accepted).to_bytes(), uac)

@@ -278,6 +278,10 @@ pub enum EventType {
     DialogTimeout,
     DialogTerminated,
     DialogError(String),
+    /// A successful INVITE crossed its mandatory ACK/response boundary, but
+    /// SDP or lower-media application could not complete. The confirmed
+    /// dialog must terminate with BYE rather than a synthetic non-2xx result.
+    ConfirmedNegotiationFailure,
     DialogStateChanged {
         old_state: String,
         new_state: String,
@@ -560,6 +564,8 @@ pub enum Guard {
     /// Used by the RFC 3261 §14.1 glare path to send 491 Request Pending
     /// in response to a UAS-side re-INVITE while our own is pending.
     HasPendingReinvite,
+    /// True while an exact outbound INVITE or UPDATE offer awaits its answer.
+    HasPendingOfferAnswer,
     Custom(String),
 }
 

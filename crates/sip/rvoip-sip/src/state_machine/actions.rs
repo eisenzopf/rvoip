@@ -4,7 +4,8 @@ use crate::adapters::dialog_adapter::{
 use crate::adapters::outbound_request_tracker::{TrackedInDialogMethod, TrackedInDialogOptions};
 use crate::session_registry::SessionRegistryHandle;
 use crate::state_machine::executor::{
-    InboundResponseStateInput, PendingOptionsSlot, PendingOptionsSlotKind, StageDispatchClaim,
+    InboundResponseStateInput, Invite2xxAckStateInput, PendingOptionsSlot, PendingOptionsSlotKind,
+    StageDispatchClaim,
 };
 use crate::state_table::types::{EventType, SessionId};
 use rvoip_sip_core::types::{HeaderName, TypedHeader};
@@ -47,6 +48,28 @@ fn exact_request_tracker_handle(
             "outbound request tracking requires exact session authority".to_string(),
         )
     })
+}
+
+async fn send_tracked_reinvite_lane_owned(
+    session: &mut SessionState,
+    dialog_adapter: &Arc<DialogAdapter>,
+    options: ReInviteRequestOptions,
+) -> crate::errors::Result<rvoip_sip_dialog::transaction::TransactionKey> {
+    let tracked_options = Arc::new(options.clone());
+    let lease = dialog_adapter.outbound_request_tracker.prepare(
+        exact_request_tracker_handle(session)?,
+        TrackedInDialogOptions::Reinvite(tracked_options),
+    )?;
+    let transaction_id = dialog_adapter
+        .send_reinvite_with_options_lane_owned(session, options)
+        .await?;
+    // Bind before activation flushes any response/auth event that raced the
+    // transport write.
+    session.bind_offer_answer_transaction(transaction_id.clone())?;
+    dialog_adapter
+        .outbound_request_tracker
+        .activate(lease, transaction_id.clone())?;
+    Ok(transaction_id)
 }
 
 fn next_session_refresh_generation(session: &mut SessionState) -> u64 {
@@ -180,14 +203,34 @@ pub(crate) fn stage_reinvite_local_sdp(session: &mut SessionState, offer: String
     session.local_sdp = Some(offer);
 }
 
+fn begin_reinvite_offer(session: &mut SessionState, offer: String) -> crate::errors::Result<()> {
+    session.begin_offer_answer(rvoip_sip_core::Method::Invite, offer.clone())?;
+    stage_reinvite_local_sdp(session, offer);
+    Ok(())
+}
+
 fn commit_reinvite_local_sdp(session: &mut SessionState) {
+    session.commit_offer_answer();
     session.stable_local_sdp_before_reinvite = None;
 }
 
 fn rollback_reinvite_local_sdp(session: &mut SessionState) {
+    session.rollback_offer_answer();
     if let Some(stable) = session.stable_local_sdp_before_reinvite.take() {
         session.local_sdp = stable;
     }
+}
+
+fn initial_invite_used_delayed_offer(session: &SessionState, event: &EventType) -> bool {
+    matches!(event, EventType::Dialog200OK)
+        && session.role == crate::state_table::Role::UAC
+        && !session.dialog_established
+        && session.pending_offer_answer.is_none()
+        && session
+            .pending_invite_options
+            .as_ref()
+            .and_then(|options| options.sdp.as_deref())
+            .is_some_and(|sdp| sdp.trim().is_empty())
 }
 
 /// Retire every lifecycle attachment derived from one media allocation in the
@@ -1665,6 +1708,7 @@ pub(crate) async fn execute_action(
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
     stage_claim: Option<&StageDispatchClaim>,
     mut inbound_response: Option<&mut InboundResponseStateInput>,
+    invite_2xx_ack: Option<&Invite2xxAckStateInput>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
 
@@ -2037,7 +2081,16 @@ pub(crate) async fn execute_action(
             }
         }
         Action::ClearPendingReinvite => {
-            rollback_reinvite_local_sdp(session);
+            match triggering_event {
+                EventType::Dialog200OK => commit_reinvite_local_sdp(session),
+                EventType::ReinviteReceived { .. } => {
+                    // A peer offer accepted during glare supersedes our local
+                    // pending offer. Preserve the newly negotiated answer.
+                    session.discard_offer_answer_rollback_image();
+                    session.stable_local_sdp_before_reinvite = None;
+                }
+                _ => rollback_reinvite_local_sdp(session),
+            }
             session.pending_reinvite = None;
             session.reinvite_retry_attempts = 0;
             debug!(
@@ -2177,12 +2230,34 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendACK => {
-            // NO-OP for SIP: dialog-core sends ACK automatically per RFC 3261
-            // However, we still set dialog_established = true here because for UAC,
-            // the dialog is considered established when ACK is sent
+            if let Some(ack) = invite_2xx_ack {
+                if initial_invite_used_delayed_offer(session, triggering_event) {
+                    let answer = session.local_sdp.as_deref().ok_or_else(|| {
+                        crate::errors::SessionError::SDPNegotiationFailed(
+                            "delayed-offer ACK has no generated SDP answer".to_string(),
+                        )
+                    })?;
+                    dialog_adapter
+                        .send_delayed_offer_ack_exact(
+                            exact_request_tracker_handle(session)?,
+                            &ack.transaction_id,
+                            &ack.response,
+                            answer,
+                        )
+                        .await?;
+                } else {
+                    dialog_adapter
+                        .send_invite_2xx_ack_exact(
+                            exact_request_tracker_handle(session)?,
+                            &ack.transaction_id,
+                            &ack.response,
+                        )
+                        .await?;
+                }
+            }
             session.dialog_established = true;
             info!(
-                "SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}",
+                "SendACK action completed for UAC session {}",
                 session.session_id
             );
         }
@@ -2244,17 +2319,22 @@ pub(crate) async fn execute_action(
                 .create_hold_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
-            stage_reinvite_local_sdp(session, hold_sdp.clone());
+            begin_reinvite_offer(session, hold_sdp.clone())?;
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Hold);
-            dialog_adapter
-                .send_reinvite_with_options_lane_owned(
-                    session,
-                    ReInviteRequestOptions {
-                        sdp: Some(hold_sdp),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            if let Err(error) = send_tracked_reinvite_lane_owned(
+                session,
+                dialog_adapter,
+                ReInviteRequestOptions {
+                    sdp: Some(hold_sdp),
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                rollback_reinvite_local_sdp(session);
+                session.pending_reinvite = None;
+                return Err(error.into());
+            }
         }
         Action::ResumeCall => {
             // Send re-INVITE with sendrecv SDP.
@@ -2262,17 +2342,22 @@ pub(crate) async fn execute_action(
                 .create_active_sdp_for_session_lane_owned(session)
                 .await
                 .map_err(|e| format!("create_active_sdp failed: {}", e))?;
-            stage_reinvite_local_sdp(session, active_sdp.clone());
+            begin_reinvite_offer(session, active_sdp.clone())?;
             session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Resume);
-            dialog_adapter
-                .send_reinvite_with_options_lane_owned(
-                    session,
-                    ReInviteRequestOptions {
-                        sdp: Some(active_sdp),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            if let Err(error) = send_tracked_reinvite_lane_owned(
+                session,
+                dialog_adapter,
+                ReInviteRequestOptions {
+                    sdp: Some(active_sdp),
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                rollback_reinvite_local_sdp(session);
+                session.pending_reinvite = None;
+                return Err(error.into());
+            }
         }
         Action::TransferCall(target) => {
             session.transfer_target = Some(target.clone());
@@ -2340,33 +2425,63 @@ pub(crate) async fn execute_action(
             }
         }
         Action::NegotiateSDPAsUAC => {
-            if let Some(remote_sdp) = session.remote_sdp.clone() {
+            if matches!(triggering_event, EventType::DialogACK) && session.sdp_negotiated {
+                info!(
+                    "Action::NegotiateSDPAsUAC for session {}: ordinary ACK has no new offer/answer",
+                    session.session_id
+                );
+                return Ok(ActionOutcome::default());
+            }
+            let remote_sdp = session.remote_sdp.clone().ok_or_else(|| {
+                crate::errors::SessionError::SDPNegotiationFailed(
+                    "received a successful offer/answer response without SDP".to_string(),
+                )
+            })?;
+            let delayed_offer = initial_invite_used_delayed_offer(session, triggering_event);
+            let (local_answer, config) = if delayed_offer {
+                let (answer, config) = media_adapter
+                    .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
+                    .await?;
+                (Some(answer), config)
+            } else {
                 let config = media_adapter
                     .negotiate_sdp_as_uac_lane_owned(session, &remote_sdp)
                     .await?;
+                (None, config)
+            };
 
-                // Convert to session_store NegotiatedConfig
-                let session_config = crate::session_store::state::NegotiatedConfig {
-                    local_addr: config.local_addr,
-                    remote_addr: config.remote_addr,
-                    codec: config.codec,
-                    payload_type: config.payload_type,
-                    sample_rate: config.clock_rate,
-                    channels: config.channels,
-                };
-                session.negotiated_config = Some(session_config);
-                session.local_media_direction = config.local_direction;
-                session.remote_media_direction = config.remote_direction;
-                session.sdp_negotiated = true;
-                commit_reinvite_local_sdp(session);
-                info!("SDP negotiated as UAC for session {}", session.session_id);
+            // Convert to session_store NegotiatedConfig
+            let session_config = crate::session_store::state::NegotiatedConfig {
+                local_addr: config.local_addr,
+                remote_addr: config.remote_addr,
+                codec: config.codec,
+                payload_type: config.payload_type,
+                sample_rate: config.clock_rate,
+                channels: config.channels,
+            };
+            session.negotiated_config = Some(session_config);
+            session.local_media_direction = config.local_direction;
+            session.remote_media_direction = config.remote_direction;
+            session.sdp_negotiated = true;
+            if let Some(local_answer) = local_answer {
+                session.local_sdp = Some(local_answer);
             }
+            commit_reinvite_local_sdp(session);
+            info!("SDP negotiated as UAC for session {}", session.session_id);
         }
         Action::NegotiateSDPAsUAS => {
             let guard = cleanup_diag::stage_guard(
                 CleanupStage::ActionNegotiateSdpUas,
                 &session.session_id.0,
             );
+            if matches!(triggering_event, EventType::UpdateReceived { sdp: None }) {
+                info!(
+                    "Action::NegotiateSDPAsUAS for session {}: SDP-less UPDATE refresh",
+                    session.session_id
+                );
+                guard.finish_success();
+                return Ok(ActionOutcome::default());
+            }
             // Skip negotiation when caller supplied the answer SDP ahead of
             // time via `accept_call_with_sdp`. Same reasoning as
             // `GenerateLocalSDP` above.
@@ -2536,7 +2651,7 @@ pub(crate) async fn execute_action(
                     .await
                     .map_err(|e| format!("create_active_sdp failed: {}", e))?
             };
-            stage_reinvite_local_sdp(session, sdp.clone());
+            begin_reinvite_offer(session, sdp.clone())?;
             session.pending_reinvite = Some(kind);
             // A 491/ReinviteGlare response is queued on the same exact-session
             // lane. It observes this SDP and retry intent only after the
@@ -2545,15 +2660,20 @@ pub(crate) async fn execute_action(
                 "Sending re-INVITE for session {} (hold={})",
                 session.session_id, hold_direction
             );
-            dialog_adapter
-                .send_reinvite_with_options_lane_owned(
-                    session,
-                    ReInviteRequestOptions {
-                        sdp: Some(sdp),
-                        ..Default::default()
-                    },
-                )
-                .await?;
+            if let Err(error) = send_tracked_reinvite_lane_owned(
+                session,
+                dialog_adapter,
+                ReInviteRequestOptions {
+                    sdp: Some(sdp),
+                    ..Default::default()
+                },
+            )
+            .await
+            {
+                rollback_reinvite_local_sdp(session);
+                session.pending_reinvite = None;
+                return Err(error.into());
+            }
         }
 
         Action::PlayAudioFile(file) => {
@@ -4340,26 +4460,60 @@ pub(crate) async fn execute_action(
                 )
                 .into());
             };
-            let lease = dialog_adapter.outbound_request_tracker.prepare(
+            let snapshot = (*options).clone();
+            let local_offer = match snapshot.sdp.as_ref() {
+                Some(sdp) if sdp.trim().is_empty() => {
+                    return Err(crate::errors::SessionError::InvalidTransition(
+                        "an SDP-bearing UPDATE requires a non-empty local offer".to_string(),
+                    )
+                    .into());
+                }
+                Some(sdp) => Some(sdp.clone()),
+                None => None,
+            };
+            if let Some(local_offer) = local_offer.as_ref() {
+                media_adapter.validate_local_sdp_offer(local_offer)?;
+                session.begin_offer_answer(rvoip_sip_core::Method::Update, local_offer.clone())?;
+                stage_reinvite_local_sdp(session, local_offer.clone());
+            }
+            let lease = match dialog_adapter.outbound_request_tracker.prepare(
                 exact_request_tracker_handle(session)?,
                 TrackedInDialogOptions::Update(Arc::clone(&options)),
-            )?;
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    rollback_reinvite_local_sdp(session);
+                    return Err(error.into());
+                }
+            };
             let transaction_id = match dialog_adapter
-                .send_update_with_options_lane_owned(session, (*options).clone())
+                .send_update_with_options_lane_owned(session, snapshot)
                 .await
             {
                 Ok(transaction_id) => transaction_id,
                 Err(_) if options.session_timer_refresh => {
+                    rollback_reinvite_local_sdp(session);
                     return Ok(session_refresh_immediate_effect(
                         session,
                         SessionRefreshDeadlineKind::UpdateFailed,
                     ));
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    rollback_reinvite_local_sdp(session);
+                    return Err(error.into());
+                }
             };
-            dialog_adapter
+            if let Err(error) = session.bind_offer_answer_transaction(transaction_id.clone()) {
+                rollback_reinvite_local_sdp(session);
+                return Err(error.into());
+            }
+            if let Err(error) = dialog_adapter
                 .outbound_request_tracker
-                .activate(lease, transaction_id)?;
+                .activate(lease, transaction_id)
+            {
+                rollback_reinvite_local_sdp(session);
+                return Err(error.into());
+            }
             if options.session_timer_refresh {
                 return Ok(session_refresh_transaction_deadline_effect(
                     session,
@@ -4382,33 +4536,67 @@ pub(crate) async fn execute_action(
                 )
                 .into());
             };
-            let lease = dialog_adapter.outbound_request_tracker.prepare(
+            let snapshot = (*options).clone();
+            let local_offer = snapshot.sdp.clone().filter(|sdp| !sdp.trim().is_empty());
+            if local_offer.is_none() && !snapshot.session_timer_refresh {
+                return Err(crate::errors::SessionError::InvalidTransition(
+                    "offerless in-dialog re-INVITE is unsupported; supply an SDP offer".to_string(),
+                )
+                .into());
+            }
+            if let Some(local_offer) = local_offer.as_ref() {
+                media_adapter.validate_local_sdp_offer(local_offer)?;
+                begin_reinvite_offer(session, local_offer.clone())?;
+            }
+            let lease = match dialog_adapter.outbound_request_tracker.prepare(
                 exact_request_tracker_handle(session)?,
                 TrackedInDialogOptions::Reinvite(Arc::clone(&options)),
-            )?;
-            let snapshot = (*options).clone();
+            ) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    rollback_reinvite_local_sdp(session);
+                    return Err(error.into());
+                }
+            };
             // RFC 3261 §14.1 — track the in-flight builder-API
             // re-INVITE so `HasPendingReinvite` fires the UAS-side glare path.
-            let sdp_snapshot = snapshot.sdp.clone().unwrap_or_default();
-            session.pending_reinvite = Some(
-                crate::session_store::state::PendingReinvite::SdpUpdate(sdp_snapshot),
-            );
+            if let Some(local_offer) = local_offer {
+                session.pending_reinvite = Some(
+                    crate::session_store::state::PendingReinvite::SdpUpdate(local_offer),
+                );
+            }
             let transaction_id = match dialog_adapter
                 .send_reinvite_with_options_lane_owned(session, snapshot)
                 .await
             {
                 Ok(transaction_id) => transaction_id,
                 Err(_) if options.session_timer_refresh => {
+                    rollback_reinvite_local_sdp(session);
+                    session.pending_reinvite = None;
                     return Ok(session_refresh_immediate_effect(
                         session,
                         SessionRefreshDeadlineKind::ReinviteFailed,
                     ));
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    rollback_reinvite_local_sdp(session);
+                    session.pending_reinvite = None;
+                    return Err(error.into());
+                }
             };
-            dialog_adapter
+            if let Err(error) = session.bind_offer_answer_transaction(transaction_id.clone()) {
+                rollback_reinvite_local_sdp(session);
+                session.pending_reinvite = None;
+                return Err(error.into());
+            }
+            if let Err(error) = dialog_adapter
                 .outbound_request_tracker
-                .activate(lease, transaction_id)?;
+                .activate(lease, transaction_id)
+            {
+                rollback_reinvite_local_sdp(session);
+                session.pending_reinvite = None;
+                return Err(error.into());
+            }
             if options.session_timer_refresh {
                 return Ok(session_refresh_transaction_deadline_effect(
                     session,
