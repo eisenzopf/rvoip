@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
-use crate::packet::RtpPacket;
+use crate::packet::{rtcp::RtcpReportBlock, RtpPacket};
 use crate::stats::{JitterEstimator, PacketLossResult, PacketLossTracker};
 #[cfg(test)]
 use crate::RtpTimestamp;
@@ -41,11 +41,17 @@ pub struct RtpStream {
     /// Number of duplicate packets
     duplicates: u64,
 
+    /// Number of packets received behind the highest sequence number.
+    reordered: u64,
+
     /// Interarrival jitter estimate (RFC 3550)
     jitter: f64,
 
     /// Sequence-aware RFC 3550 jitter estimator.
     jitter_estimator: JitterEstimator,
+
+    /// RTP clock rate used to encode RTCP jitter in timestamp units.
+    clock_rate: u32,
 
     /// Extended sequence and received-window tracker.
     loss_tracker: PacketLossTracker,
@@ -86,8 +92,10 @@ impl RtpStream {
             bytes_received: 0,
             packets_lost: 0,
             duplicates: 0,
+            reordered: 0,
             jitter: 0.0,
             jitter_estimator: JitterEstimator::new(clock_rate),
+            clock_rate,
             loss_tracker: PacketLossTracker::new(),
             jitter_buffer: None,
             max_jitter_size: 50,                        // Default size
@@ -131,7 +139,10 @@ impl RtpStream {
     /// Returns the packet if it should be processed immediately,
     /// or None if it was placed in the jitter buffer
     pub fn process_packet(&mut self, packet: RtpPacket) -> Option<RtpPacket> {
-        let now = Instant::now();
+        self.process_packet_at(packet, Instant::now())
+    }
+
+    fn process_packet_at(&mut self, packet: RtpPacket, now: Instant) -> Option<RtpPacket> {
         self.last_packet_time = now;
 
         let seq = packet.header.sequence_number;
@@ -171,6 +182,7 @@ impl RtpStream {
         self.seq_cycles = (self.highest_seq >> 16) as u16;
         self.packets_lost = loss_stats.packets_lost;
         self.duplicates = loss_stats.duplicates;
+        self.reordered = loss_stats.reordered;
         self.jitter = self
             .jitter_estimator
             .update_with_sequence(seq, timestamp, now);
@@ -266,8 +278,9 @@ impl RtpStream {
             bytes_received: self.bytes_received,
             packets_lost: self.packets_lost,
             duplicates: self.duplicates,
+            packets_out_of_order: self.reordered,
             last_packet_time: Some(self.last_packet_time),
-            jitter: self.jitter as u32,
+            jitter: self.jitter_timestamp_units(),
             first_seq: self.base_seq as u32,
             highest_seq: self.highest_seq,
             received: self.packets_received as u32,
@@ -287,6 +300,7 @@ impl RtpStream {
             self.latest_seq = seq as RtpSequenceNumber;
             self.packets_lost = 0;
             self.duplicates = 0;
+            self.reordered = 0;
             self.jitter = 0.0;
             self.loss_tracker.reset();
             self.jitter_estimator.reset();
@@ -315,6 +329,35 @@ impl RtpStream {
             (delay_secs * 65536.0) as u32
         } else {
             0
+        }
+    }
+
+    /// Build and snapshot this source's RFC 3550 reception report block.
+    pub(crate) fn take_report_block(&mut self) -> RtcpReportBlock {
+        let (last_sr, delay_since_last_sr) = match self.last_sr_timestamp {
+            Some(timestamp) => (timestamp, self.calculate_delay_since_last_sr()),
+            None => (0, 0),
+        };
+
+        RtcpReportBlock {
+            ssrc: self.ssrc,
+            fraction_lost: self.loss_tracker.take_interval_fraction_lost(),
+            cumulative_lost: self.loss_tracker.get_cumulative_lost(),
+            highest_seq: self.loss_tracker.highest_extended_sequence(),
+            jitter: self.jitter_timestamp_units(),
+            last_sr,
+            delay_since_last_sr,
+        }
+    }
+
+    fn jitter_timestamp_units(&self) -> u32 {
+        let units = self.jitter * f64::from(self.clock_rate);
+        if !units.is_finite() || units <= 0.0 {
+            0
+        } else if units >= f64::from(u32::MAX) {
+            u32::MAX
+        } else {
+            units.round() as u32
         }
     }
 }
@@ -347,6 +390,9 @@ pub struct RtpStreamStats {
 
     /// Number of duplicate packets
     pub duplicates: u64,
+
+    /// Number of packets received behind the highest sequence number.
+    pub packets_out_of_order: u64,
 
     /// Last time a packet was received
     pub last_packet_time: Option<Instant>,
@@ -455,6 +501,36 @@ mod tests {
         stream.process_packet(create_test_packet(65535, 160));
         assert_eq!(stream.highest_seq, 0x1_0000);
         assert_eq!(stream.packets_lost, 0);
+    }
+
+    #[test]
+    fn report_blocks_use_interval_loss_and_timestamp_unit_jitter() {
+        let mut stream = RtpStream::new(0x12345678, 8000);
+        let start = Instant::now();
+
+        stream.process_packet_at(create_test_packet(10, 0), start);
+        // RTP advances by 20 ms while arrival advances by 40 ms. The first
+        // RFC 3550 jitter sample is 20 ms / 16 = 1.25 ms = 10 ticks at 8 kHz.
+        stream.process_packet_at(
+            create_test_packet(12, 160),
+            start + Duration::from_millis(40),
+        );
+
+        let first = stream.take_report_block();
+        assert_eq!(first.fraction_lost, 85);
+        assert_eq!(first.cumulative_lost, 1);
+        assert_eq!(first.jitter, 10);
+
+        for (offset, sequence) in (13..=20).enumerate() {
+            stream.process_packet_at(
+                create_test_packet(sequence, 320 + offset as u32 * 160),
+                start + Duration::from_millis(60 + offset as u64 * 20),
+            );
+        }
+
+        let second = stream.take_report_block();
+        assert_eq!(second.fraction_lost, 0);
+        assert_eq!(second.cumulative_lost, 1);
     }
 
     #[test]

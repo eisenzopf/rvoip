@@ -87,6 +87,15 @@ impl RtcpReportGenerator {
         self.octets_sent += octets;
     }
 
+    /// Replace the cumulative RTP sender totals used by the next report.
+    ///
+    /// Session statistics are already cumulative. Using the additive update
+    /// API on every periodic tick would count the same packets repeatedly.
+    pub fn set_sent_totals(&mut self, packets: u32, octets: u32) {
+        self.packets_sent = packets;
+        self.octets_sent = octets;
+    }
+
     /// Process a received RTP packet
     pub fn process_received_packet(&mut self, ssrc: RtpSsrc, seq: u16) {
         let tracker = self
@@ -294,6 +303,21 @@ mod tests {
         assert_eq!(sr.report_blocks.len(), 1);
         assert_eq!(sr.report_blocks[0].ssrc, remote_ssrc);
         assert_eq!(sr.report_blocks[0].fraction_lost, 0); // No loss in our test
+    }
+
+    #[test]
+    fn setting_cumulative_sender_totals_does_not_double_count() {
+        let mut generator = RtcpReportGenerator::new(0x12345678, "test".to_string());
+
+        generator.set_sent_totals(3, 30);
+        let first = generator.generate_sender_report(100);
+        generator.set_sent_totals(3, 30);
+        let second = generator.generate_sender_report(200);
+
+        assert_eq!(first.sender_packet_count, 3);
+        assert_eq!(first.sender_octet_count, 30);
+        assert_eq!(second.sender_packet_count, 3);
+        assert_eq!(second.sender_octet_count, 30);
     }
 
     #[test]

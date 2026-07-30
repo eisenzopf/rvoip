@@ -513,4 +513,29 @@ mod tests {
         non_final_padding.extend_from_slice(&[0x80, 206, 0, 0]);
         assert!(RtcpTolerantCompoundPacket::parse(&non_final_padding).is_err());
     }
+
+    #[test]
+    fn final_padded_unknown_packet_round_trips_exactly() {
+        let rr = RtcpReceiverReport {
+            ssrc: 0x12345678,
+            report_blocks: Vec::new(),
+        };
+        let unknown = RtcpUnknownPacket {
+            packet_type: 205,
+            count: 7,
+            payload: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+            padding: Bytes::from_static(&[0, 0, 0, 4]),
+        };
+        let compound = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)),
+                RtcpCompoundMember::Unknown(unknown.clone()),
+            ],
+        };
+
+        let wire = compound.serialize().unwrap();
+        let parsed = RtcpTolerantCompoundPacket::parse(&wire).unwrap();
+        assert_eq!(parsed.packets[1], RtcpCompoundMember::Unknown(unknown));
+        assert_eq!(parsed.serialize().unwrap(), wire);
+    }
 }

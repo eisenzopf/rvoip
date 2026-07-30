@@ -872,6 +872,7 @@ impl UdpRtpTransport {
                                             timestamp: packet.header.timestamp,
                                             marker: packet.header.marker,
                                             payload: packet.payload.clone(), // Use the parsed payload
+                                            padding_size: packet.padding_size,
                                             source: addr,
                                             ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
                                         };

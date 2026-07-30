@@ -55,6 +55,10 @@ pub enum RtpEvent {
         /// Payload data
         payload: Bytes,
 
+        /// RFC 3550 padding octets stripped from `payload` while parsing.
+        /// Zero means the RTP padding bit was clear.
+        padding_size: u8,
+
         /// Source address
         source: SocketAddr,
 

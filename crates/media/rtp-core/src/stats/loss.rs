@@ -4,7 +4,7 @@ use crate::RtpSequenceNumber;
 
 /// Number of recent extended sequence numbers retained for duplicate and
 /// reordering detection.
-const RECEIVED_WINDOW_SIZE: u64 = 2048;
+const RECEIVED_WINDOW_SIZE: i64 = 2048;
 
 /// Packet loss tracker for RTP streams
 #[derive(Debug, Clone)]
@@ -13,16 +13,22 @@ pub struct PacketLossTracker {
     base_seq: Option<RtpSequenceNumber>,
 
     /// Extended sequence number of the first packet.
-    base_extended: Option<u64>,
+    base_extended: Option<i64>,
 
     /// Highest extended sequence number received.
-    highest_seq: u64,
+    highest_seq: i64,
 
     /// Number of packets actually received
     received: u64,
 
     /// Number of distinct packets received in the tracked sequence range.
     unique_received: u64,
+
+    /// Expected-packet total captured when the preceding RTCP report was built.
+    expected_prior: u64,
+
+    /// Unique-received total captured when the preceding RTCP report was built.
+    unique_received_prior: u64,
 
     /// Number of packets lost
     lost: u64,
@@ -37,7 +43,7 @@ pub struct PacketLossTracker {
     cycles: u32,
 
     /// Recently received extended sequence numbers.
-    received_window: HashSet<u64>,
+    received_window: HashSet<i64>,
 
     /// Recent loss history (1=received, 0=lost) for burst detection
     loss_history: Vec<bool>,
@@ -64,6 +70,8 @@ impl PacketLossTracker {
             highest_seq: 0,
             received: 0,
             unique_received: 0,
+            expected_prior: 0,
+            unique_received_prior: 0,
             lost: 0,
             duplicates: 0,
             reordered: 0,
@@ -84,24 +92,15 @@ impl PacketLossTracker {
         // Initialize if this is the first packet
         if self.base_seq.is_none() {
             self.base_seq = Some(seq);
-            self.base_extended = Some(seq as u64);
-            self.highest_seq = seq as u64;
+            self.base_extended = Some(seq as i64);
+            self.highest_seq = seq as i64;
             self.unique_received = 1;
-            self.received_window.insert(seq as u64);
+            self.received_window.insert(seq as i64);
             self.loss_history.push(true); // First packet is received
             return PacketLossResult::FirstPacket { seq };
         }
 
-        let Some(extended_seq) = self.extend_sequence(seq) else {
-            // A high sequence received while still in cycle zero belongs to
-            // the conceptual cycle before the first observed packet. It is
-            // late, not a jump almost 65,536 packets into the future.
-            self.reordered += 1;
-            return PacketLossResult::Reordered {
-                seq,
-                expected: self.highest_seq as u16,
-            };
-        };
+        let extended_seq = self.extend_sequence(seq);
         if self.received_window.contains(&extended_seq) {
             self.duplicates += 1;
             return PacketLossResult::Duplicate { seq };
@@ -114,7 +113,7 @@ impl PacketLossTracker {
             // Sequence numbers older than the bounded window cannot safely be
             // distinguished from duplicates. Count them as reordered, but do
             // not change the established loss total.
-            let oldest_tracked = highest_seq.saturating_sub(RECEIVED_WINDOW_SIZE - 1);
+            let oldest_tracked = highest_seq - (RECEIVED_WINDOW_SIZE - 1);
             if extended_seq >= oldest_tracked {
                 self.received_window.insert(extended_seq);
                 if extended_seq >= self.base_extended.expect("tracker is initialized") {
@@ -131,7 +130,7 @@ impl PacketLossTracker {
         }
 
         if extended_seq > highest_seq {
-            let gap = extended_seq - highest_seq;
+            let gap = (extended_seq - highest_seq) as u64;
             self.unique_received += 1;
             self.received_window.insert(extended_seq);
 
@@ -169,13 +168,13 @@ impl PacketLossTracker {
 
     /// Return the extended highest sequence number used in RTCP reports.
     pub fn highest_extended_sequence(&self) -> u32 {
-        self.highest_seq.min(u32::MAX as u64) as u32
+        self.highest_seq.clamp(0, u32::MAX as i64) as u32
     }
 
     /// Calculate the total number of expected packets
     pub fn calculate_expected(&self) -> u64 {
         if let Some(base_extended) = self.base_extended {
-            self.highest_seq - base_extended + 1
+            (self.highest_seq - base_extended + 1).max(0) as u64
         } else {
             0
         }
@@ -192,6 +191,31 @@ impl PacketLossTracker {
 
         let fraction = (lost as f64 / expected as f64) * 256.0;
         fraction.min(255.0) as u8
+    }
+
+    /// Return the packet-loss fraction for the interval since the preceding
+    /// RTCP report and advance the report snapshot.
+    ///
+    /// RFC 3550 defines the fraction field over the reporting interval, not
+    /// over the lifetime of the source. Late packets can make the interval's
+    /// received delta exceed its expected delta; that recovery is encoded as
+    /// zero rather than wrapping into a large loss fraction.
+    pub fn take_interval_fraction_lost(&mut self) -> u8 {
+        let expected = self.calculate_expected();
+        let expected_interval = expected.saturating_sub(self.expected_prior);
+        let received_interval = self
+            .unique_received
+            .saturating_sub(self.unique_received_prior);
+
+        self.expected_prior = expected;
+        self.unique_received_prior = self.unique_received;
+
+        if expected_interval == 0 || received_interval >= expected_interval {
+            return 0;
+        }
+
+        let lost_interval = expected_interval - received_interval;
+        ((lost_interval * 256) / expected_interval).min(255) as u8
     }
 
     /// Calculate the cumulative number of packets lost
@@ -226,6 +250,8 @@ impl PacketLossTracker {
         self.highest_seq = 0;
         self.received = 0;
         self.unique_received = 0;
+        self.expected_prior = 0;
+        self.unique_received_prior = 0;
         self.lost = 0;
         self.duplicates = 0;
         self.reordered = 0;
@@ -242,27 +268,25 @@ impl PacketLossTracker {
     /// Map a 16-bit sequence number to the cycle nearest the current highest
     /// sequence number. This permits late packets from the preceding cycle
     /// without mistaking them for a new wrap.
-    fn extend_sequence(&self, seq: RtpSequenceNumber) -> Option<u64> {
+    fn extend_sequence(&self, seq: RtpSequenceNumber) -> i64 {
         let highest_low = (self.highest_seq & 0xffff) as i32;
         let difference = seq as i32 - highest_low;
         let cycle_base = self.highest_seq & !0xffff;
 
         if difference < -0x8000 {
-            Some(cycle_base + 0x1_0000 + seq as u64)
+            cycle_base + 0x1_0000 + seq as i64
         } else if difference > 0x8000 {
-            cycle_base
-                .checked_sub(0x1_0000)
-                .map(|previous_cycle| previous_cycle + seq as u64)
+            cycle_base - 0x1_0000 + seq as i64
         } else {
-            Some(cycle_base + seq as u64)
+            cycle_base + seq as i64
         }
     }
 
-    fn advance_highest(&mut self, extended_seq: u64) {
+    fn advance_highest(&mut self, extended_seq: i64) {
         self.highest_seq = extended_seq;
-        self.cycles = (extended_seq >> 16).min(u32::MAX as u64) as u32;
+        self.cycles = (extended_seq >> 16).clamp(0, u32::MAX as i64) as u32;
 
-        let oldest_tracked = extended_seq.saturating_sub(RECEIVED_WINDOW_SIZE - 1);
+        let oldest_tracked = extended_seq - (RECEIVED_WINDOW_SIZE - 1);
         self.received_window
             .retain(|received| *received >= oldest_tracked);
     }
@@ -523,6 +547,43 @@ mod tests {
         ));
         assert_eq!(tracker.highest_extended_sequence(), 1);
         assert_eq!(tracker.get_cumulative_lost(), 0);
+    }
+
+    #[test]
+    fn late_packet_before_sequence_zero_is_then_a_duplicate() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(0);
+
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Reordered {
+                seq: 65535,
+                expected: 0,
+            }
+        );
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Duplicate { seq: 65535 }
+        );
+        assert_eq!(tracker.highest_extended_sequence(), 0);
+        assert_eq!(tracker.get_stats().duplicates, 1);
+    }
+
+    #[test]
+    fn rtcp_fraction_lost_is_scoped_to_each_report_interval() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(10);
+        tracker.process(12);
+
+        assert_eq!(tracker.take_interval_fraction_lost(), 85);
+        assert_eq!(tracker.get_cumulative_lost(), 1);
+
+        for sequence in 13..=20 {
+            tracker.process(sequence);
+        }
+
+        assert_eq!(tracker.take_interval_fraction_lost(), 0);
+        assert_eq!(tracker.get_cumulative_lost(), 1);
     }
 
     #[test]
