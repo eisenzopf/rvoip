@@ -1145,6 +1145,16 @@ mod tests {
             .start_audio_transmission_with_tone(&dialog_id)
             .await
             .unwrap();
+        controller
+            .set_audio_source(
+                &dialog_id,
+                AudioSource::CustomSamples {
+                    samples: vec![0x7f, 0xff],
+                    repeat: true,
+                },
+            )
+            .await
+            .unwrap();
         assert_eq!(
             controller
                 .rtp_sessions
@@ -1174,6 +1184,13 @@ mod tests {
         let transmitter = wrapper.audio_transmitter.as_ref().unwrap();
         assert_eq!(transmitter.codec_format().name, "PCMA");
         assert_eq!(transmitter.codec_format().payload_type, 8);
+        match transmitter.replacement_config().source {
+            AudioSource::CustomSamples { samples, repeat } => {
+                assert_eq!(samples, vec![0x7f, 0xff]);
+                assert!(repeat);
+            }
+            source => panic!("codec update replaced the current generated source: {source:?}"),
+        }
         drop(wrapper);
 
         #[cfg(feature = "opus")]

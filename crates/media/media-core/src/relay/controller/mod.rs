@@ -1212,7 +1212,7 @@ impl MediaSessionController {
                     .audio_transmitter
                     .take()
                     .map(|transmitter| {
-                        let config = transmitter.config().clone();
+                        let config = transmitter.replacement_config();
                         (transmitter, config)
                     })
             })

@@ -773,8 +773,10 @@ impl AudioTransmitter {
         self.is_active.load(Ordering::Acquire)
     }
 
-    pub(super) fn config(&self) -> &AudioTransmitterConfig {
-        &self.config
+    pub(super) fn replacement_config(&self) -> AudioTransmitterConfig {
+        let mut config = self.config.clone();
+        config.source = self.audio_generator.lock().source.clone();
+        config
     }
 
     #[cfg(test)]
