@@ -90,7 +90,6 @@ pub struct RtpStatsManager {
     start_time: Instant,
 
     /// Clock rate for timestamp conversions
-    #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
     clock_rate: u32,
 }
 
@@ -118,6 +117,20 @@ impl RtpStatsManager {
     /// Get a copy of the current statistics
     pub fn get_stats(&self) -> RtpStats {
         self.stats.lock().unwrap().clone()
+    }
+
+    /// Take a statistics snapshot for an RTCP reporting interval.
+    ///
+    /// The returned `fraction_lost` covers packets expected since the prior
+    /// call, while cumulative counters such as `packets_lost` retain their
+    /// lifetime values. The cached live snapshot starts a clean interval.
+    pub fn take_interval_stats(&mut self) -> RtpStats {
+        let fraction_lost = self.loss_tracker.take_interval_fraction_lost();
+        let mut stats = self.stats.lock().unwrap();
+        stats.fraction_lost = fraction_lost;
+        let snapshot = stats.clone();
+        stats.fraction_lost = 0;
+        snapshot
     }
 
     /// Reset all statistics
@@ -148,6 +161,20 @@ impl RtpStatsManager {
 
     /// Update statistics for a received packet
     pub fn update_received(
+        &mut self,
+        seq: RtpSequenceNumber,
+        timestamp: u32,
+        bytes: usize,
+        arrival_time: Instant,
+    ) {
+        self.update_received_at(seq, timestamp, bytes, arrival_time);
+    }
+
+    /// Update receive statistics using an explicitly controlled arrival time.
+    ///
+    /// This is useful for packet captures, deterministic simulations, and
+    /// tests that must reproduce an exact RFC 3550 jitter sample.
+    pub fn update_received_at(
         &mut self,
         seq: RtpSequenceNumber,
         timestamp: u32,
@@ -191,16 +218,16 @@ impl RtpStatsManager {
         }
 
         // Update jitter calculation
-        let jitter = self
-            .jitter_estimator
-            .update_with_sequence(seq, timestamp, arrival_time);
-        stats.jitter = jitter;
+        let jitter_seconds =
+            self.jitter_estimator
+                .update_with_sequence(seq, timestamp, arrival_time);
+        stats.jitter = jitter_seconds * f64::from(self.clock_rate);
 
         // Recompute loss from the unique received-packet window so a late
         // packet that fills a gap reduces the cumulative total.
         let loss_stats = self.loss_tracker.get_stats();
         stats.packets_lost = loss_stats.packets_lost;
-        stats.fraction_lost = loss_stats.fraction_lost;
+        stats.fraction_lost = self.loss_tracker.interval_fraction_lost();
         stats.highest_seq = self.loss_tracker.highest_extended_sequence();
 
         // Update RTCP generator if available
@@ -289,5 +316,36 @@ mod tests {
         assert_eq!(stats.packets_out_of_order, 1);
         assert_eq!(stats.jitter, jitter_before_reorder);
         assert_eq!(stats.highest_seq, 0x1_0001);
+    }
+
+    #[test]
+    fn controlled_arrivals_use_timestamp_unit_jitter_and_interval_loss() {
+        let mut manager = RtpStatsManager::new(8000);
+        let start = Instant::now();
+
+        manager.update_received_at(10, 0, 100, start);
+        // RTP advances by 20 ms while arrival advances by 40 ms. RFC 3550
+        // therefore produces 20 ms / 16 = 1.25 ms of jitter, or 10 ticks at
+        // an 8 kHz RTP clock rate.
+        manager.update_received_at(12, 160, 100, start + Duration::from_millis(40));
+
+        let first = manager.take_interval_stats();
+        assert_eq!(first.fraction_lost, 85);
+        assert_eq!(first.packets_lost, 1);
+        assert!((first.jitter - 10.0).abs() < 0.000_001);
+        assert_eq!(manager.get_stats().fraction_lost, 0);
+
+        for (offset, sequence) in (13..=20).enumerate() {
+            manager.update_received_at(
+                sequence,
+                320 + offset as u32 * 160,
+                100,
+                start + Duration::from_millis(60 + offset as u64 * 20),
+            );
+        }
+
+        let second = manager.take_interval_stats();
+        assert_eq!(second.fraction_lost, 0);
+        assert_eq!(second.packets_lost, 1);
     }
 }

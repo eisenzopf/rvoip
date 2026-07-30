@@ -1471,6 +1471,14 @@ impl RtpSession {
     /// This is useful when we want to ensure a stream exists for an SSRC
     /// even if no packets have been received yet.
     pub async fn create_stream_for_ssrc(&mut self, ssrc: RtpSsrc) -> bool {
+        self.create_stream_for_ssrc_after(ssrc, std::future::ready(()))
+            .await
+    }
+
+    async fn create_stream_for_ssrc_after<F>(&mut self, ssrc: RtpSsrc, before_insert: F) -> bool
+    where
+        F: std::future::Future<Output = ()>,
+    {
         // Check if this SSRC already exists. The contains_key + insert
         // pair has a benign race (two callers may both decide "new" and
         // race the insert), but we only need a stable per-SSRC entry —
@@ -1485,10 +1493,12 @@ impl RtpSession {
         // first-packet path stays unbuffered makes precreated streams hold the
         // second sequential packet and can reverse later delivery.
         info!("Manually creating new RTP stream for SSRC={:08x}", ssrc);
-        let mut stream = RtpStream::new(ssrc, self.config.clock_rate);
-        if let Some(sender_report) = self.received_sender_reports.get(&ssrc) {
-            stream.update_last_sr_info(sender_report.lsr, sender_report.received_at);
-        }
+        let stream = RtpStream::new(ssrc, self.config.clock_rate);
+
+        // Production passes an immediately-ready future. Keeping the
+        // insertion boundary explicit lets the race regression deliver an SR
+        // after precreation has begun but before the stream becomes visible.
+        before_insert.await;
 
         // The contains_key check above is racy w.r.t. the recv hot
         // path also inserting on first packet; `entry()` arbitrates.
@@ -1503,6 +1513,19 @@ impl RtpSession {
         }
         if !closure_ran {
             return false;
+        }
+
+        // Reconcile retained SR state only after the stream is visible. This
+        // closes both sides of the handoff with the RTCP task, which stores
+        // the SR first and then looks up the stream: an SR arriving before
+        // insertion is found here, while one arriving after insertion is
+        // applied by the RTCP task. Lock the visible stream first so a newer
+        // RTCP update waits behind reconciliation and cannot be overwritten
+        // by an older retained snapshot.
+        if let Some(mut stream) = self.streams.get_mut(&ssrc) {
+            if let Some(sender_report) = self.received_sender_reports.get(&ssrc) {
+                stream.update_last_sr_info(sender_report.lsr, sender_report.received_at);
+            }
         }
 
         // Emit the new stream event
@@ -2004,6 +2027,71 @@ mod tests {
         let stream = session.get_stream(remote_ssrc).await.unwrap();
         assert_eq!(stream.packets_received, 2);
         assert_eq!(stream.highest_seq, 101);
+    }
+
+    #[tokio::test]
+    async fn precreated_stream_reconciles_sender_report_during_insert_handoff() {
+        use crate::packet::rtcp::{NtpTimestamp, RtcpCompoundPacket, RtcpSenderReport};
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let destination = session.local_addr().unwrap();
+        let remote_ssrc = 0xc1c2_c3c4;
+        let mut events = session.subscribe();
+
+        let mut sender_report = RtcpSenderReport::new(remote_ssrc);
+        sender_report.ntp_timestamp = NtpTimestamp {
+            seconds: 0xaaaa_1234,
+            fraction: 0x5678_bbbb,
+        };
+        let sender_report_wire = RtcpCompoundPacket::new_with_sr(sender_report)
+            .serialize()
+            .unwrap();
+
+        // Pause production precreation immediately before insertion. The
+        // receive task must retain the SR and observe that no stream exists;
+        // precreation then inserts the stream and reconciles that retained SR.
+        let report_during_handoff = async {
+            peer.send_to(&sender_report_wire, destination)
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        RtpSessionEvent::RtcpSenderReport { ssrc, .. } if ssrc == remote_ssrc
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("sender report was not processed during precreation");
+        };
+        assert!(
+            session
+                .create_stream_for_ssrc_after(remote_ssrc, report_during_handoff)
+                .await
+        );
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        session.send_receiver_report().await.unwrap();
+        let mut buffer = [0u8; 2048];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        let report = parse_receiver_report(&buffer[..size]);
+        assert_eq!(report.report_blocks.len(), 1);
+        assert_eq!(report.report_blocks[0].ssrc, remote_ssrc);
+        assert_eq!(report.report_blocks[0].last_sr, 0x1234_5678);
+        assert!(report.report_blocks[0].delay_since_last_sr > 0);
     }
 
     #[tokio::test]

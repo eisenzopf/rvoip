@@ -194,21 +194,18 @@ impl PacketLossTracker {
     }
 
     /// Return the packet-loss fraction for the interval since the preceding
-    /// RTCP report and advance the report snapshot.
+    /// RTCP report without advancing the report snapshot.
     ///
     /// RFC 3550 defines the fraction field over the reporting interval, not
     /// over the lifetime of the source. Late packets can make the interval's
     /// received delta exceed its expected delta; that recovery is encoded as
     /// zero rather than wrapping into a large loss fraction.
-    pub fn take_interval_fraction_lost(&mut self) -> u8 {
+    pub fn interval_fraction_lost(&self) -> u8 {
         let expected = self.calculate_expected();
         let expected_interval = expected.saturating_sub(self.expected_prior);
         let received_interval = self
             .unique_received
             .saturating_sub(self.unique_received_prior);
-
-        self.expected_prior = expected;
-        self.unique_received_prior = self.unique_received;
 
         if expected_interval == 0 || received_interval >= expected_interval {
             return 0;
@@ -216,6 +213,15 @@ impl PacketLossTracker {
 
         let lost_interval = expected_interval - received_interval;
         ((lost_interval * 256) / expected_interval).min(255) as u8
+    }
+
+    /// Return the current interval loss fraction and advance the report
+    /// snapshot so the following report covers only newly expected packets.
+    pub fn take_interval_fraction_lost(&mut self) -> u8 {
+        let fraction_lost = self.interval_fraction_lost();
+        self.expected_prior = self.calculate_expected();
+        self.unique_received_prior = self.unique_received;
+        fraction_lost
     }
 
     /// Calculate the cumulative number of packets lost

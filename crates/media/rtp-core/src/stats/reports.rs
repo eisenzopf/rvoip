@@ -23,7 +23,7 @@ pub struct RtcpReportGenerator {
     cname: String,
 
     /// Packet loss statistics by SSRC
-    loss_stats: HashMap<RtpSsrc, PacketLossTracker>,
+    loss_stats: HashMap<RtpSsrc, parking_lot::Mutex<PacketLossTracker>>,
 
     /// Time of last SR sent
     last_sr_time: Option<Instant>,
@@ -101,8 +101,27 @@ impl RtcpReportGenerator {
         let tracker = self
             .loss_stats
             .entry(ssrc)
-            .or_insert_with(|| PacketLossTracker::new());
-        tracker.process(seq);
+            .or_insert_with(|| parking_lot::Mutex::new(PacketLossTracker::new()));
+        tracker.get_mut().process(seq);
+    }
+
+    fn take_report_blocks(&self) -> Vec<RtcpReportBlock> {
+        self.loss_stats
+            .iter()
+            .take(31)
+            .map(|(ssrc, tracker)| {
+                let mut tracker = tracker.lock();
+                RtcpReportBlock {
+                    ssrc: *ssrc,
+                    fraction_lost: tracker.take_interval_fraction_lost(),
+                    cumulative_lost: tracker.get_cumulative_lost(),
+                    highest_seq: tracker.highest_extended_sequence(),
+                    jitter: 0,              // Jitter would be calculated separately
+                    last_sr: 0,             // Would be from received SRs
+                    delay_since_last_sr: 0, // Would be from received SRs
+                }
+            })
+            .collect()
     }
 
     /// Calculate RTCP interval based on session parameters
@@ -142,29 +161,10 @@ impl RtcpReportGenerator {
         self.last_sr_time = Some(Instant::now());
         self.last_rtp_timestamp = Some(rtp_timestamp);
 
-        // Create report blocks for each source we're receiving from
-        let mut report_blocks = Vec::new();
-
-        for (ssrc, tracker) in &self.loss_stats {
-            let stats = tracker.get_stats();
-
-            let report_block = RtcpReportBlock {
-                ssrc: *ssrc,
-                fraction_lost: stats.fraction_lost,
-                cumulative_lost: tracker.get_cumulative_lost(),
-                highest_seq: tracker.highest_extended_sequence(),
-                jitter: 0,              // Jitter would be calculated separately
-                last_sr: 0,             // Would be from received SRs
-                delay_since_last_sr: 0, // Would be from received SRs
-            };
-
-            report_blocks.push(report_block);
-
-            // Only include up to 31 report blocks (5-bit field in RTCP header)
-            if report_blocks.len() >= 31 {
-                break;
-            }
-        }
+        // RFC 3550 fraction loss covers the interval since the preceding
+        // report, while cumulative loss and highest sequence remain lifetime
+        // values.
+        let report_blocks = self.take_report_blocks();
 
         // Create SR
         RtcpSenderReport {
@@ -179,29 +179,7 @@ impl RtcpReportGenerator {
 
     /// Generate a Receiver Report (RR)
     pub fn generate_receiver_report(&self) -> RtcpReceiverReport {
-        // Create report blocks for each source we're receiving from
-        let mut report_blocks = Vec::new();
-
-        for (ssrc, tracker) in &self.loss_stats {
-            let stats = tracker.get_stats();
-
-            let report_block = RtcpReportBlock {
-                ssrc: *ssrc,
-                fraction_lost: stats.fraction_lost,
-                cumulative_lost: tracker.get_cumulative_lost(),
-                highest_seq: tracker.highest_extended_sequence(),
-                jitter: 0,              // Jitter would be calculated separately
-                last_sr: 0,             // Would be from received SRs
-                delay_since_last_sr: 0, // Would be from received SRs
-            };
-
-            report_blocks.push(report_block);
-
-            // Only include up to 31 report blocks (5-bit field in RTCP header)
-            if report_blocks.len() >= 31 {
-                break;
-            }
-        }
+        let report_blocks = self.take_report_blocks();
 
         // Create RR
         RtcpReceiverReport {
@@ -303,6 +281,41 @@ mod tests {
         assert_eq!(sr.report_blocks.len(), 1);
         assert_eq!(sr.report_blocks[0].ssrc, remote_ssrc);
         assert_eq!(sr.report_blocks[0].fraction_lost, 0); // No loss in our test
+    }
+
+    #[test]
+    fn sender_and_receiver_reports_use_interval_fraction_loss() {
+        let remote_ssrc = 0xabcdef01;
+
+        let mut sender_generator =
+            RtcpReportGenerator::new(0x12345678, "sender@example.com".to_string());
+        sender_generator.process_received_packet(remote_ssrc, 10);
+        sender_generator.process_received_packet(remote_ssrc, 12);
+        let first_sender = sender_generator.generate_sender_report(160);
+        assert_eq!(first_sender.report_blocks[0].fraction_lost, 85);
+        assert_eq!(first_sender.report_blocks[0].cumulative_lost, 1);
+
+        for sequence in 13..=20 {
+            sender_generator.process_received_packet(remote_ssrc, sequence);
+        }
+        let second_sender = sender_generator.generate_sender_report(320);
+        assert_eq!(second_sender.report_blocks[0].fraction_lost, 0);
+        assert_eq!(second_sender.report_blocks[0].cumulative_lost, 1);
+
+        let mut receiver_generator =
+            RtcpReportGenerator::new(0x87654321, "receiver@example.com".to_string());
+        receiver_generator.process_received_packet(remote_ssrc, 10);
+        receiver_generator.process_received_packet(remote_ssrc, 12);
+        let first_receiver = receiver_generator.generate_receiver_report();
+        assert_eq!(first_receiver.report_blocks[0].fraction_lost, 85);
+        assert_eq!(first_receiver.report_blocks[0].cumulative_lost, 1);
+
+        for sequence in 13..=20 {
+            receiver_generator.process_received_packet(remote_ssrc, sequence);
+        }
+        let second_receiver = receiver_generator.generate_receiver_report();
+        assert_eq!(second_receiver.report_blocks[0].fraction_lost, 0);
+        assert_eq!(second_receiver.report_blocks[0].cumulative_lost, 1);
     }
 
     #[test]
