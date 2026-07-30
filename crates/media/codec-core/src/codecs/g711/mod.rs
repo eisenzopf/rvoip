@@ -36,7 +36,7 @@
 //! let decoded: Vec<i16> = encoded.iter().map(|&e| alaw_expand(e)).collect();
 //! ```
 //!
-//! ### Using the G711Codec Struct
+//! ### Using the `G711Codec` Struct
 //!
 //! ```rust
 //! use codec_core::codecs::g711::{G711Codec, G711Variant};
@@ -85,7 +85,9 @@ pub enum G711Variant {
 
 impl G711Codec {
     /// Create a new G.711 codec with the specified variant
-    pub fn new(variant: G711Variant) -> Self {
+    #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
+    pub const fn new(variant: G711Variant) -> Self {
         Self {
             variant,
             frame_size: 160, // Default 20ms at 8kHz
@@ -93,6 +95,16 @@ impl G711Codec {
     }
 
     /// Create a new G.711 codec with configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configuration uses a sample rate, channel
+    /// count, or frame duration unsupported by G.711.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::needless_pass_by_value
+    )]
     pub fn new_with_config(
         variant: G711Variant,
         config: crate::types::CodecConfig,
@@ -114,12 +126,10 @@ impl G711Codec {
         }
 
         // Calculate frame size from config
-        let frame_size = if let Some(frame_ms) = config.frame_size_ms {
+        let frame_size = config.frame_size_ms.map_or(160, |frame_ms| {
             let samples_per_ms = 8000.0 / 1000.0; // 8 samples per ms at 8kHz
             (samples_per_ms * frame_ms) as usize
-        } else {
-            160 // Default 20ms
-        };
+        });
 
         // Validate frame size
         let valid_sizes = [80, 160, 240, 320];
@@ -137,21 +147,35 @@ impl G711Codec {
     }
 
     /// Create a new G.711 μ-law (PCMU) codec
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `config` is not a supported G.711 configuration.
     pub fn new_pcmu(config: crate::types::CodecConfig) -> Result<Self, CodecError> {
         Self::new_with_config(G711Variant::MuLaw, config)
     }
 
     /// Create a new G.711 A-law (PCMA) codec
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `config` is not a supported G.711 configuration.
     pub fn new_pcma(config: crate::types::CodecConfig) -> Result<Self, CodecError> {
         Self::new_with_config(G711Variant::ALaw, config)
     }
 
     /// Get the codec variant
-    pub fn variant(&self) -> G711Variant {
+    #[must_use]
+    pub const fn variant(&self) -> G711Variant {
         self.variant
     }
 
     /// Compress samples using the configured variant
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility with other codecs.
     pub fn compress(&self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
         match self.variant {
             G711Variant::ALaw => Ok(samples
@@ -166,6 +190,11 @@ impl G711Codec {
     }
 
     /// Expand samples using the configured variant
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility with other codecs.
     pub fn expand(&self, compressed: &[u8]) -> Result<Vec<i16>, CodecError> {
         match self.variant {
             G711Variant::ALaw => Ok(compressed
@@ -180,6 +209,11 @@ impl G711Codec {
     }
 
     /// Compress samples using A-law
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility.
     pub fn compress_alaw(&self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
         Ok(samples
             .iter()
@@ -188,6 +222,11 @@ impl G711Codec {
     }
 
     /// Expand A-law samples
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility.
     pub fn expand_alaw(&self, compressed: &[u8]) -> Result<Vec<i16>, CodecError> {
         Ok(compressed
             .iter()
@@ -196,6 +235,11 @@ impl G711Codec {
     }
 
     /// Compress samples using μ-law
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility.
     pub fn compress_ulaw(&self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
         Ok(samples
             .iter()
@@ -204,6 +248,11 @@ impl G711Codec {
     }
 
     /// Expand μ-law samples
+    ///
+    /// # Errors
+    ///
+    /// This implementation is infallible; the result type is retained for API
+    /// compatibility.
     pub fn expand_ulaw(&self, compressed: &[u8]) -> Result<Vec<i16>, CodecError> {
         Ok(compressed
             .iter()
@@ -316,6 +365,6 @@ impl crate::types::AudioCodecExt for G711Codec {
 }
 
 /// Initialize G.711 lookup tables (stub for compatibility)
-pub fn init_tables() {
+pub const fn init_tables() {
     // No initialization needed with our implementation
 }

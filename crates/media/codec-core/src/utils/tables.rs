@@ -42,22 +42,26 @@ pub static ALAW_DECODE_TABLE: [i16; 256] = [
 ];
 
 /// Fast μ-law encoding using direct computation
-pub fn encode_mulaw_table(sample: i16) -> u8 {
+#[must_use]
+pub const fn encode_mulaw_table(sample: i16) -> u8 {
     crate::utils::simd::linear_to_mulaw_scalar(sample)
 }
 
 /// Fast μ-law decoding using lookup table
-pub fn decode_mulaw_table(encoded: u8) -> i16 {
+#[must_use]
+pub const fn decode_mulaw_table(encoded: u8) -> i16 {
     MULAW_DECODE_TABLE[encoded as usize]
 }
 
 /// Fast A-law encoding using direct computation
-pub fn encode_alaw_table(sample: i16) -> u8 {
+#[must_use]
+pub const fn encode_alaw_table(sample: i16) -> u8 {
     crate::utils::simd::linear_to_alaw_scalar(sample)
 }
 
 /// Fast A-law decoding using lookup table
-pub fn decode_alaw_table(encoded: u8) -> i16 {
+#[must_use]
+pub const fn decode_alaw_table(encoded: u8) -> i16 {
     ALAW_DECODE_TABLE[encoded as usize]
 }
 
@@ -96,7 +100,8 @@ pub fn init_tables() {
 }
 
 /// Get memory usage of lookup tables
-pub fn get_table_memory_usage() -> usize {
+#[must_use]
+pub const fn get_table_memory_usage() -> usize {
     // Only decode tables:
     // μ-law: 256 * 2 = 512 bytes
     // A-law: 256 * 2 = 512 bytes
@@ -135,8 +140,7 @@ mod tests {
             let scalar_result = crate::utils::simd::mulaw_to_linear_scalar(encoded);
             assert_eq!(
                 table_result, scalar_result,
-                "μ-law decode table mismatch for encoded {}",
-                encoded
+                "μ-law decode table mismatch for encoded {encoded}"
             );
 
             // Test A-law decode
@@ -144,8 +148,7 @@ mod tests {
             let scalar_result = crate::utils::simd::alaw_to_linear_scalar(encoded);
             assert_eq!(
                 table_result, scalar_result,
-                "A-law decode table mismatch for encoded {}",
-                encoded
+                "A-law decode table mismatch for encoded {encoded}"
             );
         }
     }

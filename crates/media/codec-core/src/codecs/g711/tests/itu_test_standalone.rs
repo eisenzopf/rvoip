@@ -114,8 +114,10 @@ pub fn test_g711_itu_compliance() {
             perfect_roundtrips += 1;
         } else if i < 5 {
             // Show first few errors if any
-            println!("  [{:3}] Input: {:6}, A-law error: {:3} (tol: {:3}), μ-law error: {:3} (tol: {:3})",
-                     i, input, alaw_error, alaw_tolerance, mulaw_error, mulaw_tolerance);
+            println!(
+                "  [{:3}] Input: {:6}, A-law error: {:3} (tol: {:3}), μ-law error: {:3} (tol: {:3})",
+                i, input, alaw_error, alaw_tolerance, mulaw_error, mulaw_tolerance
+            );
         }
     }
 

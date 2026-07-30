@@ -37,9 +37,10 @@
 /// # Algorithm
 ///
 /// Based on ITU-T G.711 specification and reference implementation.
-pub fn alaw_compress(sample: i16) -> u8 {
+#[must_use]
+pub const fn alaw_compress(sample: i16) -> u8 {
     let mut ix = if sample < 0 {
-        (((!sample) as u16) >> 4) as i16
+        ((!sample).cast_unsigned() >> 4).cast_signed()
     } else {
         sample >> 4
     };
@@ -58,7 +59,7 @@ pub fn alaw_compress(sample: i16) -> u8 {
         ix |= 0x0080;
     }
 
-    (ix ^ 0x0055) as u8
+    (ix ^ 0x0055).to_le_bytes()[0]
 }
 
 /// A-law expansion according to ITU-T G.711
@@ -76,7 +77,9 @@ pub fn alaw_compress(sample: i16) -> u8 {
 /// # Algorithm
 ///
 /// Based on ITU-T G.711 specification and reference implementation.
-pub fn alaw_expand(compressed: u8) -> i16 {
+#[must_use]
+#[allow(clippy::cast_lossless)]
+pub const fn alaw_expand(compressed: u8) -> i16 {
     let mut ix = (compressed ^ 0x0055) as i16;
 
     ix &= 0x007F;
@@ -84,13 +87,13 @@ pub fn alaw_expand(compressed: u8) -> i16 {
     let mut mant = ix & 0x000F;
 
     if iexp > 0 {
-        mant = mant + 16;
+        mant += 16;
     }
 
     mant = (mant << 4) + 0x0008;
 
     if iexp > 1 {
-        mant = mant << (iexp - 1);
+        mant <<= iexp - 1;
     }
 
     if compressed > 127 {
@@ -115,9 +118,10 @@ pub fn alaw_expand(compressed: u8) -> i16 {
 /// # Algorithm
 ///
 /// Based on ITU-T G.711 specification.
-pub fn ulaw_compress(sample: i16) -> u8 {
+#[must_use]
+pub const fn ulaw_compress(sample: i16) -> u8 {
     let absno = if sample < 0 {
-        (((!sample) as u16) >> 2) as i16 + 33
+        ((!sample).cast_unsigned() >> 2).cast_signed() + 33
     } else {
         (sample >> 2) + 33
     };
@@ -139,7 +143,7 @@ pub fn ulaw_compress(sample: i16) -> u8 {
         result |= 0x0080;
     }
 
-    result as u8
+    result.to_le_bytes()[0]
 }
 
 /// μ-law expansion according to ITU-T G.711
@@ -157,7 +161,9 @@ pub fn ulaw_compress(sample: i16) -> u8 {
 /// # Algorithm
 ///
 /// Based on ITU-T G.711 specification.
-pub fn ulaw_expand(compressed: u8) -> i16 {
+#[must_use]
+#[allow(clippy::cast_lossless)]
+pub const fn ulaw_expand(compressed: u8) -> i16 {
     let sign = if compressed < 0x0080 { -1 } else { 1 };
     let mantissa = (!compressed) as i16;
     let exponent = (mantissa >> 4) & 0x0007;
@@ -170,6 +176,7 @@ pub fn ulaw_expand(compressed: u8) -> i16 {
 }
 
 #[cfg(test)]
+#[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::*;
 

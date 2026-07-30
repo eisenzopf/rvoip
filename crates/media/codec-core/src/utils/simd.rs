@@ -8,20 +8,26 @@ use std::sync::OnceLock;
 /// SIMD support information
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SimdSupport {
-    /// x86_64 SSE2 support
+    /// `x86_64` SSE2 support
     pub sse2: bool,
-    /// x86_64 AVX2 support
+    /// `x86_64` AVX2 support
     pub avx2: bool,
-    /// AArch64 NEON support
+    /// `AArch64` NEON support
     pub neon: bool,
 }
 
 /// Global SIMD support detection
 static SIMD_SUPPORT: OnceLock<SimdSupport> = OnceLock::new();
 
+#[cfg(target_arch = "x86_64")]
+const fn extracted_i16(value: i32) -> i16 {
+    let bytes = value.to_le_bytes();
+    i16::from_le_bytes([bytes[0], bytes[1]])
+}
+
 /// Initialize SIMD support detection
 pub fn init_simd_support() {
-    SIMD_SUPPORT.get_or_init(|| detect_simd_support());
+    SIMD_SUPPORT.get_or_init(detect_simd_support);
 }
 
 /// Internal function to detect SIMD support
@@ -53,11 +59,13 @@ fn detect_simd_support() -> SimdSupport {
 }
 
 /// Get SIMD support information
+#[must_use]
 pub fn get_simd_support() -> SimdSupport {
-    *SIMD_SUPPORT.get_or_init(|| detect_simd_support())
+    *SIMD_SUPPORT.get_or_init(detect_simd_support)
 }
 
 /// Check if any SIMD support is available
+#[must_use]
 pub fn has_simd_support() -> bool {
     let support = get_simd_support();
     support.sse2 || support.avx2 || support.neon
@@ -78,18 +86,26 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     unsafe {
         for chunk in chunks.by_ref() {
             // Load 8 samples at once
-            let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
+            let samples_vec = _mm_loadu_si128(chunk.as_ptr().cast::<__m128i>());
 
             // Process each sample - need to unroll or use different approach
             // _mm_extract_epi16 requires compile-time constant, so we unroll
-            output[out_idx] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);
-            output[out_idx + 1] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 1) as i16);
-            output[out_idx + 2] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 2) as i16);
-            output[out_idx + 3] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 3) as i16);
-            output[out_idx + 4] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 4) as i16);
-            output[out_idx + 5] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 5) as i16);
-            output[out_idx + 6] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 6) as i16);
-            output[out_idx + 7] = linear_to_mulaw_scalar(_mm_extract_epi16(samples_vec, 7) as i16);
+            output[out_idx] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 0)));
+            output[out_idx + 1] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 1)));
+            output[out_idx + 2] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 2)));
+            output[out_idx + 3] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 3)));
+            output[out_idx + 4] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 4)));
+            output[out_idx + 5] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 5)));
+            output[out_idx + 6] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 6)));
+            output[out_idx + 7] =
+                linear_to_mulaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 7)));
             out_idx += 8;
         }
     }
@@ -101,7 +117,7 @@ pub fn encode_mulaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     }
 }
 
-/// SIMD-optimized μ-law encoding (AArch64 NEON)
+/// SIMD-optimized μ-law encoding (`AArch64` NEON)
 #[cfg(target_arch = "aarch64")]
 pub fn encode_mulaw_simd_neon(samples: &[i16], output: &mut [u8]) {
     if !get_simd_support().neon {
@@ -134,18 +150,26 @@ pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     unsafe {
         for chunk in chunks.by_ref() {
             // Load 8 samples at once
-            let samples_vec = _mm_loadu_si128(chunk.as_ptr() as *const __m128i);
+            let samples_vec = _mm_loadu_si128(chunk.as_ptr().cast::<__m128i>());
 
             // Process each sample - need to unroll or use different approach
             // _mm_extract_epi16 requires compile-time constant, so we unroll
-            output[out_idx] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 0) as i16);
-            output[out_idx + 1] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 1) as i16);
-            output[out_idx + 2] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 2) as i16);
-            output[out_idx + 3] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 3) as i16);
-            output[out_idx + 4] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 4) as i16);
-            output[out_idx + 5] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 5) as i16);
-            output[out_idx + 6] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 6) as i16);
-            output[out_idx + 7] = linear_to_alaw_scalar(_mm_extract_epi16(samples_vec, 7) as i16);
+            output[out_idx] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 0)));
+            output[out_idx + 1] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 1)));
+            output[out_idx + 2] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 2)));
+            output[out_idx + 3] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 3)));
+            output[out_idx + 4] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 4)));
+            output[out_idx + 5] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 5)));
+            output[out_idx + 6] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 6)));
+            output[out_idx + 7] =
+                linear_to_alaw_scalar(extracted_i16(_mm_extract_epi16(samples_vec, 7)));
             out_idx += 8;
         }
     }
@@ -157,7 +181,7 @@ pub fn encode_alaw_simd_sse2(samples: &[i16], output: &mut [u8]) {
     }
 }
 
-/// SIMD-optimized A-law encoding (AArch64 NEON)
+/// SIMD-optimized A-law encoding (`AArch64` NEON)
 #[cfg(target_arch = "aarch64")]
 pub fn encode_alaw_simd_neon(samples: &[i16], output: &mut [u8]) {
     if !get_simd_support().neon {
@@ -214,7 +238,8 @@ pub fn encode_alaw_optimized(samples: &[i16], output: &mut [u8]) {
 }
 
 /// Scalar μ-law conversion (ITU-T G.711)
-pub fn linear_to_mulaw_scalar(sample: i16) -> u8 {
+#[must_use]
+pub const fn linear_to_mulaw_scalar(sample: i16) -> u8 {
     const CLIP: i16 = 32635;
     const BIAS: i16 = 0x84;
     const MULAW_MAX: u8 = 0x7F;
@@ -236,7 +261,7 @@ pub fn linear_to_mulaw_scalar(sample: i16) -> u8 {
         sample = CLIP;
     }
 
-    sample = sample + BIAS;
+    sample += BIAS;
 
     let exponent = if sample <= 0x1F {
         0
@@ -257,13 +282,14 @@ pub fn linear_to_mulaw_scalar(sample: i16) -> u8 {
     };
 
     let mantissa = (sample >> (exponent + 3)) & 0x0F;
-    let mulaw = ((exponent << 4) | mantissa) as u8;
+    let mulaw = ((exponent << 4) | mantissa).to_le_bytes()[0];
 
     (mulaw ^ MULAW_MAX) | sign
 }
 
 /// Scalar A-law conversion (ITU-T G.711)
-pub fn linear_to_alaw_scalar(sample: i16) -> u8 {
+#[must_use]
+pub const fn linear_to_alaw_scalar(sample: i16) -> u8 {
     const CLIP: i16 = 32635;
     const ALAW_MAX: u8 = 0x7F;
 
@@ -307,11 +333,13 @@ pub fn linear_to_alaw_scalar(sample: i16) -> u8 {
         ((exponent << 4) | mantissa) + 16
     };
 
-    ((alaw as u8) ^ ALAW_MAX) | sign
+    (alaw.to_le_bytes()[0] ^ ALAW_MAX) | sign
 }
 
 /// Scalar μ-law to linear conversion
-pub fn mulaw_to_linear_scalar(mulaw: u8) -> i16 {
+#[must_use]
+#[allow(clippy::cast_lossless)]
+pub const fn mulaw_to_linear_scalar(mulaw: u8) -> i16 {
     const BIAS: i16 = 0x84;
     const MULAW_MAX: u8 = 0x7F;
 
@@ -334,6 +362,7 @@ pub fn mulaw_to_linear_scalar(mulaw: u8) -> i16 {
 }
 
 /// Scalar A-law to linear conversion
+#[must_use]
 pub fn alaw_to_linear_scalar(alaw: u8) -> i16 {
     const ALAW_MAX: u8 = 0x7F;
 
@@ -342,22 +371,22 @@ pub fn alaw_to_linear_scalar(alaw: u8) -> i16 {
     let magnitude = alaw & 0x7F;
 
     let sample = if magnitude < 16 {
-        (magnitude as u16) << 4
+        u16::from(magnitude) << 4
     } else {
         let exponent = (magnitude >> 4) & 0x07;
         let mantissa = magnitude & 0x0F;
 
         // Prevent overflow by clamping shift amounts and using wider types
-        let exp_shift = ((exponent + 3) as u32).min(15);
-        let gain_shift = ((exponent + 2) as u32).min(15);
+        let exp_shift = u32::from(exponent + 3).min(15);
+        let gain_shift = u32::from(exponent + 2).min(15);
 
-        ((mantissa as u16) << exp_shift) + ((1u16) << gain_shift)
+        (u16::from(mantissa) << exp_shift) + (1_u16 << gain_shift)
     } + 8;
 
     if sign != 0 {
-        -(sample as i16)
+        -sample.cast_signed()
     } else {
-        sample as i16
+        sample.cast_signed()
     }
 }
 
@@ -392,7 +421,7 @@ mod tests {
 
         // G.711 is lossy, so we expect some difference
         let error = (original - decoded).abs();
-        assert!(error < 1000, "Error too large: {}", error);
+        assert!(error < 1000, "Error too large: {error}");
     }
 
     #[test]
@@ -407,10 +436,7 @@ mod tests {
         let error = (original - decoded).abs();
         assert!(
             error < 5000,
-            "Error too large: {} (original: {}, decoded: {})",
-            error,
-            original,
-            decoded
+            "Error too large: {error} (original: {original}, decoded: {decoded})"
         );
     }
 

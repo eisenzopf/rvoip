@@ -20,9 +20,8 @@ mod tests {
         let test_values = vec![0u8, 0x55, 0xD5, 0x2A, 0xFF];
 
         for &encoded in &test_values {
-            let decoded = alaw_expand(encoded);
-            // Should produce valid 16-bit samples
-            assert!(decoded >= i16::MIN && decoded <= i16::MAX);
+            // Decoding every selected input should complete without panicking.
+            let _decoded = alaw_expand(encoded);
         }
     }
 
@@ -32,9 +31,8 @@ mod tests {
         let test_values = vec![0u8, 0x7F, 0xFF, 0x80, 0x00];
 
         for &encoded in &test_values {
-            let decoded = ulaw_expand(encoded);
-            // Should produce valid 16-bit samples
-            assert!(decoded >= i16::MIN && decoded <= i16::MAX);
+            // Decoding every selected input should complete without panicking.
+            let _decoded = ulaw_expand(encoded);
         }
     }
 
@@ -42,12 +40,9 @@ mod tests {
     fn test_decoding_all_values() {
         // Test decoding all possible 8-bit values for both laws
         for encoded in 0u8..=255u8 {
-            let alaw_decoded = alaw_expand(encoded);
-            let mulaw_decoded = ulaw_expand(encoded);
-
-            // All decoded values should be valid 16-bit samples
-            assert!(alaw_decoded >= i16::MIN && alaw_decoded <= i16::MAX);
-            assert!(mulaw_decoded >= i16::MIN && mulaw_decoded <= i16::MAX);
+            // Both decoders must accept every possible encoded byte.
+            let _alaw_decoded = alaw_expand(encoded);
+            let _mulaw_decoded = ulaw_expand(encoded);
         }
     }
 
@@ -69,10 +64,6 @@ mod tests {
                 "Encoded 0x{:02x}: A-law -> {}, μ-law -> {}",
                 encoded, alaw_decoded, mulaw_decoded
             );
-
-            // Should be valid 16-bit range
-            assert!(alaw_decoded >= i16::MIN && alaw_decoded <= i16::MAX);
-            assert!(mulaw_decoded >= i16::MIN && mulaw_decoded <= i16::MAX);
         }
     }
 

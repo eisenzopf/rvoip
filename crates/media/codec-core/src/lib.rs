@@ -1,7 +1,7 @@
-//! # Codec-Core: Audio Codec Library for VoIP
+//! # `Codec-Core`: Audio Codec Library for `VoIP`
 //!
-//! A simple implementation of G.711 audio codec for VoIP applications.
-//! This library provides ITU-T compliant G.711 μ-law and A-law encoding/decoding
+//! A simple implementation of G.711 audio codec for `VoIP` applications.
+//! This library provides `ITU-T` compliant G.711 μ-law and A-law encoding/decoding
 //! with lookup table optimizations.
 //!
 //! ## Features
@@ -194,6 +194,7 @@ pub fn init() -> Result<()> {
 }
 
 /// Get library information
+#[must_use]
 pub fn info() -> LibraryInfo {
     LibraryInfo {
         version: VERSION,

@@ -1,6 +1,6 @@
 //! # Audio Codec Implementations
 //!
-//! This module contains G.711 audio codec implementation for VoIP applications.
+//! This module contains G.711 audio codec implementation for `VoIP` applications.
 //!
 //! ## Available Codecs
 //!
@@ -83,6 +83,11 @@ pub struct CodecFactory;
 
 impl CodecFactory {
     /// Create a codec instance from configuration
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configuration is invalid, the codec feature
+    /// is disabled, or codec construction fails.
     pub fn create(config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
         // Validate configuration first
         config.validate()?;
@@ -113,13 +118,17 @@ impl CodecFactory {
             }
 
             codec_type => Err(CodecError::feature_not_enabled(format!(
-                "Codec {} not enabled in build features",
-                codec_type.name()
+                "Codec {codec_type} not enabled in build features"
             ))),
         }
     }
 
     /// Create a codec by name
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `name` is unknown, its feature is disabled, or
+    /// the configuration is invalid.
     pub fn create_by_name(name: &str, config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
         let codec_type = match normalize_codec_name(name).as_str() {
             "PCMU" => CodecType::G711Pcmu,
@@ -140,6 +149,11 @@ impl CodecFactory {
     }
 
     /// Create a codec by RTP payload type
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload type is unknown, its codec feature is
+    /// disabled, or the configuration is invalid.
     pub fn create_by_payload_type(
         payload_type: u8,
         config: CodecConfig,
@@ -149,7 +163,7 @@ impl CodecFactory {
             8 => CodecType::G711Pcma,
             18 => CodecType::G729,
 
-            _ => return Err(CodecError::unsupported_codec(format!("PT{}", payload_type))),
+            _ => return Err(CodecError::unsupported_codec(format!("PT{payload_type}"))),
         };
 
         let config = CodecConfig {
@@ -161,6 +175,7 @@ impl CodecFactory {
     }
 
     /// Get all supported codec names
+    #[must_use]
     pub fn supported_codecs() -> Vec<&'static str> {
         vec![
             #[cfg(feature = "g711")]
@@ -179,6 +194,7 @@ impl CodecFactory {
     }
 
     /// Check if a codec is supported
+    #[must_use]
     pub fn is_supported(name: &str) -> bool {
         let normalized = normalize_codec_name(name);
         match normalized.as_str() {
@@ -204,6 +220,7 @@ pub struct CodecRegistry {
 
 impl CodecRegistry {
     /// Create a new empty registry
+    #[must_use]
     pub fn new() -> Self {
         Self {
             codecs: HashMap::new(),
@@ -216,8 +233,9 @@ impl CodecRegistry {
     }
 
     /// Get a codec by name
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&dyn AudioCodec> {
-        self.codecs.get(name).map(|codec| codec.as_ref())
+        self.codecs.get(name).map(std::convert::AsRef::as_ref)
     }
 
     /// Get a mutable codec by name
@@ -231,16 +249,19 @@ impl CodecRegistry {
     }
 
     /// List all registered codec names
+    #[must_use]
     pub fn list_codecs(&self) -> Vec<&String> {
         self.codecs.keys().collect()
     }
 
     /// Get the count of registered codecs
+    #[must_use]
     pub fn len(&self) -> usize {
         self.codecs.len()
     }
 
     /// Check if the registry is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.codecs.is_empty()
     }
@@ -268,6 +289,7 @@ pub struct CodecCapabilities {
 
 impl CodecCapabilities {
     /// Get capabilities for all supported codecs
+    #[must_use]
     pub fn get_all() -> Self {
         // Both values are populated by feature-gated blocks. In a deliberately
         // codec-free build they remain empty and therefore need no mutation.
@@ -370,11 +392,13 @@ impl CodecCapabilities {
     }
 
     /// Check if a codec type is supported
+    #[must_use]
     pub fn is_supported(&self, codec_type: CodecType) -> bool {
         self.codec_types.contains(&codec_type)
     }
 
     /// Get information for a specific codec type
+    #[must_use]
     pub fn get_info(&self, codec_type: CodecType) -> Option<&CodecInfo> {
         self.codec_info.get(&codec_type)
     }

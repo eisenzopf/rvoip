@@ -158,7 +158,8 @@ impl CodecError {
     }
 
     /// Check if this error is recoverable
-    pub fn is_recoverable(&self) -> bool {
+    #[must_use]
+    pub const fn is_recoverable(&self) -> bool {
         match self {
             // Configuration errors are not recoverable
             Self::InvalidConfig { .. }
@@ -169,7 +170,9 @@ impl CodecError {
             | Self::InvalidBitrate { .. }
             | Self::FeatureNotEnabled { .. }
             | Self::CodecNotFound { .. }
-            | Self::InternalError { .. } => false,
+            | Self::InternalError { .. }
+            | Self::InitializationFailed { .. }
+            | Self::ResetFailed { .. } => false,
 
             // Operational errors may be recoverable
             Self::InvalidFrameSize { .. }
@@ -182,14 +185,12 @@ impl CodecError {
             | Self::MathError { .. }
             | Self::IoError { .. }
             | Self::ExternalLibraryError { .. } => true,
-
-            // Reset and initialization errors depend on the specific cause
-            Self::InitializationFailed { .. } | Self::ResetFailed { .. } => false,
         }
     }
 
     /// Get the error category
-    pub fn category(&self) -> ErrorCategory {
+    #[must_use]
+    pub const fn category(&self) -> ErrorCategory {
         match self {
             Self::InvalidConfig { .. }
             | Self::UnsupportedCodec { .. }
@@ -351,7 +352,7 @@ mod tests {
             expected: 160,
             actual: 80,
         };
-        let display = format!("{}", err);
+        let display = format!("{err}");
         assert!(display.contains("expected 160"));
         assert!(display.contains("got 80"));
     }

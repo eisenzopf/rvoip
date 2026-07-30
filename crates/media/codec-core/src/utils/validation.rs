@@ -4,6 +4,10 @@ use crate::error::{CodecError, Result};
 use crate::types::{CodecType, SampleRate};
 
 /// Validate audio samples for codec processing
+///
+/// # Errors
+///
+/// Returns an error when `samples` is empty.
 pub fn validate_samples(samples: &[i16]) -> Result<()> {
     if samples.is_empty() {
         return Err(CodecError::invalid_format("Input samples cannot be empty"));
@@ -14,6 +18,10 @@ pub fn validate_samples(samples: &[i16]) -> Result<()> {
 }
 
 /// Validate encoded data for codec processing
+///
+/// # Errors
+///
+/// Returns an error when `data` is empty or exceeds the supported size limit.
 pub fn validate_encoded_data(data: &[u8]) -> Result<()> {
     if data.is_empty() {
         return Err(CodecError::invalid_format("Encoded data cannot be empty"));
@@ -31,6 +39,10 @@ pub fn validate_encoded_data(data: &[u8]) -> Result<()> {
 }
 
 /// Validate frame size for a specific codec
+///
+/// # Errors
+///
+/// Returns an error when `frame_size` is unsupported by `codec_type`.
 pub fn validate_frame_size(codec_type: CodecType, frame_size: usize) -> Result<()> {
     let expected_sizes = match codec_type {
         CodecType::G711Pcmu | CodecType::G711Pcma => {
@@ -59,6 +71,10 @@ pub fn validate_frame_size(codec_type: CodecType, frame_size: usize) -> Result<(
 }
 
 /// Validate sample rate for a specific codec
+///
+/// # Errors
+///
+/// Returns an error when `sample_rate` is unsupported by `codec_type`.
 pub fn validate_sample_rate(codec_type: CodecType, sample_rate: SampleRate) -> Result<()> {
     let supported_rates = codec_type.supported_sample_rates();
     let rate_hz = sample_rate.hz();
@@ -74,6 +90,10 @@ pub fn validate_sample_rate(codec_type: CodecType, sample_rate: SampleRate) -> R
 }
 
 /// Validate channel count for a specific codec
+///
+/// # Errors
+///
+/// Returns an error when `channels` is unsupported by `codec_type`.
 pub fn validate_channels(codec_type: CodecType, channels: u8) -> Result<()> {
     let supported_channels = codec_type.supported_channels();
 
@@ -88,7 +108,11 @@ pub fn validate_channels(codec_type: CodecType, channels: u8) -> Result<()> {
 }
 
 /// Validate bitrate for a specific codec
-pub fn validate_bitrate(codec_type: CodecType, bitrate: u32) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error when `bitrate` is outside the codec's supported range.
+pub const fn validate_bitrate(codec_type: CodecType, bitrate: u32) -> Result<()> {
     let (min_bitrate, max_bitrate) = codec_type.bitrate_range();
 
     if bitrate < min_bitrate || bitrate > max_bitrate {
@@ -103,6 +127,16 @@ pub fn validate_bitrate(codec_type: CodecType, bitrate: u32) -> Result<()> {
 }
 
 /// Validate buffer sizes for encoding/decoding operations
+///
+/// # Errors
+///
+/// Returns an error when `output_size` is smaller than the size implied by
+/// `input_size` and `expected_ratio`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 pub fn validate_buffer_sizes(
     input_size: usize,
     output_size: usize,
@@ -121,8 +155,13 @@ pub fn validate_buffer_sizes(
 }
 
 /// Validate that frame samples are properly aligned for multi-channel audio
+///
+/// # Errors
+///
+/// Returns an error when the sample count is not divisible by `channels`.
+#[allow(clippy::manual_is_multiple_of)]
 pub fn validate_channel_alignment(samples: &[i16], channels: u8) -> Result<()> {
-    if samples.len() % channels as usize != 0 {
+    if samples.len() % usize::from(channels) != 0 {
         return Err(CodecError::invalid_format(format!(
             "Sample count {} not divisible by channel count {}",
             samples.len(),
@@ -134,6 +173,10 @@ pub fn validate_channel_alignment(samples: &[i16], channels: u8) -> Result<()> {
 }
 
 /// Validate G.711 specific parameters
+///
+/// # Errors
+///
+/// Returns an error when the frame is empty or has the wrong sample count.
 pub fn validate_g711_frame(samples: &[i16], expected_frame_size: usize) -> Result<()> {
     validate_samples(samples)?;
 
@@ -148,6 +191,11 @@ pub fn validate_g711_frame(samples: &[i16], expected_frame_size: usize) -> Resul
 }
 
 /// Validate G.722 specific parameters
+///
+/// # Errors
+///
+/// Returns an error when the frame is empty, has the wrong sample count, or
+/// contains an odd number of samples.
 pub fn validate_g722_frame(samples: &[i16], expected_frame_size: usize) -> Result<()> {
     validate_samples(samples)?;
 
@@ -159,7 +207,7 @@ pub fn validate_g722_frame(samples: &[i16], expected_frame_size: usize) -> Resul
     }
 
     // G.722 requires even number of samples for QMF processing
-    if samples.len() % 2 != 0 {
+    if !samples.len().is_multiple_of(2) {
         return Err(CodecError::invalid_format(
             "G.722 requires even number of samples for QMF processing",
         ));
@@ -169,6 +217,10 @@ pub fn validate_g722_frame(samples: &[i16], expected_frame_size: usize) -> Resul
 }
 
 /// Validate G.729 specific parameters
+///
+/// # Errors
+///
+/// Returns an error when the frame is empty or does not contain 80 samples.
 pub fn validate_g729_frame(samples: &[i16]) -> Result<()> {
     validate_samples(samples)?;
 
@@ -184,6 +236,11 @@ pub fn validate_g729_frame(samples: &[i16]) -> Result<()> {
 }
 
 /// Validate Opus specific parameters
+///
+/// # Errors
+///
+/// Returns an error when the frame is empty, its sample rate is unsupported,
+/// or its sample count is invalid for the selected rate.
 pub fn validate_opus_frame(samples: &[i16], sample_rate: SampleRate) -> Result<()> {
     validate_samples(samples)?;
 
@@ -201,7 +258,7 @@ pub fn validate_opus_frame(samples: &[i16], sample_rate: SampleRate) -> Result<(
             return Err(CodecError::InvalidSampleRate {
                 rate: rate_hz,
                 supported: vec![8000, 12000, 16000, 24000, 48000],
-            })
+            });
         }
     };
 
@@ -216,6 +273,16 @@ pub fn validate_opus_frame(samples: &[i16], sample_rate: SampleRate) -> Result<(
 }
 
 /// Validate that two buffers have compatible sizes for processing
+///
+/// # Errors
+///
+/// Returns an error when `output` is smaller than the size implied by the
+/// input length and `compression_ratio`.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 pub fn validate_buffer_compatibility(
     input: &[i16],
     output: &[u8],
@@ -234,11 +301,16 @@ pub fn validate_buffer_compatibility(
 }
 
 /// Validate memory alignment for SIMD operations
+///
+/// # Errors
+///
+/// This check currently reports misalignment through tracing and always
+/// succeeds; the result type is retained for API compatibility.
 pub fn validate_simd_alignment(data: &[i16]) -> Result<()> {
     let ptr = data.as_ptr() as usize;
 
     // Check for 16-byte alignment (required for SSE)
-    if ptr % 16 != 0 {
+    if !ptr.is_multiple_of(16) {
         tracing::debug!("Data not aligned for SIMD operations, falling back to scalar");
     }
 
@@ -308,12 +380,12 @@ mod tests {
     #[test]
     fn test_validate_bitrate() {
         // G.711 has fixed bitrate
-        assert!(validate_bitrate(CodecType::G711Pcmu, 64000).is_ok());
-        assert!(validate_bitrate(CodecType::G711Pcmu, 128000).is_err());
+        assert!(validate_bitrate(CodecType::G711Pcmu, 64_000).is_ok());
+        assert!(validate_bitrate(CodecType::G711Pcmu, 128_000).is_err());
 
         // Opus has variable bitrate
-        assert!(validate_bitrate(CodecType::Opus, 32000).is_ok());
-        assert!(validate_bitrate(CodecType::Opus, 600000).is_err());
+        assert!(validate_bitrate(CodecType::Opus, 32_000).is_ok());
+        assert!(validate_bitrate(CodecType::Opus, 600_000).is_err());
     }
 
     #[test]
