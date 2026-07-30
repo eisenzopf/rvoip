@@ -352,21 +352,29 @@ fn payload_codec_available(payload_type: u8) -> bool {
 }
 
 fn sdp_payload_codec_available(session: &SdpSession, payload_type: u8) -> bool {
-    let mapping_name =
-        audio_rtpmap(session, payload_type).map(|mapping| mapping.encoding_name.as_str());
+    let mapping = audio_rtpmap(session, payload_type);
+    let mapping_matches = |name: &str, rate: u32, channels: &[u8]| {
+        mapping.is_some_and(|mapping| {
+            let mapped_channels = mapping
+                .encoding_params
+                .as_deref()
+                .unwrap_or("1")
+                .parse::<u8>()
+                .ok();
+            mapping.encoding_name.eq_ignore_ascii_case(name)
+                && mapping.clock_rate == rate
+                && mapped_channels.is_some_and(|value| channels.contains(&value))
+        })
+    };
     match payload_type {
-        0 => mapping_name.is_none_or(|name| name.eq_ignore_ascii_case("PCMU")),
-        8 => mapping_name.is_none_or(|name| name.eq_ignore_ascii_case("PCMA")),
-        13 => mapping_name.is_none_or(|name| name.eq_ignore_ascii_case("CN")),
-        18 => {
-            cfg!(feature = "g729")
-                && mapping_name.is_none_or(|name| name.eq_ignore_ascii_case("G729"))
-        }
-        101 => mapping_name.is_none_or(|name| name.eq_ignore_ascii_case("telephone-event")),
-        96..=127 => {
-            cfg!(feature = "opus")
-                && mapping_name.is_some_and(|name| name.eq_ignore_ascii_case("opus"))
-        }
+        0 => mapping.is_none() || mapping_matches("PCMU", 8_000, &[1]),
+        8 => mapping.is_none() || mapping_matches("PCMA", 8_000, &[1]),
+        13 => mapping.is_none() || mapping_matches("CN", 8_000, &[1]),
+        18 => cfg!(feature = "g729") && (mapping.is_none() || mapping_matches("G729", 8_000, &[1])),
+        // Telephone-event uses a dynamic PT in this stack and therefore
+        // always requires an explicit RFC 4733 mapping.
+        101 => mapping_matches("telephone-event", 8_000, &[1]),
+        96..=127 => cfg!(feature = "opus") && mapping_matches("opus", 48_000, &[1, 2]),
         _ => false,
     }
 }
@@ -475,6 +483,7 @@ fn validate_uac_audio_answer(
         .find(|media| media.media.eq_ignore_ascii_case("audio"))
         .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-audio"))?;
 
+    let mut primary_payloads = Vec::new();
     for format in &answered_audio.formats {
         if !offered_audio
             .formats
@@ -489,9 +498,25 @@ fn validate_uac_audio_answer(
         if !sdp_payload_codec_available(answer, payload_type) {
             return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
         }
+        if !matches!(payload_type, 13 | 101) {
+            primary_payloads.push(payload_type);
+        }
     }
-    let payload_type = select_primary_audio_payload(&answered_audio.formats)
-        .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-primary-payload"))?;
+    let payload_type = match primary_payloads.as_slice() {
+        [payload_type] => *payload_type,
+        [] => {
+            return Err(bounded_sdp_failure(
+                "remote-answer",
+                "missing-primary-payload",
+            ))
+        }
+        _ => {
+            return Err(bounded_sdp_failure(
+                "remote-answer",
+                "multiple-primary-payloads",
+            ))
+        }
+    };
     if !sdp_payload_codec_available(answer, payload_type) {
         return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
     }
@@ -1524,7 +1549,8 @@ impl MediaAdapter {
         let result = self
             .negotiate_sdp_as_uac_lane_owned(&mut session, remote_sdp)
             .await;
-        let security_observation = (session.media_security != previous_security)
+        let security_changed = result.is_ok() && session.media_security != previous_security;
+        let security_observation = security_changed
             .then(|| {
                 session
                     .lifecycle_handle
@@ -1532,7 +1558,7 @@ impl MediaAdapter {
                     .zip(session.media_security.clone())
             })
             .flatten();
-        if session.media_security != previous_security {
+        if security_changed {
             // The public compatibility commit acquires the same non-reentrant
             // lane and revision-checks this snapshot. Release our exact guard
             // first; any intervening signaling event makes the commit fail
@@ -1732,12 +1758,13 @@ impl MediaAdapter {
         let result = self
             .negotiate_sdp_as_uas_lane_owned(&mut session, remote_sdp)
             .await;
-        let state_changed = previous_origin
-            != (
-                session.sdp_origin_session_id.clone(),
-                session.sdp_origin_version,
-            )
-            || session.media_security != previous_security;
+        let state_changed = result.is_ok()
+            && (previous_origin
+                != (
+                    session.sdp_origin_session_id.clone(),
+                    session.sdp_origin_version,
+                )
+                || session.media_security != previous_security);
         let security_observation = (session.media_security != previous_security)
             .then(|| {
                 session
@@ -1788,14 +1815,13 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, srtp_pair, reject_with_port_zero) =
+        let (answer_attr, pending_srtp_pair, reject_with_port_zero) =
             if !offered_crypto.is_empty() && self.offer_srtp {
                 // Both sides want SRTP — negotiate.
                 let answerer = SrtpNegotiator::new_answerer();
                 let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
-                self.negotiated_srtp.insert(session_id.clone(), pair);
                 tracing::info!(
-                    "SDES offer accepted for session {}: tag {} suite {:?}",
+                    "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
                     session_id.0,
                     chosen.tag,
                     chosen.suite
@@ -1806,7 +1832,7 @@ impl MediaAdapter {
                         session_id.0, chosen.suite
                     ));
                 }
-                (Some(chosen), true, false)
+                (Some(chosen), Some(pair), false)
             } else if offered_crypto.is_empty() && self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
                     "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
@@ -1827,11 +1853,10 @@ impl MediaAdapter {
                         session_id.0
                     ));
                 }
-                (None, false, true)
+                (None, None, true)
             } else {
-                (None, false, false)
+                (None, None, false)
             };
-        let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
 
         // Port-zero rejection short-circuit: build a minimal RFC 3264
         // §6 declined m-line answer and return without setting up any
@@ -1913,7 +1938,7 @@ impl MediaAdapter {
             )
             .await?;
 
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
+            let negotiated_suite = if let Some(pair) = pending_srtp_pair {
                 let suite = pair.suite;
                 self.controller
                     .install_srtp_contexts(dialog_id, pair.send_ctx, pair.recv_ctx)
@@ -1929,14 +1954,16 @@ impl MediaAdapter {
                     session_id.0,
                     suite
                 );
-                Self::record_media_security_negotiated_lane_owned(session, suite, true);
                 if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uas suite={:?}",
                         session_id.0, suite
                     ));
                 }
-            }
+                Some(suite)
+            } else {
+                None
+            };
 
             self.controller
                 .establish_media_flow(dialog_id, remote_addr)
@@ -1955,8 +1982,11 @@ impl MediaAdapter {
                     "media resource changed during UAS negotiation".to_string(),
                 ));
             }
+            if let Some(suite) = negotiated_suite {
+                Self::record_media_security_negotiated_lane_owned(session, suite, true);
+            }
         } else if signaling_only_port.is_some() {
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
+            if let Some(pair) = pending_srtp_pair {
                 Self::record_media_security_negotiated_lane_owned(session, pair.suite, false);
             }
         }
@@ -1966,11 +1996,9 @@ impl MediaAdapter {
         // Sprint 3.5 — `negotiate_sdp_as_uas` now consumes the
         // generic RFC 3264 §6 matcher in
         // `rvoip_sip_dialog::sdp::match_offer`. The strict path
-        // (default) intersects offered formats with our supported
-        // set in offerer-preference order; the permissive path
-        // (`Config::strict_codec_matching = false`) preserves the
-        // pre-Sprint-3.5 "always answer with full set" behaviour
-        // for deployments that depend on it.
+        // (default) additionally applies transport policy; both modes
+        // intersect the offer with our implemented codecs and retain one
+        // primary codec plus auxiliary CN/telephone-event payloads.
         let (origin_session_id, origin_version) = advance_sdp_origin(session);
         let origin_version = origin_version.to_string();
         // Sprint 3 A6 — same public-address override as the offer
@@ -2015,9 +2043,8 @@ impl MediaAdapter {
             .time("0", "0")
             .media_audio(advertised_port, answer_transport)
             .formats(&formats_str);
-        // Emit rtpmap/fmtp ONLY for the formats we kept. In the
-        // permissive branch this is the full set; in the strict
-        // branch the matcher's intersection has already filtered.
+        // Emit rtpmap/fmtp ONLY for the one primary and any auxiliary
+        // formats retained by the validated intersection.
         // NEXT_STEPS C2 — routed through `rtpmap_for_pt` so adding a
         // new codec only requires extending the helper.
         for fmt in &formats {
@@ -4004,32 +4031,65 @@ pub(crate) fn compute_answer_formats(
         }
     }
 
-    if !strict {
-        // Permissive — answer with our full set regardless. Matches
-        // the pre-Sprint-3.5 shape.
-        return Ok(supported);
+    let candidates = if strict {
+        let caps = rvoip_sip_dialog::sdp::AnswerCapabilities {
+            supported_formats: supported.clone(),
+            accept_srtp: offer_srtp,
+            require_srtp: srtp_required,
+        };
+        let matched = rvoip_sip_dialog::sdp::match_offer(offer, &caps)
+            .map_err(|_| bounded_sdp_failure("format-match", "policy"))?;
+        let line = matched
+            .media_lines
+            .iter()
+            .find(|line| line.media == "audio")
+            .ok_or_else(|| {
+                SessionError::SDPNegotiationFailed("matcher returned no audio media line".into())
+            })?;
+        if !line.accepted {
+            return Err(SessionError::SDPNegotiationFailed(
+                "no codec overlap with offer".into(),
+            ));
+        }
+        line.negotiated_formats.clone()
+    } else {
+        // Even compatibility mode must obey RFC 3264: an answer cannot add
+        // payloads the offer did not contain. It only bypasses the stricter
+        // transport-policy matcher.
+        let audio = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+            .ok_or_else(|| bounded_sdp_failure("format-match", "missing-audio"))?;
+        audio
+            .formats
+            .iter()
+            .filter(|format| supported.contains(format))
+            .cloned()
+            .collect()
+    };
+
+    let mut primary = None;
+    let mut auxiliary = Vec::new();
+    for format in candidates {
+        let payload_type = format
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("format-match", "invalid-payload"))?;
+        if !sdp_payload_codec_available(offer, payload_type) {
+            continue;
+        }
+        if matches!(payload_type, 13 | 101) {
+            auxiliary.push(format);
+        } else if primary.is_none() {
+            primary = Some(format);
+        }
     }
 
-    let caps = rvoip_sip_dialog::sdp::AnswerCapabilities {
-        supported_formats: supported,
-        accept_srtp: offer_srtp,
-        require_srtp: srtp_required,
-    };
-    let m = rvoip_sip_dialog::sdp::match_offer(offer, &caps)
-        .map_err(|_| bounded_sdp_failure("format-match", "policy"))?;
-    let line = m
-        .media_lines
-        .iter()
-        .find(|l| l.media == "audio")
-        .ok_or_else(|| {
-            SessionError::SDPNegotiationFailed("matcher returned no audio media line".into())
-        })?;
-    if !line.accepted {
-        return Err(SessionError::SDPNegotiationFailed(
-            "no codec overlap with offer".into(),
-        ));
-    }
-    Ok(line.negotiated_formats.clone())
+    let primary = primary.ok_or_else(|| bounded_sdp_failure("format-match", "no-primary"))?;
+    let mut answer = Vec::with_capacity(1 + auxiliary.len());
+    answer.push(primary);
+    answer.extend(auxiliary);
+    Ok(answer)
 }
 
 #[cfg(test)]
@@ -4752,10 +4812,10 @@ a=fmtp:101 0-15\r\n";
         );
     }
 
-    /// Sprint 3.5 — permissive mode preserves the legacy
-    /// pre-Sprint-3.5 "always full set" answer shape.
+    /// Compatibility mode still obeys RFC 3264 and cannot add an unoffered
+    /// payload to the answer.
     #[test]
-    fn permissive_mode_answers_with_full_set() {
+    fn compatibility_mode_still_answers_with_the_offered_intersection() {
         let offer_sdp = SdpBuilder::new("Session")
             .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")
@@ -4779,12 +4839,161 @@ a=fmtp:101 0-15\r\n";
             false,        /*srtp_required*/
             false,
         )
-        .expect("permissive mode never errors on overlap");
+        .expect("compatibility mode accepts the offered overlap");
         assert_eq!(
             formats,
-            vec!["0".to_string(), "8".to_string(), "101".to_string()],
-            "permissive answer keeps the full legacy set"
+            vec!["0".to_string(), "101".to_string()],
+            "an answer must not add unoffered PCMA"
         );
+    }
+
+    #[test]
+    fn uas_selects_one_primary_codec_and_keeps_auxiliary_payloads() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["8", "0", "13", "101"])
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("13", "CN/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        let formats = compute_answer_formats(&offer, &[0, 8, 13, 101], true, false, false)
+            .expect("valid mixed offer");
+        assert_eq!(formats, ["8", "13", "101"]);
+    }
+
+    #[test]
+    fn uas_skips_invalid_mappings_and_never_answers_unmapped_dynamic_payloads() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["96", "0", "101"])
+            .rtpmap("0", "PCMU/16000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+
+        assert!(compute_answer_formats(&offer, &[0, 8, 111, 101], true, false, false).is_err());
+    }
+
+    #[test]
+    fn uac_answer_requires_one_primary_and_valid_dynamic_mappings() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let multiple_primary = offer.clone();
+        assert!(validate_uac_audio_answer(&offer, &multiple_primary, true).is_err());
+
+        let missing_dynamic_map = SdpBuilder::new("Session")
+            .origin("-", "2", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["0", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn uas_answer_and_runtime_choose_the_same_single_primary_codec() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_offered_codecs(vec![0, 8, 101]);
+        let mut session = SessionState::new(SessionId("single-primary".into()), Role::UAS);
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(18_000, "RTP/AVP")
+            .formats(&["8", "0", "101"])
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap()
+            .to_string();
+
+        let (answer, config) = adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut session, &offer)
+            .await
+            .unwrap();
+        assert!(answer.contains("m=audio 9 RTP/AVP 8 101\r\n"));
+        assert!(!answer.contains("a=rtpmap:0 "));
+        assert_eq!(config.codec, "PCMA");
+        assert_eq!(config.payload_type, 8);
+    }
+
+    #[tokio::test]
+    async fn invalid_uas_codec_offer_does_not_commit_provisional_srtp_state() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let (_, attrs) =
+            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).expect("offerer keys");
+        let mut media = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(18_000, "RTP/SAVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/16000");
+        for attr in attrs {
+            media = media.crypto_attribute(attr);
+        }
+        let offer = media.done().build().unwrap().to_string();
+        let session_id = SessionId("srtp-codec-rollback".into());
+        let mut session = SessionState::new(session_id.clone(), Role::UAS);
+
+        assert!(adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut session, &offer)
+            .await
+            .is_err());
+        assert!(session.media_security.is_none());
+        assert!(!adapter.negotiated_srtp.contains_key(&session_id));
     }
 
     /// Sprint 3.5 — strict mode + zero overlap returns
