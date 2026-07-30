@@ -244,18 +244,7 @@ pub struct ProtectedRtpPacket {
 impl ProtectedRtpPacket {
     /// Serialize the protected packet with its authentication tag
     pub fn serialize(&self) -> Result<bytes::Bytes, crate::Error> {
-        let packet_bytes = self.packet.serialize()?;
-
-        if let Some(tag) = &self.auth_tag {
-            // Combine packet and authentication tag
-            let mut buffer = bytes::BytesMut::with_capacity(packet_bytes.len() + tag.len());
-            buffer.extend_from_slice(&packet_bytes);
-            buffer.extend_from_slice(tag);
-            Ok(buffer.freeze())
-        } else {
-            // No authentication tag
-            Ok(packet_bytes)
-        }
+        self.serialize_into(&mut bytes::BytesMut::new())
     }
 
     /// Serialize the protected packet into a caller-owned scratch buffer.
@@ -268,6 +257,26 @@ impl ProtectedRtpPacket {
 
         self.packet.header.serialize(buffer)?;
         buffer.extend_from_slice(&self.packet.payload);
+        if !self.packet.header.padding && self.packet.padding_size != 0 {
+            return Err(crate::Error::InvalidParameter(format!(
+                "RTP padding flag ({}) does not match padding length ({})",
+                self.packet.header.padding, self.packet.padding_size
+            )));
+        }
+        if self.packet.header.padding
+            && self.packet.padding_size == 0
+            && self.packet.payload.is_empty()
+        {
+            return Err(crate::Error::InvalidParameter(
+                "protected RTP padding flag is set but the encrypted payload is empty".to_string(),
+            ));
+        }
+        if self.packet.padding_size != 0 {
+            for _ in 1..self.packet.padding_size {
+                buffer.extend_from_slice(&[0]);
+            }
+            buffer.extend_from_slice(&[self.packet.padding_size]);
+        }
         if let Some(tag) = &self.auth_tag {
             buffer.extend_from_slice(tag);
         }
@@ -417,6 +426,7 @@ impl SrtpContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn null_profiles_are_retained_identities_but_cannot_construct_contexts() {
@@ -529,6 +539,37 @@ mod tests {
                 .unwrap();
             assert_eq!(after_failure, from_fresh);
         }
+    }
+
+    #[test]
+    fn rtp_padding_is_encrypted_and_restored() {
+        let key = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]);
+        let mut sender = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap();
+        let mut receiver = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap();
+        let mut original = crate::packet::RtpPacket::new_with_payload(
+            96,
+            42,
+            123_456,
+            0x4567_89ab,
+            Bytes::from_static(b"padded media"),
+        );
+        original.set_padding(4);
+
+        let plaintext = original.serialize().unwrap();
+        let header_size = original.header.size();
+        let protected = sender.protect(&original).unwrap();
+        let wire = protected.serialize().unwrap();
+        let ciphertext_end = wire.len() - SRTP_AES128_CM_SHA1_80.tag_length;
+
+        assert_ne!(
+            &wire[header_size..ciphertext_end],
+            &plaintext[header_size..],
+            "RTP padding must be encrypted together with the media payload"
+        );
+
+        let restored = receiver.unprotect(&wire).unwrap();
+        assert_eq!(restored, original);
+        assert_eq!(restored.serialize().unwrap(), plaintext);
     }
 }
 

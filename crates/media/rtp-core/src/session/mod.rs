@@ -64,6 +64,26 @@ pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 /// [`RtpSession::receive_packet`].
 pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
 
+/// Build the RTCP loss fields from the sequence-aware stream tracker.
+///
+/// `packets_received` includes duplicates and reordered arrivals, so deriving
+/// loss from that counter can hide a real sequence gap. The stream's bounded
+/// extended-sequence tracker is the source of truth for cumulative loss.
+fn rtcp_loss_fields(stats: &RtpStreamStats) -> (u8, u32) {
+    let expected = stats
+        .highest_seq
+        .saturating_sub(stats.first_seq)
+        .saturating_add(1);
+    if expected == 0 {
+        return (0, 0);
+    }
+
+    let lost_in_range = stats.packets_lost.min(u64::from(expected));
+    let fraction = ((lost_in_range * 256) / u64::from(expected)).min(255) as u8;
+    let cumulative = stats.packets_lost.min(0x00ff_ffff) as u32;
+    (fraction, cumulative)
+}
+
 /// RTP session queue sizing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RtpSessionBufferConfig {
@@ -1530,12 +1550,10 @@ impl RtpSession {
             let mut block = crate::packet::rtcp::RtcpReportBlock::new(ssrc);
 
             // Set statistics
-            let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-            let (fraction_lost, cumulative_lost) =
-                block.calculate_packet_loss(expected_packets, stream_stats.received);
+            let (fraction_lost, cumulative_lost) = rtcp_loss_fields(&stream_stats);
 
             block.fraction_lost = fraction_lost;
-            block.cumulative_lost = cumulative_lost as u32;
+            block.cumulative_lost = cumulative_lost;
             block.highest_seq = stream_stats.highest_seq;
             block.jitter = stream_stats.jitter;
 
@@ -1604,12 +1622,10 @@ impl RtpSession {
             let mut block = crate::packet::rtcp::RtcpReportBlock::new(ssrc);
 
             // Set statistics
-            let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-            let (fraction_lost, cumulative_lost) =
-                block.calculate_packet_loss(expected_packets, stream_stats.received);
+            let (fraction_lost, cumulative_lost) = rtcp_loss_fields(&stream_stats);
 
             block.fraction_lost = fraction_lost;
-            block.cumulative_lost = cumulative_lost as u32;
+            block.cumulative_lost = cumulative_lost;
             block.highest_seq = stream_stats.highest_seq;
             block.jitter = stream_stats.jitter;
 
@@ -1745,6 +1761,24 @@ impl RtpSessionSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rtcp_loss_uses_sequence_tracker_not_duplicate_inclusive_receive_count() {
+        let stats = RtpStreamStats {
+            first_seq: 65_535,
+            highest_seq: 65_537,
+            packets_received: 3,
+            received: 3,
+            packets_lost: 1,
+            ..RtpStreamStats::default()
+        };
+
+        // The three receive calls include a duplicate, so comparing the raw
+        // receive count with the three expected sequence positions would
+        // incorrectly report no loss. The tracker still has one missing
+        // sequence across the wrap.
+        assert_eq!(rtcp_loss_fields(&stats), (85, 1));
+    }
 
     #[test]
     fn default_session_buffer_config_preserves_channel_capacities() {
