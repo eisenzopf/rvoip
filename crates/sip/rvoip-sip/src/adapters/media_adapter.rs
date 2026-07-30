@@ -2811,15 +2811,15 @@ impl MediaAdapter {
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
         let session_id = session.session_id.clone();
-        // Resolve the exact managed resource once and prime the cached session
-        // info. Both SRTP and plaintext paths share this canonical owner.
-        let exact_media = self.lane_owned_media(session)?;
-        let dialog_id = &exact_media.dialog_id;
         if self.signaling_only_local_port().is_some() {
             return self
                 .generate_signaling_only_sdp_offer_lane_owned(session, direction)
                 .await;
         }
+        // Resolve the exact managed resource once and prime the cached session
+        // info. Both SRTP and plaintext paths share this canonical owner.
+        let exact_media = self.lane_owned_media(session)?;
+        let dialog_id = &exact_media.dialog_id;
         let info = self
             .controller
             .get_session_info(dialog_id)
