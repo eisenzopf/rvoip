@@ -75,7 +75,7 @@ rvoip_driver() {
         -- "$@"
 }
 
-for profile in sha1-80 sha1-32; do
+for profile in sha1-80 sha1-32 aes256-sha1-80 aes256-sha1-32; do
     rvoip_srtp="$(rvoip_driver "${profile}" protect-rtp)"
     [[ "$("${LIBSRTP_DRIVER}" "${profile}" unprotect-rtp "${rvoip_srtp}")" == "ok" ]]
 
@@ -99,4 +99,4 @@ for profile in sha1-80 sha1-32; do
 done
 
 echo "SRTP/SRTCP interoperability passed against libSRTP ${LIBSRTP_VERSION} (${LIBSRTP_COMMIT})."
-echo "Verified rvoip -> libSRTP and libSRTP -> rvoip for RTP, RTCP, and RTP rollover with SHA1-80 and SHA1-32."
+echo "Verified rvoip -> libSRTP and libSRTP -> rvoip for RTP, RTCP, and RTP rollover with AES-128/AES-256 SHA1-80 and SHA1-32."
