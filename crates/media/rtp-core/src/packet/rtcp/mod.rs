@@ -4,7 +4,7 @@
 //! It includes implementations for different RTCP packet types: SR, RR, SDES, BYE, APP.
 //! Extended Reports (XR) are defined in RFC 3611.
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::Error;
 use crate::Result;
@@ -68,7 +68,7 @@ mod xr;
 // Re-export all public types
 pub use app::RtcpApplicationDefined;
 pub use bye::RtcpGoodbye;
-pub use compound::RtcpCompoundPacket;
+pub use compound::{RtcpCompoundMember, RtcpCompoundPacket, RtcpTolerantCompoundPacket};
 pub use ntp::NtpTimestamp;
 pub use receiver_report::RtcpReceiverReport;
 pub use report_block::RtcpReportBlock;
@@ -77,6 +77,169 @@ pub use sender_report::RtcpSenderReport;
 pub use xr::{
     ReceiverReferenceTimeBlock, RtcpExtendedReport, RtcpXrBlock, RtcpXrBlockType, VoipMetricsBlock,
 };
+
+/// A well-formed RTCP packet whose packet type is not implemented.
+///
+/// Both the body and any RTCP padding are retained so tolerant compound
+/// parsing can round-trip packets such as RTPFB/PSFB without interpreting
+/// them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RtcpUnknownPacket {
+    /// Raw RTCP packet type byte.
+    pub packet_type: u8,
+    /// The five count/subtype bits from the common header.
+    pub count: u8,
+    /// Packet body, excluding the common header and RTCP padding.
+    pub payload: Bytes,
+    /// Exact RTCP padding bytes. Empty when the padding bit was clear.
+    pub padding: Bytes,
+}
+
+#[derive(Debug)]
+struct ParsedRtcpEnvelope {
+    packet_type: u8,
+    count: u8,
+    payload: Bytes,
+    padding: Bytes,
+}
+
+fn parse_rtcp_envelope(data: &[u8]) -> Result<ParsedRtcpEnvelope> {
+    if data.len() < 4 {
+        return Err(Error::BufferTooSmall {
+            required: 4,
+            available: data.len(),
+        });
+    }
+
+    let first_byte = data[0];
+    let version = (first_byte >> 6) & 0x03;
+    if version != RTCP_VERSION {
+        return Err(Error::RtcpError(format!(
+            "Invalid RTCP version: {}",
+            version
+        )));
+    }
+
+    let has_padding = first_byte & 0x20 != 0;
+    let count = first_byte & 0x1f;
+    let packet_type = data[1];
+    let length_words_minus_one = u16::from_be_bytes([data[2], data[3]]) as usize;
+    let packet_size = (length_words_minus_one + 1) * 4;
+    if data.len() < packet_size {
+        return Err(Error::BufferTooSmall {
+            required: packet_size,
+            available: data.len(),
+        });
+    }
+    if data.len() > packet_size {
+        return Err(Error::RtcpError(format!(
+            "RTCP packet length declares {} bytes but {} bytes were supplied",
+            packet_size,
+            data.len()
+        )));
+    }
+
+    let mut body_end = packet_size;
+    let padding = if has_padding {
+        if packet_size == 4 {
+            return Err(Error::RtcpError(
+                "RTCP padding flag is set on a packet with no body".to_string(),
+            ));
+        }
+
+        let padding_size = data[packet_size - 1] as usize;
+        let body_size = packet_size - 4;
+        if padding_size == 0 || padding_size > body_size {
+            return Err(Error::RtcpError(format!(
+                "Invalid RTCP padding length {} for {}-byte body",
+                padding_size, body_size
+            )));
+        }
+        body_end -= padding_size;
+        Bytes::copy_from_slice(&data[body_end..packet_size])
+    } else {
+        Bytes::new()
+    };
+
+    Ok(ParsedRtcpEnvelope {
+        packet_type,
+        count,
+        payload: Bytes::copy_from_slice(&data[4..body_end]),
+        padding,
+    })
+}
+
+impl RtcpUnknownPacket {
+    /// Parse and preserve a well-formed RTCP packet type not implemented by
+    /// this crate.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let envelope = parse_rtcp_envelope(data)?;
+        if RtcpPacketType::try_from(envelope.packet_type).is_ok() {
+            return Err(Error::InvalidParameter(format!(
+                "RTCP packet type {} is implemented and is not unknown",
+                envelope.packet_type
+            )));
+        }
+
+        Ok(Self {
+            packet_type: envelope.packet_type,
+            count: envelope.count,
+            payload: envelope.payload,
+            padding: envelope.padding,
+        })
+    }
+
+    /// Serialize the preserved packet without interpreting its payload.
+    pub fn serialize(&self) -> Result<Bytes> {
+        if RtcpPacketType::try_from(self.packet_type).is_ok() {
+            return Err(Error::InvalidParameter(format!(
+                "RTCP packet type {} is implemented and cannot use RtcpUnknownPacket",
+                self.packet_type
+            )));
+        }
+        if self.count > 31 {
+            return Err(Error::InvalidParameter(format!(
+                "RTCP count/subtype {} exceeds five bits",
+                self.count
+            )));
+        }
+        if !self.padding.is_empty()
+            && (self.padding.len() > u8::MAX as usize
+                || self.padding[self.padding.len() - 1] as usize != self.padding.len())
+        {
+            return Err(Error::InvalidParameter(
+                "Unknown RTCP packet has malformed padding".to_string(),
+            ));
+        }
+
+        let packet_size = 4 + self.payload.len() + self.padding.len();
+        if packet_size % 4 != 0 {
+            return Err(Error::InvalidParameter(format!(
+                "Unknown RTCP packet size {} is not 32-bit aligned",
+                packet_size
+            )));
+        }
+        let words_minus_one = packet_size / 4 - 1;
+        if words_minus_one > u16::MAX as usize {
+            return Err(Error::InvalidParameter(
+                "Unknown RTCP packet is too large".to_string(),
+            ));
+        }
+
+        let mut buf = BytesMut::with_capacity(packet_size);
+        let padding_bit = u8::from(!self.padding.is_empty()) << 5;
+        buf.put_u8((RTCP_VERSION << 6) | padding_bit | self.count);
+        buf.put_u8(self.packet_type);
+        buf.put_u16(words_minus_one as u16);
+        buf.extend_from_slice(&self.payload);
+        buf.extend_from_slice(&self.padding);
+        Ok(buf.freeze())
+    }
+
+    fn has_padding(&self) -> bool {
+        !self.padding.is_empty()
+    }
+}
 
 /// RTCP packet variants
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,60 +266,45 @@ pub enum RtcpPacket {
 impl RtcpPacket {
     /// Parse an RTCP packet from bytes
     pub fn parse(data: &[u8]) -> Result<Self> {
-        let mut buf = Bytes::copy_from_slice(data);
-
-        // Parse common header (first 4 bytes)
-        if buf.remaining() < 4 {
-            return Err(Error::BufferTooSmall {
-                required: 4,
-                available: buf.remaining(),
-            });
-        }
-
-        let first_byte = buf.get_u8();
-        // Check version (2 bits)
-        let version = (first_byte >> 6) & 0x03;
-        if version != RTCP_VERSION {
-            return Err(Error::RtcpError(format!(
-                "Invalid RTCP version: {}",
-                version
-            )));
-        }
-
-        // Check padding flag (1 bit)
-        let _padding = ((first_byte >> 5) & 0x01) != 0;
-
-        // Get reception report count (5 bits)
-        let report_count = first_byte & 0x1F;
-
-        // Get packet type
-        let packet_type = RtcpPacketType::try_from(buf.get_u8())?;
-
-        // Get length in 32-bit words minus one (convert to bytes)
-        let length = buf.get_u16() as usize * 4;
-
-        if buf.remaining() < length {
-            return Err(Error::BufferTooSmall {
-                required: length,
-                available: buf.remaining(),
-            });
-        }
+        let envelope = parse_rtcp_envelope(data)?;
+        let report_count = envelope.count;
+        let packet_type = RtcpPacketType::try_from(envelope.packet_type)?;
+        let mut buf = envelope.payload;
 
         // Parse specific packet type
         match packet_type {
-            RtcpPacketType::SenderReport => Ok(RtcpPacket::SenderReport(
-                sender_report::parse_sender_report(&mut buf, report_count)?,
-            )),
-            RtcpPacketType::ReceiverReport => Ok(RtcpPacket::ReceiverReport(
-                receiver_report::parse_receiver_report(&mut buf, report_count)?,
-            )),
-            RtcpPacketType::SourceDescription => {
-                Ok(RtcpPacket::SourceDescription(RtcpSourceDescription {
-                    chunks: Vec::new(),
-                }))
+            RtcpPacketType::SenderReport => {
+                let report = sender_report::parse_sender_report(&mut buf, report_count)?;
+                if !buf.is_empty() {
+                    return Err(Error::RtcpError(format!(
+                        "Sender Report has {} unexpected trailing bytes",
+                        buf.len()
+                    )));
+                }
+                Ok(RtcpPacket::SenderReport(report))
             }
+            RtcpPacketType::ReceiverReport => {
+                let report = receiver_report::parse_receiver_report(&mut buf, report_count)?;
+                if !buf.is_empty() {
+                    return Err(Error::RtcpError(format!(
+                        "Receiver Report has {} unexpected trailing bytes",
+                        buf.len()
+                    )));
+                }
+                Ok(RtcpPacket::ReceiverReport(report))
+            }
+            RtcpPacketType::SourceDescription => Ok(RtcpPacket::SourceDescription(
+                sdes::parse_sdes(&buf, report_count)?,
+            )),
             RtcpPacketType::Goodbye => {
-                Ok(RtcpPacket::Goodbye(bye::parse_bye(&mut buf, report_count)?))
+                let goodbye = bye::parse_bye(&mut buf, report_count)?;
+                if !buf.is_empty() {
+                    return Err(Error::RtcpError(format!(
+                        "BYE packet has {} unexpected trailing bytes",
+                        buf.len()
+                    )));
+                }
+                Ok(RtcpPacket::Goodbye(goodbye))
             }
             RtcpPacketType::ApplicationDefined => {
                 Ok(RtcpPacket::ApplicationDefined(app::parse_app(&mut buf)?))
@@ -399,5 +547,48 @@ mod tests {
         );
 
         assert!(RtcpPacketType::try_from(100).is_err());
+    }
+
+    #[test]
+    fn unknown_packet_is_preserved() {
+        let bytes = [0x85, 205, 0, 2, 1, 2, 3, 4, 5, 6, 7, 8];
+        let parsed = RtcpUnknownPacket::parse(&bytes).unwrap();
+
+        assert_eq!(parsed.packet_type, 205);
+        assert_eq!(parsed.count, 5);
+        assert_eq!(&parsed.payload[..], &bytes[4..]);
+        assert!(parsed.padding.is_empty());
+        assert_eq!(&parsed.serialize().unwrap()[..], &bytes);
+
+        // The legacy single-packet parser remains strict, so adding tolerant
+        // compound parsing does not add a variant to the public RtcpPacket
+        // enum and break downstream exhaustive matches.
+        assert!(RtcpPacket::parse(&bytes).is_err());
+    }
+
+    #[test]
+    fn malformed_rtcp_padding_is_rejected() {
+        assert!(RtcpUnknownPacket::parse(&[0xa0, 205, 0, 1, 1, 2, 3, 0]).is_err());
+        assert!(RtcpUnknownPacket::parse(&[0xa0, 205, 0, 1, 1, 2, 3, 5]).is_err());
+        assert!(RtcpUnknownPacket::parse(&[0xa0, 205, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn declared_packet_length_must_match_input() {
+        let rr_with_trailing_packet = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78, 0x80, 205, 0, 0];
+        assert!(RtcpPacket::parse(&rr_with_trailing_packet).is_err());
+
+        // RR declares a second body word that is not a report block.
+        let rr_with_internal_trailing_word = [0x80, 201, 0, 2, 0x12, 0x34, 0x56, 0x78, 0, 0, 0, 0];
+        assert!(RtcpPacket::parse(&rr_with_internal_trailing_word).is_err());
+    }
+
+    #[test]
+    fn malformed_known_sdes_member_is_rejected() {
+        // The header declares one SDES chunk, but the body contains no SSRC.
+        assert!(RtcpPacket::parse(&[0x81, 202, 0, 0]).is_err());
+
+        // The SSRC is present, but the mandatory END item is missing.
+        assert!(RtcpPacket::parse(&[0x81, 202, 0, 1, 0x12, 0x34, 0x56, 0x78,]).is_err());
     }
 }

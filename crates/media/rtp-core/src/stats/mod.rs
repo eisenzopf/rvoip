@@ -171,16 +171,13 @@ impl RtpStatsManager {
                 stats.last_seq = Some(seq);
             }
             PacketLossResult::Sequential { seq } => {
-                stats.highest_seq = seq as u32;
                 stats.last_seq = Some(seq);
             }
             PacketLossResult::Gap {
                 seq,
                 expected: _,
-                lost,
+                lost: _,
             } => {
-                stats.packets_lost += lost as u64;
-                stats.highest_seq = seq as u32;
                 stats.last_seq = Some(seq);
             }
             PacketLossResult::Duplicate { seq: _ } => {
@@ -194,12 +191,17 @@ impl RtpStatsManager {
         }
 
         // Update jitter calculation
-        let jitter = self.jitter_estimator.update(timestamp, arrival_time);
+        let jitter = self
+            .jitter_estimator
+            .update_with_sequence(seq, timestamp, arrival_time);
         stats.jitter = jitter;
 
-        // Update fraction lost from loss tracker
+        // Recompute loss from the unique received-packet window so a late
+        // packet that fills a gap reduces the cumulative total.
         let loss_stats = self.loss_tracker.get_stats();
+        stats.packets_lost = loss_stats.packets_lost;
         stats.fraction_lost = loss_stats.fraction_lost;
+        stats.highest_seq = self.loss_tracker.highest_extended_sequence();
 
         // Update RTCP generator if available
         if let Some(generator) = &mut self.rtcp_generator {
@@ -269,5 +271,23 @@ mod tests {
         let stats = manager.get_stats();
         assert_eq!(stats.packets_sent, 1);
         assert_eq!(stats.bytes_sent, 100);
+    }
+
+    #[test]
+    fn reordered_packet_fills_loss_without_corrupting_jitter() {
+        let mut manager = RtpStatsManager::new(8000);
+        let start = Instant::now();
+
+        manager.update_received(65535, 0, 100, start);
+        manager.update_received(1, 320, 100, start + Duration::from_millis(40));
+        assert_eq!(manager.get_stats().packets_lost, 1);
+
+        let jitter_before_reorder = manager.get_stats().jitter;
+        manager.update_received(0, 160, 100, start + Duration::from_secs(5));
+        let stats = manager.get_stats();
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(stats.packets_out_of_order, 1);
+        assert_eq!(stats.jitter, jitter_before_reorder);
+        assert_eq!(stats.highest_seq, 0x1_0001);
     }
 }

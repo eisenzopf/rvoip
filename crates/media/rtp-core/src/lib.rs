@@ -121,8 +121,9 @@ pub use packet::extension::{
 };
 pub use packet::header::RtpHeader;
 pub use packet::rtcp::{
-    NtpTimestamp, RtcpApplicationDefined, RtcpCompoundPacket, RtcpExtendedReport, RtcpGoodbye,
-    RtcpPacket, RtcpReceiverReport, RtcpReportBlock, RtcpSenderReport, RtcpSourceDescription,
+    NtpTimestamp, RtcpApplicationDefined, RtcpCompoundMember, RtcpCompoundPacket,
+    RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpReceiverReport, RtcpReportBlock,
+    RtcpSenderReport, RtcpSourceDescription, RtcpTolerantCompoundPacket, RtcpUnknownPacket,
     RtcpXrBlock, VoipMetricsBlock,
 };
 pub use packet::rtp::RtpPacket;

@@ -4,7 +4,10 @@ use std::time::{Duration, Instant};
 use tracing::{debug, warn};
 
 use crate::packet::RtpPacket;
-use crate::{RtpSequenceNumber, RtpSsrc, RtpTimestamp};
+use crate::stats::{JitterEstimator, PacketLossResult, PacketLossTracker};
+#[cfg(test)]
+use crate::RtpTimestamp;
+use crate::{RtpSequenceNumber, RtpSsrc};
 
 /// Represents an RTP stream with sequence tracking and statistics
 pub struct RtpStream {
@@ -41,14 +44,11 @@ pub struct RtpStream {
     /// Interarrival jitter estimate (RFC 3550)
     jitter: f64,
 
-    /// Last arrival time used for jitter calculation
-    last_arrival: Option<Instant>,
+    /// Sequence-aware RFC 3550 jitter estimator.
+    jitter_estimator: JitterEstimator,
 
-    /// Last RTP timestamp used for jitter calculation
-    last_timestamp: Option<RtpTimestamp>,
-
-    /// Clock rate for timestamp calculations
-    clock_rate: u32,
+    /// Extended sequence and received-window tracker.
+    loss_tracker: PacketLossTracker,
 
     /// Jitter buffer for reordering packets (optional)
     jitter_buffer: Option<Arc<Mutex<VecDeque<RtpPacket>>>>,
@@ -87,9 +87,8 @@ impl RtpStream {
             packets_lost: 0,
             duplicates: 0,
             jitter: 0.0,
-            last_arrival: None,
-            last_timestamp: None,
-            clock_rate,
+            jitter_estimator: JitterEstimator::new(clock_rate),
+            loss_tracker: PacketLossTracker::new(),
             jitter_buffer: None,
             max_jitter_size: 50,                        // Default size
             max_packet_age: Duration::from_millis(200), // Default 200ms
@@ -142,31 +141,46 @@ impl RtpStream {
         self.packets_received += 1;
         self.bytes_received += packet.size() as u64;
 
-        // Initialize sequence tracking if this is the first packet
-        if !self.initialized {
-            self.init_sequence(seq);
-            self.last_timestamp = Some(timestamp);
-            self.last_arrival = Some(now);
-            self.initialized = true;
+        let loss_result = self.loss_tracker.process(seq);
+        let is_first_packet = matches!(loss_result, PacketLossResult::FirstPacket { .. });
+        match loss_result {
+            PacketLossResult::FirstPacket { seq } => self.init_sequence(seq),
+            PacketLossResult::Sequential { seq } => {
+                self.latest_seq = seq;
+                self.highest_seq = self.loss_tracker.highest_extended_sequence();
+            }
+            PacketLossResult::Gap {
+                seq,
+                expected,
+                lost,
+            } => {
+                debug!(
+                    "Detected sequence gap: expected={}, got={}, lost={}",
+                    expected, seq, lost
+                );
+                self.latest_seq = seq;
+                self.highest_seq = self.loss_tracker.highest_extended_sequence();
+            }
+            PacketLossResult::Duplicate { .. }
+            | PacketLossResult::Reordered { .. }
+            | PacketLossResult::Unknown => {}
+        }
+
+        let loss_stats = self.loss_tracker.get_stats();
+        self.highest_seq = self.loss_tracker.highest_extended_sequence();
+        self.seq_cycles = (self.highest_seq >> 16) as u16;
+        self.packets_lost = loss_stats.packets_lost;
+        self.duplicates = loss_stats.duplicates;
+        self.jitter = self
+            .jitter_estimator
+            .update_with_sequence(seq, timestamp, now);
+        self.initialized = true;
+
+        // Preserve the existing first-packet behavior even when a jitter
+        // buffer is enabled.
+        if is_first_packet {
             return Some(packet);
         }
-
-        // Update sequence tracking
-        self.update_sequence(seq);
-
-        // Update jitter estimate
-        if let (Some(last_arrival), Some(last_ts)) = (self.last_arrival, self.last_timestamp) {
-            let arrival_diff = now.duration_since(last_arrival).as_secs_f64();
-            let ts_diff =
-                ((timestamp as i32 - last_ts as i32).abs() as f64) / (self.clock_rate as f64);
-
-            // RFC 3550 jitter calculation
-            let d = arrival_diff - ts_diff;
-            self.jitter += (d.abs() - self.jitter) / 16.0;
-        }
-
-        self.last_arrival = Some(now);
-        self.last_timestamp = Some(timestamp);
 
         // If using jitter buffer, add to buffer and return ordered packets
         if let Some(buffer) = &self.jitter_buffer {
@@ -184,61 +198,6 @@ impl RtpStream {
         self.latest_seq = seq;
         self.highest_seq = seq as u32;
         debug!("Initialized RTP stream with seq={}", seq);
-    }
-
-    /// Update sequence tracking with a new sequence number
-    fn update_sequence(&mut self, seq: RtpSequenceNumber) {
-        // Detect sequence number cycle (wraparound from 65535 to 0)
-        if seq < 0x1000 && self.latest_seq > 0xf000 {
-            debug!(
-                "Detected sequence wraparound: {} -> {}",
-                self.latest_seq, seq
-            );
-            self.seq_cycles += 1;
-        }
-
-        // Check for duplicate
-        if seq == self.latest_seq {
-            self.duplicates += 1;
-            return;
-        }
-
-        // Calculate extended sequence (with cycle count)
-        let extended_seq = (self.seq_cycles as u32) << 16 | (seq as u32);
-
-        // Check if this is the highest sequence seen
-        if extended_seq > self.highest_seq {
-            // Calculate lost packets (gap in sequence)
-            let expected_seq = (self.latest_seq as u32 + 1) & 0xFFFF;
-            if seq != expected_seq as u16 {
-                // There's a gap - calculate how many packets were lost
-                let gap = if seq > expected_seq as u16 {
-                    seq - expected_seq as u16
-                } else {
-                    // Handle sequence number wraparound
-                    ((0xFFFF as u32 + 1) - expected_seq as u32) as u16 + seq
-                };
-
-                if gap > 0 {
-                    self.packets_lost += gap as u64;
-                    debug!(
-                        "Detected sequence gap: expected={}, got={}, lost={}",
-                        expected_seq, seq, gap
-                    );
-                }
-            }
-
-            self.highest_seq = extended_seq;
-        } else {
-            // Out of order packet (older than highest)
-            debug!(
-                "Out of order packet: seq={}, highest={}",
-                seq,
-                self.highest_seq & 0xFFFF
-            );
-        }
-
-        self.latest_seq = seq;
     }
 
     /// Add a packet to the jitter buffer
@@ -329,8 +288,8 @@ impl RtpStream {
             self.packets_lost = 0;
             self.duplicates = 0;
             self.jitter = 0.0;
-            self.last_arrival = None;
-            self.last_timestamp = None;
+            self.loss_tracker.reset();
+            self.jitter_estimator.reset();
 
             self.initialized = true;
             debug!("Initialized RTP stream with seq={}", seq);
@@ -450,7 +409,7 @@ mod tests {
         stream.process_packet(create_test_packet(1003, 80480));
         assert_eq!(stream.highest_seq, 1005); // Highest shouldn't change
         assert_eq!(stream.packets_received, 5);
-        assert_eq!(stream.packets_lost, 3); // Still 3 packets lost
+        assert_eq!(stream.packets_lost, 2); // Late packet fills one gap
     }
 
     #[test]
@@ -482,6 +441,20 @@ mod tests {
         stream.process_packet(create_test_packet(2, 81280));
         assert_eq!(stream.highest_seq, 65538); // 1 cycle + sequence 2
         assert_eq!(stream.seq_cycles, 1);
+    }
+
+    #[test]
+    fn test_reordered_packet_from_before_wrap_fills_gap() {
+        let mut stream = RtpStream::new(0x12345678, 8000);
+
+        stream.process_packet(create_test_packet(65534, 0));
+        stream.process_packet(create_test_packet(0, 320));
+        assert_eq!(stream.highest_seq, 0x1_0000);
+        assert_eq!(stream.packets_lost, 1);
+
+        stream.process_packet(create_test_packet(65535, 160));
+        assert_eq!(stream.highest_seq, 0x1_0000);
+        assert_eq!(stream.packets_lost, 0);
     }
 
     #[test]

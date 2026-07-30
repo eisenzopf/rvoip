@@ -143,7 +143,7 @@ impl RtcpReportGenerator {
                 ssrc: *ssrc,
                 fraction_lost: stats.fraction_lost,
                 cumulative_lost: tracker.get_cumulative_lost(),
-                highest_seq: stats.packets_expected as u32,
+                highest_seq: tracker.highest_extended_sequence(),
                 jitter: 0,              // Jitter would be calculated separately
                 last_sr: 0,             // Would be from received SRs
                 delay_since_last_sr: 0, // Would be from received SRs
@@ -180,7 +180,7 @@ impl RtcpReportGenerator {
                 ssrc: *ssrc,
                 fraction_lost: stats.fraction_lost,
                 cumulative_lost: tracker.get_cumulative_lost(),
-                highest_seq: stats.packets_expected as u32,
+                highest_seq: tracker.highest_extended_sequence(),
                 jitter: 0,              // Jitter would be calculated separately
                 last_sr: 0,             // Would be from received SRs
                 delay_since_last_sr: 0, // Would be from received SRs

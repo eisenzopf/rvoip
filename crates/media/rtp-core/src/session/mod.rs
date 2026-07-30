@@ -732,117 +732,148 @@ impl RtpSession {
             loop {
                 match transport_events.recv().await {
                     Ok(crate::traits::RtpEvent::RtcpReceived { data, source: _ }) => {
-                        // Try to parse the RTCP packet
-                        if let Ok(rtcp_packet) = crate::packet::rtcp::RtcpPacket::parse(&data) {
-                            // Handle the RTCP packet based on its type
-                            match rtcp_packet {
-                                crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
-                                    // Extract the SSRC and reason
-                                    if !bye.sources.is_empty() {
-                                        let source_ssrc = bye.sources[0];
+                        // Parse the complete compound packet. Unknown but
+                        // well-formed members are retained by the tolerant
+                        // parser and ignored by the production handler.
+                        match crate::packet::rtcp::RtcpCompoundPacket::parse_tolerant(&data) {
+                            Ok(compound) => {
+                                for rtcp_member in compound.packets {
+                                    let rtcp_packet = match rtcp_member {
+                                        crate::packet::rtcp::RtcpCompoundMember::Known(packet) => {
+                                            packet
+                                        }
+                                        crate::packet::rtcp::RtcpCompoundMember::Unknown(
+                                            unknown,
+                                        ) => {
+                                            trace!(
+                                                "Ignoring unimplemented RTCP packet type {}",
+                                                unknown.packet_type
+                                            );
+                                            continue;
+                                        }
+                                    };
+                                    match rtcp_packet {
+                                        crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
+                                            // Extract the SSRC and reason
+                                            if !bye.sources.is_empty() {
+                                                let source_ssrc = bye.sources[0];
 
-                                        // Broadcast BYE event
-                                        let _ = event_tx_recv.send(RtpSessionEvent::Bye {
-                                            ssrc: source_ssrc,
-                                            reason: bye.reason,
-                                        });
+                                                // Broadcast BYE event
+                                                let _ = event_tx_recv.send(RtpSessionEvent::Bye {
+                                                    ssrc: source_ssrc,
+                                                    reason: bye.reason,
+                                                });
 
-                                        info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
-                                    }
-                                }
-                                crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
-                                    // Process sender report
-                                    let report_ssrc = sr.ssrc;
+                                                info!(
+                                                    "Received RTCP BYE from SSRC={:08x}",
+                                                    source_ssrc
+                                                );
+                                            }
+                                        }
+                                        crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
+                                            // Process sender report
+                                            let report_ssrc = sr.ssrc;
 
-                                    debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
+                                            debug!(
+                                                "Received RTCP SR from SSRC={:08x}",
+                                                report_ssrc
+                                            );
 
-                                    // Update stream statistics if this stream exists
-                                    if let Some(mut stream) = streams_map.get_mut(&report_ssrc) {
-                                        // Update the stream's RTCP SR info
-                                        // This will be used for calculating round-trip time
-                                        stream.update_last_sr_info(
-                                            sr.ntp_timestamp.to_u32(),
-                                            std::time::Instant::now(),
-                                        );
+                                            // Update stream statistics if this stream exists
+                                            if let Some(mut stream) =
+                                                streams_map.get_mut(&report_ssrc)
+                                            {
+                                                // Update the stream's RTCP SR info
+                                                // This will be used for calculating round-trip time
+                                                stream.update_last_sr_info(
+                                                    sr.ntp_timestamp.to_u32(),
+                                                    std::time::Instant::now(),
+                                                );
 
-                                        debug!(
-                                            "Updated RTCP SR info for stream SSRC={:08x}",
-                                            report_ssrc
-                                        );
-                                    }
+                                                debug!(
+                                                    "Updated RTCP SR info for stream SSRC={:08x}",
+                                                    report_ssrc
+                                                );
+                                            }
 
-                                    // If media sync is enabled, update it
-                                    if let Some(sync) = &media_sync {
-                                        if let Ok(mut media_sync) = sync.write() {
-                                            // Update synchronization data
-                                            media_sync.update_from_sr(
-                                                report_ssrc,
-                                                sr.ntp_timestamp,
-                                                sr.rtp_timestamp,
+                                            // If media sync is enabled, update it
+                                            if let Some(sync) = &media_sync {
+                                                if let Ok(mut media_sync) = sync.write() {
+                                                    // Update synchronization data
+                                                    media_sync.update_from_sr(
+                                                        report_ssrc,
+                                                        sr.ntp_timestamp,
+                                                        sr.rtp_timestamp,
+                                                    );
+                                                }
+                                            }
+
+                                            // Emit SR event for external processing
+                                            let _ = event_tx_recv.send(
+                                                RtpSessionEvent::RtcpSenderReport {
+                                                    ssrc: report_ssrc,
+                                                    ntp_timestamp: sr.ntp_timestamp,
+                                                    rtp_timestamp: sr.rtp_timestamp,
+                                                    packet_count: sr.sender_packet_count,
+                                                    octet_count: sr.sender_octet_count,
+                                                    report_blocks: sr.report_blocks,
+                                                },
                                             );
                                         }
-                                    }
+                                        crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
+                                            // Process receiver report
+                                            let report_ssrc = rr.ssrc;
 
-                                    // Emit SR event for external processing
-                                    let _ = event_tx_recv.send(RtpSessionEvent::RtcpSenderReport {
-                                        ssrc: report_ssrc,
-                                        ntp_timestamp: sr.ntp_timestamp,
-                                        rtp_timestamp: sr.rtp_timestamp,
-                                        packet_count: sr.sender_packet_count,
-                                        octet_count: sr.sender_octet_count,
-                                        report_blocks: sr.report_blocks,
-                                    });
-                                }
-                                crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
-                                    // Process receiver report
-                                    let report_ssrc = rr.ssrc;
-
-                                    debug!(
+                                            debug!(
                                         "Received RTCP RR from SSRC={:08x} with {} report blocks",
                                         report_ssrc,
                                         rr.report_blocks.len()
                                     );
 
-                                    // If there's a report block about our SSRC, process it
-                                    for block in &rr.report_blocks {
-                                        if block.ssrc == ssrc {
-                                            debug!(
+                                            // If there's a report block about our SSRC, process it
+                                            for block in &rr.report_blocks {
+                                                if block.ssrc == ssrc {
+                                                    debug!(
                                                 "Processing report block about our SSRC={:08x}",
                                                 ssrc
                                             );
 
-                                            // Update session stats with packet loss info
-                                            {
-                                                let mut stats = stats_recv.lock();
-                                                stats.packets_lost = block.cumulative_lost as u64;
+                                                    // Update session stats with packet loss info
+                                                    {
+                                                        let mut stats = stats_recv.lock();
+                                                        stats.packets_lost =
+                                                            block.cumulative_lost as u64;
 
-                                                // Calculate packet loss percentage
-                                                let fraction_lost =
-                                                    block.fraction_lost as f64 / 256.0;
-                                                debug!(
-                                                    "Packet loss: {}% (fraction={})",
-                                                    fraction_lost * 100.0,
-                                                    block.fraction_lost
-                                                );
+                                                        // Calculate packet loss percentage
+                                                        let fraction_lost =
+                                                            block.fraction_lost as f64 / 256.0;
+                                                        debug!(
+                                                            "Packet loss: {}% (fraction={})",
+                                                            fraction_lost * 100.0,
+                                                            block.fraction_lost
+                                                        );
+                                                    }
+                                                }
                                             }
+
+                                            // Emit RR event for external processing
+                                            let _ = event_tx_recv.send(
+                                                RtpSessionEvent::RtcpReceiverReport {
+                                                    ssrc: report_ssrc,
+                                                    report_blocks: rr.report_blocks,
+                                                },
+                                            );
+                                        }
+                                        // Handle other RTCP packet types as needed.
+                                        other => {
+                                            trace!("Received RTCP packet: {:?}", other);
                                         }
                                     }
-
-                                    // Emit RR event for external processing
-                                    let _ =
-                                        event_tx_recv.send(RtpSessionEvent::RtcpReceiverReport {
-                                            ssrc: report_ssrc,
-                                            report_blocks: rr.report_blocks,
-                                        });
-                                }
-                                // Handle other RTCP packet types as needed
-                                _ => {
-                                    // For now, we're just logging other packet types
-                                    trace!("Received RTCP packet: {:?}", rtcp_packet);
                                 }
                             }
-                        } else {
-                            warn!("Failed to parse RTCP packet");
+                            Err(error) => {
+                                warn!("Failed to parse compound RTCP packet: {}", error);
+                            }
                         }
                     }
                     Ok(crate::traits::RtpEvent::MediaReceived {
@@ -876,6 +907,7 @@ impl RtpSession {
                         let packet = RtpPacket {
                             header,
                             payload: payload.clone(),
+                            padding_size: 0,
                         };
 
                         // Update stats
