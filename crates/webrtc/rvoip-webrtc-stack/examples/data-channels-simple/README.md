@@ -2,9 +2,7 @@
 
 This is a minimal example of a **WebRTC DataChannel** using **Rust (sansio RTC)** as the signaling server.
 
-`hyper` v0.14 requires a Tokio runtime (it uses `tokio::net::TcpListener` internally via `Server::bind`). When we run
-under `runtime-smol`, there's no Tokio
-reactor, so `hyper` panics. Therefore, this example must be ran in default runtime-tokio.
+This packaged stack and `hyper` v0.14 both use Tokio.
 
 ## Features
 

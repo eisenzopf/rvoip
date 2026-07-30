@@ -35,11 +35,8 @@ repository.workspace = true
 
 [features]
 default = ["runtime-tokio"]
-runtime-smol = [
-    "dep:smol",
-    "dep:async-broadcast",
-]
-runtime-tokio = ["dep:tokio"]
+# Retained as a source-compatible feature name. Tokio is now mandatory.
+runtime-tokio = []
 
 [lib]
 name = "webrtc"
@@ -193,10 +190,6 @@ path = "tests/simulcast_rtc_to_webrtc_interop.rs"
 name = "tokio_only_runtime"
 path = "tests/tokio_only_runtime.rs"
 
-[dependencies.async-broadcast]
-version = "0.7"
-optional = true
-
 [dependencies.async-trait]
 version = "0.1.89"
 
@@ -214,10 +207,6 @@ version = "0.3.4"
 path = "../rvoip-rtc"
 package = "rvoip-rtc"
 
-[dependencies.smol]
-version = "2.0.2"
-optional = true
-
 [dependencies.tokio]
 version = "1.49.0"
 features = [
@@ -227,7 +216,6 @@ features = [
     "rt",
     "rt-multi-thread",
 ]
-optional = true
 
 [dev-dependencies.anyhow]
 version = "1.0.102"

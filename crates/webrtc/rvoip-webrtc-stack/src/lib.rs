@@ -1,17 +1,15 @@
 #![warn(rust_2018_idioms)]
 #![allow(dead_code)]
 
-//! Async-friendly WebRTC implementation in Rust
+//! Tokio-based WebRTC implementation in Rust
 //!
-//! This crate provides an async-friendly runtime-agnostic WebRTC implementation built on top of
-//! the Sans-I/O [rtc](https://docs.rs/rtc) protocol core.
+//! This crate provides an async-friendly Tokio integration built on top of the
+//! runtime-independent Sans-I/O [rtc](https://docs.rs/rtc) protocol core.
 //!
 //! # Async Runtime Support
 //!
-//! The library supports multiple async runtimes through feature flags:
-//!
-//! - `runtime-tokio` (default) - Tokio runtime support
-//! - `runtime-smol` - smol runtime support
+//! Tokio is always enabled. The `runtime-tokio` feature name remains as a
+//! source-compatible no-op for existing manifests.
 
 pub mod data_channel;
 pub mod media_stream;

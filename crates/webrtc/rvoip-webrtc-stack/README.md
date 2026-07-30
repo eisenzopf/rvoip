@@ -65,14 +65,14 @@ alt="Recall.ai">
 ## Overview
 
 WebRTC.rs is an async-friendly WebRTC implementation in Rust, originally inspired by and largely rewriting the Pion
-stack. The project is currently evolving into a clean, ergonomic, runtime-agnostic implementation that works with any
-async runtime (Tokio, async-std, smol, embassy).
+stack. This rvoip package qualifies Tokio as its sole async integration runtime while keeping protocol logic in the
+runtime-independent Sans-I/O core.
 
 **Architecture:**
 
 - **[rtc](https://github.com/webrtc-rs/rtc)**: Sans-I/O protocol core with complete WebRTC stack (95%+ W3C API
   compliance)
-- **webrtc** (this crate): Async-friendly API with runtime abstraction layer
+- **webrtc** (this crate): Async-friendly Tokio integration layer
 
 **📖 Learn more:** Read
 our [architecture blog post](https://webrtc.rs/blog/2026/01/31/async-friendly-webrtc-architecture.html) for design
@@ -85,7 +85,7 @@ details and roadmap.
 #### Current Status (February 2026)
 
 - **v0.17.x branch**: Receives **bug fixes only** (no new features). Use this for Tokio-based production applications.
-- **Master branch**: Under active development for **v0.20.0** with new Sans-I/O architecture and runtime abstraction.
+- **Master branch**: Under active development for **v0.20.0** with the new Sans-I/O architecture.
 
 #### **What's Changing in upcoming v0.20.0+?**
 
@@ -93,14 +93,14 @@ The new architecture will address critical issues in v0.17.x:
 
 - ❌ Callback hell and Arc explosion
 - ❌ Resources leak in callback
-- ❌ Tight Tokio coupling (cannot use async-std, smol, embassy)
+- ❌ Protocol logic coupled to an executor
 
 **v0.20.0+ will provide:**
 
-✅ **Runtime Independence**
+✅ **Sans-I/O Core and Qualified Tokio Integration**
 
-- Support for Tokio, async-std, smol, embassy via Quinn-style runtime abstraction
-- Feature flags: `runtime-tokio` (default), `runtime-async-std`, `runtime-smol`, `runtime-embassy`
+- Runtime-independent protocol logic in `rvoip-rtc`
+- Tokio is always enabled; `runtime-tokio` remains as a compatibility feature name
 
 ✅ **Clean Event Handling**
 
