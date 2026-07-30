@@ -985,10 +985,8 @@ impl RtpSession {
                             let mut entry = streams_map.entry(packet_ssrc).or_insert_with(|| {
                                 created = true;
                                 info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
-                                let mut stream = RtpStream::new(
-                                    packet_ssrc,
-                                    clock_rate.load(Ordering::Relaxed),
-                                );
+                                let mut stream =
+                                    RtpStream::new(packet_ssrc, clock_rate.load(Ordering::Relaxed));
                                 if let Some(sender_report) =
                                     received_sender_reports.get(&packet_ssrc)
                                 {
