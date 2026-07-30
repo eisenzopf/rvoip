@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_srtp_client_session_never_emits_plaintext_rtcp() {
+    async fn direct_srtp_client_session_emits_authenticated_srtcp() {
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut security = SecurityConfig::srtp_with_key(vec![0x44; 30]);
         security.srtp_profiles = vec![crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32];
@@ -306,22 +306,25 @@ mod tests {
         let client = DefaultMediaTransportClient::new(config).await.unwrap();
         let session = client.get_session().await.unwrap();
 
-        assert!(matches!(
-            session.lock().await.send_sender_report().await,
-            Err(crate::Error::UnsupportedFeature(_))
-        ));
-        assert!(matches!(
-            session.lock().await.send_receiver_report().await,
-            Err(crate::Error::UnsupportedFeature(_))
-        ));
+        session.lock().await.send_sender_report().await.unwrap();
 
         let mut wire = [0_u8; 2048];
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(1_200),
-            peer.recv_from(&mut wire)
+        let (length, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), peer.recv_from(&mut wire))
+                .await
+                .unwrap()
+                .unwrap();
+        let mut peer_receive = crate::srtp::SrtpContext::new(
+            crate::srtp::SRTP_AES128_CM_SHA1_32,
+            crate::srtp::SrtpCryptoKey::new(vec![0x44; 16], vec![0x44; 14]),
         )
-        .await
-        .is_err());
+        .unwrap();
+        let plaintext = peer_receive.unprotect_rtcp(&wire[..length]).unwrap();
+        assert!(matches!(
+            crate::packet::rtcp::RtcpPacket::parse(&plaintext).unwrap(),
+            crate::packet::rtcp::RtcpPacket::SenderReport(_)
+        ));
+        assert_ne!(&wire[..length], plaintext.as_ref());
     }
 
     #[tokio::test]

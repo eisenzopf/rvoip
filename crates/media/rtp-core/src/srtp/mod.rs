@@ -23,6 +23,9 @@ pub enum SrtpEncryptionAlgorithm {
     /// AES in f8-mode (Customized for SRTP)
     AesF8,
 
+    /// Null encryption (for debugging/testing only)
+    Null,
+
     /// AEAD AES-128-GCM (RFC 7714).
     ///
     /// The profile identity is retained so configuration and negotiation can
@@ -34,9 +37,6 @@ pub enum SrtpEncryptionAlgorithm {
     /// The profile identity is retained so configuration and negotiation can
     /// fail closed. Encryption is not implemented in this release.
     AeadAes256Gcm,
-
-    /// Null encryption (for debugging/testing only)
-    Null,
 }
 
 /// SRTP authentication algorithms
@@ -414,7 +414,11 @@ fn validate_plaintext_rtcp(data: &[u8]) -> Result<(), crate::Error> {
             ));
         }
 
-        crate::packet::rtcp::RtcpPacket::parse(&packet[..packet_size])?;
+        if crate::packet::rtcp::RtcpPacketType::try_from(packet[1]).is_ok() {
+            crate::packet::rtcp::RtcpPacket::parse(&packet[..packet_size])?;
+        } else {
+            crate::packet::rtcp::RtcpUnknownPacket::parse(&packet[..packet_size])?;
+        }
         offset += packet_size;
     }
 
@@ -1166,6 +1170,15 @@ mod tests {
                 & 0x7fff_ffff,
             1
         );
+    }
+
+    #[test]
+    fn unknown_well_formed_rtcp_type_survives_srtcp_round_trip() {
+        let (mut sender, mut receiver) = contexts();
+        let unknown = [0x80, 208, 0, 1, 0x11, 0x22, 0x33, 0x44];
+
+        let wire = sender.protect_rtcp(&unknown).unwrap();
+        assert_eq!(receiver.unprotect_rtcp(&wire).unwrap().as_ref(), unknown);
     }
 
     #[test]

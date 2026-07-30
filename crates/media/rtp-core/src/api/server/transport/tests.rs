@@ -105,21 +105,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_shared_srtp_server_rejects_missing_or_malformed_key() {
+    async fn pre_shared_srtp_server_configuration_rejects_missing_or_malformed_key() {
         for key in [None, Some(vec![0x42; 29]), Some(vec![0x42; 31])] {
             let mut security_config = ServerSecurityConfig::default();
             security_config.security_mode = SecurityMode::Srtp;
+            security_config.srtp_profiles =
+                vec![crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80];
             security_config.srtp_key = key;
-            let config = crate::api::server::config::ServerConfigBuilder::new()
+            let result = crate::api::server::config::ServerConfigBuilder::new()
                 .local_address("127.0.0.1:0".parse().unwrap())
                 .security_config(security_config)
-                .build()
-                .unwrap();
-            let server = DefaultMediaTransportServer::new(config).await.unwrap();
-            assert!(matches!(
-                server.start().await,
-                Err(MediaTransportError::Security(_))
-            ));
+                .build();
+            assert!(matches!(result, Err(MediaTransportError::Security(_))));
         }
     }
 }

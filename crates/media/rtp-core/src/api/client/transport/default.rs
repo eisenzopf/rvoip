@@ -157,12 +157,52 @@ impl DefaultMediaTransportClient {
             MediaTransportError::InitializationError(format!("Failed to create RTP session: {}", e))
         })?;
         if config.security_config.security_mode.requires_srtp() {
-            if let Some(udp) = session
-                .transport()
+            let transport = session.transport();
+            let udp = transport
                 .as_any()
                 .downcast_ref::<UdpRtpTransport>()
+                .ok_or_else(|| {
+                    MediaTransportError::Security(
+                        "secure client session is not backed by UDP transport".to_string(),
+                    )
+                })?;
+            udp.require_srtp();
+
+            if config.security_config.security_mode
+                == crate::api::common::config::SecurityMode::Srtp
             {
-                udp.require_srtp();
+                let crypto_suite = crate::api::common::config::implemented_single_srtp_suite(
+                    &config.security_config.srtp_profiles,
+                )
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?;
+                let combined_key = config.security_config.srtp_key.as_ref().ok_or_else(|| {
+                    MediaTransportError::Security(
+                        "SRTP mode requires pre-shared key material".to_string(),
+                    )
+                })?;
+                let expected_length = crypto_suite.key_length + 14;
+                if combined_key.len() != expected_length {
+                    return Err(MediaTransportError::Security(format!(
+                        "SRTP key material for {crypto_suite:?} must be exactly {expected_length} bytes, got {}",
+                        combined_key.len(),
+                    )));
+                }
+                let key = combined_key[..crypto_suite.key_length].to_vec();
+                let salt = combined_key[crypto_suite.key_length..].to_vec();
+                udp.set_srtp_contexts(
+                    crate::srtp::SrtpContext::new(
+                        crypto_suite.clone(),
+                        crate::srtp::SrtpCryptoKey::new(key.clone(), salt.clone()),
+                    )
+                    .map_err(|error| MediaTransportError::Security(error.to_string()))?,
+                    crate::srtp::SrtpContext::new(
+                        crypto_suite,
+                        crate::srtp::SrtpCryptoKey::new(key, salt),
+                    )
+                    .map_err(|error| MediaTransportError::Security(error.to_string()))?,
+                )
+                .await
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?;
             }
         }
 
