@@ -705,7 +705,7 @@ async fn installed_wrapper_context_still_rejects_racy_direct_receive_and_plainte
 }
 
 #[tokio::test]
-async fn enabled_srtp_transport_rejects_rtcp_until_authenticated_srtcp_exists() {
+async fn enabled_srtp_transport_emits_only_authenticated_srtcp() {
     let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let inner = UdpRtpTransport::new(RtpTransportConfig {
         local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -716,36 +716,48 @@ async fn enabled_srtp_transport_rejects_rtcp_until_authenticated_srtcp_exists() 
     let transport = SecurityRtpTransport::new(Arc::new(inner), true)
         .await
         .unwrap();
-    let context = SrtpContext::new(
-        SRTP_AES128_CM_SHA1_80,
-        SrtpCryptoKey::new(vec![0x31; 16], vec![0x42; 14]),
-    )
-    .unwrap();
+    let key = SrtpCryptoKey::new(vec![0x31; 16], vec![0x42; 14]);
+    let context = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap();
     transport.set_srtp_context(context).await.unwrap();
     let report = rvoip_rtp_core::RtcpPacket::ReceiverReport(
         rvoip_rtp_core::RtcpReceiverReport::new(0x1122_3344),
     );
 
-    assert!(matches!(
-        transport
-            .send_rtcp(&report, sink.local_addr().unwrap())
-            .await,
-        Err(Error::UnsupportedFeature(_))
-    ));
-    assert!(matches!(
-        transport
-            .send_rtcp_bytes(&report.serialize().unwrap(), sink.local_addr().unwrap())
-            .await,
-        Err(Error::UnsupportedFeature(_))
-    ));
-
+    let mut receiver = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap();
+    let plaintext = report.serialize().unwrap();
     let mut wire = [0_u8; 128];
-    assert!(tokio::time::timeout(
-        std::time::Duration::from_millis(50),
-        sink.recv_from(&mut wire)
-    )
-    .await
-    .is_err());
+
+    transport
+        .send_rtcp(&report, sink.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (first_length, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+    let first_wire = wire[..first_length].to_vec();
+    assert_ne!(first_wire, plaintext.as_ref());
+    assert_eq!(
+        receiver.unprotect_rtcp(&first_wire).unwrap().as_ref(),
+        plaintext.as_ref()
+    );
+
+    transport
+        .send_rtcp_bytes(&plaintext, sink.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (second_length, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+    let second_wire = wire[..second_length].to_vec();
+    assert_ne!(first_wire, second_wire);
+    assert_eq!(
+        receiver.unprotect_rtcp(&second_wire).unwrap().as_ref(),
+        plaintext.as_ref()
+    );
     transport.close().await.unwrap();
 }
 

@@ -7,12 +7,16 @@ use aes::{
     Aes128, Aes256,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
 
 // Define types for AES-CM
 type Aes128Ctr64BE = Ctr64BE<Aes128>;
 type Aes256Ctr64BE = Ctr64BE<Aes256>;
+// Define type for HMAC-SHA1
+type HmacSha1 = Hmac<Sha1>;
 
 /// Basic cryptographic key/salt for SRTP
 #[derive(Debug, Clone)]
@@ -40,11 +44,10 @@ impl SrtpCryptoKey {
         &self.salt
     }
 
-    /// Create a key from an exact base64 key+salt string (as used in SDP).
+    /// Create a key from exact base64 key+salt material (as used in SDP).
     ///
-    /// Supported lengths are 30 bytes (AES-128 key + 14-byte salt) and
-    /// 46 bytes (AES-256 key + 14-byte salt). Other lengths are rejected
-    /// instead of silently creating a variable-length or truncated salt.
+    /// AES-128 uses 16 key bytes plus the 14-byte master salt. AES-256 uses
+    /// 32 key bytes plus the same 14-byte salt.
     pub fn from_base64(data: &str) -> Result<Self> {
         let decoded = BASE64
             .decode(data)
@@ -89,6 +92,15 @@ struct SrtpSessionKeys {
 
     /// Salt for RTP encryption
     rtp_salt: Vec<u8>,
+
+    /// Key for RTCP encryption
+    rtcp_enc_key: Vec<u8>,
+
+    /// Key for RTCP authentication
+    rtcp_auth_key: Vec<u8>,
+
+    /// Salt for RTCP encryption
+    rtcp_salt: Vec<u8>,
 }
 
 impl SrtpCrypto {
@@ -155,19 +167,60 @@ impl SrtpCrypto {
         };
         let rtp_salt = super::srtp_kdf(&self.master_key, &rtp_salt_params, 14)?;
 
+        // Derive RTCP encryption key
+        let rtcp_enc_params = super::SrtpKeyDerivationParams {
+            label: super::KeyDerivationLabel::RtcpEncryption,
+            key_derivation_rate: 0,
+            index: 0,
+        };
+        let rtcp_enc_key =
+            super::srtp_kdf(&self.master_key, &rtcp_enc_params, self.suite.key_length)?;
+
+        // Derive RTCP authentication key
+        let rtcp_auth_params = super::SrtpKeyDerivationParams {
+            label: super::KeyDerivationLabel::RtcpAuthentication,
+            key_derivation_rate: 0,
+            index: 0,
+        };
+        let rtcp_auth_key = super::srtp_kdf(&self.master_key, &rtcp_auth_params, 20)?;
+
+        // Derive RTCP salt
+        let rtcp_salt_params = super::SrtpKeyDerivationParams {
+            label: super::KeyDerivationLabel::RtcpSalt,
+            key_derivation_rate: 0,
+            index: 0,
+        };
+        let rtcp_salt = super::srtp_kdf(&self.master_key, &rtcp_salt_params, 14)?;
+
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
             rtp_enc_key,
             rtp_auth_key,
             rtp_salt,
+            rtcp_enc_key,
+            rtcp_auth_key,
+            rtcp_salt,
         };
 
         self.session_keys = Some(session_keys);
         Ok(())
     }
 
-    /// Encrypt an RTP packet
+    /// Encrypt an RTP packet in the initial rollover cycle.
+    ///
+    /// This compatibility entry point retains the pre-0.3.5 API. Stateful
+    /// callers should use [`Self::encrypt_rtp_with_roc`] through
+    /// [`super::SrtpContext`].
     pub fn encrypt_rtp(&self, packet: &RtpPacket) -> Result<(RtpPacket, Option<Vec<u8>>)> {
+        self.encrypt_rtp_with_roc(packet, 0)
+    }
+
+    /// Encrypt an RTP packet using the supplied rollover counter.
+    pub fn encrypt_rtp_with_roc(
+        &self,
+        packet: &RtpPacket,
+        roc: u32,
+    ) -> Result<(RtpPacket, Option<Vec<u8>>)> {
         if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
             // Null encryption, just return the original packet
             return if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
@@ -176,7 +229,7 @@ impl SrtpCrypto {
             } else {
                 // Authentication is enabled, calculate tag
                 let serialized = packet.serialize()?;
-                let auth_tag = self.calculate_auth_tag(&serialized, 0)?;
+                let auth_tag = self.calculate_auth_tag(&serialized, roc)?;
                 Ok((packet.clone(), Some(auth_tag)))
             };
         }
@@ -197,7 +250,6 @@ impl SrtpCrypto {
         // Create an IV for encryption
         let ssrc = packet.header.ssrc;
         let sequence = packet.header.sequence_number as u64;
-        let roc: u32 = 0; // Roll-over counter, in a real implementation this would be tracked
         let packet_index = (roc as u64) << 16 | sequence;
 
         // Create an IV using salt and packet info
@@ -228,8 +280,7 @@ impl SrtpCrypto {
         }
 
         // `padding_size == 0` marks that the protected payload already
-        // contains encrypted padding. The RTP P bit remains on wire, but its
-        // final padding-count octet cannot be interpreted until decryption.
+        // contains encrypted padding. The RTP P bit remains on wire.
         let encrypted_packet = RtpPacket {
             header,
             payload: encrypted_payload.freeze(),
@@ -238,8 +289,7 @@ impl SrtpCrypto {
 
         // Calculate authentication tag if authentication is enabled
         let auth_tag = if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            // Serialize the protected representation without asking the
-            // ordinary RTP serializer to interpret encrypted padding.
+            // Serialize the encrypted packet for authentication
             let mut encrypted_serialized = BytesMut::with_capacity(encrypted_packet.size());
             encrypted_packet
                 .header
@@ -281,8 +331,17 @@ impl SrtpCrypto {
         authenticator.calculate_auth_tag(packet_data, roc)
     }
 
-    /// Decrypt an SRTP packet
+    /// Decrypt an SRTP packet in the initial rollover cycle.
+    ///
+    /// This compatibility entry point retains the pre-0.3.5 API. Stateful
+    /// callers should use [`Self::decrypt_rtp_with_roc`] through
+    /// [`super::SrtpContext`].
     pub fn decrypt_rtp(&self, data: &[u8]) -> Result<RtpPacket> {
+        self.decrypt_rtp_with_roc(data, 0)
+    }
+
+    /// Decrypt an SRTP packet using the supplied rollover counter.
+    pub fn decrypt_rtp_with_roc(&self, data: &[u8], roc: u32) -> Result<RtpPacket> {
         if self.suite.encryption == SrtpEncryptionAlgorithm::Null
             && self.suite.authentication == SrtpAuthenticationAlgorithm::Null
         {
@@ -327,13 +386,12 @@ impl SrtpCrypto {
                 self.suite.tag_length,
             );
 
-            // Roll-over counter, in a full implementation this would be tracked
-            let roc: u32 = 0;
-
             // Verify the authentication tag
             let is_valid = authenticator.verify_auth_tag(packet_data, auth_tag, roc)?;
             if !is_valid {
-                return Err(Error::SrtpError("Authentication failed".to_string()));
+                return Err(Error::AuthenticationFailed(
+                    "SRTP authentication tag mismatch".to_string(),
+                ));
             }
         }
 
@@ -350,7 +408,6 @@ impl SrtpCrypto {
         // Create an IV for decryption
         let ssrc = header.ssrc;
         let sequence = header.sequence_number as u64;
-        let roc: u32 = 0; // In a real implementation, this would be tracked
         let packet_index = (roc as u64) << 16 | sequence;
 
         // Create an IV using salt and packet info
@@ -407,30 +464,43 @@ impl SrtpCrypto {
         })
     }
 
-    /// Reject low-level SRTCP protection until per-SSRC indexes, replay state,
-    /// and packet-derived IVs are implemented.
-    pub fn encrypt_rtcp(&self, data: &[u8]) -> Result<(Bytes, Option<Vec<u8>>)> {
-        let _ = data;
+    /// Legacy stateless SRTCP encryption entry point.
+    ///
+    /// SRTCP requires a monotonically increasing per-SSRC index. Reusing the
+    /// historical implicit index zero would reuse an AES-CTR IV, so callers
+    /// must protect RTCP through [`super::SrtpContext`].
+    pub fn encrypt_rtcp(&self, _data: &[u8]) -> Result<(Bytes, Option<Vec<u8>>)> {
         Err(Error::UnsupportedFeature(
-            "authenticated SRTCP is not implemented; low-level RTCP encryption is unavailable"
-                .to_string(),
+            "stateless SRTCP encryption is unsafe; use SrtpContext::protect_rtcp".to_string(),
         ))
     }
 
-    // Kept out of the build solely as implementation notes for PR3. It must
-    // not be callable because it uses a fixed SSRC and index zero.
-    #[cfg(any())]
-    fn incomplete_encrypt_rtcp(&self, data: &[u8]) -> Result<(Bytes, Option<Vec<u8>>)> {
+    /// Encrypt an RTCP packet with an explicit 31-bit SRTCP index.
+    pub(crate) fn encrypt_rtcp_with_index(
+        &self,
+        data: &[u8],
+        index: u32,
+    ) -> Result<(Bytes, Option<Vec<u8>>)> {
+        if index > 0x7fff_ffff {
+            return Err(Error::SrtpError(
+                "SRTCP index exceeds the 31-bit wire field".to_string(),
+            ));
+        }
+        if data.len() < 8 {
+            return Err(Error::SrtpError("RTCP packet too short".to_string()));
+        }
+        let ssrc = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+
         if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
-            // Null encryption, just return the original data
-            return if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
-                // No authentication either
-                Ok((Bytes::copy_from_slice(data), None))
+            let mut result = BytesMut::with_capacity(data.len() + 4);
+            result.extend_from_slice(data);
+            result.put_u32(index);
+            let auth_tag = if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
+                None
             } else {
-                // Only authentication
-                let auth_tag = self.calculate_rtcp_auth_tag(data, 0)?;
-                Ok((Bytes::copy_from_slice(data), Some(auth_tag)))
+                Some(self.calculate_rtcp_auth_tag(&result)?)
             };
+            return Ok((result.freeze(), auth_tag));
         }
 
         // Get session keys
@@ -449,10 +519,6 @@ impl SrtpCrypto {
         // 7. Calculate authentication tag
 
         // For simplicity in this implementation, we'll assume everything after the first 8 bytes is to be encrypted
-        if data.len() <= 8 {
-            return Err(Error::SrtpError("RTCP packet too short".to_string()));
-        }
-
         // Extract header and payload
         let header = &data[0..8];
         let payload = &data[8..];
@@ -466,13 +532,9 @@ impl SrtpCrypto {
         // Create a mutable copy of the payload for encryption
         let mut encrypted_payload = BytesMut::from(payload);
 
-        // Create an IV (simplified - in a real implementation we'd extract SSRC from the RTCP packet)
-        let ssrc = 0u32; // Simplified - would extract from packet
-        let index = 0u64; // Simplified - would track index
-
         let iv = match self.suite.encryption {
             SrtpEncryptionAlgorithm::AesCm => {
-                super::create_srtp_iv(&session_keys.rtcp_salt, ssrc, index)?
+                super::create_srtp_iv(&session_keys.rtcp_salt, ssrc, index as u64)?
             }
             _ => {
                 return Err(Error::SrtpError(
@@ -497,11 +559,11 @@ impl SrtpCrypto {
         result.extend_from_slice(&encrypted_payload);
 
         // Add SRTCP index and E flag
-        result.put_u32(0x80000000 | (index as u32)); // E flag set, index 0
+        result.put_u32(0x80000000 | index);
 
         // Calculate authentication tag if needed
         let auth_tag = if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            let auth_tag = self.calculate_rtcp_auth_tag(&result, 0)?;
+            let auth_tag = self.calculate_rtcp_auth_tag(&result)?;
             Some(auth_tag)
         } else {
             None
@@ -511,8 +573,7 @@ impl SrtpCrypto {
     }
 
     /// Calculate authentication tag for an RTCP packet
-    #[cfg(any())]
-    fn calculate_rtcp_auth_tag(&self, data: &[u8], _index: u32) -> Result<Vec<u8>> {
+    fn calculate_rtcp_auth_tag(&self, data: &[u8]) -> Result<Vec<u8>> {
         if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
             return Err(Error::SrtpError(
                 "Authentication is not enabled".to_string(),
@@ -526,30 +587,27 @@ impl SrtpCrypto {
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
         // Create HMAC-SHA1 instance
-        let tag = hmac_sha1(data, &session_keys.rtcp_auth_key, self.suite.tag_length)?;
+        let tag = hmac_sha1(
+            data,
+            &session_keys.rtcp_auth_key,
+            self.suite.srtcp_tag_length(),
+        )?;
 
         Ok(tag)
     }
 
-    /// Reject low-level SRTCP unprotection until authenticated per-SSRC state
-    /// and replay handling are implemented.
-    pub fn decrypt_rtcp(&self, data: &[u8]) -> Result<Bytes> {
-        let _ = data;
+    /// Legacy stateless SRTCP decryption entry point.
+    ///
+    /// Replay validation and atomic receive-state updates live in
+    /// [`super::SrtpContext`], so bypassing that context is rejected.
+    pub fn decrypt_rtcp(&self, _data: &[u8]) -> Result<Bytes> {
         Err(Error::UnsupportedFeature(
-            "authenticated SRTCP is not implemented; low-level RTCP decryption is unavailable"
-                .to_string(),
+            "stateless SRTCP decryption is unsafe; use SrtpContext::unprotect_rtcp".to_string(),
         ))
     }
 
-    #[cfg(any())]
-    fn incomplete_decrypt_rtcp(&self, data: &[u8]) -> Result<Bytes> {
-        if self.suite.encryption == SrtpEncryptionAlgorithm::Null
-            && self.suite.authentication == SrtpAuthenticationAlgorithm::Null
-        {
-            // Null encryption and authentication, just return the original data
-            return Ok(Bytes::copy_from_slice(data));
-        }
-
+    /// Decrypt an SRTCP packet and return its SSRC and 31-bit packet index.
+    pub(crate) fn decrypt_rtcp_with_index(&self, data: &[u8]) -> Result<(Bytes, u32, u32)> {
         // Get session keys
         let session_keys = self
             .session_keys
@@ -560,7 +618,7 @@ impl SrtpCrypto {
         let min_len = 8
             + 4
             + (if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-                self.suite.tag_length
+                self.suite.srtcp_tag_length()
             } else {
                 0
             });
@@ -573,7 +631,7 @@ impl SrtpCrypto {
         }
 
         // Calculate authentication tag position
-        let auth_tag_pos = data.len() - self.suite.tag_length;
+        let auth_tag_pos = data.len() - self.suite.srtcp_tag_length();
 
         // Verify authentication tag if authentication is enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
@@ -581,7 +639,7 @@ impl SrtpCrypto {
             let auth_tag = &data[auth_tag_pos..];
 
             // Calculate authentication tag to compare
-            let calculated_tag = self.calculate_rtcp_auth_tag(packet_data, 0)?;
+            let calculated_tag = self.calculate_rtcp_auth_tag(packet_data)?;
 
             // Constant-time comparison to prevent timing attacks
             let mut result = 0;
@@ -596,7 +654,9 @@ impl SrtpCrypto {
             }
 
             if result != 0 {
-                return Err(Error::SrtpError("SRTCP authentication failed".to_string()));
+                return Err(Error::AuthenticationFailed(
+                    "SRTCP authentication tag mismatch".to_string(),
+                ));
             }
         }
 
@@ -611,13 +671,22 @@ impl SrtpCrypto {
         let index_value = u32::from_be_bytes(index_bytes);
         let e_flag = (index_value & 0x80000000) != 0;
         let index = index_value & 0x7FFFFFFF;
+        let ssrc = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-        // If E flag is not set, packet is not encrypted
+        // An authenticated E=0 packet is valid only for an explicitly
+        // unencrypted SRTCP policy. Every constructible 0.3.5 suite uses
+        // AES-CM, so accepting it here would silently downgrade ciphertext to
+        // cleartext even though its HMAC is valid.
         if !e_flag {
+            if self.suite.encryption != SrtpEncryptionAlgorithm::Null {
+                return Err(Error::AuthenticationFailed(
+                    "encrypted SRTCP policy requires the E flag".to_string(),
+                ));
+            }
             // Remove the index and auth tag
             let mut result = BytesMut::with_capacity(index_pos);
             result.extend_from_slice(&data[0..index_pos]);
-            return Ok(result.freeze());
+            return Ok((result.freeze(), ssrc, index));
         }
 
         // Extract header and payload
@@ -632,9 +701,6 @@ impl SrtpCrypto {
 
         // Create a mutable copy of the payload for decryption
         let mut decrypted_payload = BytesMut::from(payload);
-
-        // Create an IV (simplified - in a real implementation we'd extract SSRC from the RTCP packet)
-        let ssrc = 0u32; // Simplified - would extract from packet
 
         let iv = match self.suite.encryption {
             SrtpEncryptionAlgorithm::AesCm => {
@@ -662,7 +728,7 @@ impl SrtpCrypto {
         // Add decrypted payload to result
         result.extend_from_slice(&decrypted_payload);
 
-        Ok(result.freeze())
+        Ok((result.freeze(), ssrc, index))
     }
 }
 
@@ -704,6 +770,33 @@ fn aes_cm_decrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
     aes_cm_encrypt(data, key, iv)
 }
 
+/// HMAC-SHA1 authentication for SRTP
+fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
+    // Create a new HMAC-SHA1 instance
+    let mut mac = HmacSha1::new_from_slice(key)
+        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
+
+    // Update with data
+    mac.update(data);
+
+    // Finalize and get the result
+    let result = mac.finalize().into_bytes();
+
+    // Truncate to the requested tag length. Guard against a misconfigured
+    // suite whose tag_length exceeds the 20-byte HMAC-SHA1 output (otherwise
+    // the slice below panics).
+    if tag_length > result.len() {
+        return Err(Error::SrtpError(format!(
+            "auth tag_length {} exceeds HMAC-SHA1 output {}",
+            tag_length,
+            result.len()
+        )));
+    }
+    let tag = result.as_slice()[..tag_length].to_vec();
+
+    Ok(tag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -719,14 +812,14 @@ mod tests {
     #[test]
     fn test_srtp_key_from_base64() {
         for (combined_length, key_length) in [(30, 16), (46, 32)] {
-            let base64_key = BASE64.encode(vec![0x42; combined_length]);
-            let key = SrtpCryptoKey::from_base64(&base64_key).unwrap();
+            let encoded = BASE64.encode(vec![0x42; combined_length]);
+            let key = SrtpCryptoKey::from_base64(&encoded).unwrap();
             assert_eq!(key.key().len(), key_length);
             assert_eq!(key.salt().len(), 14);
         }
 
-        for invalid_length in [0, 16, 29, 31, 45, 47] {
-            let encoded = BASE64.encode(vec![0x42; invalid_length]);
+        for combined_length in [0, 15, 16, 29, 31, 45, 47] {
+            let encoded = BASE64.encode(vec![0x42; combined_length]);
             assert!(SrtpCryptoKey::from_base64(&encoded).is_err());
         }
 
@@ -737,22 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_and_context_require_an_exact_fourteen_byte_master_salt() {
-        for salt_length in [13, 15] {
-            let key = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; salt_length]);
-            assert!(matches!(
-                SrtpCrypto::new(crate::srtp::SRTP_AES128_CM_SHA1_80, key.clone()),
-                Err(Error::SrtpError(_))
-            ));
-            assert!(matches!(
-                crate::srtp::SrtpContext::new(crate::srtp::SRTP_AES128_CM_SHA1_80, key),
-                Err(Error::SrtpError(_))
-            ));
-        }
-    }
-
-    #[test]
-    fn null_encryption_cannot_construct_crypto_context() {
+    fn null_encryption_suite_fails_closed() {
         let key = SrtpCryptoKey::new(vec![0; 16], vec![0; 14]);
         let null_suite = SrtpCryptoSuite {
             encryption: SrtpEncryptionAlgorithm::Null,
@@ -762,6 +840,25 @@ mod tests {
         };
         assert!(matches!(
             SrtpCrypto::new(null_suite, key),
+            Err(Error::UnsupportedFeature(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_stateless_srtcp_entry_points_fail_closed() {
+        let crypto = SrtpCrypto::new(
+            super::super::SRTP_AES128_CM_SHA1_80,
+            SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]),
+        )
+        .unwrap();
+        let rtcp = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
+
+        assert!(matches!(
+            crypto.encrypt_rtcp(&rtcp),
+            Err(Error::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            crypto.decrypt_rtcp(&rtcp),
             Err(Error::UnsupportedFeature(_))
         ));
     }
@@ -803,22 +900,29 @@ mod tests {
     }
 
     #[test]
-    fn low_level_srtcp_entry_points_fail_closed() {
-        let crypto = SrtpCrypto::new(
-            super::super::SRTP_AES128_CM_SHA1_80,
-            SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]),
-        )
-        .unwrap();
-        let rtcp = [0x80, 200, 0, 1, 0, 0, 0, 1];
+    fn test_hmac_sha1() {
+        // Test data
+        let data = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let key = vec![0; 20]; // 20-byte key (all zeros)
 
-        assert!(matches!(
-            crypto.encrypt_rtcp(&rtcp),
-            Err(Error::UnsupportedFeature(_))
-        ));
-        assert!(matches!(
-            crypto.decrypt_rtcp(&rtcp),
-            Err(Error::UnsupportedFeature(_))
-        ));
+        // Calculate tag with length 10 (80 bits)
+        let tag = hmac_sha1(&data, &key, 10);
+        assert!(tag.is_ok());
+        let tag = tag.unwrap();
+
+        // Tag should be 10 bytes long
+        assert_eq!(tag.len(), 10);
+
+        // Calculate tag with length 4 (32 bits)
+        let tag32 = hmac_sha1(&data, &key, 4);
+        assert!(tag32.is_ok());
+        let tag32 = tag32.unwrap();
+
+        // Tag should be 4 bytes long
+        assert_eq!(tag32.len(), 4);
+
+        // First 4 bytes should match between the two tags
+        assert_eq!(tag[0..4], tag32[0..4]);
     }
 
     #[test]

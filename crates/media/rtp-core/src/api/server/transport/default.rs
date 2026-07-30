@@ -253,6 +253,36 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             }
         }
 
+        // Pre-shared SRTP cannot become usable later through negotiation. Fail
+        // before binding sockets or marking the server running if its key is
+        // absent or malformed.
+        let pre_shared_srtp = if self.config.security_config.security_mode == SecurityMode::Srtp {
+            let crypto_suite = crate::api::common::config::implemented_single_srtp_suite(
+                &self.config.security_config.srtp_profiles,
+            )
+            .map_err(|error| MediaTransportError::Security(error.to_string()))?;
+            let key = self
+                .config
+                .security_config
+                .srtp_key
+                .clone()
+                .ok_or_else(|| {
+                    MediaTransportError::Security(
+                        "SRTP mode requires pre-shared key material".to_string(),
+                    )
+                })?;
+            let expected_length = crypto_suite.key_length + 14;
+            if key.len() != expected_length {
+                return Err(MediaTransportError::Security(format!(
+                    "SRTP key material for {crypto_suite:?} must be exactly {expected_length} bytes, got {}",
+                    key.len(),
+                )));
+            }
+            Some((crypto_suite, key))
+        } else {
+            None
+        };
+
         // Set running flag
         {
             let mut running = self.running.write().await;
@@ -283,7 +313,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             MediaTransportError::Transport(format!("Failed to create UDP transport: {}", e))
         })?;
 
-        // Create SecurityRtpTransport wrapper
+        // Create SecurityRtpTransport wrapper only when the selected mode
+        // actually requires SRTP/SRTCP.
         let srtp_enabled = self.config.security_config.security_mode.requires_srtp();
         let transport = SecurityRtpTransport::new(Arc::new(udp_transport), srtp_enabled)
             .await
@@ -298,77 +329,28 @@ impl MediaTransportServer for DefaultMediaTransportServer {
 
         let transport_arc: Arc<dyn RtpTransport> = Arc::new(transport);
 
-        // Wire SRTP context if security is enabled
-        let security_guard = self.security_context.read().await;
-        if let Some(_security_ctx) = security_guard.as_ref() {
-            // For now, we'll extract the SRTP key directly from the config
-            // In a full implementation, we'd access it through security_ctx.get_config()
-            if self.config.security_config.security_mode == SecurityMode::Srtp {
-                let crypto_suite = crate::api::common::config::implemented_single_srtp_suite(
-                    &self.config.security_config.srtp_profiles,
-                )
+        // Install the same exact profile/key pair on the main transport that
+        // will be provisioned into each per-client transport.
+        if let Some((crypto_suite, srtp_key)) = pre_shared_srtp.as_ref() {
+            let key = srtp_key[..crypto_suite.key_length].to_vec();
+            let salt = srtp_key[crypto_suite.key_length..].to_vec();
+            let srtp_context =
+                SrtpContext::new(crypto_suite.clone(), SrtpCryptoKey::new(key, salt))
+                    .map_err(|error| MediaTransportError::Security(error.to_string()))?;
+            let sec_transport = transport_arc
+                .as_any()
+                .downcast_ref::<SecurityRtpTransport>()
+                .ok_or_else(|| {
+                    MediaTransportError::Security(
+                        "secure server transport is not backed by SecurityRtpTransport".to_string(),
+                    )
+                })?;
+            sec_transport
+                .set_srtp_context(srtp_context)
+                .await
                 .map_err(|error| MediaTransportError::Security(error.to_string()))?;
-                if let Some(srtp_key) = &self.config.security_config.srtp_key {
-                    debug!("Configuring server SRTP context with pre-shared keys");
-                    debug!(
-                        "Creating server SRTP context from {} byte key",
-                        srtp_key.len()
-                    );
-
-                    // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
-                    if srtp_key.len() == 30 {
-                        let key = srtp_key[0..16].to_vec();
-                        let salt = srtp_key[16..30].to_vec();
-
-                        debug!(
-                            "Creating server SrtpCryptoKey with key: {} bytes, salt: {} bytes",
-                            key.len(),
-                            salt.len()
-                        );
-                        let crypto_key = SrtpCryptoKey::new(key, salt);
-
-                        match SrtpContext::new(crypto_suite, crypto_key) {
-                            Ok(srtp_context) => {
-                                debug!("Successfully created server SRTP context");
-
-                                // Set SRTP context on security transport
-                                if let Some(sec_transport) = transport_arc
-                                    .as_any()
-                                    .downcast_ref::<SecurityRtpTransport>()
-                                {
-                                    sec_transport.set_srtp_context(srtp_context).await.map_err(
-                                        |error| MediaTransportError::Security(error.to_string()),
-                                    )?;
-                                    info!(
-                                        "SRTP context successfully configured on server transport"
-                                    );
-                                } else {
-                                    warn!("Failed to downcast to SecurityRtpTransport for server SRTP context setting");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to create server SRTP context: {}", e);
-                                return Err(MediaTransportError::Security(format!(
-                                    "Server SRTP context creation failed: {}",
-                                    e
-                                )));
-                            }
-                        }
-                    } else {
-                        error!(
-                            "Invalid server AES-128 SRTP key material length: {} bytes (expected exactly 30)",
-                            srtp_key.len()
-                        );
-                        return Err(MediaTransportError::Security(
-                            "Server AES-128 SRTP key material must be exactly 30 bytes".to_string(),
-                        ));
-                    }
-                } else {
-                    warn!("SRTP mode enabled on server but no key provided");
-                }
-            }
+            info!("SRTP context successfully configured on server transport");
         }
-        drop(security_guard);
 
         // Store the socket in a thread-safe way using RwLock
         {
@@ -384,6 +366,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         let session_buffer_config = self.config.rtp_session_buffer_config;
         let transport_buffer_config = self.config.rtp_transport_buffer_config;
         let secure_media_required = self.config.security_config.security_mode.requires_srtp();
+        let client_srtp = pre_shared_srtp;
 
         let task = tokio::spawn(async move {
             debug!("Started transport event task");
@@ -543,6 +526,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                     session_buffer_config,
                                     transport_buffer_config,
                                     secure_media_required,
+                                    client_srtp.clone(),
                                 )
                                 .await;
 

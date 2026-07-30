@@ -2436,7 +2436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn srtp_session_rejects_manual_and_automatic_plaintext_rtcp() {
+    async fn srtp_session_emits_authenticated_manual_rtcp() {
         let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let config = RtpSessionConfig {
             local_addr: "127.0.0.1:0".parse().unwrap(),
@@ -2453,6 +2453,7 @@ mod tests {
             .unwrap();
         let key = vec![0x11; 16];
         let salt = vec![0x22; 14];
+        let peer_key = crate::srtp::SrtpCryptoKey::new(key.clone(), salt.clone());
         let send = crate::srtp::SrtpContext::new(
             crate::srtp::SRTP_AES128_CM_SHA1_80,
             crate::srtp::SrtpCryptoKey::new(key.clone(), salt.clone()),
@@ -2465,21 +2466,26 @@ mod tests {
         .unwrap();
         udp.set_srtp_contexts(send, recv).await.unwrap();
 
-        assert!(matches!(
-            session.send_sender_report().await,
-            Err(Error::UnsupportedFeature(_))
-        ));
-        assert!(matches!(
-            session.send_receiver_report().await,
-            Err(Error::UnsupportedFeature(_))
-        ));
+        session.send_sender_report().await.unwrap();
+        session.send_receiver_report().await.unwrap();
 
         let mut wire = [0_u8; 2048];
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1_200), peer.recv_from(&mut wire))
-                .await
-                .is_err()
-        );
+        let mut peer_receive =
+            crate::srtp::SrtpContext::new(crate::srtp::SRTP_AES128_CM_SHA1_80, peer_key).unwrap();
+        for expected_type in [
+            crate::packet::rtcp::RtcpPacketType::SenderReport,
+            crate::packet::rtcp::RtcpPacketType::ReceiverReport,
+        ] {
+            let (length, _) =
+                tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut wire))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let plaintext = peer_receive.unprotect_rtcp(&wire[..length]).unwrap();
+            let packet = crate::packet::rtcp::RtcpPacket::parse(&plaintext).unwrap();
+            assert_eq!(packet.packet_type(), expected_type);
+            assert_ne!(&wire[..length], plaintext.as_ref());
+        }
         session.close().await.unwrap();
     }
 }
