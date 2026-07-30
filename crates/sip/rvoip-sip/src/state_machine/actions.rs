@@ -2813,22 +2813,22 @@ pub(crate) async fn execute_action(
                         Some(("SIP".to_string(), 408, Some("Session expired".to_string())));
                 }
                 "SuspendMedia" => {
+                    let direction = crate::types::MediaDirection::SendOnly;
                     if let Some(media_id) = &session.media_session_id {
-                        let direction = crate::types::MediaDirection::SendOnly;
                         media_adapter
                             .set_media_direction(media_id.clone(), direction)
                             .await?;
-                        session.local_media_direction = direction;
                     }
+                    session.local_media_direction = direction;
                 }
                 "ResumeMedia" => {
+                    let direction = crate::types::MediaDirection::SendRecv;
                     if let Some(media_id) = &session.media_session_id {
-                        let direction = crate::types::MediaDirection::SendRecv;
                         media_adapter
                             .set_media_direction(media_id.clone(), direction)
                             .await?;
-                        session.local_media_direction = direction;
                     }
+                    session.local_media_direction = direction;
                 }
                 "CheckReadiness" => {
                     return Ok(ActionOutcome::with_event(EventType::CheckConditions));
