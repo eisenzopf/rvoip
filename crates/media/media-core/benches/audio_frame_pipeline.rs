@@ -22,6 +22,10 @@
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rvoip_media_core::performance::{
+    pool::{AudioFramePool, PoolConfig},
+    zero_copy::ZeroCopyAudioFrame,
+};
 use rvoip_media_core::relay::controller::MediaSessionController;
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use std::sync::Arc;
@@ -31,6 +35,7 @@ use tokio::runtime::Builder;
 const PAYLOAD_SIZE: usize = 160; // G.711 µ-law, 20 ms @ 8 kHz
 const OPS_PER_TASK: u64 = 200;
 const CONCURRENT_TASK_COUNTS: [usize; 4] = [1, 4, 8, 16];
+const FRAME_SAMPLES: usize = 160;
 
 fn make_packet(seq: u16) -> RtpPacket {
     let header = RtpHeader::new(0 /* µ-law PT */, seq, (seq as u32) * 160, 0xdead_beef);
@@ -128,5 +133,43 @@ fn bench_concurrent(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_single, bench_concurrent);
+/// Compare fresh frame allocation with a prewarmed pool. This used to be a
+/// single wall-clock ratio assertion in `cargo test`, where scheduler noise
+/// could reverse the result. Criterion supplies warmup, repeated sampling, and
+/// outlier analysis while the ordinary tests retain deterministic pool checks.
+fn bench_frame_acquisition(c: &mut Criterion) {
+    let pool = AudioFramePool::new(PoolConfig {
+        initial_size: 32,
+        max_size: 128,
+        sample_rate: 8_000,
+        channels: 1,
+        samples_per_frame: FRAME_SAMPLES,
+    });
+    pool.prewarm(32);
+
+    let mut group = c.benchmark_group("audio_frame_acquisition");
+    group.throughput(Throughput::Elements(1));
+
+    group.bench_function("fresh_allocation", |b| {
+        b.iter(|| {
+            let samples = vec![black_box(100i16); FRAME_SAMPLES];
+            black_box(ZeroCopyAudioFrame::new(samples, 8_000, 1, 0));
+        });
+    });
+
+    group.bench_function("prewarmed_pool", |b| {
+        b.iter(|| {
+            black_box(pool.get_frame());
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_single,
+    bench_concurrent,
+    bench_frame_acquisition
+);
 criterion_main!(benches);

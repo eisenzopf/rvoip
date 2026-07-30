@@ -647,18 +647,43 @@ mod tests {
             iterations: 10, // Small for test speed
             ..Default::default()
         };
+        let expected_iterations = config.iterations as u64;
+        let expected_frame_bytes = config.frame_size as u64
+            * u64::from(config.channels)
+            * std::mem::size_of::<i16>() as u64;
 
         let benchmark = AudioFrameBenchmark::new(config);
         let results = benchmark.run_comprehensive_benchmark();
 
-        // All metrics should have been populated
-        assert!(results.traditional_metrics.operation_count > 0);
-        assert!(results.zero_copy_metrics.operation_count > 0);
-        assert!(results.pooled_metrics.operation_count > 0);
-
-        // Zero-copy should typically be faster (though test data might be small)
-        let summary = results.calculate_improvements();
-        assert!(summary.zero_copy_speedup >= 0.5); // At least not much slower
-        assert!(summary.pooled_speedup >= 0.5);
+        // Gate deterministic work/allocation properties here. Comparative
+        // wall-clock timing is measured by the media-core Criterion benches;
+        // a ten-iteration timing ratio is not stable under hosted-CI load.
+        assert_eq!(
+            results.traditional_metrics.operation_count,
+            expected_iterations
+        );
+        assert_eq!(
+            results.zero_copy_metrics.operation_count,
+            expected_iterations
+        );
+        assert_eq!(results.pooled_metrics.operation_count, expected_iterations);
+        assert_eq!(
+            results.traditional_metrics.allocation_count,
+            expected_iterations
+        );
+        assert_eq!(
+            results.zero_copy_metrics.allocation_count,
+            expected_iterations
+        );
+        assert_eq!(results.pooled_metrics.allocation_count, 0);
+        assert_eq!(
+            results.traditional_metrics.memory_allocated,
+            expected_iterations * expected_frame_bytes * 3
+        );
+        assert_eq!(
+            results.zero_copy_metrics.memory_allocated,
+            expected_iterations * expected_frame_bytes
+        );
+        assert_eq!(results.pooled_metrics.memory_allocated, 0);
     }
 }
