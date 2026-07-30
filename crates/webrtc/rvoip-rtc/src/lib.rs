@@ -10,7 +10,7 @@
 //! Instead of the library performing network reads and writes directly, **you** provide the
 //! network data and handle the output. This gives you:
 //!
-//! - **Runtime Independence**: Works with tokio, async-std, smol, or blocking I/O
+//! - **Runtime Independence**: Works with any async executor or blocking I/O
 //! - **Full Control**: You control threading, scheduling, and I/O multiplexing
 //! - **Testability**: Protocol logic can be tested without real network I/O
 //! - **Flexibility**: Easy integration with existing networking code

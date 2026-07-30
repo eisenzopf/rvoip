@@ -4,9 +4,7 @@ play-from-disk-renegotiation demonstrates WebRTC.rs's renegotiation abilities.
 
 For a simpler example of playing a file from disk we also have [examples/play-from-disk](/examples/play-from-disk)
 
-`hyper` v0.14 requires a Tokio runtime (it uses `tokio::net::TcpListener` internally via `Server::bind`). When we run
-under `runtime-smol`, there's no Tokio
-reactor, so `hyper` panics. Therefore, this example must be ran in default runtime-tokio.
+This packaged stack and `hyper` v0.14 both use Tokio.
 
 ## Instructions
 

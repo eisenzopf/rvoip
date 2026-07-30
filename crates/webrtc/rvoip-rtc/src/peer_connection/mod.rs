@@ -26,7 +26,8 @@
 //!
 //! ## Sans-I/O Benefits
 //!
-//! - **Flexibility**: Works with any I/O runtime (tokio, async-std, blocking, etc.)
+//! - **Flexibility**: Keeps protocol logic independent of I/O scheduling; rvoip's
+//!   integration layer uses Tokio
 //! - **Testability**: Protocol logic can be tested without network I/O
 //! - **Control**: Application has full control over threading and scheduling
 //!

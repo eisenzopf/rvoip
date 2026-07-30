@@ -181,7 +181,7 @@ impl RTCIceGatherer {
 
         debug!("Resolving STUN server: {}", stun_server_addr_str);
 
-        // Resolve hostname to IP address using runtime-agnostic helper
+        // Resolve hostname to an IP address through the Tokio integration helper.
         let resolved_addrs = runtime::resolve_host(&stun_server_addr_str).await?;
 
         // Filter addresses to match the local_addr IP version (IPv4 or IPv6)

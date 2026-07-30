@@ -1,7 +1,7 @@
 //! Runtime abstraction for async I/O and timer operations
 //!
-//! This module provides traits that abstract over different async runtimes,
-//! allowing the WebRTC implementation to work with Tokio, async-std, smol, and others.
+//! The protocol core remains Sans-I/O, while this integration layer is
+//! intentionally qualified only for Tokio.
 
 #![allow(clippy::type_complexity)]
 
@@ -38,10 +38,9 @@ trait JoinHandleInner: Send + Sync {
     fn is_finished(&self) -> bool;
 }
 
-/// Abstracts I/O and timer operations for runtime independence
+/// Abstracts I/O and timer operations used by the Tokio integration
 ///
-/// This trait allows the WebRTC implementation to work with different async runtimes
-/// without being tightly coupled to any specific runtime.
+/// The trait boundary is retained to keep protocol and I/O concerns separate.
 pub trait Runtime: Send + Sync + Debug + 'static {
     /// Drive a future to completion in the background
     ///
@@ -67,7 +66,7 @@ pub trait Runtime: Send + Sync + Debug + 'static {
     ) -> io::Result<Box<dyn AsyncTcpListener>>;*/
 }
 
-/// Abstract implementation of a UDP socket for runtime independence
+/// Abstract implementation of a UDP socket for the integration layer
 ///
 /// Simple async wrapper around UDP sockets
 pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
@@ -88,7 +87,7 @@ pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
     fn local_addr(&self) -> io::Result<SocketAddr>;
 }
 
-/// An async mutex that works across different runtimes
+/// Async mutex interface used by the Tokio integration boundary
 pub trait AsyncMutex<T: ?Sized>: Send + Sync {
     /// The guard type returned by lock()
     type Guard<'a>: std::ops::Deref<Target = T> + std::ops::DerefMut + Send + 'a
@@ -191,81 +190,21 @@ impl std::error::Error for BroadcastRecvError {}
 
 /// Get the default runtime for the current build configuration
 ///
-/// Returns the runtime for whichever runtime feature is enabled.
-/// If multiple runtimes are enabled, tokio takes precedence.
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-smol"))]
+/// Returns the Tokio runtime.
 pub fn default_runtime() -> Option<std::sync::Arc<dyn Runtime>> {
-    #[cfg(feature = "runtime-tokio")]
-    {
-        Some(std::sync::Arc::new(TokioRuntime))
-    }
-
-    #[cfg(all(not(feature = "runtime-tokio"), feature = "runtime-smol"))]
-    {
-        Some(std::sync::Arc::new(SmolRuntime))
-    }
-}
-
-#[cfg(not(any(feature = "runtime-tokio", feature = "runtime-smol")))]
-pub fn default_runtime() -> Option<std::sync::Arc<dyn Runtime>> {
-    None
-}
-
-/// Get smol runtime if enabled
-#[cfg(any(feature = "runtime-tokio", feature = "runtime-smol"))]
-pub fn smol_runtime() -> Option<std::sync::Arc<dyn Runtime>> {
-    #[cfg(feature = "runtime-smol")]
-    {
-        Some(std::sync::Arc::new(SmolRuntime))
-    }
-
-    #[cfg(not(feature = "runtime-smol"))]
-    None
+    Some(std::sync::Arc::new(TokioRuntime))
 }
 
 // Runtime implementations
-#[cfg(feature = "runtime-tokio")]
 mod tokio;
-#[cfg(feature = "runtime-tokio")]
 pub use tokio::TokioRuntime;
-#[cfg(feature = "runtime-tokio")]
 pub use tokio::{
     TokioInterval, block_on, broadcast_channel, channel, interval, resolve_host, sleep, timeout,
 };
-#[cfg(feature = "runtime-tokio")]
 pub type Interval = TokioInterval;
-#[cfg(feature = "runtime-tokio")]
 pub type Mutex<T> = tokio::TokioMutex<T>;
-#[cfg(feature = "runtime-tokio")]
 pub type Notify = tokio::TokioNotify;
-#[cfg(feature = "runtime-tokio")]
 pub type Sender<T> = tokio::TokioSender<T>;
-#[cfg(feature = "runtime-tokio")]
 pub type Receiver<T> = tokio::TokioReceiver<T>;
-#[cfg(feature = "runtime-tokio")]
 pub type BroadcastSender<T> = tokio::TokioBroadcastSender<T>;
-#[cfg(feature = "runtime-tokio")]
 pub type BroadcastReceiver<T> = tokio::TokioBroadcastReceiver<T>;
-
-#[cfg(feature = "runtime-smol")]
-mod smol;
-#[cfg(feature = "runtime-smol")]
-pub use smol::SmolRuntime;
-#[cfg(feature = "runtime-smol")]
-pub use smol::{
-    SmolInterval, block_on, broadcast_channel, channel, interval, resolve_host, sleep, timeout,
-};
-#[cfg(feature = "runtime-smol")]
-pub type Interval = SmolInterval;
-#[cfg(feature = "runtime-smol")]
-pub type Mutex<T> = smol::SmolMutex<T>;
-#[cfg(feature = "runtime-smol")]
-pub type Notify = smol::SmolNotify;
-#[cfg(feature = "runtime-smol")]
-pub type Sender<T> = smol::SmolSender<T>;
-#[cfg(feature = "runtime-smol")]
-pub type Receiver<T> = smol::SmolReceiver<T>;
-#[cfg(feature = "runtime-smol")]
-pub type BroadcastSender<T> = smol::SmolBroadcastSender<T>;
-#[cfg(feature = "runtime-smol")]
-pub type BroadcastReceiver<T> = smol::SmolBroadcastReceiver<T>;

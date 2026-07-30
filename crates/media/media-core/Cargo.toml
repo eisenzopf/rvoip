@@ -49,7 +49,6 @@ anyhow.workspace = true
 
 # Error handling
 thiserror = "1.0"
-async-std = "1.0"
 
 # Bytes handling
 bytes = "1.5"

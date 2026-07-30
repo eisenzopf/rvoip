@@ -78,7 +78,7 @@ you what to send.
 
 **Benefits:**
 
-- 🚀 **Runtime Independent** - Works with tokio, async-std, smol, or blocking I/O
+- 🚀 **Runtime Independent** - Works with any async executor or blocking I/O
 - 🎯 **Full Control** - You control threading, scheduling, and I/O multiplexing
 - 🧪 **Testable** - Protocol logic can be tested without real network I/O
 - 🔌 **Flexible** - Easy integration with existing networking code

@@ -5,7 +5,7 @@
 # example builds — so a test regression could land on main without CI catching
 # it. This workflow makes the core test suite and clippy block PRs.
 #
-# Two jobs:
+# Three jobs:
 #   test   — `cargo test` over the default-members (SIP + media + foundation).
 #            Those are the service-free, security-relevant crates. The extension
 #            crates (postgres/redis/keycloak/ldap/…) need live services to test
@@ -17,6 +17,10 @@
 #            hard-errors and denied lints — e.g. a regression of the
 #            lint-group-priority misconfig fixed in the root Cargo.toml.
 #            Tightening to `-D warnings` is a follow-up after the warning cleanup.
+#   webrtc-runtime — compile and run the Tokio-only runtime regression under
+#            default, no-default, and all-feature configurations. The
+#            all-feature lane also rejects alternate executor/reactor packages
+#            anywhere in the workspace dependency graph.
 
 name: workspace-test-clippy
 
@@ -29,6 +33,39 @@ on:
   workflow_dispatch: {}
 
 jobs:
+  webrtc-runtime:
+    name: WebRTC Tokio (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            flags: ""
+          - name: no-default-features
+            flags: "--no-default-features"
+          - name: all-features
+            flags: "--all-features"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify Tokio-only runtime
+        run: cargo test -p rvoip-webrtc-stack --locked ${{ matrix.flags }} --test tokio_only_runtime
+      - name: Reject alternate runtime dependencies
+        if: matrix.name == 'all-features'
+        shell: bash
+        run: |
+          if forbidden="$(
+            cargo tree --workspace --all-features --locked --prefix none |
+              grep -E '^(smol|async-std|async-io|async-global-executor|async-executor|async-channel|async-task|async-process|async-net|async-fs|async-signal|async-broadcast|blocking|futures-lite|piper|polling) v'
+          )"; then
+            echo "alternate runtime dependencies are forbidden:"
+            echo "$forbidden"
+            exit 1
+          fi
+
   test:
     name: cargo test (core)
     runs-on: ubuntu-latest
