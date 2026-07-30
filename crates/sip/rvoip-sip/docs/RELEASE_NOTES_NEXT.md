@@ -1,10 +1,11 @@
-# rvoip 0.3.4 Release Candidate Notes
+# rvoip 0.3.4 Release Notes
 
 Date: 2026-07-29
 
-These notes describe the coordinated `0.3.4` candidate. They do not represent
-a published release or a passing beta attestation until the exact committed
-candidate completes the strict full gate and receives owner approval.
+These notes describe the coordinated `0.3.4` release. The project owner
+approved a transparent carry-forward qualification rather than a new strict
+full-beta run. The release does not represent inherited evidence as current
+evidence.
 
 ## Headline
 
@@ -32,8 +33,9 @@ transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
   cancellation latching, forked and late 2xx responses, ACK ownership,
   response aggregation, Timer C, strict/loose routing, SIPS, and exact response
   flow handling.
-- Kamailio and OpenSIPS are mandatory real-process interoperability peers in
-  both adjacency orders over UDP, TCP, and verified TLS.
+- The strict beta tooling now makes Kamailio and OpenSIPS mandatory
+  real-process interoperability peers in both adjacency orders over UDP, TCP,
+  and verified TLS. That matrix was not rerun for this carry-forward release.
 - The beta report generator records revision-bound Asterisk, FreeSWITCH,
   Kamailio, and OpenSIPS attestations and fails closed on missing or skipped
   required rows.
@@ -63,9 +65,10 @@ transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
 
 ## Proxy Claim Boundary
 
-The candidate may be described only as an “RFC 3261 transaction-stateful
-proxy profile, updated by RFC 4320 and RFC 6026,” after every applicable row in
-the conformance matrix links to green executable evidence.
+The implementation is described as a bounded “RFC 3261
+transaction-stateful proxy profile, updated by RFC 4320 and RFC 6026.” The
+`0.3.4` carry-forward qualification makes no new universal proxy-conformance
+claim and does not claim a fresh peer-interoperability matrix.
 
 - Recursive 3xx Contact processing is not part of the claimed profile.
 - Loop detection is disabled unless it can distinguish loops from spirals.
@@ -92,21 +95,26 @@ the conformance matrix links to green executable evidence.
   interoperability.
 - The proxy claim remains limited to the explicitly tested profile below.
 
-## Required Qualification
+## Carry-forward qualification
 
-Promotion requires the exact clean candidate revision to pass:
+The exact release commit is qualified under
+`rvoip-release-carry-forward-attestation-v1` with this recorded disposition:
 
-- all unit, integration, security, lifecycle, RFC, and public-API checks;
-- Asterisk and FreeSWITCH signaling plus real audio matrices;
-- Kamailio and OpenSIPS in both orders over UDP, TCP, and TLS;
-- the SIPp ladder and strict-UA checks;
-- three canonical 2,000-CPS runs with the recorded beta thresholds;
-- one-hour monolithic and one-hour split soaks; and
-- report verification, package inspection, SBOM, provenance, vulnerability
-  policy, and publication dry run.
+- `beta_suite: NOT-RERUN`;
+- `inherited_beta_background: 0.3.2 OWNER-APPROVED-EXCEPTION`;
+- `current_workspace_verification: PASS`;
+- `current_canonical_2k: PASS`; and
+- `disposition: OWNER-APPROVED-CARRY-FORWARD`.
 
-No prior exception or historical report qualifies `0.3.4`. Publication,
-tagging, pushing, or deployment requires separate owner authorization.
+One clean canonical 2,000-CPS/65,000-call real-media pass is bound to the exact
+`0.3.4` commit, tree, source fingerprint, report, persisted acceptance result,
+performance audit, and executable hash. The release verifier separately runs
+the current workspace compile, library, target, integration, example, and
+doctest checks plus all 44 package-manifest checks.
+
+The full `0.3.4` beta gate, Asterisk/FreeSWITCH/Kamailio/OpenSIPS matrix, SIPp
+ladder, and long soaks were not rerun. The immutable `0.3.2` exception remains
+historical background with strict status `NON-RC`; it is not a `0.3.4` PASS.
 
 Historical `0.3.2` disposition and evidence remain unchanged in
 [`BETA_RELEASE_EXCEPTION.md`](BETA_RELEASE_EXCEPTION.md) and its immutable

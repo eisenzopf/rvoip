@@ -4,6 +4,44 @@
 
 No changes yet.
 
+## 0.3.4 — 2026-07-29
+
+This coordinated 44-crate patch release adds exact inbound-admission terminal
+notification, completes RFC 6026 INVITE Accepted lifecycles, and introduces a
+bounded RFC 3261 transaction-stateful proxy profile updated by RFC 4320 and
+RFC 6026.
+
+### Added
+
+- Exact-generation inbound admission termination notification for cancelled,
+  remotely ended, and failed source legs without polling.
+- Compact, sharded Timer M/L retention driven by the existing manager-owned
+  deadline queues rather than per-transaction runners and sleeper tasks.
+- Matched/unmatched proxy CANCEL handling, fork response contexts, multiple
+  and late 2xx forwarding, ACK ownership, Timer C, response aggregation, and
+  strict/loose routing coverage within the documented bounded profile.
+- Fail-closed Kamailio/OpenSIPS interoperability and four-peer beta-report
+  attestation tooling for future strict full-beta runs.
+- `rvoip-release-carry-forward-attestation-v1` release verification.
+
+### Fixed
+
+- Atomic, generation-protected transaction timer firing removes a saturated
+  command-channel race that could strand expired transactions.
+- Accepted transactions shed active runners, transports, command queues, and
+  active-only locks while preserving RFC retention and exact cleanup.
+- INVITE retransmission, late response, Via/route, RFC 3263 failover, and
+  stateful-proxy response behavior have focused regression coverage.
+
+### Qualification
+
+The owner approved `0.3.4` with a transparent carry-forward disposition. The
+full `0.3.4` beta, four-peer interoperability matrix, and long soaks were not
+rerun. Current evidence is the complete workspace release verification and one
+clean revision-bound canonical 2,000-CPS/65,000-call real-media PASS. The
+immutable `0.3.2` owner-approved exception remains historical background with
+strict status `NON-RC` and is not relabeled as a current beta PASS.
+
 ## 0.3.3 — 2026-07-29
 
 This unified patch release corrects the vCon wire model, Session-finalization

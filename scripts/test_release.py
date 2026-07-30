@@ -462,6 +462,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 "0.3.3",
                 None,
                 str(attestation),
+                None,
                 log,
             )
             self.assertEqual(qualification["mode"], "owner-approved-exception")
@@ -484,7 +485,160 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 "0.3.3",
                 "/tmp/strict-report",
                 "/tmp/exception.json",
+                None,
                 mock.Mock(),
+            )
+
+    def test_carry_forward_is_explicit_hash_bound_and_not_a_beta_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attestation = root / "carry-forward-attestation.json"
+            attestation.write_text(
+                json.dumps(
+                    {
+                        "release": {
+                            "version": "0.3.4",
+                            "disposition": "OWNER-APPROVED-CARRY-FORWARD",
+                            "beta_suite": "NOT-RERUN",
+                        },
+                        "inherited_beta_background": {
+                            "version": "0.3.2",
+                            "disposition": "APPROVED-WITH-EXCEPTION",
+                            "strict_automated_status": "NON-RC",
+                        },
+                        "current_evidence": {
+                            "canonical_2k": {"status": "PASS"}
+                        },
+                    }
+                )
+            )
+            log = mock.Mock()
+            qualification = release.verify_beta_reporting(
+                root,
+                "0.3.4",
+                None,
+                None,
+                str(attestation),
+                log,
+            )
+            self.assertEqual(
+                qualification["mode"], "owner-approved-carry-forward"
+            )
+            self.assertEqual(
+                qualification["strict_automated_status"], "NOT-RERUN"
+            )
+            self.assertEqual(
+                qualification["current_workspace_verification"], "PASS"
+            )
+            self.assertEqual(
+                qualification["attestation_sha256"],
+                release.hashlib.sha256(attestation.read_bytes()).hexdigest(),
+            )
+            command = log.command.call_args.args[0]
+            self.assertIn("release_carry_forward_attestation.py", command[1])
+            self.assertEqual(command[-2:], ["--version", "0.3.4"])
+
+    def test_carry_forward_receipt_requires_exact_bounded_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            receipt_path = root / "target/release-logs/0.3.4/verification.json"
+            receipt_path.parent.mkdir(parents=True)
+            attestation = root / "carry-forward-attestation.json"
+            attestation.write_text("{}")
+            attestation_sha256 = release.hashlib.sha256(
+                attestation.read_bytes()
+            ).hexdigest()
+            receipt = {
+                "schema": release.VERIFICATION_RECEIPT_SCHEMA,
+                "version": "0.3.4",
+                "git_commit": "a" * 40,
+                "package_count": 1,
+                "ordered_packages": ["rvoip"],
+                "package_sha256": {},
+                "package_file_manifest_sha256": {"rvoip": "b" * 64},
+                "beta_qualification": {
+                    "mode": "owner-approved-carry-forward",
+                    "disposition": "OWNER-APPROVED-CARRY-FORWARD",
+                    "strict_automated_status": "NOT-RERUN",
+                    "current_workspace_verification": "PASS",
+                    "inherited_beta_background": {
+                        "version": "0.3.2",
+                        "disposition": "APPROVED-WITH-EXCEPTION",
+                        "strict_automated_status": "NON-RC",
+                    },
+                    "current_canonical_2k": {"status": "PASS"},
+                    "attestation_path": attestation.name,
+                    "attestation_sha256": attestation_sha256,
+                },
+                "verification_scope": {
+                    "mode": "full",
+                    "workspace_manifest": "PASS",
+                    "workspace_compile": "PASS",
+                    "workspace_tests": "PASS",
+                    "workspace_doctests": "PASS",
+                    "beta_suite": "OWNER-APPROVED-CARRY-FORWARD",
+                    "targeted_commands": [],
+                    "postgresql_evidence": None,
+                    "package_file_manifests": "PASS",
+                    "package_archives": "VERIFIED-WHEN-REGISTRY-RESOLVABLE",
+                },
+            }
+            receipt_path.write_text(json.dumps(receipt))
+            with mock.patch.object(
+                release, "run", return_value=mock.Mock(returncode=0)
+            ):
+                release.read_verification_receipt(
+                    root, "0.3.4", "a" * 40, ["rvoip"]
+                )
+                for label, mutate in (
+                    (
+                        "beta relabeled pass",
+                        lambda value: value["beta_qualification"].update(
+                            {"strict_automated_status": "PASS"}
+                        ),
+                    ),
+                    (
+                        "inherited relabeled pass",
+                        lambda value: value["beta_qualification"][
+                            "inherited_beta_background"
+                        ].update({"strict_automated_status": "PASS"}),
+                    ),
+                    (
+                        "canonical missing",
+                        lambda value: value["beta_qualification"].update(
+                            {"current_canonical_2k": {"status": "MISSING"}}
+                        ),
+                    ),
+                ):
+                    with self.subTest(label=label):
+                        candidate = json.loads(json.dumps(receipt))
+                        mutate(candidate)
+                        receipt_path.write_text(json.dumps(candidate))
+                        with self.assertRaises(release.ReleaseError):
+                            release.read_verification_receipt(
+                                root, "0.3.4", "a" * 40, ["rvoip"]
+                            )
+
+                receipt_path.write_text(json.dumps(receipt))
+                attestation.write_text("altered")
+                with self.assertRaises(release.ReleaseError):
+                    release.read_verification_receipt(
+                        root, "0.3.4", "a" * 40, ["rvoip"]
+                    )
+
+    def test_carry_forward_cli_is_mutually_exclusive(self) -> None:
+        parser = release.parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "verify",
+                    "--version",
+                    "0.3.4",
+                    "--beta-report-root",
+                    "strict",
+                    "--beta-carry-forward-attestation",
+                    "carry-forward.json",
+                ]
             )
 
     def test_targeted_delta_attestation_is_exact_and_commit_bound(self) -> None:

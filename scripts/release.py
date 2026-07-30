@@ -30,6 +30,7 @@ DEFAULT_TIMEOUT_SECONDS = 900
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 TARGETED_DELTA_ATTESTATION_SCHEMA = "rvoip-targeted-delta-attestation-v1"
 TARGETED_POSTGRES_EVIDENCE_SCHEMA = "rvoip-vcon-postgres-live-evidence-v1"
+CARRY_FORWARD_ATTESTATION_SCHEMA = "rvoip-release-carry-forward-attestation-v1"
 VCON_SCHEMA_COMMIT = "2342aba64bdb71d9e80ab6e274a3921e2b1c769e"
 TARGETED_DELTA_VERSION = "0.3.3"
 TARGETED_DELTA_BASE_TAG = "v0.3.2"
@@ -1021,12 +1022,55 @@ def verify_beta_reporting(
     version: str,
     beta_report_root: str | None,
     beta_exception_attestation: str | None,
+    beta_carry_forward_attestation: str | None,
     log: ReleaseLog,
 ) -> dict[str, Any]:
-    if beta_report_root and beta_exception_attestation:
-        raise ReleaseError(
-            "--beta-report-root and --beta-exception-attestation are mutually exclusive"
+    supplied = [
+        value
+        for value in (
+            beta_report_root,
+            beta_exception_attestation,
+            beta_carry_forward_attestation,
         )
+        if value
+    ]
+    if len(supplied) > 1:
+        raise ReleaseError(
+            "strict, exception, and carry-forward beta inputs are mutually exclusive"
+        )
+    if beta_carry_forward_attestation:
+        attestation = Path(beta_carry_forward_attestation)
+        if not attestation.is_absolute():
+            attestation = root / attestation
+        verifier = root / "scripts/release_carry_forward_attestation.py"
+        command = [
+            sys.executable,
+            str(verifier),
+            "verify",
+            "--attestation",
+            str(attestation),
+            "--version",
+            version,
+        ]
+        log.command(command, root)
+        payload = load_json_object(attestation, "carry-forward attestation")
+        release = payload.get("release")
+        inherited = payload.get("inherited_beta_background")
+        current = payload.get("current_evidence")
+        if not isinstance(release, dict) or not isinstance(inherited, dict):
+            raise ReleaseError("carry-forward attestation lacks release metadata")
+        if not isinstance(current, dict):
+            raise ReleaseError("carry-forward attestation lacks current evidence")
+        return {
+            "mode": "owner-approved-carry-forward",
+            "disposition": release.get("disposition"),
+            "strict_automated_status": release.get("beta_suite"),
+            "current_workspace_verification": "PASS",
+            "inherited_beta_background": inherited,
+            "current_canonical_2k": current.get("canonical_2k"),
+            "attestation_path": relative_or_absolute(root, attestation),
+            "attestation_sha256": hashlib.sha256(attestation.read_bytes()).hexdigest(),
+        }
     if beta_exception_attestation:
         attestation = Path(beta_exception_attestation)
         if not attestation.is_absolute():
@@ -1166,6 +1210,7 @@ def verify(
     version: str,
     beta_report_root: str | None,
     beta_exception_attestation: str | None,
+    beta_carry_forward_attestation: str | None,
     targeted_delta_attestation: str | None,
 ) -> None:
     head = ensure_release_state(root, version, require_no_tag=True)
@@ -1173,7 +1218,9 @@ def verify(
     log = ReleaseLog(root, version, "verify")
     log.event("start", operation="verify", version=version, git_commit=head)
     if targeted_delta_attestation and (
-        beta_report_root or beta_exception_attestation
+        beta_report_root
+        or beta_exception_attestation
+        or beta_carry_forward_attestation
     ):
         raise ReleaseError(
             "--targeted-delta-attestation is mutually exclusive with beta "
@@ -1217,6 +1264,7 @@ def verify(
             version,
             beta_report_root,
             beta_exception_attestation,
+            beta_carry_forward_attestation,
             log,
         )
         named_commands = [
@@ -1247,7 +1295,12 @@ def verify(
             "beta_suite": (
                 "PASS"
                 if beta_qualification["mode"] == "strict"
-                else "OWNER-APPROVED-EXCEPTION"
+                else (
+                    "OWNER-APPROVED-CARRY-FORWARD"
+                    if beta_qualification["mode"]
+                    == "owner-approved-carry-forward"
+                    else "OWNER-APPROVED-EXCEPTION"
+                )
             ),
             "targeted_commands": [],
             "postgresql_evidence": None,
@@ -1332,13 +1385,73 @@ def read_verification_receipt(
     )
     full_scope = (
         scope_mode == "full"
-        and qualification_mode in {"strict", "owner-approved-exception"}
+        and qualification_mode
+        in {
+            "strict",
+            "owner-approved-exception",
+            "owner-approved-carry-forward",
+        }
         and scope.get("workspace_tests") == "PASS"
         and scope.get("workspace_doctests") == "PASS"
-        and scope.get("beta_suite") in {"PASS", "OWNER-APPROVED-EXCEPTION"}
+        and scope.get("beta_suite")
+        in {
+            "PASS",
+            "OWNER-APPROVED-EXCEPTION",
+            "OWNER-APPROVED-CARRY-FORWARD",
+        }
         and scope.get("targeted_commands") == []
         and scope.get("postgresql_evidence") is None
     ) if isinstance(scope, dict) else False
+    carry_forward_qualification = (
+        qualification_mode == "owner-approved-carry-forward"
+        and qualification.get("disposition")
+        == "OWNER-APPROVED-CARRY-FORWARD"
+        and qualification.get("strict_automated_status") == "NOT-RERUN"
+        and qualification.get("current_workspace_verification") == "PASS"
+        and isinstance(qualification.get("inherited_beta_background"), dict)
+        and qualification["inherited_beta_background"].get("version") == "0.3.2"
+        and qualification["inherited_beta_background"].get("disposition")
+        == "APPROVED-WITH-EXCEPTION"
+        and qualification["inherited_beta_background"].get(
+            "strict_automated_status"
+        )
+        == "NON-RC"
+        and isinstance(qualification.get("current_canonical_2k"), dict)
+        and qualification["current_canonical_2k"].get("status") == "PASS"
+        and isinstance(qualification.get("attestation_sha256"), str)
+        and re.fullmatch(
+            r"[0-9a-f]{64}", qualification["attestation_sha256"]
+        )
+        is not None
+    ) if isinstance(qualification, dict) else False
+    carry_forward_attestation_current = True
+    if qualification_mode == "owner-approved-carry-forward":
+        carry_forward_attestation_current = False
+        attestation_value = qualification.get("attestation_path")
+        if isinstance(attestation_value, str) and attestation_value:
+            attestation = Path(attestation_value)
+            if not attestation.is_absolute():
+                attestation = root / attestation
+            if (
+                attestation.is_file()
+                and hashlib.sha256(attestation.read_bytes()).hexdigest()
+                == qualification.get("attestation_sha256")
+            ):
+                verifier = root / "scripts/release_carry_forward_attestation.py"
+                verified = run(
+                    [
+                        sys.executable,
+                        str(verifier),
+                        "verify",
+                        "--attestation",
+                        str(attestation),
+                        "--version",
+                        version,
+                    ],
+                    cwd=root,
+                    check=False,
+                )
+                carry_forward_attestation_current = verified.returncode == 0
     targeted_commands = (
         scope.get("targeted_commands") if isinstance(scope, dict) else None
     )
@@ -1419,6 +1532,13 @@ def read_verification_receipt(
         and set(package_hashes) <= set(ordered)
         and common_scope
         and (full_scope or targeted_scope)
+        and (
+            qualification_mode != "owner-approved-carry-forward"
+            or (
+                carry_forward_qualification
+                and carry_forward_attestation_current
+            )
+        )
     )
     if not expected:
         raise ReleaseError("verification receipt does not match this release commit")
@@ -1626,6 +1746,10 @@ def parser() -> argparse.ArgumentParser:
                 default=os.environ.get("RVOIP_BETA_EXCEPTION_ATTESTATION"),
             )
             report_group.add_argument(
+                "--beta-carry-forward-attestation",
+                default=os.environ.get("RVOIP_BETA_CARRY_FORWARD_ATTESTATION"),
+            )
+            report_group.add_argument(
                 "--targeted-delta-attestation",
                 default=os.environ.get("RVOIP_TARGETED_DELTA_ATTESTATION"),
             )
@@ -1654,6 +1778,7 @@ def main(argv: list[str] | None = None) -> int:
                     version,
                     args.beta_report_root,
                     args.beta_exception_attestation,
+                    args.beta_carry_forward_attestation,
                     args.targeted_delta_attestation,
                 )
             elif args.command == "publish":

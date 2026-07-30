@@ -52,6 +52,31 @@ available before publication.
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.
 
+### Approved beta carry-forward verification
+
+For the owner-approved `0.3.4` release, verification may consume the dedicated
+carry-forward attestation instead of a newly completed full beta report:
+
+```sh
+scripts/release.sh verify --version 0.3.4 \
+  --beta-carry-forward-attestation \
+  /path/to/0.3.4/carry-forward-attestation.json
+```
+
+The `rvoip-release-carry-forward-attestation-v1` verifier is limited to
+`0.3.4`. It requires a clean exact release commit and source fingerprint,
+`v0.3.3` as the delta base, the unchanged SHA-256-bound `0.3.2` exception, and
+one fresh canonical 2,000-CPS/65,000-call real-media PASS. The canonical
+evidence is copied in full and hash-manifested; its persisted acceptance,
+performance audit, cleanup convergence, source binding, executable hash, and
+evidence-tree hash are independently rechecked.
+
+This mode still runs the normal current workspace compile, library, target,
+integration, example, doctest, and 44-package verification. Its receipt says
+`OWNER-APPROVED-CARRY-FORWARD` and `NOT-RERUN`; it cannot label the inherited
+`0.3.2` evidence as a current beta PASS. The `0.3.4` full beta,
+interoperability matrix, and long soaks remain explicitly `NOT-RERUN`.
+
 ### Approved targeted-delta verification
 
 For an owner-approved, narrowly scoped vCon patch, verification can consume a
@@ -102,12 +127,13 @@ it. The resulting receipt copies the ephemeral PostgreSQL environment so the
 targeted qualification cannot be mistaken for a test against an unspecified
 or persistent database.
 
-The three verification inputs `--beta-report-root`,
-`--beta-exception-attestation`, and `--targeted-delta-attestation` are mutually
-exclusive. A targeted receipt says `NOT-RERUN` for the beta, broad workspace
-tests, and doctests; it never relabels them as passing. Receipt schema v4
-records the attestation hash, targeted commands, PostgreSQL evidence hash, and
-the manifest/compile/package checks that did run.
+The four verification inputs `--beta-report-root`,
+`--beta-exception-attestation`, `--beta-carry-forward-attestation`, and
+`--targeted-delta-attestation` are mutually exclusive. A targeted receipt says
+`NOT-RERUN` for the beta, broad workspace tests, and doctests; it never
+relabels them as passing. Receipt schema v4 records the attestation hash,
+targeted commands, PostgreSQL evidence hash, and the manifest/compile/package
+checks that did run.
 
 ## Publish
 
