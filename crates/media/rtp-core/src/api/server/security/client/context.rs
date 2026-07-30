@@ -7,7 +7,6 @@ use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error};
 
 use crate::api::common::config::SecurityInfo;
 use crate::api::common::error::SecurityError;
@@ -30,8 +29,6 @@ pub struct DefaultClientSecurityContext {
     pub socket: Arc<Mutex<Option<SocketHandle>>>,
     /// Server config (shared)
     pub config: ServerSecurityConfig,
-    /// Names derived only after the complete profile list validates.
-    advertised_profiles: Vec<String>,
     /// Transport used for DTLS
     pub transport: Arc<Mutex<Option<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>>>>,
     /// Flag indicating that handshake is waiting for first packet
@@ -49,8 +46,13 @@ impl DefaultClientSecurityContext {
         config: ServerSecurityConfig,
         transport: Option<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>>,
     ) -> Result<Self, SecurityError> {
-        let advertised_profiles =
-            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+        if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
+            return Err(SecurityError::UnsupportedFeature(format!(
+                "server-managed DTLS client context cannot implement {:?}",
+                config.security_mode
+            )));
+        }
+        config.validate()?;
         Ok(Self {
             address,
             connection: Arc::new(Mutex::new(connection)),
@@ -58,7 +60,6 @@ impl DefaultClientSecurityContext {
             handshake_completed: Arc::new(Mutex::new(false)),
             socket: Arc::new(Mutex::new(socket)),
             config,
-            advertised_profiles,
             transport: Arc::new(Mutex::new(transport)),
             initial_packet: Arc::new(Mutex::new(None)),
             waiting_for_first_packet: Arc::new(Mutex::new(false)),
@@ -88,29 +89,9 @@ impl DefaultClientSecurityContext {
 
     /// Spawn a task to wait for handshake completion
     pub async fn spawn_handshake_task(&self) -> Result<(), SecurityError> {
-        // Clone values needed for the task
-        let address = self.address;
-        let connection = self.connection.clone();
-        let srtp_context = self.srtp_context.clone();
-        let handshake_completed = self.handshake_completed.clone();
-
-        // Spawn the task
-        tokio::spawn(async move {
-            // Delegate to the handshake module
-            let result = handshake::wait_for_handshake(
-                &connection,
-                address,
-                &handshake_completed,
-                &srtp_context,
-            )
-            .await;
-
-            if let Err(e) = result {
-                error!("Handshake task failed for client {}: {}", address, e);
-            }
-        });
-
-        Ok(())
+        Err(SecurityError::UnsupportedFeature(
+            "DTLS handshake tasks are unavailable in 0.3.5".to_string(),
+        ))
     }
 
     /// Start a handshake with the remote
@@ -134,54 +115,10 @@ impl DefaultClientSecurityContext {
 
 #[async_trait]
 impl ClientSecurityContext for DefaultClientSecurityContext {
-    async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError> {
-        // Store socket
-        let mut socket_lock = self.socket.lock().await;
-        *socket_lock = Some(socket.clone());
-
-        // Set up transport if not already done
-        let mut transport_guard = self.transport.lock().await;
-        if transport_guard.is_none() {
-            debug!("Creating DTLS transport for client {}", self.address);
-
-            // Create UDP transport
-            let new_transport =
-                match crate::dtls::transport::udp::UdpTransport::new(socket.socket.clone(), 1500)
-                    .await
-                {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return Err(SecurityError::Configuration(format!(
-                            "Failed to create DTLS transport: {}",
-                            e
-                        )))
-                    }
-                };
-
-            // Start the transport
-            let new_transport = Arc::new(Mutex::new(new_transport));
-            if let Err(e) = new_transport.lock().await.start().await {
-                return Err(SecurityError::Configuration(format!(
-                    "Failed to start DTLS transport: {}",
-                    e
-                )));
-            }
-
-            debug!("DTLS transport started for client {}", self.address);
-            *transport_guard = Some(new_transport.clone());
-
-            // Set transport on connection if it exists
-            let mut conn_guard = self.connection.lock().await;
-            if let Some(conn) = conn_guard.as_mut() {
-                conn.set_transport(new_transport);
-                debug!(
-                    "Transport set on existing connection for client {}",
-                    self.address
-                );
-            }
-        }
-
-        Ok(())
+    async fn set_socket(&self, _socket: SocketHandle) -> Result<(), SecurityError> {
+        Err(SecurityError::UnsupportedFeature(
+            "DTLS transport setup is unavailable in 0.3.5".to_string(),
+        ))
     }
 
     async fn get_remote_fingerprint(&self) -> Result<Option<String>, SecurityError> {
@@ -232,7 +169,8 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
 
     async fn is_handshake_complete(&self) -> Result<bool, SecurityError> {
         let completed = *self.handshake_completed.lock().await;
-        Ok(completed)
+        let has_connection = self.connection.lock().await.is_some();
+        Ok(completed && has_connection)
     }
 
     async fn close(&self) -> Result<(), SecurityError> {
@@ -264,11 +202,31 @@ impl ClientSecurityContext for DefaultClientSecurityContext {
     }
 
     fn is_secure(&self) -> bool {
-        self.config.security_mode.is_enabled()
+        self.config.security_mode == crate::api::common::config::SecurityMode::DtlsSrtp
+            && self
+                .connection
+                .try_lock()
+                .is_ok_and(|connection| connection.is_some())
+            && self
+                .handshake_completed
+                .try_lock()
+                .is_ok_and(|completed| *completed)
+            && self
+                .srtp_context
+                .try_lock()
+                .is_ok_and(|context| context.is_some())
     }
 
     fn get_security_info(&self) -> SecurityInfo {
-        let crypto_suites = self.advertised_profiles.clone();
+        // A caller can build this historically field-public struct directly.
+        // Advertise nothing until both the DTLS handshake and its derived SRTP
+        // context are actually present.
+        if !self.is_secure() {
+            return SecurityInfo::default();
+        }
+        let crypto_suites =
+            crate::api::common::config::implemented_srtp_profile_names(&self.config.srtp_profiles)
+                .unwrap_or_default();
         SecurityInfo {
             mode: self.config.security_mode,
             fingerprint: None,

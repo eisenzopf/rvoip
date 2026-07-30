@@ -3,9 +3,9 @@ use rvoip_rtp_core::{
     packet::RtpPacket,
     srtp::{
         SrtpAuthenticationAlgorithm, SrtpContext, SrtpCryptoKey, SrtpCryptoSuite,
-        SrtpEncryptionAlgorithm, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
+        SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL, SRTP_NULL_SHA1_80,
     },
-    Result,
+    Error, Result,
 };
 
 fn main() -> Result<()> {
@@ -18,19 +18,24 @@ fn main() -> Result<()> {
     println!("Testing with AES_CM_SHA1_80 (encryption + authentication)");
     test_srtp_context(SRTP_AES128_CM_SHA1_80, &packet1)?;
 
-    println!("\nTesting with NULL_NULL (no encryption or authentication)");
-    test_srtp_context(SRTP_NULL_NULL, &packet1)?;
-
-    // Create a custom suite with authentication but no encryption
-    let auth_only = SrtpCryptoSuite {
-        encryption: SrtpEncryptionAlgorithm::Null,
-        authentication: SrtpAuthenticationAlgorithm::HmacSha1_80,
-        key_length: 16,
-        tag_length: 10,
-    };
-
-    println!("\nTesting with NULL_SHA1_80 (authentication only)");
-    test_srtp_context(auth_only, &packet1)?;
+    println!("\nChecking retained NULL profile identities fail closed");
+    for (name, suite) in [
+        ("NULL_NULL", SRTP_NULL_NULL),
+        ("NULL_SHA1_80", SRTP_NULL_SHA1_80),
+    ] {
+        let key = SrtpCryptoKey::new(vec![0x01; 16], vec![0x02; 14]);
+        match SrtpContext::new(suite, key) {
+            Err(Error::UnsupportedFeature(message)) => {
+                println!("{name} is unavailable as required: {message}")
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(Error::SrtpError(format!(
+                    "{name} unexpectedly constructed an SRTP context"
+                )))
+            }
+        }
+    }
 
     Ok(())
 }
@@ -38,7 +43,7 @@ fn main() -> Result<()> {
 fn test_srtp_context(suite: SrtpCryptoSuite, packet: &RtpPacket) -> Result<()> {
     // Create crypto key
     let key_data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
-    let salt_data = vec![16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
+    let salt_data = vec![14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1];
     let key = SrtpCryptoKey::new(key_data, salt_data);
 
     // Create SRTP context

@@ -353,6 +353,10 @@ pub struct UdpRtpTransport {
     /// scheduler.
     active: Arc<AtomicBool>,
 
+    /// Security policy latch. Once set, RTP must not fall back to plaintext and
+    /// RTCP remains disabled until the SRTCP state implementation is complete.
+    secure_media_required: Arc<AtomicBool>,
+
     /// Makes allocator release idempotent across explicit close and Drop.
     allocator_release_started: AtomicBool,
 
@@ -545,6 +549,7 @@ impl UdpRtpTransport {
             event_tx,
             receiver_tasks: Arc::new(Mutex::new(Vec::with_capacity(2))),
             active: Arc::new(AtomicBool::new(false)),
+            secure_media_required: Arc::new(AtomicBool::new(false)),
             allocator_release_started: AtomicBool::new(false),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
@@ -585,6 +590,7 @@ impl UdpRtpTransport {
         let event_tx = self.event_tx.clone();
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
+        let secure_media_required = self.secure_media_required.clone();
         let dtmf_seen = self.dtmf_seen.clone();
         let symmetric_rtp_policy = self.symmetric_rtp_policy;
         let symmetric_rtp_counters = self.symmetric_rtp_counters.clone();
@@ -621,7 +627,7 @@ impl UdpRtpTransport {
                     // Receive packet
                     match rtp_socket.recv_from(&mut buffer).await {
                         Ok((size, addr)) => {
-                            info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
+                            trace!("UDP recv_from returned {} bytes from {}", size, addr);
 
                             let packet_class = classify_rtp_mux_packet(&buffer[..size]);
                             if !packet_class.is_media() {
@@ -640,6 +646,13 @@ impl UdpRtpTransport {
 
                             // Check if it's RTCP according to RFC 5761
                             if packet_class == RtpMuxPacketClass::Rtcp {
+                                if secure_media_required.load(Ordering::Acquire) {
+                                    trace!(
+                                        "Dropping unauthenticated RTCP while SRTP is configured"
+                                    );
+                                    continue;
+                                }
+
                                 // Once an RTP tuple is latched, multiplexed
                                 // RTCP must arrive on that tuple too. A new
                                 // tuple earns trust through RTP probation,
@@ -716,6 +729,10 @@ impl UdpRtpTransport {
                                             continue;
                                         }
                                     }
+                                } else if secure_media_required.load(Ordering::Acquire) {
+                                    trace!("SRTP is required but no receive context is installed; dropping packet");
+                                    drop(srtp_guard);
+                                    continue;
                                 } else {
                                     RtpPacket::parse(&buffer[..size])
                                 };
@@ -912,6 +929,7 @@ impl UdpRtpTransport {
             let rtcp_socket = rtcp_socket.clone();
             let event_tx = self.event_tx.clone();
             let active_state = self.active.clone();
+            let secure_media_required = self.secure_media_required.clone();
             let rtcp_recv_buffer_size = self.config.buffer_config.rtcp_recv_buffer_size;
 
             let rtcp_receiver =
@@ -927,6 +945,13 @@ impl UdpRtpTransport {
                         // Receive packet
                         match rtcp_socket.recv_from(&mut buffer).await {
                             Ok((size, addr)) => {
+                                if secure_media_required.load(Ordering::Acquire) {
+                                    trace!(
+                                        "Dropping unauthenticated RTCP while SRTP is configured"
+                                    );
+                                    continue;
+                                }
+
                                 // Create RTCP event
                                 let rtcp_data = Bytes::copy_from_slice(&buffer[..size]);
                                 let event = RtpEvent::RtcpReceived {
@@ -1018,8 +1043,12 @@ impl UdpRtpTransport {
         self.event_tx.subscribe()
     }
 
-    /// Get a clone of the RTP socket
-    /// This is used when sharing the same socket with other protocols (e.g., DTLS)
+    /// Get a clone of the raw RTP socket.
+    ///
+    /// This low-level interoperability escape is not security-aware: direct
+    /// `UdpSocket` reads and writes bypass this transport's SRTP policy,
+    /// authentication, replay handling, and event pipeline. Possession of this
+    /// handle must never be treated as evidence of a secure media path.
     pub fn get_socket(&self) -> Arc<UdpSocket> {
         self.rtp_socket.clone()
     }
@@ -1031,16 +1060,20 @@ impl UdpRtpTransport {
     /// loop to `unprotect()` every inbound RTP datagram (RTCP is not
     /// SRTP-protected — SRTCP support is a separate feature).
     ///
-    /// Setting both contexts is the *only* way to switch this
-    /// transport from plain RTP to SRTP. Calling this method is
-    /// idempotent: a second call replaces the contexts (used today
-    /// only in tests; mid-call rekeying is out of scope for this
-    /// step).
+    /// Calling this method irreversibly requires secure media, even when
+    /// validation fails, so ignoring its error cannot downgrade subsequent
+    /// traffic to plaintext. Only enabled contexts using one of the four exact
+    /// reviewed AES-CM/HMAC suites are installed. A successful second call
+    /// replaces the contexts (used today only in tests; mid-call rekeying is
+    /// out of scope for this step).
     pub async fn set_srtp_contexts(
         &self,
         send: crate::srtp::SrtpContext,
         recv: crate::srtp::SrtpContext,
-    ) {
+    ) -> Result<()> {
+        self.secure_media_required.store(true, Ordering::Release);
+        send.validate_for_secure_transport()?;
+        recv.validate_for_secure_transport()?;
         *self.srtp_send.lock() = Some(send);
         *self.srtp_recv.lock() = Some(recv);
         if srtp_diagnostics_enabled() {
@@ -1049,13 +1082,70 @@ impl UdpRtpTransport {
                 self.rtp_socket.local_addr().ok()
             );
         }
+        Ok(())
     }
 
-    /// Whether SRTP is currently configured on this transport. Used by
-    /// tests + diagnostic introspection; the send/receive paths
-    /// branch internally on the same `Option`.
+    /// Whether valid, enabled SRTP contexts are installed in both directions.
+    /// This remains false for a secure-media policy latch without ready
+    /// contexts, including after a rejected installation attempt.
     pub async fn srtp_enabled(&self) -> bool {
-        self.srtp_send.lock().is_some() || self.srtp_recv.lock().is_some()
+        if !self.secure_media_required.load(Ordering::Acquire) {
+            return false;
+        }
+        self.srtp_send
+            .lock()
+            .as_ref()
+            .is_some_and(|context| context.validate_for_secure_transport().is_ok())
+            && self
+                .srtp_recv
+                .lock()
+                .as_ref()
+                .is_some_and(|context| context.validate_for_secure_transport().is_ok())
+    }
+
+    /// Require secure media even before directional contexts are attached.
+    ///
+    /// Direct API sessions use this latch to prevent their auxiliary RTP/RTCP
+    /// socket from emitting plaintext. PR3 can replace the RTCP rejection with
+    /// authenticated SRTCP while retaining this policy boundary.
+    pub(crate) fn require_srtp(&self) {
+        self.secure_media_required.store(true, Ordering::Release);
+    }
+
+    /// Send bytes that have already passed the transport's SRTP protection
+    /// path. This is crate-internal so public raw-byte callers cannot bypass
+    /// the irreversible secure-media requirement.
+    pub(crate) async fn send_protected_rtp_bytes(
+        &self,
+        bytes: &[u8],
+        dest: SocketAddr,
+    ) -> Result<()> {
+        if !self.secure_media_required.load(Ordering::Acquire) {
+            return Err(Error::InvalidState(
+                "protected RTP wire send requires secure media mode".to_string(),
+            ));
+        }
+        self.send_rtp_wire_bytes_unchecked(bytes, dest).await
+    }
+
+    /// Lowest-level RTP datagram write. All public and crate-internal callers
+    /// must enforce their security policy before reaching this helper.
+    async fn send_rtp_wire_bytes_unchecked(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
+        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+            // Seed the pre-latch target for callers that send before media is
+            // received. Once a validated inbound tuple is latched, outbound
+            // calls must not restore a stale SDP destination.
+            self.remote_rtp_addr.store(Some(Arc::new(dest)));
+        }
+
+        let sent_bytes = self
+            .rtp_socket
+            .send_to(bytes, dest)
+            .await
+            .map_err(|e| Error::Transport(format!("Failed to send RTP packet: {}", e)))?;
+
+        debug!("UDP send_to sent {} bytes to {}", sent_bytes, dest);
+        Ok(())
     }
 
     /// Send an RTP packet using caller-provided scratch storage for
@@ -1079,12 +1169,16 @@ impl UdpRtpTransport {
 
         if let Some(protected) = protected {
             let data = protected.serialize_into(buffer)?;
-            self.send_rtp_bytes(&data, dest).await
+            self.send_rtp_wire_bytes_unchecked(&data, dest).await
+        } else if self.secure_media_required.load(Ordering::Acquire) {
+            Err(Error::InvalidState(
+                "SRTP is required but no send context is installed".to_string(),
+            ))
         } else {
             buffer.clear();
             packet.header.serialize(buffer)?;
             buffer.extend_from_slice(&packet.payload);
-            self.send_rtp_bytes(buffer, dest).await
+            self.send_rtp_wire_bytes_unchecked(buffer, dest).await
         }
     }
 }
@@ -1108,22 +1202,12 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
-            // Seed the pre-latch target for callers that send before media is
-            // received. Once a validated inbound tuple is latched, outbound
-            // calls must not restore a stale SDP destination.
-            self.remote_rtp_addr.store(Some(Arc::new(dest)));
+        if self.secure_media_required.load(Ordering::Acquire) {
+            return Err(Error::InvalidState(
+                "raw RTP bytes cannot bypass a secure-media transport".to_string(),
+            ));
         }
-
-        // Send the data
-        let sent_bytes = self
-            .rtp_socket
-            .send_to(bytes, dest)
-            .await
-            .map_err(|e| Error::Transport(format!("Failed to send RTP packet: {}", e)))?;
-
-        debug!("UDP send_to sent {} bytes to {}", sent_bytes, dest);
-        Ok(())
+        self.send_rtp_wire_bytes_unchecked(bytes, dest).await
     }
 
     async fn send_rtcp(&self, packet: &RtcpPacket, dest: SocketAddr) -> Result<()> {
@@ -1135,6 +1219,13 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
+        if self.secure_media_required.load(Ordering::Acquire) {
+            return Err(Error::UnsupportedFeature(
+                "RTCP is disabled while SRTP is configured until authenticated SRTCP is implemented"
+                    .to_string(),
+            ));
+        }
+
         if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
             // Same pre-latch seeding rule as RTP.
             self.remote_rtcp_addr.store(Some(Arc::new(dest)));
@@ -1163,10 +1254,49 @@ impl RtpTransport for UdpRtpTransport {
 
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)> {
         // Receive data from the RTP socket
-        self.rtp_socket
+        let (size, addr) = self
+            .rtp_socket
             .recv_from(buffer)
             .await
-            .map_err(|e| Error::Transport(format!("Failed to receive packet: {}", e)))
+            .map_err(|e| Error::Transport(format!("Failed to receive packet: {}", e)))?;
+
+        if self.secure_media_required.load(Ordering::Acquire) {
+            match classify_rtp_mux_packet(&buffer[..size]) {
+                RtpMuxPacketClass::Rtcp => {
+                    return Err(Error::UnsupportedFeature(
+                        "unauthenticated RTCP was dropped while SRTP is configured".to_string(),
+                    ));
+                }
+                RtpMuxPacketClass::Rtp => {}
+                class => {
+                    return Err(Error::InvalidPacket(format!(
+                        "secure RTP receive rejected {} datagram",
+                        class.as_str()
+                    )));
+                }
+            }
+
+            let packet = {
+                let mut srtp_recv = self.srtp_recv.lock();
+                let context = srtp_recv.as_mut().ok_or_else(|| {
+                    Error::InvalidState(
+                        "SRTP is required but no receive context is installed".to_string(),
+                    )
+                })?;
+                context.unprotect(&buffer[..size])?
+            };
+            let plaintext = packet.serialize()?;
+            if plaintext.len() > buffer.len() {
+                return Err(Error::BufferTooSmall {
+                    required: plaintext.len(),
+                    available: buffer.len(),
+                });
+            }
+            buffer[..plaintext.len()].copy_from_slice(&plaintext);
+            return Ok((plaintext.len(), addr));
+        }
+
+        Ok((size, addr))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -1247,7 +1377,7 @@ impl Drop for UdpRtpTransport {
 /// 4. All packets with payload types in the range 0-63 and 96-127 are RTP.
 ///
 /// See RFC 5761 section 4 for more details.
-fn is_rtcp_packet(buffer: &[u8]) -> bool {
+pub(crate) fn is_rtcp_packet(buffer: &[u8]) -> bool {
     if buffer.len() < 2 {
         return false;
     }
@@ -2037,6 +2167,185 @@ mod tests {
         (a, b)
     }
 
+    fn test_receiver_report() -> crate::packet::rtcp::RtcpPacket {
+        crate::packet::rtcp::RtcpPacket::ReceiverReport(
+            crate::packet::rtcp::RtcpReceiverReport::new(0x1122_3344),
+        )
+    }
+
+    #[tokio::test]
+    async fn public_secure_receive_never_returns_unauthenticated_rtp() {
+        let transport = UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: false,
+            rtcp_mux: true,
+            session_id: Some("secure-public-receive".to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        })
+        .await
+        .unwrap();
+        transport.stop_receiver().await.unwrap();
+
+        let (transport_send, transport_recv) = make_srtp_ctx_pair();
+        transport
+            .set_srtp_contexts(transport_send, transport_recv)
+            .await
+            .unwrap();
+        let destination = transport.local_rtp_addr().unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut receive_buffer = [0_u8; 256];
+
+        let plaintext = RtpPacket::new(
+            RtpHeader::new(0, 10, 1_600, 0x1122_3344),
+            Bytes::from_static(b"plaintext must fail"),
+        )
+        .serialize()
+        .unwrap();
+        sender.send_to(&plaintext, destination).await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_secs(1),
+            transport.receive_packet(&mut receive_buffer)
+        )
+        .await
+        .unwrap()
+        .is_err());
+
+        let mut wrong_key = crate::srtp::SrtpContext::new(
+            crate::srtp::SRTP_AES128_CM_SHA1_80,
+            crate::srtp::SrtpCryptoKey::new(vec![0xa5; 16], vec![0x5a; 14]),
+        )
+        .unwrap();
+        let wrong_packet = RtpPacket::new(
+            RtpHeader::new(0, 11, 1_760, 0x1122_3344),
+            Bytes::from_static(b"wrong authentication key"),
+        );
+        let wrong_wire = wrong_key
+            .protect(&wrong_packet)
+            .unwrap()
+            .serialize()
+            .unwrap();
+        sender.send_to(&wrong_wire, destination).await.unwrap();
+        assert!(tokio::time::timeout(
+            Duration::from_secs(1),
+            transport.receive_packet(&mut receive_buffer)
+        )
+        .await
+        .unwrap()
+        .is_err());
+
+        let (mut matching_sender, _) = make_srtp_ctx_pair();
+        let valid_packet = RtpPacket::new(
+            RtpHeader::new(0, 12, 1_920, 0x1122_3344),
+            Bytes::from_static(b"authenticated plaintext"),
+        );
+        let valid_wire = matching_sender
+            .protect(&valid_packet)
+            .unwrap()
+            .serialize()
+            .unwrap();
+        sender.send_to(&valid_wire, destination).await.unwrap();
+        let (size, source) = tokio::time::timeout(
+            Duration::from_secs(1),
+            transport.receive_packet(&mut receive_buffer),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(source, sender.local_addr().unwrap());
+        assert_ne!(&receive_buffer[..size], valid_wire.as_ref());
+        let recovered = RtpPacket::parse(&receive_buffer[..size]).unwrap();
+        assert_eq!(recovered.payload, valid_packet.payload);
+
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn srtp_transport_rejects_plaintext_rtcp_egress() {
+        for rtcp_mux in [true, false] {
+            let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let transport = UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: (!rtcp_mux).then(|| "127.0.0.1:0".parse().unwrap()),
+                symmetric_rtp: false,
+                rtcp_mux,
+                session_id: Some(format!("srtp-rtcp-egress-{rtcp_mux}")),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap();
+            let (send, _) = make_srtp_ctx_pair();
+            let (_, recv) = make_srtp_ctx_pair();
+            transport.set_srtp_contexts(send, recv).await.unwrap();
+
+            let report = test_receiver_report();
+            let result = if rtcp_mux {
+                transport
+                    .send_rtcp(&report, sink.local_addr().unwrap())
+                    .await
+            } else {
+                transport
+                    .send_rtcp_bytes(&report.serialize().unwrap(), sink.local_addr().unwrap())
+                    .await
+            };
+            assert!(matches!(result, Err(Error::UnsupportedFeature(_))));
+
+            let mut wire = [0_u8; 128];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), sink.recv_from(&mut wire))
+                    .await
+                    .is_err()
+            );
+            transport.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn srtp_transport_drops_plaintext_rtcp_ingress() {
+        for rtcp_mux in [true, false] {
+            let transport = UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: (!rtcp_mux).then(|| "127.0.0.1:0".parse().unwrap()),
+                symmetric_rtp: false,
+                rtcp_mux,
+                session_id: Some(format!("srtp-rtcp-ingress-{rtcp_mux}")),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap();
+            let (send, _) = make_srtp_ctx_pair();
+            let (_, recv) = make_srtp_ctx_pair();
+            transport.set_srtp_contexts(send, recv).await.unwrap();
+            let mut events = transport.subscribe();
+
+            let destination = if rtcp_mux {
+                transport.local_rtp_addr().unwrap()
+            } else {
+                transport
+                    .rtcp_socket
+                    .as_ref()
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+            };
+            let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            sender
+                .send_to(&test_receiver_report().serialize().unwrap(), destination)
+                .await
+                .unwrap();
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(75), events.recv())
+                    .await
+                    .is_err()
+            );
+            transport.close().await.unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn srtp_round_trip_through_real_udp_sockets() {
         // Two transports, both with SRTP enabled (matched key pair).
@@ -2070,8 +2379,8 @@ mod tests {
         // on the other side.
         let (a_send, b_recv) = make_srtp_ctx_pair();
         let (b_send, a_recv) = make_srtp_ctx_pair();
-        transport_a.set_srtp_contexts(a_send, a_recv).await;
-        transport_b.set_srtp_contexts(b_send, b_recv).await;
+        transport_a.set_srtp_contexts(a_send, a_recv).await.unwrap();
+        transport_b.set_srtp_contexts(b_send, b_recv).await.unwrap();
         assert!(transport_a.srtp_enabled().await);
         assert!(transport_b.srtp_enabled().await);
 
@@ -2130,8 +2439,8 @@ mod tests {
 
         let (a_send, b_recv) = make_aes256_srtp_ctx_pair();
         let (b_send, a_recv) = make_aes256_srtp_ctx_pair();
-        transport_a.set_srtp_contexts(a_send, a_recv).await;
-        transport_b.set_srtp_contexts(b_send, b_recv).await;
+        transport_a.set_srtp_contexts(a_send, a_recv).await.unwrap();
+        transport_b.set_srtp_contexts(b_send, b_recv).await.unwrap();
 
         let mut events = transport_b.subscribe();
         let header = RtpHeader::new(0, 1, 12345, 0xdead_beef);
@@ -2188,7 +2497,7 @@ mod tests {
         // A: matched pair with itself (key 1).
         let (a_send, _a_unused) = make_srtp_ctx_pair();
         let (_a2, a_recv) = make_srtp_ctx_pair();
-        transport_a.set_srtp_contexts(a_send, a_recv).await;
+        transport_a.set_srtp_contexts(a_send, a_recv).await.unwrap();
 
         // B: DIFFERENT key — set up a separate pair so unprotect
         // can't authenticate A's packets.
@@ -2207,7 +2516,8 @@ mod tests {
         .unwrap();
         transport_b
             .set_srtp_contexts(b_send_mismatch, b_recv_mismatch)
-            .await;
+            .await
+            .unwrap();
 
         let mut events = transport_b.subscribe();
 

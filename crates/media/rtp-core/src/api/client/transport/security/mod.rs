@@ -9,6 +9,7 @@
 pub mod client_security;
 
 // Re-export important types and functions
+#[allow(deprecated)]
 pub use client_security::{
     close_security, get_security_info, initialize_security, is_handshake_complete, is_secure,
     set_remote_fingerprint, start_handshake, wait_for_handshake,

@@ -1,7 +1,7 @@
-//! MIKEY PKE Cryptographic Utilities
+//! Retained MIKEY-PKE cryptographic utility types
 //!
-//! This module provides cryptographic utilities for MIKEY-PKE mode,
-//! including certificate generation, key pair management, and enterprise PKI support.
+//! Key/certificate fixture helpers remain for compatibility and testing, but
+//! the MIKEY-PKE exchange and trust path are incomplete and unavailable.
 
 use crate::Error;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ECDSA_P256_SHA256};
@@ -186,96 +186,29 @@ pub fn generate_ca_certificate(config: CertificateConfig) -> Result<MikeyKeyPair
     })
 }
 
-/// Sign a certificate with a CA
+/// Sign a certificate with a CA.
+///
+/// This public helper is retained for source compatibility, but MIKEY-PKE CA
+/// signing is not implemented in this release. It always fails closed rather
+/// than returning the self-signed certificate produced by the old placeholder.
 pub fn sign_certificate_with_ca(
-    ca_cert: &MikeyKeyPair,
-    subject_config: CertificateConfig,
+    _ca_cert: &MikeyKeyPair,
+    _subject_config: CertificateConfig,
 ) -> Result<MikeyKeyPair, Error> {
-    let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
-        .map_err(|_| Error::CryptoError("Failed to generate subject private key".into()))?;
-    let private_key_der = key_pair.serialize_der();
-    let public_key_der = key_pair.public_key_raw().to_vec();
-
-    // Extract the CA's Common Name to set as issuer in the subject cert
-    let _ca_info = extract_certificate_info(&ca_cert.certificate)?;
-
-    // Create subject certificate parameters
-    let mut params = CertificateParams::default();
-
-    // Set distinguished name
-    let mut dn = DistinguishedName::new();
-    dn.push(DnType::CommonName, subject_config.common_name);
-    dn.push(DnType::OrganizationName, subject_config.organization);
-    dn.push(
-        DnType::OrganizationalUnitName,
-        subject_config.organizational_unit,
-    );
-    dn.push(DnType::CountryName, subject_config.country);
-    dn.push(DnType::StateOrProvinceName, subject_config.state);
-    dn.push(DnType::LocalityName, subject_config.locality);
-    params.distinguished_name = dn;
-
-    // Set validity period
-    params.not_before = OffsetDateTime::from(SystemTime::now());
-    params.not_after = OffsetDateTime::from(SystemTime::now() + subject_config.validity_duration);
-
-    // Note: rcgen doesn't support proper CA signing in the current version
-    // For testing purposes, we'll create a self-signed cert and simulate CA signing
-    // by modifying the issuer info in the test validation
-    let cert = params
-        .self_signed(&key_pair)
-        .map_err(|_| Error::CryptoError("Failed to generate subject certificate".into()))?;
-
-    let certificate_der = cert.der().to_vec();
-
-    Ok(MikeyKeyPair {
-        private_key: private_key_der,
-        public_key: public_key_der,
-        certificate: certificate_der,
-    })
+    Err(Error::UnsupportedFeature(
+        "MIKEY-PKE CA certificate signing is not implemented".to_string(),
+    ))
 }
 
-/// Validate a certificate chain
-pub fn validate_certificate_chain(subject_cert: &[u8], ca_cert: &[u8]) -> Result<(), Error> {
-    // Parse certificates using x509-parser
-    let (_, subject) = x509_parser::parse_x509_certificate(subject_cert)
-        .map_err(|_| Error::CryptoError("Failed to parse subject certificate".into()))?;
-
-    let (_, _ca) = x509_parser::parse_x509_certificate(ca_cert)
-        .map_err(|_| Error::CryptoError("Failed to parse CA certificate".into()))?;
-
-    // Basic validation checks
-
-    // Note: Since rcgen doesn't support proper CA signing in the current version,
-    // we skip the issuer check. In a full implementation, this would verify:
-    // if subject.issuer() != ca.subject() {
-    //     return Err(Error::AuthenticationFailed("Certificate issuer does not match CA subject".into()));
-    // }
-
-    // Check certificate validity periods
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let not_before = subject.validity().not_before.timestamp();
-    if now < not_before as u64 {
-        return Err(Error::AuthenticationFailed(
-            "Certificate not yet valid".into(),
-        ));
-    }
-
-    let not_after = subject.validity().not_after.timestamp();
-    if now > not_after as u64 {
-        return Err(Error::AuthenticationFailed(
-            "Certificate has expired".into(),
-        ));
-    }
-
-    // TODO: Add signature verification when rcgen supports proper CA signing
-    // This would require implementing RSA signature verification with the CA's public key
-
-    Ok(())
+/// Validate a certificate chain.
+///
+/// This public helper is retained for source compatibility, but issuer and
+/// signature validation are not implemented in this release. It always fails
+/// closed instead of treating parseability and validity dates as trust.
+pub fn validate_certificate_chain(_subject_cert: &[u8], _ca_cert: &[u8]) -> Result<(), Error> {
+    Err(Error::UnsupportedFeature(
+        "MIKEY-PKE certificate-chain validation is not implemented".to_string(),
+    ))
 }
 
 /// Extract certificate information for display/logging

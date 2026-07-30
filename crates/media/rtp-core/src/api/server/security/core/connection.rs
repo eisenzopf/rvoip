@@ -170,29 +170,9 @@ pub async fn get_fingerprint_from_connection(
 
 /// Create a DTLS transport for a socket
 pub async fn create_dtls_transport(
-    socket: &SocketHandle,
+    _socket: &SocketHandle,
 ) -> Result<Arc<Mutex<crate::dtls::transport::udp::UdpTransport>>, SecurityError> {
-    // Create a transport for packet reception
-    let transport =
-        match crate::dtls::transport::udp::UdpTransport::new(socket.socket.clone(), 1500).await {
-            Ok(mut t) => {
-                // Start the transport (CRUCIAL)
-                if let Err(e) = t.start().await {
-                    return Err(SecurityError::Configuration(format!(
-                        "Failed to start DTLS transport: {}",
-                        e
-                    )));
-                }
-                t
-            }
-            Err(e) => {
-                return Err(SecurityError::Configuration(format!(
-                    "Failed to create DTLS transport: {}",
-                    e
-                )))
-            }
-        };
-
-    // Wrap in Arc<Mutex<>>
-    Ok(Arc::new(Mutex::new(transport)))
+    Err(SecurityError::UnsupportedFeature(
+        "DTLS transport construction is unavailable in rvoip 0.3.5".to_string(),
+    ))
 }

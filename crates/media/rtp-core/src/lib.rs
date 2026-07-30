@@ -18,7 +18,8 @@
 //! - `csrc`: CSRC management
 //! - `error`: Error handling
 //! - `rtcp`: RTCP packet definitions and processing
-//! - `dtls`: DTLS support
+//! - `dtls`: retained incomplete protocol types; public connection construction
+//!   returns a typed unsupported-feature error in 0.3.5
 //! - `api`: New API module with client/server separation
 //! - `feedback`: Advanced RTCP feedback mechanisms for real-time adaptation
 //!
@@ -58,6 +59,14 @@
 //! - Efficient packet ordering and scheduling
 //!
 //! This is ideal for deployments handling tens of thousands of concurrent streams.
+//!
+//! ## Security availability in 0.3.5
+//!
+//! Direct SRTP with an explicitly provisioned implemented AES-CM suite and
+//! SDES signaling are available. DTLS-SRTP, MIKEY, ZRTP, AES-GCM SRTP,
+//! automatic key rotation, and SRTCP are unavailable and fail closed. Public
+//! identifiers retained for compatibility must not be treated as advertised or
+//! negotiated capabilities. See `MIGRATION_0.3.5.md` in the crate source.
 
 mod error;
 

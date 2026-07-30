@@ -2,41 +2,38 @@ use bytes::{Bytes, BytesMut};
 use rvoip_rtp_core::{
     packet::RtpPacket,
     srtp::{
-        crypto::SrtpCrypto, SrtpAuthenticationAlgorithm, SrtpCryptoKey, SrtpCryptoSuite,
-        SrtpEncryptionAlgorithm, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL,
+        crypto::SrtpCrypto, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32,
+        SRTP_AES128_CM_SHA1_80, SRTP_NULL_NULL, SRTP_NULL_SHA1_80,
     },
-    Result,
+    Error, Result,
 };
 
 fn main() -> Result<()> {
     println!("SRTP Crypto Test Example");
     println!("========================");
 
-    // Test standard RFC 3711 cipher suites
-    test_crypto_suite("NULL_NULL", SRTP_NULL_NULL)?;
+    // Test the reviewed RFC 3711 cipher suites.
     test_crypto_suite("AES128_CM_SHA1_80", SRTP_AES128_CM_SHA1_80)?;
     test_crypto_suite("AES128_CM_SHA1_32", SRTP_AES128_CM_SHA1_32)?;
 
-    // Test specific algorithm combinations
-    println!("\nTesting custom algorithm combinations:");
-
-    // NULL encryption with SHA1-80 authentication
-    let null_sha1_80 = SrtpCryptoSuite {
-        encryption: SrtpEncryptionAlgorithm::Null,
-        authentication: SrtpAuthenticationAlgorithm::HmacSha1_80,
-        key_length: 16, // Key still needed for auth
-        tag_length: 10,
-    };
-    test_crypto_suite("NULL_SHA1_80", null_sha1_80)?;
-
-    // AES-CM with NULL authentication
-    let aes_cm_null = SrtpCryptoSuite {
-        encryption: SrtpEncryptionAlgorithm::AesCm,
-        authentication: SrtpAuthenticationAlgorithm::Null,
-        key_length: 16,
-        tag_length: 0,
-    };
-    test_crypto_suite("AES128_CM_NULL", aes_cm_null)?;
+    // NULL profile identities are retained, but cannot create crypto contexts.
+    for (name, suite) in [
+        ("NULL_NULL", SRTP_NULL_NULL),
+        ("NULL_SHA1_80", SRTP_NULL_SHA1_80),
+    ] {
+        let key = SrtpCryptoKey::new(vec![0x01; 16], vec![0x02; 14]);
+        match SrtpCrypto::new(suite, key) {
+            Err(Error::UnsupportedFeature(message)) => {
+                println!("{name} is unavailable as required: {message}")
+            }
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(Error::SrtpError(format!(
+                    "{name} unexpectedly constructed an SRTP crypto context"
+                )))
+            }
+        }
+    }
 
     // Test tamper resistance
     test_tamper_resistance()?;

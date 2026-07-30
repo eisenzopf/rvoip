@@ -1,7 +1,5 @@
 use rvoip_rtp_core::dtls::{create_connection, DtlsConfig};
-use rvoip_rtp_core::srtp::{
-    SrtpContext, SrtpCryptoKey, SRTP_AEAD_AES_128_GCM,
-};
+use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AEAD_AES_128_GCM};
 
 #[test]
 fn aes_gcm_context_construction_fails_closed() {

@@ -1,9 +1,8 @@
-//! ZRTP (Z Real-time Transport Protocol) implementation
+//! Retained, incomplete ZRTP (Z Real-time Transport Protocol) API
 //!
-//! This module implements ZRTP key exchange as specified in RFC 6189.
-//! ZRTP is a key management protocol that performs a Diffie-Hellman key exchange
-//! during call setup to establish SRTP keys, without requiring PKI or pre-provisioned
-//! certificates.
+//! Message, hash, and configuration types remain for compatibility and tests,
+//! but they do not form a complete RFC 6189 key exchange. Checked construction
+//! and key-exchange entry points return `Error::UnsupportedFeature` in 0.3.5.
 //!
 //! Reference: <https://tools.ietf.org/html/rfc6189>
 
@@ -159,6 +158,7 @@ pub enum ZrtpState {
 }
 
 /// ZRTP key exchange implementation
+#[allow(dead_code)] // inert implementation state retained behind fail-closed public entry points
 pub struct Zrtp {
     /// Configuration
     config: ZrtpConfig,
@@ -196,8 +196,14 @@ pub struct Zrtp {
     srtp_responder_key: Option<SrtpCryptoKey>,
 }
 
+#[allow(dead_code)] // packet/SAS helpers remain for compatibility and future completion
 impl Zrtp {
     /// Create a new ZRTP key exchange
+    ///
+    /// This compatibility constructor retains the public packet and
+    /// configuration surface. Call [`Self::try_new`] for checked construction.
+    /// Protocol initialization and message processing fail closed in this
+    /// release.
     pub fn new(config: ZrtpConfig, role: ZrtpRole) -> Self {
         // Generate random ZID
         let mut zid = [0u8; 12];
@@ -222,6 +228,14 @@ impl Zrtp {
             srtp_initiator_key: None,
             srtp_responder_key: None,
         }
+    }
+
+    /// Reject construction until the ZRTP state machine has complete RFC and
+    /// interoperability coverage.
+    pub fn try_new(_config: ZrtpConfig, _role: ZrtpRole) -> Result<Self, Error> {
+        Err(Error::UnsupportedFeature(
+            "ZRTP key exchange is not complete and is unavailable".into(),
+        ))
     }
 
     /// Create Hello message
@@ -770,101 +784,15 @@ impl Zrtp {
 
 impl SecurityKeyExchange for Zrtp {
     fn init(&mut self) -> Result<(), Error> {
-        match self.role {
-            ZrtpRole::Initiator => {
-                // Initiator creates and sends Hello
-                let _ = self.create_hello()?;
-                Ok(())
-            }
-            ZrtpRole::Responder => {
-                // Responder waits for Hello
-                Ok(())
-            }
-        }
+        Err(Error::UnsupportedFeature(
+            "ZRTP key exchange is not complete and is unavailable".into(),
+        ))
     }
 
-    fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
-        // Parse ZRTP packet
-        let packet = ZrtpPacket::parse(message)
-            .map_err(|_| Error::ParseError("Failed to parse ZRTP packet".into()))?;
-
-        let response = match (self.role, &self.state) {
-            (ZrtpRole::Initiator, ZrtpState::HelloSent) => {
-                // Process Hello response
-                if packet.message_type() == ZrtpMessageType::Hello {
-                    // Process peer's Hello
-                    let hello_ack = self.process_hello(&packet)?;
-                    self.state = ZrtpState::HelloAckSent;
-                    Ok(Some(hello_ack.to_bytes()))
-                } else {
-                    Err(Error::InvalidMessage("Expected Hello message".into()))
-                }
-            }
-            (ZrtpRole::Initiator, ZrtpState::HelloAckSent) => {
-                // Process Commit from responder
-                let dh_part1 = self.process_commit(&packet)?;
-                self.state = ZrtpState::DhPart1Sent;
-                Ok(Some(dh_part1.to_bytes()))
-            }
-            (ZrtpRole::Initiator, ZrtpState::DhPart1Sent) => {
-                // Process DH Part 2 from responder
-                let confirm1 = self.process_dh_part2(&packet)?;
-                self.state = ZrtpState::Confirm1Sent;
-                Ok(Some(confirm1.to_bytes()))
-            }
-            (ZrtpRole::Initiator, ZrtpState::Confirm1Sent) => {
-                // Process Confirm 2 from responder
-                let conf2_ack = self.process_confirm2(&packet)?;
-                self.state = ZrtpState::ConfirmAckSent;
-                Ok(Some(conf2_ack.to_bytes()))
-            }
-            (ZrtpRole::Responder, ZrtpState::Initial) => {
-                // Process Hello from initiator
-                let hello = self.create_hello()?;
-                let hello_bytes = hello.to_bytes();
-
-                // Also process Hello message from initiator
-                let hello_ack = self.process_hello(&packet)?;
-                let hello_ack_bytes = hello_ack.to_bytes();
-
-                // Combine responses
-                let mut combined = Vec::new();
-                combined.extend_from_slice(&hello_bytes);
-                combined.extend_from_slice(&hello_ack_bytes);
-
-                Ok(Some(combined))
-            }
-            (ZrtpRole::Responder, ZrtpState::HelloReceived) => {
-                // Process Hello ACK from initiator
-                let commit = self.process_hello_ack(&packet)?;
-                self.state = ZrtpState::CommitSent;
-                Ok(Some(commit.to_bytes()))
-            }
-            (ZrtpRole::Responder, ZrtpState::CommitSent) => {
-                // Process DH Part 1 from initiator
-                let dh_part2 = self.process_dh_part1(&packet)?;
-                self.state = ZrtpState::DhPart2Sent;
-                Ok(Some(dh_part2.to_bytes()))
-            }
-            (ZrtpRole::Responder, ZrtpState::DhPart2Sent) => {
-                // Process Confirm 1 from initiator
-                let confirm2 = self.process_confirm1(&packet)?;
-                self.state = ZrtpState::Confirm2Sent;
-                Ok(Some(confirm2.to_bytes()))
-            }
-            (ZrtpRole::Responder, ZrtpState::Confirm2Sent) => {
-                // Process Confirm ACK from initiator
-                self.process_conf2_ack(&packet)?;
-                self.state = ZrtpState::Completed;
-                Ok(None)
-            }
-            _ => Err(Error::InvalidState(format!(
-                "Invalid state {:?} for message processing",
-                self.state
-            ))),
-        };
-
-        response
+    fn process_message(&mut self, _message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        Err(Error::UnsupportedFeature(
+            "ZRTP key exchange is not complete and is unavailable".into(),
+        ))
     }
 
     fn get_srtp_key(&self) -> Option<SrtpCryptoKey> {
@@ -875,7 +803,7 @@ impl SecurityKeyExchange for Zrtp {
     }
 
     fn get_srtp_suite(&self) -> Option<SrtpCryptoSuite> {
-        Some(self.config.srtp_profile.clone())
+        None
     }
 
     fn is_complete(&self) -> bool {

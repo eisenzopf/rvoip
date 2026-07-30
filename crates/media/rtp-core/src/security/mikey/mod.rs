@@ -1,12 +1,13 @@
-//! MIKEY (Multimedia Internet KEYing) implementation
+//! Retained MIKEY (Multimedia Internet KEYing) API
 //!
 //! MIKEY is a key management protocol designed for real-time multimedia applications,
 //! particularly for the establishment of security context for SRTP.
 //!
-//! This module implements RFC 3830 (MIKEY) with support for:
-//! - Pre-shared key mode
-//! - Public-key mode
-//! - DH key exchange mode
+//! The public message/configuration types remain for source compatibility, but
+//! none of the PSK, public-key, or Diffie-Hellman exchanges is complete in
+//! 0.3.5. Checked construction, initialization, message processing, and key
+//! extraction return `Error::UnsupportedFeature` before state or key mutation.
+//! These types must not be advertised or negotiated as RFC 3830 support.
 //!
 //! Reference: <https://tools.ietf.org/html/rfc3830>
 
@@ -35,7 +36,7 @@ pub use payloads::{
 pub enum MikeyEncryptionAlgorithm {
     /// AES in Counter Mode (default)
     AesCm,
-    /// Null encryption (for debugging only)
+    /// Retained NULL-encryption wire identity; unavailable for negotiation
     Null,
 }
 
@@ -44,7 +45,7 @@ pub enum MikeyEncryptionAlgorithm {
 pub enum MikeyAuthenticationAlgorithm {
     /// HMAC-SHA-256
     HmacSha256,
-    /// Null authentication (for debugging only)
+    /// Retained NULL-authentication wire identity; unavailable for negotiation
     Null,
 }
 
@@ -141,6 +142,11 @@ pub struct Mikey {
 
 impl Mikey {
     /// Create a new MIKEY key exchange with the specified role
+    ///
+    /// This compatibility constructor retains the public configuration types.
+    /// Call [`Self::try_new`] when construction must reject incomplete modes
+    /// immediately; unsupported modes also fail from `init` and
+    /// `process_message` without changing protocol state.
     pub fn new(config: MikeyConfig, role: MikeyRole) -> Self {
         Self {
             config,
@@ -152,6 +158,41 @@ impl Mikey {
             srtp_suite: None,
             generated_tek: None,
             generated_salt: None,
+        }
+    }
+
+    /// Checked construction for MIKEY key exchange.
+    ///
+    /// All modes are currently unavailable because none has a complete,
+    /// interoperable key-protection path.
+    pub fn try_new(config: MikeyConfig, role: MikeyRole) -> Result<Self, Error> {
+        let _ = role;
+        match config.method {
+            MikeyKeyExchangeMethod::Psk => Err(Error::UnsupportedFeature(
+                "MIKEY pre-shared-key exchange does not protect transported key material and is unavailable"
+                    .into(),
+            )),
+            MikeyKeyExchangeMethod::Pk => Err(Error::UnsupportedFeature(
+                "MIKEY public-key exchange is not complete and is unavailable".into(),
+            )),
+            MikeyKeyExchangeMethod::Dh => Err(Error::UnsupportedFeature(
+                "MIKEY Diffie-Hellman exchange is not complete and is unavailable".into(),
+            )),
+        }
+    }
+
+    fn ensure_supported(&self) -> Result<(), Error> {
+        match self.config.method {
+            MikeyKeyExchangeMethod::Psk => Err(Error::UnsupportedFeature(
+                "MIKEY pre-shared-key exchange does not protect transported key material and is unavailable"
+                    .into(),
+            )),
+            MikeyKeyExchangeMethod::Pk => Err(Error::UnsupportedFeature(
+                "MIKEY public-key exchange is not complete and is unavailable".into(),
+            )),
+            MikeyKeyExchangeMethod::Dh => Err(Error::UnsupportedFeature(
+                "MIKEY Diffie-Hellman exchange is not complete and is unavailable".into(),
+            )),
         }
     }
 
@@ -800,6 +841,7 @@ impl Mikey {
 
 impl SecurityKeyExchange for Mikey {
     fn init(&mut self) -> Result<(), Error> {
+        self.ensure_supported()?;
         match self.role {
             MikeyRole::Initiator => {
                 // Choose method based on configuration
@@ -821,6 +863,7 @@ impl SecurityKeyExchange for Mikey {
     }
 
     fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error> {
+        self.ensure_supported()?;
         match (self.role, &self.state, self.config.method) {
             // PSK Mode
             (MikeyRole::Initiator, MikeyState::WaitingForResponse, MikeyKeyExchangeMethod::Psk) => {

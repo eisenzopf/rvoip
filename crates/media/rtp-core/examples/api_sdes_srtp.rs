@@ -73,8 +73,8 @@ async fn main() -> Result<(), ExampleError> {
     // Demo 4: SDP Integration Examples
     demo_sdp_integration().await?;
 
-    info!("✅ All SDES demos completed successfully!");
-    info!("🎯 Phase 2 SDES integration is ready for production SIP systems");
+    info!("✅ SDES signaling demonstrations completed successfully.");
+    info!("Directional offerer/answerer key-state repair remains required before production use.");
 
     Ok(())
 }
@@ -84,7 +84,7 @@ async fn demo_basic_sdes_exchange() -> Result<(), ExampleError> {
     info!("📡 Demo 1: Basic SDES Server/Client Exchange");
     info!("--------------------------------------------");
 
-    // Create SDES server with enterprise-grade configuration
+    // Create an SDES signaling configuration for this compatibility demo.
     let server_config = SdesServerConfig {
         supported_profiles: vec![
             SrtpProfile::AesCm128HmacSha1_80,

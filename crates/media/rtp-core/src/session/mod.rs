@@ -1036,7 +1036,13 @@ impl RtpSession {
                     // Send the compound packet
                     if let Ok(data) = compound.serialize() {
                         if let Err(e) = transport.send_rtcp_bytes(&data, remote_addr).await {
-                            warn!("Failed to send RTCP compound packet: {}", e);
+                            if matches!(e, Error::UnsupportedFeature(_)) {
+                                trace!(
+                                    "Skipping RTCP report while authenticated SRTCP is unavailable"
+                                );
+                            } else {
+                                warn!("Failed to send RTCP compound packet: {}", e);
+                            }
                         } else {
                             info!("Sent RTCP compound packet of {} bytes", data.len());
 
@@ -1204,7 +1210,11 @@ impl RtpSession {
                 Ok(data) => {
                     // Send using transport (through RTCP port if available)
                     if let Err(e) = self.transport.send_rtcp_bytes(&data, remote_addr).await {
-                        warn!("Failed to send RTCP BYE: {}", e);
+                        if matches!(e, Error::UnsupportedFeature(_)) {
+                            trace!("Skipping RTCP BYE while authenticated SRTCP is unavailable");
+                        } else {
+                            warn!("Failed to send RTCP BYE: {}", e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -1633,6 +1643,10 @@ impl RtpSession {
     ///
     /// This method is used to access the underlying UDP socket when needed for
     /// other protocols that need to share the same socket (e.g., DTLS).
+    /// Reads and writes performed directly on the returned socket bypass RTP
+    /// parsing and all SRTP authentication/encryption enforced by the transport.
+    /// Callers must not use this raw handle for media when SRTP is configured;
+    /// media must continue through the authenticated transport APIs.
     pub async fn get_socket_handle(&self) -> Result<Arc<UdpSocket>> {
         // Try to get the socket from the UdpRtpTransport
         if let Some(t) = self.transport.as_any().downcast_ref::<UdpRtpTransport>() {
@@ -1780,5 +1794,53 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error, Error::SessionError(_)));
+    }
+
+    #[tokio::test]
+    async fn srtp_session_rejects_manual_and_automatic_plaintext_rtcp() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let config = RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            ssrc: Some(0x1020_3040),
+            payload_type: 0,
+            ..RtpSessionConfig::default()
+        };
+        let mut session = RtpSession::new(config).await.unwrap();
+        let transport = session.transport();
+        let udp = transport
+            .as_any()
+            .downcast_ref::<UdpRtpTransport>()
+            .unwrap();
+        let key = vec![0x11; 16];
+        let salt = vec![0x22; 14];
+        let send = crate::srtp::SrtpContext::new(
+            crate::srtp::SRTP_AES128_CM_SHA1_80,
+            crate::srtp::SrtpCryptoKey::new(key.clone(), salt.clone()),
+        )
+        .unwrap();
+        let recv = crate::srtp::SrtpContext::new(
+            crate::srtp::SRTP_AES128_CM_SHA1_80,
+            crate::srtp::SrtpCryptoKey::new(key, salt),
+        )
+        .unwrap();
+        udp.set_srtp_contexts(send, recv).await.unwrap();
+
+        assert!(matches!(
+            session.send_sender_report().await,
+            Err(Error::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            session.send_receiver_report().await,
+            Err(Error::UnsupportedFeature(_))
+        ));
+
+        let mut wire = [0_u8; 2048];
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1_200), peer.recv_from(&mut wire))
+                .await
+                .is_err()
+        );
+        session.close().await.unwrap();
     }
 }

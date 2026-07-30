@@ -1,6 +1,8 @@
-//! DTLS-SRTP key extraction
+//! Retained low-level DTLS-SRTP key-material extraction
 //!
-//! This module implements SRTP key extraction from DTLS handshakes.
+//! This helper transforms caller-supplied keying material. It does not perform
+//! or authenticate a DTLS handshake, and the public DTLS connection path is
+//! unavailable in 0.3.5.
 
 use crate::dtls::crypto::keys::{extract_srtp_keys, DtlsKeyingMaterial};
 use crate::dtls::message::extension::SrtpProtectionProfile;

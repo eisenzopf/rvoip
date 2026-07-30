@@ -435,8 +435,12 @@ impl SdesServer {
     }
 }
 
-/// SRTP-only server security context (no DTLS handshake)
-/// This implementation uses pre-shared keys negotiated through SIP/SDP
+/// Configuration-only companion for a pre-shared-key SRTP server.
+///
+/// This type validates and describes key material but does not own or install
+/// the [`crate::srtp::SrtpContext`] that protects media. The default media
+/// transport installs that crypto context separately; a standalone instance
+/// therefore reports [`ServerSecurityContext::is_secure`] as `false`.
 #[allow(dead_code)] // retained (liveness/Drop hold or reserved); not read
 pub struct SrtpServerSecurityContext {
     /// Configuration
@@ -455,28 +459,7 @@ pub struct SrtpServerSecurityContext {
 impl SrtpServerSecurityContext {
     /// Create a new SRTP-only server security context
     pub async fn new(config: ServerSecurityConfig) -> Result<Arc<Self>, SecurityError> {
-        if config.srtp_profiles.is_empty() {
-            return Err(SecurityError::Configuration(
-                "SRTP/SDES requires at least one implemented profile".to_string(),
-            ));
-        }
-        for profile in &config.srtp_profiles {
-            profile.ensure_supported().map_err(SecurityError::from)?;
-        }
-        match &config.srtp_key {
-            Some(key) if key.len() >= 30 => {}
-            Some(key) => {
-                return Err(SecurityError::Configuration(format!(
-                    "SRTP key material must be at least 30 bytes, got {}",
-                    key.len()
-                )))
-            }
-            None => {
-                return Err(SecurityError::Configuration(
-                    "SRTP mode requires a 16-byte key and 14-byte salt".to_string(),
-                ))
-            }
-        }
+        config.validate()?;
 
         let advertised_profiles =
             crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
@@ -597,7 +580,7 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
     }
 
     fn is_secure(&self) -> bool {
-        true // Pre-shared key SRTP is secure
+        false
     }
 
     fn get_security_info(&self) -> SecurityInfo {
@@ -609,7 +592,9 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
             fingerprint: None, // No fingerprint for pre-shared keys
             fingerprint_algorithm: None,
             crypto_suites,
-            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
+            key_params: Some(
+                "Configured pre-shared key; media crypto not installed here".to_string(),
+            ),
             srtp_profile,
         }
     }
@@ -641,7 +626,10 @@ impl ServerSecurityContext for SrtpServerSecurityContext {
     }
 }
 
-/// SRTP client context for server-side client handling
+/// Configuration-only SRTP client companion for server-side client handling.
+///
+/// It does not own or install media crypto and cannot by itself attest that
+/// the client connection is secure.
 pub struct SrtpServerClientContext {
     /// Client address
     addr: SocketAddr,
@@ -657,28 +645,7 @@ impl SrtpServerClientContext {
         addr: SocketAddr,
         config: ServerSecurityConfig,
     ) -> Result<Self, SecurityError> {
-        if config.srtp_profiles.is_empty() {
-            return Err(SecurityError::Configuration(
-                "SRTP/SDES requires at least one implemented profile".to_string(),
-            ));
-        }
-        for profile in &config.srtp_profiles {
-            profile.ensure_supported().map_err(SecurityError::from)?;
-        }
-        match &config.srtp_key {
-            Some(key) if key.len() >= 30 => {}
-            Some(key) => {
-                return Err(SecurityError::Configuration(format!(
-                    "SRTP key material must be at least 30 bytes, got {}",
-                    key.len()
-                )))
-            }
-            None => {
-                return Err(SecurityError::Configuration(
-                    "SRTP mode requires a 16-byte key and 14-byte salt".to_string(),
-                ))
-            }
-        }
+        config.validate()?;
         let advertised_profiles =
             crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
         Ok(Self {
@@ -720,7 +687,7 @@ impl ClientSecurityContext for SrtpServerClientContext {
     }
 
     fn is_secure(&self) -> bool {
-        true // Pre-shared key SRTP is secure
+        false
     }
 
     fn get_security_info(&self) -> SecurityInfo {
@@ -732,7 +699,9 @@ impl ClientSecurityContext for SrtpServerClientContext {
             fingerprint: None,
             fingerprint_algorithm: None,
             crypto_suites,
-            key_params: Some("Pre-shared key (from SIP/SDP)".to_string()),
+            key_params: Some(
+                "Configured pre-shared key; media crypto not installed here".to_string(),
+            ),
             srtp_profile,
         }
     }

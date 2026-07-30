@@ -152,7 +152,10 @@ fn bench_full_stack_srtp(c: &mut Criterion) {
                     // Both directions need a context per the current API;
                     // the send side is unused (this bench drives raw UDP
                     // from a sender socket), so we install a no-op send.
-                    transport.set_srtp_contexts(make_srtp(), make_srtp()).await;
+                    transport
+                        .set_srtp_contexts(make_srtp(), make_srtp())
+                        .await
+                        .expect("install SRTP contexts");
                     let mut rx = transport.subscribe();
                     let sender = UdpSocket::bind(LOOPBACK).await.expect("bind sender");
 

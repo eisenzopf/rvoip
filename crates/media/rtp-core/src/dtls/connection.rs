@@ -1,6 +1,8 @@
-//! DTLS connection implementation
+//! Retained internal DTLS connection state machine
 //!
-//! This module handles the DTLS connection state and lifecycle.
+//! This state machine is incomplete and is not publicly constructible in
+//! 0.3.5. Use `dtls::create_connection`, which fails closed with a typed
+//! unsupported-feature error.
 
 use bytes::Bytes;
 use std::net::SocketAddr;

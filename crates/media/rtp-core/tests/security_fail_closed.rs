@@ -1,30 +1,260 @@
 use bytes::Bytes;
-use rvoip_rtp_core::api::client::security::srtp::{SdesClient, SdesClientConfig};
-use rvoip_rtp_core::api::client::security::{
-    ClientSecurityConfig, ClientSecurityContext, DefaultClientSecurityContext,
+use rvoip_rtp_core::api::client::security::dtls::handshake as client_dtls_handshake;
+use rvoip_rtp_core::api::client::security::dtls::transport as client_dtls_transport;
+use rvoip_rtp_core::api::client::security::srtp::{
+    SdesClient, SdesClientConfig, SrtpClientSecurityContext,
 };
-use rvoip_rtp_core::api::common::{SecurityError, SrtpProfile};
+use rvoip_rtp_core::api::client::security::{
+    ClientSecurityConfig, ClientSecurityContext as OutboundClientSecurityContext,
+    DefaultClientSecurityContext,
+};
+use rvoip_rtp_core::api::common::{
+    SecurityConfig, SecurityError, SecurityMode, SecurityProfile, SrtpProfile,
+};
+use rvoip_rtp_core::api::server::security::client::context::DefaultClientSecurityContext as ServerManagedClientSecurityContext;
+use rvoip_rtp_core::api::server::security::core::connection as server_dtls_connection;
+use rvoip_rtp_core::api::server::security::dtls::transport as server_dtls_transport;
 use rvoip_rtp_core::api::server::security::srtp::{
-    SdesServer, SdesServerConfig, SdesServerSession,
+    SdesServer, SdesServerConfig, SdesServerSession, SrtpServerClientContext,
+    SrtpServerSecurityContext,
 };
 use rvoip_rtp_core::api::server::security::{
-    DefaultServerSecurityContext, ServerSecurityConfig, SocketHandle,
+    ClientSecurityContext as InboundClientSecurityContext, DefaultServerSecurityContext,
+    ServerSecurityConfig, ServerSecurityContext, SocketHandle,
 };
 use rvoip_rtp_core::dtls::message::extension::{SrtpProtectionProfile, UseSrtpExtension};
 use rvoip_rtp_core::dtls::{create_connection, DtlsConfig};
 use rvoip_rtp_core::security::sdes::{Sdes, SdesConfig, SdesRole};
 use rvoip_rtp_core::security::SecurityKeyExchange;
+use rvoip_rtp_core::srtp::crypto::SrtpCrypto;
 use rvoip_rtp_core::srtp::{
-    SrtpContext, SrtpCryptoKey, SrtpEncryptionAlgorithm, SRTP_AEAD_AES_128_GCM,
-    SRTP_AEAD_AES_256_GCM, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80, SRTP_AES256_CM_SHA1_80,
+    SrtpAuthenticationAlgorithm, SrtpContext, SrtpCryptoKey, SrtpCryptoSuite,
+    SrtpEncryptionAlgorithm, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM, SRTP_AES128_CM_SHA1_32,
+    SRTP_AES128_CM_SHA1_80, SRTP_AES256_CM_SHA1_32, SRTP_AES256_CM_SHA1_80, SRTP_NULL_NULL,
+    SRTP_NULL_SHA1_80,
 };
 use rvoip_rtp_core::transport::{
     RtpTransport, RtpTransportConfig, SecurityRtpTransport, UdpRtpTransport,
 };
 use rvoip_rtp_core::Error;
 use rvoip_rtp_core::RtpPacket;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
+
+fn dtls_client_config(profiles: Vec<SrtpProfile>) -> ClientSecurityConfig {
+    ClientSecurityConfig {
+        security_mode: SecurityMode::DtlsSrtp,
+        validate_fingerprint: true,
+        srtp_profiles: profiles,
+        ..ClientSecurityConfig::default()
+    }
+}
+
+fn dtls_server_config(profiles: Vec<SrtpProfile>) -> ServerSecurityConfig {
+    ServerSecurityConfig {
+        security_mode: SecurityMode::DtlsSrtp,
+        srtp_profiles: profiles,
+        ..ServerSecurityConfig::default()
+    }
+}
+
+#[test]
+fn all_public_security_defaults_are_explicitly_unsecured() {
+    assert_eq!(SecurityMode::default(), SecurityMode::None);
+    let common = SecurityConfig::default();
+    assert_eq!(common.profile, SecurityProfile::Unsecured);
+    assert_eq!(common.mode, SecurityMode::None);
+    assert!(!common.required);
+    assert!(common.srtp_profiles.is_empty());
+    assert!(common.srtp_key.is_none());
+
+    let client = ClientSecurityConfig::default();
+    assert_eq!(client.security_mode, SecurityMode::None);
+    assert!(!client.validate_fingerprint);
+    assert!(client.srtp_profiles.is_empty());
+    assert!(client.srtp_key.is_none());
+
+    let server = ServerSecurityConfig::default();
+    assert_eq!(server.security_mode, SecurityMode::None);
+    assert!(server.srtp_profiles.is_empty());
+    assert!(server.srtp_key.is_none());
+}
+
+#[tokio::test]
+async fn standalone_psk_contexts_never_claim_an_active_secure_transport() {
+    let client_config = ClientSecurityConfig {
+        security_mode: SecurityMode::Srtp,
+        srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+        srtp_key: Some(vec![0x21; 30]),
+        ..ClientSecurityConfig::default()
+    };
+    let client = SrtpClientSecurityContext::new(client_config).await.unwrap();
+    assert!(!OutboundClientSecurityContext::is_secure(client.as_ref()));
+
+    let server_config = ServerSecurityConfig {
+        security_mode: SecurityMode::Srtp,
+        srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+        srtp_key: Some(vec![0x32; 30]),
+        ..ServerSecurityConfig::default()
+    };
+    let server = SrtpServerSecurityContext::new(server_config.clone())
+        .await
+        .unwrap();
+    assert!(!ServerSecurityContext::is_secure(server.as_ref()));
+
+    let server_client =
+        SrtpServerClientContext::new("127.0.0.1:5004".parse().unwrap(), server_config)
+            .await
+            .unwrap();
+    assert!(!InboundClientSecurityContext::is_secure(&server_client));
+}
+
+#[test]
+fn server_managed_dtls_context_rejects_direct_srtp_configuration() {
+    let config = ServerSecurityConfig {
+        security_mode: SecurityMode::Srtp,
+        srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+        srtp_key: Some(vec![0x43; 30]),
+        ..ServerSecurityConfig::default()
+    };
+
+    assert!(matches!(
+        ServerManagedClientSecurityContext::new(
+            "127.0.0.1:5004".parse().unwrap(),
+            None,
+            None,
+            config,
+            None,
+        ),
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+}
+
+#[tokio::test]
+async fn field_literal_server_context_cannot_claim_or_advertise_unwired_srtp() {
+    let forged_srtp = SrtpContext::new(
+        SRTP_AES128_CM_SHA1_80,
+        SrtpCryptoKey::new(vec![0x43; 16], vec![0x54; 14]),
+    )
+    .unwrap();
+    let context = ServerManagedClientSecurityContext {
+        address: "127.0.0.1:5004".parse().unwrap(),
+        connection: Arc::new(tokio::sync::Mutex::new(None)),
+        srtp_context: Arc::new(tokio::sync::Mutex::new(Some(forged_srtp))),
+        handshake_completed: Arc::new(tokio::sync::Mutex::new(true)),
+        socket: Arc::new(tokio::sync::Mutex::new(None)),
+        config: ServerSecurityConfig {
+            security_mode: SecurityMode::DtlsSrtp,
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+            ..ServerSecurityConfig::default()
+        },
+        transport: Arc::new(tokio::sync::Mutex::new(None)),
+        waiting_for_first_packet: Arc::new(tokio::sync::Mutex::new(false)),
+        initial_packet: Arc::new(tokio::sync::Mutex::new(None)),
+    };
+
+    assert!(!InboundClientSecurityContext::is_secure(&context));
+    assert!(
+        !InboundClientSecurityContext::is_handshake_complete(&context)
+            .await
+            .unwrap()
+    );
+    let info = InboundClientSecurityContext::get_security_info(&context);
+    assert_eq!(info.mode, SecurityMode::None);
+    assert!(info.crypto_suites.is_empty());
+    assert!(info.srtp_profile.is_none());
+}
+
+#[tokio::test]
+async fn public_dtls_transport_helpers_fail_before_raw_socket_activity() {
+    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let handle = SocketHandle {
+        socket: socket.clone(),
+        remote_addr: None,
+    };
+    let connection = Arc::new(tokio::sync::Mutex::new(None));
+
+    assert!(matches!(
+        client_dtls_transport::setup_transport(&handle, &connection).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        client_dtls_transport::create_udp_transport(socket, 1_500).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        server_dtls_transport::create_udp_transport(&handle, 1_500).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        server_dtls_transport::start_packet_handler(&handle, |_, _| Ok(())).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        server_dtls_transport::capture_initial_packet(&handle, 0).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        server_dtls_connection::create_dtls_transport(&handle).await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+
+    let running = Arc::new(AtomicBool::new(false));
+    let remote_addr = Arc::new(tokio::sync::Mutex::new(Some(
+        "127.0.0.1:5004".parse().unwrap(),
+    )));
+    let socket = Arc::new(tokio::sync::Mutex::new(Some(handle)));
+    let completed = Arc::new(tokio::sync::Mutex::new(false));
+    assert!(matches!(
+        client_dtls_handshake::start_handshake_monitor(
+            &running,
+            &remote_addr,
+            &socket,
+            &connection,
+            &completed,
+        )
+        .await,
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
+    assert!(!running.load(Ordering::SeqCst));
+}
+
+#[test]
+fn active_security_examples_never_simulate_unavailable_protocol_success() {
+    let examples = [
+        include_str!("../examples/api_mikey_srtp.rs"),
+        include_str!("../examples/api_mikey_pke.rs"),
+        include_str!("../examples/api_zrtp_p2p.rs"),
+        include_str!("../examples/api_advanced_security.rs"),
+        include_str!("../examples/api_complete_security_showcase.rs"),
+        include_str!("../examples/api_unified_security.rs"),
+        include_str!("../examples/dtls_test.rs"),
+        include_str!("../examples/direct_dtls_media_streaming.rs"),
+        include_str!("../examples/TODO.md"),
+        include_str!("../examples/examples_output_log.txt"),
+    ];
+
+    for example in examples {
+        assert!(example.contains("UnsupportedFeature"));
+        for unsafe_claim in [
+            "simulate a successful key exchange",
+            "Fallback SRTP",
+            "SECURE COMMUNICATION ESTABLISHED",
+            "Ready for production",
+            "DTLS-SRTP support (existing)",
+            "MIKEY context: Ready",
+            "Phase 3 advanced security features are production-ready",
+            "Direct DTLS Media Streaming example completed successfully",
+            "DTLS test completed successfully",
+        ] {
+            assert!(
+                !example.contains(unsafe_claim),
+                "security example contains stale claim: {unsafe_claim}"
+            );
+        }
+    }
+}
 
 #[test]
 fn retained_gcm_identities_do_not_change_the_null_algorithm_ordinal() {
@@ -85,27 +315,19 @@ async fn public_dtls_and_security_construction_fail_with_typed_errors() {
     };
     assert!(matches!(error, Error::UnsupportedFeature(_)));
 
-    let client = ClientSecurityConfig {
-        srtp_profiles: vec![SrtpProfile::AesGcm128],
-        ..ClientSecurityConfig::default()
-    };
+    let client = dtls_client_config(vec![SrtpProfile::AesGcm128]);
     let Err(error) = DefaultClientSecurityContext::new(client).await else {
         panic!("GCM-only client security context must fail closed");
     };
     assert!(matches!(error, SecurityError::UnsupportedFeature(_)));
 
-    let client = DefaultClientSecurityContext::new(ClientSecurityConfig::default())
-        .await
-        .unwrap();
-    let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
-    client
-        .set_socket(SocketHandle {
-            remote_addr: Some(socket.local_addr().unwrap()),
-            socket,
-        })
-        .await
-        .unwrap();
-    let error = client.get_security_info().await.unwrap_err();
+    let Err(error) = DefaultClientSecurityContext::new(dtls_client_config(vec![
+        SrtpProfile::AesCm128HmacSha1_80,
+    ]))
+    .await
+    else {
+        panic!("the high-level DTLS client context must fail during construction");
+    };
     assert!(matches!(error, SecurityError::UnsupportedFeature(_)));
 }
 
@@ -140,6 +362,263 @@ async fn enabled_srtp_transport_never_sends_plaintext_without_a_context() {
 }
 
 #[tokio::test]
+async fn udp_raw_bytes_cannot_bypass_an_installed_srtp_context() {
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let transport = UdpRtpTransport::new(RtpTransportConfig {
+        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+        ..RtpTransportConfig::default()
+    })
+    .await
+    .unwrap();
+    let key = SrtpCryptoKey::new(vec![0x31; 16], vec![0x42; 14]);
+    transport
+        .set_srtp_contexts(
+            SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap(),
+            SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap(),
+        )
+        .await
+        .unwrap();
+    let packet =
+        RtpPacket::new_with_payload(0, 3, 480, 0x0102_0304, Bytes::from_static(b"never raw"));
+    let plaintext = packet.serialize().unwrap();
+
+    assert!(matches!(
+        transport
+            .send_rtp_bytes(&plaintext, sink.local_addr().unwrap())
+            .await,
+        Err(Error::InvalidState(_))
+    ));
+    let mut wire = [0_u8; 128];
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        sink.recv_from(&mut wire)
+    )
+    .await
+    .is_err());
+
+    transport
+        .send_rtp(&packet, sink.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (wire_len, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), sink.recv_from(&mut wire))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_ne!(&wire[..wire_len], plaintext.as_ref());
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn disabled_contexts_cannot_turn_secure_transports_into_plain_rtp() {
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let direct = UdpRtpTransport::new(RtpTransportConfig {
+        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+        ..RtpTransportConfig::default()
+    })
+    .await
+    .unwrap();
+    let key = SrtpCryptoKey::new(vec![0x51; 16], vec![0x62; 14]);
+    let mut direct_send = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap();
+    let mut direct_recv = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap();
+    direct_send.set_enabled(false);
+    direct_recv.set_enabled(false);
+    assert!(matches!(
+        direct.set_srtp_contexts(direct_send, direct_recv).await,
+        Err(Error::InvalidState(_))
+    ));
+    assert!(!direct.srtp_enabled().await);
+
+    let packet = RtpPacket::new_with_payload(
+        0,
+        4,
+        640,
+        0x0102_0304,
+        Bytes::from_static(b"disabled is not plain"),
+    );
+    assert!(matches!(
+        direct.send_rtp(&packet, sink.local_addr().unwrap()).await,
+        Err(Error::InvalidState(_))
+    ));
+
+    let inner = Arc::new(
+        UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpTransportConfig::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let wrapped = SecurityRtpTransport::new(inner, true).await.unwrap();
+    let mut disabled = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap();
+    disabled.set_enabled(false);
+    assert!(matches!(
+        wrapped.set_srtp_context(disabled).await,
+        Err(Error::InvalidState(_))
+    ));
+    assert!(!wrapped.is_srtp_ready().await);
+    assert!(matches!(
+        wrapped.send_rtp(&packet, sink.local_addr().unwrap()).await,
+        Err(Error::InvalidState(_))
+    ));
+    assert!(matches!(
+        wrapped
+            .inner_transport()
+            .send_rtp_bytes(&packet.serialize().unwrap(), sink.local_addr().unwrap())
+            .await,
+        Err(Error::InvalidState(_))
+    ));
+
+    let mut wire = [0_u8; 128];
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        sink.recv_from(&mut wire)
+    )
+    .await
+    .is_err());
+    direct.close().await.unwrap();
+    wrapped.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn null_and_unreviewed_suites_cannot_become_ready_secure_transports() {
+    let key = SrtpCryptoKey::new(vec![0x63; 16], vec![0x74; 14]);
+    let aes_without_authentication = SrtpCryptoSuite {
+        encryption: SrtpEncryptionAlgorithm::AesCm,
+        authentication: SrtpAuthenticationAlgorithm::Null,
+        key_length: 16,
+        tag_length: 0,
+    };
+    for suite in [
+        SRTP_NULL_NULL,
+        SRTP_NULL_SHA1_80,
+        aes_without_authentication,
+    ] {
+        assert!(matches!(
+            SrtpContext::new(suite.clone(), key.clone()),
+            Err(Error::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            SrtpCrypto::new(suite, key.clone()),
+            Err(Error::UnsupportedFeature(_))
+        ));
+    }
+
+    // The exact reviewed AES-CM/HMAC identities remain constructible.
+    for suite in [
+        SRTP_AES128_CM_SHA1_80,
+        SRTP_AES128_CM_SHA1_32,
+        SRTP_AES256_CM_SHA1_80,
+        SRTP_AES256_CM_SHA1_32,
+    ] {
+        let key = SrtpCryptoKey::new(vec![0x63; suite.key_length], vec![0x74; 14]);
+        assert!(SrtpContext::new(suite, key).is_ok());
+    }
+
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let inner = Arc::new(
+        UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpTransportConfig::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let transport = SecurityRtpTransport::new(inner, true).await.unwrap();
+    let mut events = transport.subscribe();
+    assert!(!transport.is_srtp_ready().await);
+
+    let packet = RtpPacket::new_with_payload(
+        0,
+        5,
+        800,
+        0x0102_0304,
+        Bytes::from_static(b"null suite must not pass"),
+    );
+    assert!(matches!(
+        transport
+            .send_rtp(&packet, sink.local_addr().unwrap())
+            .await,
+        Err(Error::InvalidState(_))
+    ));
+    let mut wire = [0_u8; 128];
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        sink.recv_from(&mut wire)
+    )
+    .await
+    .is_err());
+
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    sender
+        .send_to(
+            &packet.serialize().unwrap(),
+            transport.local_rtp_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(75), events.recv())
+            .await
+            .is_err()
+    );
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn plaintext_wrapper_rejects_late_srtp_context_installation() {
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let inner = Arc::new(
+        UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpTransportConfig::default()
+        })
+        .await
+        .unwrap(),
+    );
+    let wrapped = SecurityRtpTransport::new(inner, false).await.unwrap();
+    let context = SrtpContext::new(
+        SRTP_AES128_CM_SHA1_80,
+        SrtpCryptoKey::new(vec![0x19; 16], vec![0x2a; 14]),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        wrapped.set_srtp_context(context).await,
+        Err(Error::InvalidState(_))
+    ));
+    assert!(!wrapped.is_srtp_ready().await);
+
+    let mut wire = [0_u8; 128];
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        sink.recv_from(&mut wire)
+    )
+    .await
+    .is_err());
+    wrapped.close().await.unwrap();
+}
+
+#[test]
+fn low_level_srtcp_crypto_entry_points_are_unavailable() {
+    let crypto = SrtpCrypto::new(
+        SRTP_AES128_CM_SHA1_80,
+        SrtpCryptoKey::new(vec![0x71; 16], vec![0x82; 14]),
+    )
+    .unwrap();
+    let rtcp = [0x80, 200, 0, 1, 0, 0, 0, 1];
+
+    assert!(matches!(
+        crypto.encrypt_rtcp(&rtcp),
+        Err(Error::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        crypto.decrypt_rtcp(&rtcp),
+        Err(Error::UnsupportedFeature(_))
+    ));
+}
+
+#[tokio::test]
 async fn enabled_srtp_transport_never_receives_plaintext_without_a_context() {
     let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let inner = UdpRtpTransport::new(RtpTransportConfig {
@@ -165,12 +644,108 @@ async fn enabled_srtp_transport_never_receives_plaintext_without_a_context() {
 
     let mut buffer = [0u8; 128];
     let error = transport.receive_packet(&mut buffer).await.unwrap_err();
-    assert!(matches!(error, Error::InvalidState(_)));
+    assert!(matches!(error, Error::UnsupportedFeature(_)));
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(50), events.recv())
             .await
             .is_err()
     );
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn installed_wrapper_context_still_rejects_racy_direct_receive_and_plaintext() {
+    let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let inner = UdpRtpTransport::new(RtpTransportConfig {
+        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+        ..RtpTransportConfig::default()
+    })
+    .await
+    .unwrap();
+    let transport = SecurityRtpTransport::new(Arc::new(inner), true)
+        .await
+        .unwrap();
+    transport
+        .set_srtp_context(
+            SrtpContext::new(
+                SRTP_AES128_CM_SHA1_80,
+                SrtpCryptoKey::new(vec![0x73; 16], vec![0x84; 14]),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut events = transport.subscribe();
+    let packet = RtpPacket::new_with_payload(
+        0,
+        17,
+        2_720,
+        0x5566_7788,
+        Bytes::from_static(b"unauthenticated"),
+    );
+
+    sender
+        .send_to(
+            &packet.serialize().unwrap(),
+            transport.local_rtp_addr().unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut buffer = [0_u8; 128];
+    assert!(matches!(
+        transport.receive_packet(&mut buffer).await,
+        Err(Error::UnsupportedFeature(_))
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(75), events.recv())
+            .await
+            .is_err()
+    );
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn enabled_srtp_transport_rejects_rtcp_until_authenticated_srtcp_exists() {
+    let sink = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let inner = UdpRtpTransport::new(RtpTransportConfig {
+        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+        ..RtpTransportConfig::default()
+    })
+    .await
+    .unwrap();
+    let transport = SecurityRtpTransport::new(Arc::new(inner), true)
+        .await
+        .unwrap();
+    let context = SrtpContext::new(
+        SRTP_AES128_CM_SHA1_80,
+        SrtpCryptoKey::new(vec![0x31; 16], vec![0x42; 14]),
+    )
+    .unwrap();
+    transport.set_srtp_context(context).await.unwrap();
+    let report = rvoip_rtp_core::RtcpPacket::ReceiverReport(
+        rvoip_rtp_core::RtcpReceiverReport::new(0x1122_3344),
+    );
+
+    assert!(matches!(
+        transport
+            .send_rtcp(&report, sink.local_addr().unwrap())
+            .await,
+        Err(Error::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        transport
+            .send_rtcp_bytes(&report.serialize().unwrap(), sink.local_addr().unwrap())
+            .await,
+        Err(Error::UnsupportedFeature(_))
+    ));
+
+    let mut wire = [0_u8; 128];
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_millis(50),
+        sink.recv_from(&mut wire)
+    )
+    .await
+    .is_err());
     transport.close().await.unwrap();
 }
 
@@ -189,7 +764,7 @@ async fn production_client_and_server_dtls_builders_return_unsupported() {
     };
     assert!(matches!(error, SecurityError::UnsupportedFeature(_)));
 
-    let server_config = ServerSecurityConfig::default();
+    let server_config = dtls_server_config(vec![SrtpProfile::AesCm128HmacSha1_80]);
     let Err(error) =
         rvoip_rtp_core::api::server::security::core::create_server_connection(&server_config).await
     else {
@@ -202,17 +777,13 @@ async fn production_client_and_server_dtls_builders_return_unsupported() {
     };
     assert!(matches!(error, SecurityError::UnsupportedFeature(_)));
 
-    let client = DefaultClientSecurityContext::new(ClientSecurityConfig::default())
-        .await
-        .unwrap();
-    client
-        .set_socket(SocketHandle {
-            socket,
-            remote_addr: Some(remote_addr),
-        })
-        .await
-        .unwrap();
-    let error = client.initialize().await.unwrap_err();
+    let Err(error) = DefaultClientSecurityContext::new(dtls_client_config(vec![
+        SrtpProfile::AesCm128HmacSha1_80,
+    ]))
+    .await
+    else {
+        panic!("high-level client DTLS context must fail closed during construction");
+    };
     assert!(matches!(error, SecurityError::UnsupportedFeature(_)));
 }
 
@@ -259,6 +830,15 @@ fn public_profile_conversions_reject_gcm_and_unknown_ids() {
             Err(SecurityError::UnsupportedFeature(_))
         ));
     }
+
+    assert!(matches!(
+        SrtpProtectionProfile::Unknown(0xbeef).ensure_supported(),
+        Err(Error::UnsupportedFeature(_))
+    ));
+    assert!(matches!(
+        rvoip_rtp_core::api::server::security::util::string_to_security_mode("not-a-security-mode"),
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
 }
 
 #[test]

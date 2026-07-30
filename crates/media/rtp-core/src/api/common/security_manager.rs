@@ -1,20 +1,21 @@
 //! Security Context Manager
 //!
-//! This module provides high-level management of security contexts, including
-//! support for multiple key exchange methods, fallback mechanisms, and
-//! integration with existing DTLS-SRTP infrastructure.
+//! This module provides high-level management of the implemented SDES and
+//! directly provisioned PSK contexts. Retained DTLS-SRTP, MIKEY, and ZRTP
+//! method identifiers fail closed. Once established, callers can route RTP
+//! through this manager's protect/unprotect methods.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::api::client::security::ClientSecurityContext;
-use crate::api::common::config::{KeyExchangeMethod, SecurityConfig};
+use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode};
 use crate::api::common::error::SecurityError;
 use crate::api::common::unified_security::{SecurityContextFactory, UnifiedSecurityContext};
 use crate::api::server::security::ServerSecurityContext;
 
-/// High-level security context manager that can coordinate multiple security methods
+/// High-level security context manager for implemented security methods.
 pub struct SecurityContextManager {
     /// Available security contexts by method
     contexts: Arc<RwLock<HashMap<KeyExchangeMethod, SecurityContextType>>>,
@@ -29,7 +30,7 @@ pub struct SecurityContextManager {
 /// Type of security context wrapper
 #[derive(Clone)]
 pub enum SecurityContextType {
-    /// Unified context for SDES, MIKEY, ZRTP, PSK
+    /// Unified context. Only SDES and directly provisioned PSK are available.
     Unified(Arc<UnifiedSecurityContext>),
     /// Existing DTLS-SRTP client context
     DtlsClient(Arc<dyn ClientSecurityContext>),
@@ -66,14 +67,21 @@ pub struct SecurityCapabilities {
 impl SecurityContextManager {
     /// Create a new security context manager
     pub fn new(config: SecurityConfig) -> Self {
-        // Default method preference based on security and compatibility
-        let method_preference = vec![
-            KeyExchangeMethod::DtlsSrtp,     // Most common in modern systems
-            KeyExchangeMethod::Sdes,         // Good for SIP systems
-            KeyExchangeMethod::Zrtp,         // Good for P2P
-            KeyExchangeMethod::Mikey,        // Enterprise
-            KeyExchangeMethod::PreSharedKey, // Fallback
-        ];
+        // Derive preferences only from an implemented and provisioned method.
+        // A manager must never advertise a fallback that cannot actually
+        // establish the configured protection.
+        let method_preference = match config.mode {
+            SecurityMode::SdesSrtp => vec![KeyExchangeMethod::Sdes],
+            SecurityMode::Srtp
+                if config
+                    .srtp_key
+                    .as_ref()
+                    .is_some_and(|key_material| key_material.len() == 30) =>
+            {
+                vec![KeyExchangeMethod::PreSharedKey]
+            }
+            _ => Vec::new(),
+        };
 
         Self {
             contexts: Arc::new(RwLock::new(HashMap::new())),
@@ -168,6 +176,25 @@ impl SecurityContextManager {
         }
     }
 
+    fn ensure_method_available(method: KeyExchangeMethod) -> Result<(), SecurityError> {
+        match method {
+            KeyExchangeMethod::Sdes | KeyExchangeMethod::PreSharedKey => Ok(()),
+            KeyExchangeMethod::DtlsSrtp => Err(SecurityError::UnsupportedFeature(
+                "DTLS-SRTP is not complete and is unavailable".to_string(),
+            )),
+            KeyExchangeMethod::Mikey => Err(SecurityError::UnsupportedFeature(
+                "MIKEY key exchange is not complete and is unavailable".to_string(),
+            )),
+            KeyExchangeMethod::Zrtp => Err(SecurityError::UnsupportedFeature(
+                "ZRTP key exchange is not complete and is unavailable".to_string(),
+            )),
+        }
+    }
+
+    fn method_is_available(method: KeyExchangeMethod) -> bool {
+        Self::ensure_method_available(method).is_ok()
+    }
+
     /// Add a DTLS-SRTP client context
     pub async fn add_dtls_client_context(&self, context: Arc<dyn ClientSecurityContext>) {
         let mut contexts = self.contexts.write().await;
@@ -188,6 +215,7 @@ impl SecurityContextManager {
 
     /// Start security negotiation with a specific method
     pub async fn start_negotiation(&self, method: KeyExchangeMethod) -> Result<(), SecurityError> {
+        Self::ensure_method_available(method)?;
         let contexts = self.contexts.read().await;
         let context = contexts.get(&method).ok_or_else(|| {
             SecurityError::Configuration(format!(
@@ -294,6 +322,8 @@ impl SecurityContextManager {
             }
         };
 
+        Self::ensure_method_available(method)?;
+
         let contexts = self.contexts.read().await;
         let context = contexts.get(&method).ok_or_else(|| {
             SecurityError::Configuration(format!(
@@ -318,18 +348,25 @@ impl SecurityContextManager {
         &self,
         data: &[u8],
     ) -> Result<KeyExchangeMethod, SecurityError> {
-        let data_str = std::str::from_utf8(data).unwrap_or("");
+        let data_str = std::str::from_utf8(data).map_err(|error| {
+            SecurityError::Configuration(format!("security signaling is not valid UTF-8: {error}"))
+        })?;
 
         // Simple detection heuristics
         if data_str.contains("a=crypto:") {
             Ok(KeyExchangeMethod::Sdes)
         } else if data_str.contains("MIKEY") {
-            Ok(KeyExchangeMethod::Mikey)
+            Err(SecurityError::UnsupportedFeature(
+                "MIKEY key exchange is not complete and is unavailable".to_string(),
+            ))
         } else if data_str.contains("zrtp-version") {
-            Ok(KeyExchangeMethod::Zrtp)
+            Err(SecurityError::UnsupportedFeature(
+                "ZRTP key exchange is not complete and is unavailable".to_string(),
+            ))
         } else {
-            // Default to SDES for SDP-based signaling
-            Ok(KeyExchangeMethod::Sdes)
+            Err(SecurityError::Configuration(
+                "security signaling does not identify a supported key-exchange method".to_string(),
+            ))
         }
     }
 
@@ -365,21 +402,91 @@ impl SecurityContextManager {
         }
     }
 
+    /// Protect an RTP packet with the currently established unified context.
+    ///
+    /// This is the media-crypto handoff for manager users; negotiation alone
+    /// must not be treated as protection unless media is routed through this
+    /// method (or through an explicitly installed `SrtpContext`).
+    pub async fn protect_rtp(
+        &self,
+        packet: &crate::packet::RtpPacket,
+    ) -> Result<crate::srtp::ProtectedRtpPacket, SecurityError> {
+        let active_method = self.get_active_method().await.ok_or_else(|| {
+            SecurityError::NotInitialized("No active security method".to_string())
+        })?;
+        let context = self
+            .contexts
+            .read()
+            .await
+            .get(&active_method)
+            .cloned()
+            .ok_or_else(|| {
+                SecurityError::NotInitialized("Active method context not found".to_string())
+            })?;
+
+        match context {
+            SecurityContextType::Unified(unified) => unified.protect_rtp(packet).await,
+            SecurityContextType::DtlsClient(_) | SecurityContextType::DtlsServer(_) => {
+                Err(SecurityError::UnsupportedFeature(
+                    "DTLS-SRTP media protection is unavailable".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Authenticate and unprotect RTP with the currently established context.
+    pub async fn unprotect_rtp(
+        &self,
+        data: &[u8],
+    ) -> Result<crate::packet::RtpPacket, SecurityError> {
+        let active_method = self.get_active_method().await.ok_or_else(|| {
+            SecurityError::NotInitialized("No active security method".to_string())
+        })?;
+        let context = self
+            .contexts
+            .read()
+            .await
+            .get(&active_method)
+            .cloned()
+            .ok_or_else(|| {
+                SecurityError::NotInitialized("Active method context not found".to_string())
+            })?;
+
+        match context {
+            SecurityContextType::Unified(unified) => unified.unprotect_rtp(data).await,
+            SecurityContextType::DtlsClient(_) | SecurityContextType::DtlsServer(_) => {
+                Err(SecurityError::UnsupportedFeature(
+                    "DTLS-SRTP media unprotection is unavailable".to_string(),
+                ))
+            }
+        }
+    }
+
     /// Get security capabilities
     pub async fn get_capabilities(&self) -> SecurityCapabilities {
         let contexts = self.contexts.read().await;
-        let supported_methods: Vec<KeyExchangeMethod> = contexts.keys().copied().collect();
+        let supported_methods: Vec<KeyExchangeMethod> = contexts
+            .keys()
+            .copied()
+            .filter(|method| Self::method_is_available(*method))
+            .collect();
         let config_is_valid = self.config.validate().is_ok();
+        let has_supported_method = config_is_valid && !supported_methods.is_empty();
+        // SDES is currently initialized with the offerer role. Direct PSK is
+        // usable for pre-provisioned media crypto, but it has no signaling
+        // offer/answer exchange. Report those distinctions exactly.
+        let can_offer =
+            has_supported_method && supported_methods.contains(&KeyExchangeMethod::Sdes);
 
         SecurityCapabilities {
-            supported_methods: if config_is_valid {
+            supported_methods: if has_supported_method {
                 supported_methods
             } else {
                 Vec::new()
             },
-            can_offer: config_is_valid,
-            can_answer: config_is_valid,
-            srtp_profiles: if config_is_valid {
+            can_offer,
+            can_answer: false,
+            srtp_profiles: if has_supported_method {
                 self.config.srtp_profiles.clone()
             } else {
                 Vec::new()
@@ -392,6 +499,7 @@ impl SecurityContextManager {
         &self,
         method: KeyExchangeMethod,
     ) -> Result<Vec<String>, SecurityError> {
+        Self::ensure_method_available(method)?;
         let contexts = self.contexts.read().await;
         let context = contexts.get(&method).ok_or_else(|| {
             SecurityError::Configuration(format!(
@@ -438,7 +546,11 @@ impl SecurityContextManager {
     /// List available security methods
     pub async fn list_available_methods(&self) -> Vec<KeyExchangeMethod> {
         let contexts = self.contexts.read().await;
-        contexts.keys().copied().collect()
+        contexts
+            .keys()
+            .copied()
+            .filter(|method| Self::method_is_available(*method))
+            .collect()
     }
 }
 
@@ -506,20 +618,30 @@ mod tests {
         let detected = manager.detect_method_from_signaling(sdes_sdp).unwrap();
         assert_eq!(detected, KeyExchangeMethod::Sdes);
 
-        // Test MIKEY detection
+        // Incomplete MIKEY signaling must never become a negotiable method.
         let mikey_data = b"MIKEY message content";
-        let detected = manager.detect_method_from_signaling(mikey_data).unwrap();
-        assert_eq!(detected, KeyExchangeMethod::Mikey);
+        assert!(matches!(
+            manager.detect_method_from_signaling(mikey_data),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
 
-        // Test ZRTP detection
+        // Incomplete ZRTP signaling must never become a negotiable method.
         let zrtp_data = b"zrtp-version: 1.10";
-        let detected = manager.detect_method_from_signaling(zrtp_data).unwrap();
-        assert_eq!(detected, KeyExchangeMethod::Zrtp);
+        assert!(matches!(
+            manager.detect_method_from_signaling(zrtp_data),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
 
-        // Test default detection
+        // Unknown and non-text input must not silently become SDES.
         let unknown_data = b"random signaling data";
-        let detected = manager.detect_method_from_signaling(unknown_data).unwrap();
-        assert_eq!(detected, KeyExchangeMethod::Sdes); // Default
+        assert!(matches!(
+            manager.detect_method_from_signaling(unknown_data),
+            Err(SecurityError::Configuration(_))
+        ));
+        assert!(matches!(
+            manager.detect_method_from_signaling(&[0xff, 0xfe]),
+            Err(SecurityError::Configuration(_))
+        ));
     }
 
     #[tokio::test]
@@ -548,10 +670,24 @@ mod tests {
 
         let capabilities = manager.get_capabilities().await;
 
-        assert!(capabilities.can_offer);
-        assert!(capabilities.can_answer);
+        assert!(!capabilities.can_offer);
+        assert!(!capabilities.can_answer);
         assert!(!capabilities.supported_methods.is_empty());
         assert!(!capabilities.srtp_profiles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn capabilities_distinguish_sdes_offering_from_unimplemented_answering() {
+        let manager = SecurityContextManager::new(SecurityConfig::sdes_srtp());
+        manager.initialize().await.unwrap();
+
+        let capabilities = manager.get_capabilities().await;
+        assert_eq!(
+            capabilities.supported_methods,
+            vec![KeyExchangeMethod::Sdes]
+        );
+        assert!(capabilities.can_offer);
+        assert!(!capabilities.can_answer);
     }
 
     #[tokio::test]
@@ -638,6 +774,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn established_psk_manager_exposes_real_media_crypto() {
+        use bytes::Bytes;
+
+        let sender = SecurityContextManager::new(SecurityConfig::srtp_with_key(test_srtp_key()));
+        let receiver = SecurityContextManager::new(SecurityConfig::srtp_with_key(test_srtp_key()));
+        for manager in [&sender, &receiver] {
+            manager.initialize().await.unwrap();
+            manager
+                .start_negotiation(KeyExchangeMethod::PreSharedKey)
+                .await
+                .unwrap();
+            assert!(manager.is_established().await.unwrap());
+        }
+
+        let packet = crate::packet::RtpPacket::new_with_payload(
+            0,
+            7,
+            1_120,
+            0x1020_3040,
+            Bytes::from_static(b"manager-protected"),
+        );
+        let plaintext = packet.serialize().unwrap();
+        let protected = sender.protect_rtp(&packet).await.unwrap();
+        let wire = protected.serialize().unwrap();
+        assert_ne!(wire, plaintext);
+
+        let recovered = receiver.unprotect_rtp(&wire).await.unwrap();
+        assert_eq!(recovered.payload, packet.payload);
+        assert_eq!(
+            recovered.header.sequence_number,
+            packet.header.sequence_number
+        );
+    }
+
+    #[tokio::test]
     async fn test_create_method_config() {
         let config = SecurityConfig::sdes_srtp();
         let manager = SecurityContextManager::new(config);
@@ -662,13 +833,64 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_initialization_warnings() {
-        // Test that manager handles initialization failures gracefully
-        let config = SecurityConfig::zrtp_p2p(); // This will fail to initialize
+        let config = SecurityConfig::zrtp_p2p();
         let manager = SecurityContextManager::new(config);
 
-        // Should not panic, just log warnings
-        let result = manager.initialize().await;
-        assert!(result.is_ok()); // Manager initialization should succeed even if contexts fail
+        assert!(matches!(
+            manager.initialize().await,
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn incomplete_methods_are_not_available_or_negotiable() {
+        let manager = SecurityContextManager::new(SecurityConfig::srtp_with_key(test_srtp_key()));
+        manager.initialize().await.unwrap();
+
+        for method in [
+            KeyExchangeMethod::DtlsSrtp,
+            KeyExchangeMethod::Mikey,
+            KeyExchangeMethod::Zrtp,
+        ] {
+            assert!(!manager.list_available_methods().await.contains(&method));
+            assert!(matches!(
+                manager.start_negotiation(method).await,
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+            assert!(matches!(
+                manager.process_signaling(b"offer", Some(method)).await,
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+            assert!(matches!(
+                manager.create_security_offer(method).await,
+                Err(SecurityError::UnsupportedFeature(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn built_in_preferences_only_include_configured_available_methods() {
+        assert_eq!(
+            SecurityContextManager::new(SecurityConfig::sdes_srtp()).method_preference,
+            vec![KeyExchangeMethod::Sdes]
+        );
+        assert_eq!(
+            SecurityContextManager::new(SecurityConfig::srtp_with_key(test_srtp_key()))
+                .method_preference,
+            vec![KeyExchangeMethod::PreSharedKey]
+        );
+        assert!(SecurityContextManager::new(SecurityConfig::default())
+            .method_preference
+            .is_empty());
+        for config in [
+            SecurityConfig::webrtc_compatible(),
+            SecurityConfig::mikey_psk(),
+            SecurityConfig::zrtp_p2p(),
+        ] {
+            assert!(SecurityContextManager::new(config)
+                .method_preference
+                .is_empty());
+        }
     }
 
     #[test]

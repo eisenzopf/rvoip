@@ -21,7 +21,7 @@ pub enum SrtpEncryptionAlgorithm {
     /// AES in f8-mode (Customized for SRTP)
     AesF8,
 
-    /// Null encryption (for debugging/testing only)
+    /// Retained NULL-encryption identity. Construction is unsupported in 0.3.5.
     Null,
 
     /// AEAD AES-128-GCM (RFC 7714).
@@ -46,7 +46,7 @@ pub enum SrtpAuthenticationAlgorithm {
     /// HMAC-SHA1 truncated to 32 bits
     HmacSha1_32,
 
-    /// Null authentication (for debugging/testing only)
+    /// Retained NULL-authentication identity. Construction is unsupported in 0.3.5.
     Null,
 }
 
@@ -98,7 +98,11 @@ pub const SRTP_AES256_CM_SHA1_32: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 4,  // 32 bits
 };
 
-/// Null encryption/authentication (for testing/debugging only)
+/// Integrity-only NULL-encryption profile identity.
+///
+/// Retained for source compatibility. It provides no confidentiality and is
+/// rejected by `SrtpCryptoSuite::validate`, `SrtpCrypto`, and `SrtpContext` in
+/// 0.3.5.
 pub const SRTP_NULL_SHA1_80: SrtpCryptoSuite = SrtpCryptoSuite {
     encryption: SrtpEncryptionAlgorithm::Null,
     authentication: SrtpAuthenticationAlgorithm::HmacSha1_80,
@@ -106,7 +110,11 @@ pub const SRTP_NULL_SHA1_80: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 10, // 80 bits
 };
 
-/// No encryption or authentication (DANGEROUS - use only for testing)
+/// Unprotected NULL/NULL profile identity.
+///
+/// Retained for source compatibility only. It is rejected by
+/// `SrtpCryptoSuite::validate`, `SrtpCrypto`, and `SrtpContext`; it can never
+/// be installed as a secure production transport.
 pub const SRTP_NULL_NULL: SrtpCryptoSuite = SrtpCryptoSuite {
     encryption: SrtpEncryptionAlgorithm::Null,
     authentication: SrtpAuthenticationAlgorithm::Null,
@@ -131,14 +139,15 @@ pub const SRTP_AEAD_AES_256_GCM: SrtpCryptoSuite = SrtpCryptoSuite {
 };
 
 impl SrtpCryptoSuite {
-    /// Validate that the suite's parameters are internally consistent.
+    /// Validate that the suite is one of the four reviewed AES-CM/HMAC suites.
     ///
     /// The HMAC-SHA1 authentication tag is truncated from a fixed 20-byte
     /// digest, so any HMAC-SHA1 suite must declare `tag_length <= 20`.
-    /// The built-in suites all satisfy this; the check guards against a
-    /// hand-constructed `SrtpCryptoSuite` literal (the fields are public)
-    /// whose oversized `tag_length` would otherwise panic when the tag is
-    /// sliced out of the digest during protect/unprotect.
+    /// Public identities for AES-GCM, AES-f8, and NULL modes remain available
+    /// for source compatibility but fail closed here. Exact matching also
+    /// prevents a hand-constructed literal from creating an unreviewed
+    /// encryption/authentication combination that a transport could report as
+    /// secure.
     pub fn validate(&self) -> Result<(), crate::Error> {
         const HMAC_SHA1_OUTPUT_LEN: usize = 20;
         if matches!(
@@ -153,6 +162,19 @@ impl SrtpCryptoSuite {
         if self.encryption == SrtpEncryptionAlgorithm::AesF8 {
             return Err(crate::Error::UnsupportedFeature(
                 "SRTP AES-f8 is not implemented".to_string(),
+            ));
+        }
+
+        if self.encryption == SrtpEncryptionAlgorithm::Null {
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP NULL encryption profiles are retained identities but are unavailable because they provide no confidentiality"
+                    .to_string(),
+            ));
+        }
+
+        if self.authentication == SrtpAuthenticationAlgorithm::Null {
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP NULL authentication is unavailable for AES-CM profiles".to_string(),
             ));
         }
 
@@ -179,6 +201,17 @@ impl SrtpCryptoSuite {
                 "SRTP suite tag_length {} exceeds HMAC-SHA1 output {}",
                 self.tag_length, HMAC_SHA1_OUTPUT_LEN
             )));
+        }
+
+        if self != &SRTP_AES128_CM_SHA1_80
+            && self != &SRTP_AES128_CM_SHA1_32
+            && self != &SRTP_AES256_CM_SHA1_80
+            && self != &SRTP_AES256_CM_SHA1_32
+        {
+            return Err(crate::Error::UnsupportedFeature(
+                "unreviewed SRTP suite combination is unavailable; use an exact AES-CM/HMAC-SHA1 built-in profile"
+                    .to_string(),
+            ));
         }
         Ok(())
     }
@@ -277,7 +310,21 @@ impl SrtpContext {
         self.enabled = enabled;
     }
 
-    /// Set key rotation frequency
+    /// Validate that this context can be installed in a secure transport.
+    pub(crate) fn validate_for_secure_transport(&self) -> Result<(), crate::Error> {
+        if !self.enabled {
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot be installed as secure media".to_string(),
+            ));
+        }
+        self.crypto.suite().validate()
+    }
+
+    /// Set key rotation frequency.
+    ///
+    /// Non-`None` schedules are retained for API compatibility, but key
+    /// rotation is not implemented in this release. The first packet whose
+    /// index requires rotation is rejected before encryption or state changes.
     pub fn set_key_rotation(&mut self, frequency: key_derivation::KeyRotationFrequency) {
         self.key_rotation = frequency;
     }
@@ -290,15 +337,17 @@ impl SrtpContext {
     ) -> Result<ProtectedRtpPacket, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return Ok(ProtectedRtpPacket {
-                packet: packet.clone(),
-                auth_tag: None,
-            });
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot pass RTP through as plaintext".to_string(),
+            ));
         }
 
         // Check for key rotation
         if self.key_rotation.should_rotate(self.packet_index) {
-            // In a real implementation, we would rotate keys here
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP key rotation is not implemented; refusing to reuse the old key after the configured rotation boundary"
+                    .to_string(),
+            ));
         }
 
         // Increment packet index
@@ -319,45 +368,49 @@ impl SrtpContext {
     pub fn unprotect(&mut self, data: &[u8]) -> Result<crate::packet::RtpPacket, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return crate::packet::RtpPacket::parse(data);
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot accept RTP as plaintext".to_string(),
+            ));
         }
 
         // Decrypt using SRTP (which handles authentication verification internally)
         self.crypto.decrypt_rtp(data)
     }
 
-    /// Protect an RTCP packet (SRTCP encryption)
-    /// Returns the encrypted data with the authentication tag appended
-    pub fn protect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
-        // Check if SRTP is enabled
+    /// Protect an RTCP packet with SRTCP.
+    ///
+    /// Authenticated SRTCP state management is not complete in this release.
+    /// Enabled SRTP contexts therefore fail closed instead of calling the
+    /// incomplete crypto path. This method is the compatibility hook for the
+    /// complete per-SSRC SRTCP implementation planned for the next repair.
+    pub fn protect_rtcp(&mut self, _data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
         if !self.enabled {
-            return Ok(bytes::Bytes::copy_from_slice(data));
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot pass RTCP through as plaintext".to_string(),
+            ));
         }
 
-        // Encrypt using SRTCP
-        let (encrypted, auth_tag) = self.crypto.encrypt_rtcp(data)?;
-
-        // If authentication is used, append the tag
-        if let Some(tag) = auth_tag {
-            let mut buffer = bytes::BytesMut::with_capacity(encrypted.len() + tag.len());
-            buffer.extend_from_slice(&encrypted);
-            buffer.extend_from_slice(&tag);
-            Ok(buffer.freeze())
-        } else {
-            Ok(encrypted)
-        }
+        Err(crate::Error::UnsupportedFeature(
+            "authenticated SRTCP is not implemented; RTCP is disabled for SRTP contexts"
+                .to_string(),
+        ))
     }
 
-    /// Unprotect an RTCP packet (SRTCP decryption)
-    /// The input data should include the authentication tag if used
-    pub fn unprotect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
-        // Check if SRTP is enabled
+    /// Unprotect an RTCP packet with SRTCP.
+    ///
+    /// See [`Self::protect_rtcp`]. Enabled SRTP contexts reject all input until
+    /// authenticated SRTCP with replay/index state is complete.
+    pub fn unprotect_rtcp(&mut self, _data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
         if !self.enabled {
-            return Ok(bytes::Bytes::copy_from_slice(data));
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot accept RTCP as plaintext".to_string(),
+            ));
         }
 
-        // Decrypt using SRTCP (which handles authentication verification internally)
-        self.crypto.decrypt_rtcp(data)
+        Err(crate::Error::UnsupportedFeature(
+            "authenticated SRTCP is not implemented; RTCP is disabled for SRTP contexts"
+                .to_string(),
+        ))
     }
 }
 
@@ -366,14 +419,116 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_srtp_context_creation() {
-        // Create a key
+    fn null_profiles_are_retained_identities_but_cannot_construct_contexts() {
         let key = SrtpCryptoKey::new(vec![0; 16], vec![0; 14]);
+        assert!(matches!(
+            SrtpContext::new(SRTP_NULL_NULL, key.clone()),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            SrtpContext::new(SRTP_NULL_SHA1_80, key),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+    }
 
-        // Create context with null encryption
-        let context = SrtpContext::new(SRTP_NULL_NULL, key);
+    #[test]
+    fn hand_built_unreviewed_suite_combinations_fail_closed() {
+        let key = SrtpCryptoKey::new(vec![0; 16], vec![0; 14]);
+        let aes_without_authentication = SrtpCryptoSuite {
+            encryption: SrtpEncryptionAlgorithm::AesCm,
+            authentication: SrtpAuthenticationAlgorithm::Null,
+            key_length: 16,
+            tag_length: 0,
+        };
+        assert!(matches!(
+            SrtpContext::new(aes_without_authentication, key),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+    }
 
-        assert!(context.is_ok());
+    #[test]
+    fn enabled_srtp_context_rejects_incomplete_srtcp() {
+        let key = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]);
+        let mut context = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap();
+        let rtcp = [0x80, 200, 0, 1, 0, 0, 0, 1];
+
+        assert!(matches!(
+            context.protect_rtcp(&rtcp),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+        assert!(matches!(
+            context.unprotect_rtcp(&rtcp),
+            Err(crate::Error::UnsupportedFeature(_))
+        ));
+    }
+
+    #[test]
+    fn disabled_srtp_context_rejects_all_plaintext_passthrough_without_mutation() {
+        let key = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]);
+        let packet = crate::packet::RtpPacket::new(
+            crate::packet::RtpHeader::new(0, 7, 1_234, 0x1122_3344),
+            bytes::Bytes::from_static(b"must-not-pass-plain"),
+        );
+        let serialized = packet.serialize().unwrap();
+        let rtcp = [0x80, 200, 0, 1, 0, 0, 0, 1];
+        let mut context = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key).unwrap();
+        context.set_enabled(false);
+
+        assert!(matches!(
+            context.protect(&packet),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.unprotect(&serialized),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.protect_rtcp(&rtcp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.unprotect_rtcp(&rtcp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert_eq!(context.packet_index, 0);
+    }
+
+    #[test]
+    fn required_key_rotation_fails_before_encryption_or_state_mutation() {
+        let key = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]);
+        let packet = crate::packet::RtpPacket::new(
+            crate::packet::RtpHeader::new(0, 7, 1_234, 0x1122_3344),
+            bytes::Bytes::from_static(b"rotation-boundary"),
+        );
+
+        for power in [8, 64, 255] {
+            let mut context = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone()).unwrap();
+            context.set_key_rotation(key_derivation::KeyRotationFrequency::Power2(power));
+            assert!(matches!(
+                context.protect(&packet),
+                Err(crate::Error::UnsupportedFeature(_))
+            ));
+            assert_eq!(context.packet_index, 0);
+
+            // Repeating the failed operation must observe the same boundary,
+            // and clearing the unsupported schedule must produce the same
+            // first packet as a fresh context.
+            assert!(matches!(
+                context.protect(&packet),
+                Err(crate::Error::UnsupportedFeature(_))
+            ));
+            assert_eq!(context.packet_index, 0);
+
+            context.set_key_rotation(key_derivation::KeyRotationFrequency::None);
+            let after_failure = context.protect(&packet).unwrap().serialize().unwrap();
+            let from_fresh = SrtpContext::new(SRTP_AES128_CM_SHA1_80, key.clone())
+                .unwrap()
+                .protect(&packet)
+                .unwrap()
+                .serialize()
+                .unwrap();
+            assert_eq!(after_failure, from_fresh);
+        }
     }
 }
 

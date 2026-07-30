@@ -1,6 +1,7 @@
-//! ZRTP packet implementation
+//! Retained ZRTP packet-format primitives
 //!
-//! This module implements the ZRTP packet format as defined in RFC 6189.
+//! The parser/serializer is retained for compatibility and tests. It is not a
+//! complete RFC 6189 exchange, which remains unavailable in 0.3.5.
 
 use super::{ZrtpAuthTag, ZrtpCipher, ZrtpHash, ZrtpKeyAgreement, ZrtpSasType};
 use crate::Error;

@@ -4,11 +4,10 @@
 [![Documentation](https://docs.rs/rvoip-rtp-core/badge.svg)](https://docs.rs/rvoip-rtp-core)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-> **Beta scope notice:** for the `rvoip-sip` beta, RTP-layer production claims
-> are limited to RTP/RTCP basics and tested SDES-SRTP paths. DTLS-SRTP, ICE,
-> TURN, WebRTC browser interop, ZRTP, MIKEY, and TCP RTP transport are post-beta
-> unless separately audited, completed, and linked from the beta compatibility
-> matrix.
+> **rvoip 0.3.5 security notice:** direct AES-CM SRTP and SDES are the available
+> security paths. DTLS-SRTP, every MIKEY mode, ZRTP, AES-GCM, and SRTCP are
+> unavailable and fail with typed errors. Retained public identifiers are for
+> source compatibility, not advertisements of working security.
 
 ## Overview
 
@@ -37,7 +36,7 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 ### Key Components
 
 1. **RTP/RTCP Processing**: RFC 3550 packet processing with beta evidence requirements tracked by `rvoip-sip`
-2. **Security Layer**: SDES-SRTP/SRTP paths are beta candidates; DTLS-SRTP, MIKEY, and ZRTP are post-beta unless separately audited
+2. **Security Layer**: exact-suite direct SRTP and SDES are available; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP fail closed
 3. **Transport Management**: UDP is the beta media transport; TCP transport is not a `rvoip-sip` beta claim
 4. **Buffer Management**: Adaptive jitter buffer and high-performance memory pooling
 5. **Statistics & Monitoring**: Comprehensive quality metrics and network analysis
@@ -45,21 +44,15 @@ The RTP Core sits at the foundation of the media transport stack, providing reli
 
 ### Security Architecture
 
-The library contains multiple security protocol modules. For the `rvoip-sip`
-beta, only tested SDES-SRTP/SRTP paths may be claimed.
+The library retains types for multiple security protocols. Only the paths shown
+as available below may be selected in 0.3.5.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Security Protocols                      │
-├─────────────────┬──────────────┬─────────────┬─────────────┤
-│      ZRTP       │  MIKEY-PSK   │ MIKEY-PKE   │ SDES-SRTP   │
-│   (P2P Calls)   │ (Enterprise) │ (PKI-based) │ (SIP-based) │
-├─────────────────┴──────────────┴─────────────┴─────────────┤
-│                     DTLS-SRTP                              │
-│              (WebRTC Compatible)                           │
+│ Available: direct AES-CM SRTP | SDES offer/answer           │
 ├─────────────────────────────────────────────────────────────┤
-│                  SRTP/SRTCP Core                           │
-│         (AES-CM/GCM, HMAC-SHA1/256)                        │
+│ Unavailable: DTLS-SRTP | MIKEY | ZRTP | AES-GCM | SRTCP     │
+│              (typed rejection, no fallback)                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -77,27 +70,17 @@ beta, only tested SDES-SRTP/SRTP paths may be claimed.
 - ✅ SSRC collision detection and resolution
 
 #### **Security Protocols**
-- ✅ **SRTP/SRTCP**: Complete RFC 3711 implementation
-  - ✅ AES-CM (Counter Mode) and AES-GCM encryption
+- ✅ **SRTP**: AES-CM direct protection with explicitly provisioned keys
+  - ✅ AES-CM (Counter Mode); AES-GCM is retained but unavailable
   - ✅ HMAC-SHA1 authentication (80-bit and 32-bit variants)
-  - ✅ Key derivation functions and IV generation
-  - ✅ Replay protection and tamper detection
-  - ✅ Multiple cipher suite support
-- ⚠️ **DTLS-SRTP**: low-level implementation exists, but it is post-beta for `rvoip-sip`
-  - ✅ DTLS 1.2 handshake protocol with cookie exchange
-  - ✅ ECDHE key exchange using P-256 curve
-  - ✅ Certificate-based authentication
-  - ✅ SRTP key derivation from DTLS handshake
-- ⚠️ **ZRTP**: module exists, but it is post-beta for `rvoip-sip`
-  - ✅ Diffie-Hellman key exchange without PKI
-  - ✅ SAS (Short Authentication String) verification
-  - ✅ Perfect forward secrecy
-  - ✅ Voice path authentication
-- ⚠️ **MIKEY Protocols**: modules exist, but they are post-beta for `rvoip-sip`
-  - ✅ **MIKEY-PSK**: Pre-shared key mode for corporate environments
-  - ✅ **MIKEY-PKE**: Public key encryption with X.509 certificates
-  - ✅ Certificate Authority (CA) support
-  - ✅ RSA encryption and digital signatures
+  - ✅ AES-CM key derivation and IV generation
+  - ✅ Authentication and tamper detection
+  - ⛔ Per-SSRC ROC/replay enforcement is deferred to the SRTP state repair
+  - ✅ One exact AES-CM suite per direct PSK context
+- ⛔ **SRTCP**: unavailable; RTCP fails closed whenever SRTP is required
+- ⛔ **DTLS-SRTP**: retained public configuration, typed unsupported result
+- ⛔ **ZRTP**: retained public configuration and packet types, typed unsupported result
+- ⛔ **MIKEY**: PSK, PKE, and DH modes all return typed unsupported results
 - ✅ **SDES-SRTP**: SDP-based key exchange for SIP compatibility
 
 #### **Transport and Network**
@@ -216,104 +199,24 @@ async fn main() -> Result<()> {
 }
 ```
 
-### Experimental Low-Level DTLS-SRTP
+### Unavailable Security Configuration
 
-This example demonstrates a lower-level module. It is not a `rvoip-sip` beta
-claim for browser/WebRTC interop.
-
-```rust
-use rvoip_rtp_core::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Create DTLS certificate
-    let cert = generate_self_signed_certificate()?;
-    
-    // Configure secure transport
-    let config = SecureTransportConfig::builder()
-        .dtls_certificate(cert)
-        .srtp_profile(SrtpProfile::Aes128CmSha1_80)
-        .role(DtlsRole::Client)
-        .build();
-
-    // Create secure RTP session
-    let session = SecureRtpSession::new(config).await?;
-    
-    // Perform DTLS handshake
-    session.connect(remote_addr).await?;
-    println!("DTLS handshake completed");
-
-    // Send encrypted RTP
-    let packet = RtpPacket::new(/* ... */);
-    session.send_secure_rtp(packet, remote_addr).await?;
-
-    Ok(())
-}
-```
-
-### ZRTP Peer-to-Peer Security
+DTLS-SRTP, MIKEY, and ZRTP constructors are retained for source compatibility,
+but validation rejects them in 0.3.5. Applications must handle the typed error
+and must not fall back to plaintext.
 
 ```rust
-use rvoip_rtp_core::prelude::*;
+use rvoip_rtp_core::api::common::{SecurityConfig, SecurityError};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Create ZRTP session
-    let config = ZrtpConfig::builder()
-        .client_id("MyVoIPApp 1.0")
-        .supported_hash_algorithms(vec![HashAlgorithm::Sha256])
-        .supported_cipher_algorithms(vec![CipherAlgorithm::Aes128])
-        .build();
-
-    let session = ZrtpSession::new(config).await?;
-    
-    // Initiate ZRTP key exchange
-    session.start_key_exchange(remote_addr).await?;
-    
-    // Wait for SAS verification
-    let sas = session.wait_for_sas().await?;
-    println!("SAS for verification: {}", sas);
-    
-    // User confirms SAS matches on both ends
-    session.confirm_sas(true).await?;
-    
-    // Now send secure RTP
-    let packet = RtpPacket::new(/* ... */);
-    session.send_zrtp_protected_rtp(packet).await?;
-
-    Ok(())
-}
-```
-
-### Enterprise MIKEY-PKE with Certificates
-
-```rust
-use rvoip_rtp_core::prelude::*;
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Load enterprise certificate
-    let cert = load_certificate_from_file("enterprise.crt")?;
-    let private_key = load_private_key_from_file("enterprise.key")?;
-    
-    // Configure MIKEY-PKE
-    let config = MikeyPkeConfig::builder()
-        .certificate(cert)
-        .private_key(private_key)
-        .ca_certificates(load_ca_certificates()?)
-        .security_policy(SecurityPolicy::HighSecurity)
-        .build();
-
-    let session = MikeyPkeSession::new(config).await?;
-    
-    // Perform certificate-based key exchange
-    session.initiate_key_exchange(remote_addr).await?;
-    
-    // Enterprise PKI validation happens automatically
-    session.wait_for_completion().await?;
-    println!("Enterprise-grade security established");
-
-    Ok(())
+for config in [
+    SecurityConfig::webrtc_compatible(),
+    SecurityConfig::mikey_psk(),
+    SecurityConfig::zrtp_p2p(),
+] {
+    assert!(matches!(
+        config.validate(),
+        Err(SecurityError::UnsupportedFeature(_))
+    ));
 }
 ```
 
@@ -344,31 +247,32 @@ async fn main() -> Result<()> {
 }
 ```
 
-## SRTP Implementation
+## SRTP availability in 0.3.5
 
-The SRTP implementation follows RFC 3711 and provides enterprise-grade security:
+The reviewed low-level RTP protection path supports four exact AES-CM/HMAC
+suite identities. SRTCP and several public compatibility identities remain
+unavailable and fail closed; see `MIGRATION_0.3.5.md`.
 
 ### Security Features
 
 - **Encryption Algorithms**:
-  - AES-CM (Counter Mode) encryption
-  - AES-GCM for authenticated encryption
-  - NULL encryption (for authentication-only mode)
+  - AES-CM with 128-bit or 256-bit master keys
+  - AES-GCM, AES-f8, and NULL encryption identities are rejected
 
 - **Authentication Algorithms**:
   - HMAC-SHA1 authentication with 80-bit and 32-bit output
-  - HMAC-SHA256 for enhanced security
-  - NULL authentication (for encryption-only mode)
+  - NULL authentication and unreviewed hand-built combinations are rejected
 
 - **Key Management**:
   - Session key derivation from master keys
   - Secure IV generation for encryption
-  - SRTP context management with replay protection
+  - Exact 14-byte master salts
+  - Key rotation is unavailable and fails closed when requested
 
 - **Tamper Detection**:
   - Authentication tag verification
   - Packet modification detection
-  - Cryptographically secure validation
+  - Plaintext and authentication failures are dropped by secure transports
 
 ### Implementation Highlights
 
@@ -377,7 +281,7 @@ The implementation includes critical security improvements:
 1. **Authentication Tag Handling**: Fixed authentication tag discarding vulnerability by introducing `ProtectedRtpPacket` struct
 2. **Tamper Detection**: Comprehensive verification of authentication tags
 3. **Key Derivation**: Standards-compliant key derivation following RFC 3711 Section 4.3
-4. **Cipher Support**: All standard SRTP cipher suites implemented
+4. **Cipher Support**: AES-CM-128/HMAC-SHA1-80 and -32 are implemented; retained AES-GCM profiles are rejected
 
 ### Example Usage
 
@@ -448,7 +352,7 @@ The RTP Core provides the foundation for media transport in the rvoip stack:
 
 - **Upward Interface**: Delivers media frames to media-core and call-engine
 - **Downward Interface**: Handles network-level packet transmission/reception
-- **Security Integration**: Provides secure transport for all media communications
+- **Security Integration**: Provides exact-suite direct SRTP and SDES; unavailable methods fail closed
 - **Event Propagation**: Notifies upper layers of transport events and quality changes
 
 ## Testing
@@ -459,13 +363,13 @@ Run the comprehensive test suite:
 # Run all tests
 cargo test -p rvoip-rtp-core
 
-# Run with specific features
-cargo test -p rvoip-rtp-core --features "dtls zrtp mikey"
+# Run the complete feature surface (unavailable protocols must still reject)
+cargo test -p rvoip-rtp-core --all-features
 
 # Run security-specific tests
 cargo test -p rvoip-rtp-core srtp
 cargo test -p rvoip-rtp-core dtls
-cargo test -p rvoip-rtp-core zrtp
+cargo test -p rvoip-rtp-core security_fail_closed
 
 # Run performance tests
 cargo test -p rvoip-rtp-core --release buffer_performance
@@ -473,20 +377,18 @@ cargo test -p rvoip-rtp-core --release buffer_performance
 
 ### Example Applications
 
-The library includes comprehensive examples demonstrating all features:
+The library includes working examples and explicit fail-closed availability examples:
 
 ```bash
 # Basic RTP communication
 cargo run --example api_basic
 
-# Experimental low-level DTLS-SRTP session
-cargo run --example direct_dtls_media_streaming
+# DTLS, MIKEY, and ZRTP typed rejection
+cargo run --example api_complete_security_showcase
 
-# ZRTP peer-to-peer security
-cargo run --example zrtp_p2p_demo
+cargo run --example api_zrtp_p2p
 
-# Enterprise MIKEY-PKE
-cargo run --example mikey_pke_enterprise
+cargo run --example api_mikey_pke
 
 # High-performance buffers
 cargo run --example high_performance_buffers
@@ -513,7 +415,7 @@ cargo run --example socket_validation
 - **Security Context**: Minimal overhead for established sessions
 
 ### Optimization Recommendations
-- **Security Protocol Selection**: for `rvoip-sip` beta, use plaintext RTP or tested SDES-SRTP; ZRTP, MIKEY, and DTLS-SRTP require separate audit
+- **Security Protocol Selection**: use exact-suite direct SRTP or SDES; DTLS-SRTP, MIKEY, ZRTP, AES-GCM, and SRTCP are unavailable in 0.3.5
 - **Buffer Configuration**: Tune based on network RTT and jitter characteristics
 - **Memory Management**: Use memory pooling for high-volume applications
 - **Transport Selection**: UDP for low latency, TCP for reliability
@@ -527,9 +429,8 @@ use rvoip_rtp_core::Error;
 
 match rtp_result {
     Err(Error::SecurityNegotiationFailed(details)) => {
-        // Handle security handshake failures
-        log::error!("Security negotiation failed: {}", details);
-        attempt_fallback_security().await?;
+        // Preserve the security requirement; never downgrade to plaintext.
+        return Err(Error::SecurityNegotiationFailed(details));
     }
     Err(Error::PacketValidationFailed(reason)) => {
         // Handle malformed packets

@@ -44,37 +44,43 @@ cargo run --example api_sdes_srtp
 ```
 
 #### [`api_mikey_pke.rs`](api_mikey_pke.rs)
-MIKEY (Multimedia Internet KEYing) with Public Key Exchange.
+Demonstrates typed rejection of the unavailable MIKEY public-key exchange and
+its incomplete trust-path helpers.
 ```bash
 cargo run --example api_mikey_pke
 ```
 
 #### [`api_mikey_srtp.rs`](api_mikey_srtp.rs)
-MIKEY protocol integration with SRTP.
+Demonstrates typed rejection of every unavailable MIKEY mode. It does not
+substitute static SRTP keys or simulate a successful exchange.
 ```bash
 cargo run --example api_mikey_srtp
 ```
 
 #### [`api_unified_security.rs`](api_unified_security.rs)
-Unified security framework demonstrating multiple security protocols.
+Shows that the unified manager advertises only implemented, provisioned methods
+and rejects retained DTLS, MIKEY, and ZRTP configurations.
 ```bash
 cargo run --example api_unified_security
 ```
 
 #### [`api_zrtp_p2p.rs`](api_zrtp_p2p.rs)
-ZRTP (Z Real-time Transport Protocol) for peer-to-peer key agreement.
+Demonstrates typed rejection of the unavailable ZRTP state machine. No SAS or
+secure call is simulated.
 ```bash
 cargo run --example api_zrtp_p2p
 ```
 
 #### [`api_advanced_security.rs`](api_advanced_security.rs)
-Advanced security features including key rotation and multi-stream syndication.
+Demonstrates that placeholder key rotation/derivation fails closed and that
+built-in recovery policies contain only implemented methods.
 ```bash
 cargo run --example api_advanced_security
 ```
 
 #### [`api_complete_security_showcase.rs`](api_complete_security_showcase.rs)
-Comprehensive demonstration of all security capabilities.
+Shows working direct SRTP/SDES availability and typed rejection of unavailable
+DTLS, MIKEY, and ZRTP configurations.
 ```bash
 cargo run --example api_complete_security_showcase
 ```
@@ -243,7 +249,7 @@ VP8 and VP9 video payload formats with scalability features.
 cargo run --example video_payload
 ```
 
-### 🔒 Core Security Examples
+### 🔒 SRTP Examples and Unavailable-Feature Checks
 
 #### [`srtp_crypto.rs`](srtp_crypto.rs)
 Core SRTP cryptographic operations and key management.
@@ -264,19 +270,22 @@ cargo run --example debug_srtp
 ```
 
 #### [`dtls_test.rs`](dtls_test.rs)
-DTLS (Datagram Transport Layer Security) testing.
+Availability check only: asserts typed rejection of the retained, incomplete
+DTLS-SRTP constructor. It does not demonstrate a DTLS handshake.
 ```bash
 cargo run --example dtls_test
 ```
 
 #### [`direct_dtls_media_streaming.rs`](direct_dtls_media_streaming.rs)
-Direct DTLS media streaming implementation.
+Availability check only: asserts that direct DTLS media streaming is rejected
+before opening a media path. It is not a streaming example in 0.3.5.
 ```bash
 cargo run --example direct_dtls_media_streaming
 ```
 
 #### [`generate_certificates.rs`](generate_certificates.rs)
-Certificate generation for security testing.
+Standalone certificate generation utility. Generated files do not make the
+unavailable DTLS-SRTP implementation usable.
 ```bash
 cargo run --example generate_certificates
 ```
@@ -424,4 +433,4 @@ Each example includes detailed inline documentation explaining:
 For API reference documentation, run:
 ```bash
 cargo doc --open
-``` 
+```

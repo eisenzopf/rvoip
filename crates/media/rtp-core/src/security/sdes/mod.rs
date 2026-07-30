@@ -79,15 +79,11 @@ impl SdesCryptoAttribute {
         let crypto_suite = parts[1].to_string();
 
         // Parse key method and key info
-        let key_parts: Vec<&str> = parts[2].split(':').collect();
-        if key_parts.len() != 2 {
-            return Err(Error::ParseError(
-                "Invalid key format in SDES crypto attribute".into(),
-            ));
-        }
-
-        let key_method = key_parts[0].to_string();
-        let key_info = key_parts[1].to_string();
+        let (key_method, key_info) = parts[2].split_once(':').ok_or_else(|| {
+            Error::ParseError("Invalid key format in SDES crypto attribute".into())
+        })?;
+        let key_method = key_method.to_string();
+        let key_info = key_info.to_string();
 
         if key_method != "inline" {
             return Err(Error::ParseError(
@@ -210,6 +206,30 @@ impl Sdes {
             "AES_CM_128_HMAC_SHA1_32" => Some(SRTP_AES128_CM_SHA1_32),
             _ => None,
         }
+    }
+
+    /// Reject RFC 4568 extensions that this implementation does not enforce.
+    /// Accepting or echoing one would make the negotiated security properties
+    /// differ from the actual SRTP context.
+    fn validate_attribute_features(attr: &SdesCryptoAttribute) -> Result<(), Error> {
+        if attr.key_info.contains('|') {
+            return Err(Error::UnsupportedFeature(
+                "SDES lifetime and MKI key parameters are not implemented".to_string(),
+            ));
+        }
+
+        if let Some(param) = attr
+            .session_params
+            .iter()
+            .map(|param| param.trim())
+            .find(|param| !param.is_empty())
+        {
+            return Err(Error::UnsupportedFeature(format!(
+                "SDES session parameter {param:?} is not implemented"
+            )));
+        }
+
+        Ok(())
     }
 
     /// Reject configurations that could produce an empty or dishonest offer.
@@ -338,6 +358,7 @@ impl Sdes {
             if line.starts_with("a=crypto:") {
                 let attr_str = line.trim_start_matches("a=crypto:");
                 let attr = SdesCryptoAttribute::parse(attr_str)?;
+                Self::validate_attribute_features(&attr)?;
                 remote_attrs.push(attr);
             }
         }
@@ -399,6 +420,7 @@ impl Sdes {
             if line.starts_with("a=crypto:") {
                 let attr_str = line.trim_start_matches("a=crypto:");
                 let attr = SdesCryptoAttribute::parse(attr_str)?;
+                Self::validate_attribute_features(&attr)?;
 
                 // This is the selected attribute
                 selected_attr = Some(attr.clone());

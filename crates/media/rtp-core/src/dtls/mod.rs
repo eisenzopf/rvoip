@@ -1,7 +1,9 @@
-//! DTLS (Datagram Transport Layer Security) implementation
+//! Retained, incomplete DTLS (Datagram Transport Layer Security) API
 //!
-//! This module provides a DTLS 1.2 implementation for use with SRTP key exchange.
-//! It follows RFC 6347 (DTLS) and RFC 5764 (DTLS-SRTP) specifications.
+//! The protocol data types and internal parsing/cryptographic primitives remain
+//! available for compatibility and testing. They do not form a complete,
+//! interoperable DTLS 1.2 or DTLS-SRTP stack. Public connection construction
+//! validates configuration and then returns `Error::UnsupportedFeature`.
 
 pub mod alert;
 pub mod connection;

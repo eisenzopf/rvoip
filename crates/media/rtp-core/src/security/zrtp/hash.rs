@@ -1,6 +1,6 @@
-//! ZRTP hash implementations
+//! Retained hash helpers used by the incomplete ZRTP API
 //!
-//! This module provides hash functions used in ZRTP.
+//! These generic hash helpers do not make ZRTP negotiable or available.
 
 use sha2::{Digest, Sha256, Sha384};
 

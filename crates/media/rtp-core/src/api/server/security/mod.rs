@@ -91,11 +91,11 @@ pub struct ServerSecurityConfig {
 impl Default for ServerSecurityConfig {
     fn default() -> Self {
         Self {
-            security_mode: SecurityMode::DtlsSrtp,
+            security_mode: SecurityMode::None,
             fingerprint_algorithm: "sha-256".to_string(),
             certificate_path: None,
             private_key_path: None,
-            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+            srtp_profiles: Vec::new(),
             require_client_certificate: false,
             srtp_key: None,
         }
@@ -109,6 +109,64 @@ impl ServerSecurityConfig {
             security_mode: SecurityMode::None,
             srtp_profiles: Vec::new(),
             ..Self::default()
+        }
+    }
+
+    /// Validate that every field is consumed by the selected, implemented
+    /// server security mode.
+    pub fn validate(&self) -> Result<(), SecurityError> {
+        match self.security_mode {
+            SecurityMode::None => {
+                if !self.srtp_profiles.is_empty()
+                    || self.srtp_key.is_some()
+                    || self.certificate_path.is_some()
+                    || self.private_key_path.is_some()
+                    || self.require_client_certificate
+                    || self.fingerprint_algorithm != "sha-256"
+                {
+                    return Err(SecurityError::Configuration(
+                        "plain RTP server configuration cannot retain security material"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            SecurityMode::Srtp => {
+                if self.certificate_path.is_some()
+                    || self.private_key_path.is_some()
+                    || self.require_client_certificate
+                    || self.fingerprint_algorithm != "sha-256"
+                {
+                    return Err(SecurityError::Configuration(
+                        "direct SRTP server configuration cannot retain unused certificate or fingerprint material"
+                            .to_string(),
+                    ));
+                }
+                crate::api::common::config::implemented_single_srtp_suite(&self.srtp_profiles)?;
+                match &self.srtp_key {
+                    Some(key) if key.len() == 30 => Ok(()),
+                    Some(key) => Err(SecurityError::Configuration(format!(
+                        "AES-128 SRTP key material must be exactly 30 bytes, got {}",
+                        key.len()
+                    ))),
+                    None => Err(SecurityError::Configuration(
+                        "SRTP mode requires a 16-byte key and 14-byte salt".to_string(),
+                    )),
+                }
+            }
+            SecurityMode::DtlsSrtp => Err(SecurityError::UnsupportedFeature(
+                "DTLS-SRTP is not complete and is unavailable".to_string(),
+            )),
+            SecurityMode::SdesSrtp => Err(SecurityError::UnsupportedFeature(
+                "direct server SDES context is unavailable; exchange SDES through signaling"
+                    .to_string(),
+            )),
+            SecurityMode::MikeySrtp => Err(SecurityError::UnsupportedFeature(
+                "MIKEY key exchange is not complete and is unavailable".to_string(),
+            )),
+            SecurityMode::ZrtpSrtp => Err(SecurityError::UnsupportedFeature(
+                "ZRTP key exchange is not complete and is unavailable".to_string(),
+            )),
         }
     }
 }
@@ -235,6 +293,7 @@ pub trait ServerSecurityContext: Send + Sync {
 pub async fn new(
     config: ServerSecurityConfig,
 ) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
+    config.validate()?;
     match config.security_mode {
         SecurityMode::Srtp => {
             // Use SRTP-only context for pre-shared keys (no DTLS handshake)
@@ -255,5 +314,53 @@ pub async fn new(
         SecurityMode::None => Err(SecurityError::Configuration(
             "plain RTP does not create a security context".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn direct_srtp() -> ServerSecurityConfig {
+        ServerSecurityConfig {
+            security_mode: SecurityMode::Srtp,
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+            srtp_key: Some(vec![0x62; 30]),
+            ..ServerSecurityConfig::default()
+        }
+    }
+
+    #[test]
+    fn server_config_accepts_only_coherent_implemented_combinations() {
+        assert!(ServerSecurityConfig::unsecured().validate().is_ok());
+        assert!(direct_srtp().validate().is_ok());
+
+        let mut plain_with_profile = ServerSecurityConfig::unsecured();
+        plain_with_profile.srtp_profiles = vec![SrtpProfile::AesCm128HmacSha1_80];
+        assert!(matches!(
+            plain_with_profile.validate(),
+            Err(SecurityError::Configuration(_))
+        ));
+
+        let mut direct_with_certificate = direct_srtp();
+        direct_with_certificate.certificate_path = Some("certificate.pem".to_string());
+        assert!(matches!(
+            direct_with_certificate.validate(),
+            Err(SecurityError::Configuration(_))
+        ));
+
+        let mut direct_with_client_certificate = direct_srtp();
+        direct_with_client_certificate.require_client_certificate = true;
+        assert!(matches!(
+            direct_with_client_certificate.validate(),
+            Err(SecurityError::Configuration(_))
+        ));
+
+        let mut dtls = ServerSecurityConfig::default();
+        dtls.security_mode = SecurityMode::DtlsSrtp;
+        assert!(matches!(
+            dtls.validate(),
+            Err(SecurityError::UnsupportedFeature(_))
+        ));
     }
 }

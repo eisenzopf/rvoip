@@ -71,7 +71,10 @@ impl ClientConfigBuilder {
         }
     }
 
-    /// Create a builder with WebRTC-optimized defaults
+    /// Create a retained WebRTC configuration template.
+    ///
+    /// DTLS-SRTP is unavailable in 0.3.5; constructing a client from this
+    /// template returns a typed security error.
     pub fn webrtc() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode =
@@ -81,7 +84,11 @@ impl ClientConfigBuilder {
         builder
     }
 
-    /// Create a builder with SIP-optimized defaults
+    /// Create an unprovisioned SIP/direct-SRTP template.
+    ///
+    /// This intentionally contains no invented key material. Call
+    /// `with_srtp_key` before `try_build`, or select an explicit signaling
+    /// security path. Construction fails until security is provisioned.
     pub fn sip() -> Self {
         let mut builder = Self::new();
         builder.config.security_config.security_mode =
@@ -222,9 +229,22 @@ impl ClientConfigBuilder {
         self
     }
 
-    /// Build the client configuration
+    /// Build the client configuration without changing the historical
+    /// infallible signature.
+    ///
+    /// Use [`Self::try_build`] to validate security immediately. Media-client
+    /// construction validates again and rejects invalid combinations.
     pub fn build(self) -> ClientConfig {
         self.config
+    }
+
+    /// Build only if the selected security mode consumes every configured
+    /// field and is implemented.
+    pub fn try_build(self) -> Result<ClientConfig, crate::api::common::error::MediaTransportError> {
+        self.config.security_config.validate().map_err(|error| {
+            crate::api::common::error::MediaTransportError::Security(error.to_string())
+        })?;
+        Ok(self.config)
     }
 }
 
@@ -301,5 +321,29 @@ mod tests {
         assert_eq!(config.rtp_session_buffer_config, session_buffers);
         assert_eq!(config.rtp_transport_buffer_config, transport_buffers);
         assert_eq!(config.frame_channel_capacity, 7);
+    }
+
+    #[test]
+    fn try_build_rejects_unavailable_or_incoherent_security() {
+        assert!(ClientConfigBuilder::webrtc().try_build().is_err());
+        assert!(ClientConfigBuilder::sip().try_build().is_err());
+
+        let gcm = ClientSecurityConfig {
+            security_mode: crate::api::common::config::SecurityMode::Srtp,
+            srtp_profiles: vec![crate::api::common::config::SrtpProfile::AesGcm128],
+            srtp_key: Some(vec![0x21; 30]),
+            ..ClientSecurityConfig::default()
+        };
+        assert!(ClientConfigBuilder::new()
+            .security_config(gcm)
+            .try_build()
+            .is_err());
+
+        let mut plain_with_key = ClientSecurityConfig::unsecured();
+        plain_with_key.srtp_key = Some(vec![0x32; 30]);
+        assert!(ClientConfigBuilder::new()
+            .security_config(plain_with_key)
+            .try_build()
+            .is_err());
     }
 }

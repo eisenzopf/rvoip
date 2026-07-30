@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace};
 
 use crate::error::Error;
 use crate::packet::rtcp::RtcpPacket;
@@ -43,6 +43,10 @@ impl SecurityRtpTransport {
 
         // If SRTP is enabled, stop the inner transport's receiver to avoid conflicts
         if srtp_enabled {
+            // Latch the inner transport before exposing it through
+            // `inner_transport`, so its public raw-byte API cannot bypass this
+            // wrapper's SRTP path.
+            inner.require_srtp();
             debug!("Stopping inner UDP transport receiver to avoid socket conflicts");
             inner.stop_receiver().await?;
         }
@@ -82,6 +86,13 @@ impl SecurityRtpTransport {
                         debug!("Intercepted raw packet: {} bytes from {}", size, addr);
 
                         if srtp_enabled {
+                            if super::udp::is_rtcp_packet(packet_data) {
+                                trace!(
+                                    "Dropping RTCP while SRTP is configured because authenticated SRTCP is unavailable"
+                                );
+                                continue;
+                            }
+
                             let mut srtp_guard = srtp_context.write().await;
                             if let Some(srtp_ctx) = srtp_guard.as_mut() {
                                 debug!("Attempting SRTP decryption on {} bytes", size);
@@ -116,15 +127,13 @@ impl SecurityRtpTransport {
                                             debug!("Failed to forward decrypted event: {}", e);
                                         }
                                     }
-                                    Err(e) => {
-                                        warn!(
-                                            "Dropping packet that failed SRTP authentication: {}",
-                                            e
-                                        );
-                                    }
+                                    Err(e) => trace!(
+                                        "Dropping packet that failed SRTP authentication: {}",
+                                        e
+                                    ),
                                 }
                             } else {
-                                warn!("Dropping packet because SRTP has no cryptographic context");
+                                trace!("Dropping packet because SRTP has no cryptographic context");
                             }
                             drop(srtp_guard);
                             continue;
@@ -173,14 +182,30 @@ impl SecurityRtpTransport {
         Ok(())
     }
 
-    /// Set the SRTP context for this transport
-    pub async fn set_srtp_context(&self, context: SrtpContext) {
+    /// Set the SRTP context for a wrapper that was created in SRTP mode.
+    ///
+    /// A plaintext wrapper cannot be upgraded after construction because its
+    /// receiver and inner-transport latch were configured for plaintext. The
+    /// caller must construct a new SRTP-enabled wrapper instead.
+    pub async fn set_srtp_context(&self, context: SrtpContext) -> Result<()> {
+        if !self.srtp_enabled {
+            return Err(Error::InvalidState(
+                "cannot install an SRTP context on a plaintext security transport".to_string(),
+            ));
+        }
+        context.validate_for_secure_transport()?;
         let mut srtp_guard = self.srtp_context.write().await;
         *srtp_guard = Some(context);
         debug!("SRTP context set on security transport");
+        Ok(())
     }
 
-    /// Get the underlying UDP transport
+    /// Get the underlying UDP transport for low-level diagnostics.
+    ///
+    /// Its raw socket handle is an unauthenticated escape from this wrapper.
+    /// Public RTP byte sends remain latched closed in SRTP mode, but callers
+    /// using `UdpRtpTransport::get_socket` directly bypass all SRTP policy and
+    /// must not treat those reads or writes as protected media operations.
     pub fn inner_transport(&self) -> &Arc<UdpRtpTransport> {
         &self.inner
     }
@@ -191,7 +216,9 @@ impl SecurityRtpTransport {
             return false;
         }
         let srtp_guard = self.srtp_context.read().await;
-        srtp_guard.is_some()
+        srtp_guard
+            .as_ref()
+            .is_some_and(|context| context.validate_for_secure_transport().is_ok())
     }
 }
 
@@ -212,7 +239,10 @@ impl RtpTransport for SecurityRtpTransport {
                 Error::InvalidState("SRTP is enabled but no context is installed".to_string())
             })?;
             let protected_bytes = srtp_context.protect(packet)?.serialize()?;
-            return self.inner.send_rtp_bytes(&protected_bytes, dest).await;
+            return self
+                .inner
+                .send_protected_rtp_bytes(&protected_bytes, dest)
+                .await;
         }
 
         self.inner.send_rtp(packet, dest).await
@@ -229,12 +259,10 @@ impl RtpTransport for SecurityRtpTransport {
 
     async fn send_rtcp(&self, packet: &RtcpPacket, dest: SocketAddr) -> Result<()> {
         if self.srtp_enabled {
-            let mut srtp_guard = self.srtp_context.write().await;
-            let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
-                Error::InvalidState("SRTCP is enabled but no context is installed".to_string())
-            })?;
-            let protected_bytes = srtp_context.protect_rtcp(&packet.serialize()?)?;
-            return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
+            return Err(Error::UnsupportedFeature(
+                "RTCP is disabled while SRTP is configured until authenticated SRTCP is implemented"
+                    .to_string(),
+            ));
         }
 
         self.inner.send_rtcp(packet, dest).await
@@ -242,42 +270,25 @@ impl RtpTransport for SecurityRtpTransport {
 
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         if self.srtp_enabled {
-            let mut srtp_guard = self.srtp_context.write().await;
-            let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
-                Error::InvalidState("SRTCP is enabled but no context is installed".to_string())
-            })?;
-            let protected_bytes = srtp_context.protect_rtcp(bytes)?;
-            return self.inner.send_rtcp_bytes(&protected_bytes, dest).await;
+            return Err(Error::UnsupportedFeature(
+                "RTCP is disabled while SRTP is configured until authenticated SRTCP is implemented"
+                    .to_string(),
+            ));
         }
 
         self.inner.send_rtcp_bytes(bytes, dest).await
     }
 
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)> {
-        if self.srtp_enabled && self.srtp_context.read().await.is_none() {
-            return Err(Error::InvalidState(
-                "SRTP is enabled but no context is installed".to_string(),
+        if self.srtp_enabled {
+            return Err(Error::UnsupportedFeature(
+                "direct receive is unavailable on SecurityRtpTransport in SRTP mode; use the authenticated event subscription path"
+                    .to_string(),
             ));
         }
 
         // Receive from underlying transport
         let (size, addr) = self.inner.receive_packet(buffer).await?;
-
-        if self.srtp_enabled {
-            let mut srtp_guard = self.srtp_context.write().await;
-            let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
-                Error::InvalidState("SRTP is enabled but no context is installed".to_string())
-            })?;
-            let decrypted_bytes = srtp_context.unprotect(&buffer[..size])?.serialize()?;
-            if decrypted_bytes.len() > buffer.len() {
-                return Err(Error::BufferTooSmall {
-                    required: decrypted_bytes.len(),
-                    available: buffer.len(),
-                });
-            }
-            buffer[..decrypted_bytes.len()].copy_from_slice(&decrypted_bytes);
-            return Ok((decrypted_bytes.len(), addr));
-        }
 
         Ok((size, addr))
     }

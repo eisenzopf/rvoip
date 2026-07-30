@@ -189,6 +189,12 @@ impl Extension {
 
     /// Serialize the extension to bytes
     pub fn serialize(&self) -> Result<Bytes> {
+        if matches!(self, Self::Unknown { typ: 14, .. }) {
+            return Err(Error::UnsupportedFeature(
+                "raw extension type 14 cannot bypass use_srtp profile validation".to_string(),
+            ));
+        }
+
         let mut buf = BytesMut::new();
 
         // Extension type (2 bytes)
@@ -454,5 +460,25 @@ mod tests {
             .serialize()
             .is_err());
         assert!(UseSrtpExtension::parse(&[0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn unknown_variant_cannot_serialize_raw_use_srtp_bytes() {
+        // RFC 7714 AEAD_AES_128_GCM encoded as a use_srtp profile list.
+        let raw_gcm = Extension::Unknown {
+            typ: 14,
+            data: Bytes::from_static(&[0, 2, 0, 7, 0]),
+        };
+
+        assert!(matches!(
+            raw_gcm.serialize(),
+            Err(Error::UnsupportedFeature(_))
+        ));
+
+        let ordinary_unknown = Extension::Unknown {
+            typ: 0xbeef,
+            data: Bytes::from_static(&[1, 2, 3]),
+        };
+        assert!(ordinary_unknown.serialize().is_ok());
     }
 }

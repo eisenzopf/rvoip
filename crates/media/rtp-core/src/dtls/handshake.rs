@@ -491,15 +491,23 @@ impl HandshakeState {
                         self.compression_method = Some(server_hello.compression_method);
                         self.session_id = Some(server_hello.session_id.clone());
 
-                        // Check for SRTP extension
+                        // Check for SRTP extension. This client always offers
+                        // use_srtp, so omission in ServerHello is a downgrade.
+                        let mut selected_srtp = false;
                         for ext in &server_hello.extensions {
                             if let Extension::UseSrtp(srtp_ext) = ext {
-                                let profile = *srtp_ext.profiles.first().ok_or_else(|| {
-                                    crate::error::Error::DtlsHandshakeError(
-                                        "server selected an empty SRTP profile list".to_string(),
-                                    )
-                                })?;
-                                profile.ensure_supported()?;
+                                if selected_srtp || srtp_ext.profiles.len() != 1 {
+                                    self.step = HandshakeStep::Failed;
+                                    return Err(crate::error::Error::NegotiationFailed(
+                                        "ServerHello use_srtp must select exactly one profile"
+                                            .to_string(),
+                                    ));
+                                }
+                                let profile = srtp_ext.profiles[0];
+                                if let Err(error) = profile.ensure_supported() {
+                                    self.step = HandshakeStep::Failed;
+                                    return Err(error);
+                                }
                                 if !self.available_srtp_profiles.contains(&profile) {
                                     self.step = HandshakeStep::Failed;
                                     return Err(crate::error::Error::DtlsHandshakeError(
@@ -508,7 +516,14 @@ impl HandshakeState {
                                     ));
                                 }
                                 self.srtp_profile = Some(profile.into());
+                                selected_srtp = true;
                             }
+                        }
+                        if !selected_srtp {
+                            self.step = HandshakeStep::Failed;
+                            return Err(crate::error::Error::NegotiationFailed(
+                                "server omitted use_srtp after the client offered SRTP".to_string(),
+                            ));
                         }
 
                         // Update state
@@ -769,27 +784,8 @@ impl HandshakeState {
                             // Select compression method (always 0 - no compression)
                             self.compression_method = Some(0);
 
-                            // Check for SRTP extension
-                            let mut use_srtp_extension = None;
-
-                            for ext in &client_hello.extensions {
-                                if let Extension::UseSrtp(srtp_ext) = ext {
-                                    // Find the first supported profile
-                                    for profile in &srtp_ext.profiles {
-                                        if self.available_srtp_profiles.contains(profile) {
-                                            self.srtp_profile = Some((*profile).into());
-
-                                            // Create a new UseSrtp extension with just this profile
-                                            use_srtp_extension =
-                                                Some(UseSrtpExtension::with_profiles(vec![
-                                                    *profile,
-                                                ]));
-
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
+                            let use_srtp_extension =
+                                self.select_peer_srtp_profile(&client_hello.extensions)?;
 
                             // Create ServerHello
                             let mut extensions = Vec::new();
@@ -911,25 +907,8 @@ impl HandshakeState {
                         // Select compression method (always 0 - no compression)
                         self.compression_method = Some(0);
 
-                        // Check for SRTP extension
-                        let mut use_srtp_extension = None;
-
-                        for ext in &client_hello.extensions {
-                            if let Extension::UseSrtp(srtp_ext) = ext {
-                                // Find the first supported profile
-                                for profile in &srtp_ext.profiles {
-                                    if self.available_srtp_profiles.contains(profile) {
-                                        self.srtp_profile = Some((*profile).into());
-
-                                        // Create a new UseSrtp extension with just this profile
-                                        use_srtp_extension =
-                                            Some(UseSrtpExtension::with_profiles(vec![*profile]));
-
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                        let use_srtp_extension =
+                            self.select_peer_srtp_profile(&client_hello.extensions)?;
 
                         // Create ServerHello
                         let mut extensions = Vec::new();
@@ -1141,6 +1120,38 @@ impl HandshakeState {
             0xC013 | // TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA
             0x002F // TLS_RSA_WITH_AES_128_CBC_SHA
         )
+    }
+
+    /// Select exactly one mutually supported, implemented SRTP profile.
+    ///
+    /// Absence of `use_srtp` still means an ordinary DTLS handshake. Once a
+    /// peer sends the extension, however, omitting it from the response would
+    /// silently downgrade an attempted DTLS-SRTP exchange to plain DTLS.
+    fn select_peer_srtp_profile(
+        &mut self,
+        extensions: &[Extension],
+    ) -> Result<Option<UseSrtpExtension>> {
+        let Some(offered) = extensions.iter().find_map(|extension| match extension {
+            Extension::UseSrtp(use_srtp) => Some(use_srtp),
+            _ => None,
+        }) else {
+            return Ok(None);
+        };
+
+        let selected = offered.profiles.iter().copied().find(|profile| {
+            profile.ensure_supported().is_ok() && self.available_srtp_profiles.contains(profile)
+        });
+
+        let Some(selected) = selected else {
+            self.step = HandshakeStep::Failed;
+            return Err(crate::error::Error::NegotiationFailed(
+                "peer advertised use_srtp but offered no mutually supported implemented profile"
+                    .to_string(),
+            ));
+        };
+
+        self.srtp_profile = Some(selected.into());
+        Ok(Some(UseSrtpExtension::with_profiles(vec![selected])))
     }
 
     /// Generate a ClientHello message
@@ -1450,5 +1461,152 @@ impl HandshakeState {
         self.debug_verify_data();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_hello(cookie: Bytes, profiles: Vec<SrtpProtectionProfile>) -> HandshakeMessage {
+        HandshakeMessage::ClientHello(ClientHello::new(
+            DtlsVersion::Dtls12,
+            Bytes::new(),
+            cookie,
+            vec![0xC02B],
+            vec![0],
+            vec![Extension::UseSrtp(UseSrtpExtension::with_profiles(
+                profiles,
+            ))],
+        ))
+    }
+
+    #[test]
+    fn server_rejects_use_srtp_without_an_implemented_mutual_profile() {
+        for after_cookie_challenge in [false, true] {
+            let cookie = Bytes::from_static(b"verified-cookie");
+            let mut state = HandshakeState::new(DtlsRole::Server, DtlsVersion::Dtls12, 1);
+            if after_cookie_challenge {
+                state.step = HandshakeStep::SentHelloVerifyRequest;
+                state.cookie = Some(cookie.clone());
+            }
+
+            let result = state.process_message(client_hello(
+                cookie,
+                vec![
+                    SrtpProtectionProfile::AeadAes128Gcm,
+                    SrtpProtectionProfile::AeadAes256Gcm,
+                    SrtpProtectionProfile::Unknown(0xbeef),
+                ],
+            ));
+            assert!(matches!(
+                result,
+                Err(crate::Error::NegotiationFailed(message))
+                    if message.contains("no mutually supported implemented profile")
+            ));
+            assert_eq!(state.step, HandshakeStep::Failed);
+            assert!(state.srtp_profile.is_none());
+        }
+    }
+
+    #[test]
+    fn server_ignores_gcm_and_selects_only_an_implemented_mutual_profile() {
+        let cookie = Bytes::from_static(b"verified-cookie");
+        let mut state = HandshakeState::new(DtlsRole::Server, DtlsVersion::Dtls12, 1);
+        state.step = HandshakeStep::SentHelloVerifyRequest;
+        state.cookie = Some(cookie.clone());
+
+        let response = state
+            .process_message(client_hello(
+                cookie,
+                vec![
+                    SrtpProtectionProfile::AeadAes128Gcm,
+                    SrtpProtectionProfile::Aes128CmSha1_80,
+                ],
+            ))
+            .expect("implemented mutual profile should be selected")
+            .expect("server should send its handshake flight");
+
+        let server_hello = response
+            .iter()
+            .find_map(|message| match message {
+                HandshakeMessage::ServerHello(hello) => Some(hello),
+                _ => None,
+            })
+            .expect("server response must include ServerHello");
+        let selected = server_hello
+            .extensions
+            .iter()
+            .find_map(|extension| match extension {
+                Extension::UseSrtp(use_srtp) => Some(use_srtp.profiles.as_slice()),
+                _ => None,
+            })
+            .expect("ServerHello must retain use_srtp");
+
+        assert_eq!(selected, &[SrtpProtectionProfile::Aes128CmSha1_80]);
+        assert_eq!(
+            state.srtp_profile,
+            Some(u16::from(SrtpProtectionProfile::Aes128CmSha1_80))
+        );
+    }
+
+    #[test]
+    fn client_rejects_server_hello_that_silently_omits_use_srtp() {
+        let mut state = HandshakeState::new(DtlsRole::Client, DtlsVersion::Dtls12, 1);
+        let offer = state
+            .start()
+            .expect("client should create its initial flight");
+        let offered_profiles = offer
+            .iter()
+            .find_map(|message| match message {
+                HandshakeMessage::ClientHello(hello) => {
+                    hello
+                        .extensions
+                        .iter()
+                        .find_map(|extension| match extension {
+                            Extension::UseSrtp(use_srtp) => Some(use_srtp.profiles.as_slice()),
+                            _ => None,
+                        })
+                }
+                _ => None,
+            })
+            .expect("client flight must explicitly offer use_srtp");
+        assert_eq!(offered_profiles, &[SrtpProtectionProfile::Aes128CmSha1_80]);
+        let server_hello =
+            ServerHello::new(DtlsVersion::Dtls12, Bytes::new(), 0xC02B, 0, Vec::new());
+
+        assert!(matches!(
+            state.process_message(HandshakeMessage::ServerHello(server_hello)),
+            Err(crate::Error::NegotiationFailed(message))
+                if message.contains("omitted use_srtp")
+        ));
+        assert_eq!(state.step, HandshakeStep::Failed);
+        assert!(state.srtp_profile.is_none());
+    }
+
+    #[test]
+    fn client_rejects_ambiguous_server_srtp_profile_selection() {
+        let mut state = HandshakeState::new(DtlsRole::Client, DtlsVersion::Dtls12, 1);
+        state
+            .start()
+            .expect("client should create its initial flight");
+        let server_hello = ServerHello::new(
+            DtlsVersion::Dtls12,
+            Bytes::new(),
+            0xC02B,
+            0,
+            vec![Extension::UseSrtp(UseSrtpExtension::with_profiles(vec![
+                SrtpProtectionProfile::Aes128CmSha1_80,
+                SrtpProtectionProfile::Aes128CmSha1_32,
+            ]))],
+        );
+
+        assert!(matches!(
+            state.process_message(HandshakeMessage::ServerHello(server_hello)),
+            Err(crate::Error::NegotiationFailed(message))
+                if message.contains("exactly one profile")
+        ));
+        assert_eq!(state.step, HandshakeStep::Failed);
+        assert!(state.srtp_profile.is_none());
     }
 }

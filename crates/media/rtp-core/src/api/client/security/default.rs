@@ -54,6 +54,7 @@ pub struct DefaultClientSecurityContext {
 impl DefaultClientSecurityContext {
     /// Create a new DefaultClientSecurityContext
     pub async fn new(config: ClientSecurityConfig) -> Result<Arc<Self>, SecurityError> {
+        config.validate()?;
         if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
             return Err(SecurityError::UnsupportedFeature(format!(
                 "DTLS client context cannot implement {:?}",
@@ -75,24 +76,11 @@ impl DefaultClientSecurityContext {
                 "SRTP profile {profile:?} is not implemented"
             )));
         }
-        let advertised_profiles =
-            crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
+        crate::api::common::config::implemented_srtp_profile_names(&config.srtp_profiles)?;
 
-        // Create context
-        let ctx = Self {
-            config,
-            advertised_profiles,
-            connection: Arc::new(Mutex::new(None)),
-            srtp_context: Arc::new(Mutex::new(None)),
-            remote_addr: Arc::new(Mutex::new(None)),
-            remote_fingerprint: Arc::new(Mutex::new(None)),
-            socket: Arc::new(Mutex::new(None)),
-            handshake_completed: Arc::new(Mutex::new(false)),
-            remote_fingerprint_algorithm: Arc::new(Mutex::new(None)),
-            handshake_monitor_running: Arc::new(AtomicBool::new(false)),
-        };
-
-        Ok(Arc::new(ctx))
+        Err(SecurityError::UnsupportedFeature(
+            "DTLS client security context construction is unavailable in this release".to_string(),
+        ))
     }
 
     /// Initialize DTLS connection

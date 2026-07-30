@@ -53,9 +53,9 @@ pub fn srtp_kdf(
     params: &SrtpKeyDerivationParams,
     output_len: usize,
 ) -> Result<Vec<u8>> {
-    if master_key.salt().len() < 14 {
+    if master_key.salt().len() != 14 {
         return Err(Error::SrtpError(format!(
-            "Salt too short: expected at least 14 bytes, got {}",
+            "SRTP master salt must be exactly 14 bytes, got {}",
             master_key.salt().len()
         )));
     }
@@ -137,9 +137,9 @@ pub fn srtp_kdf(
 /// * `ssrc` - Synchronization source identifier
 /// * `packet_index` - Index of the packet
 pub fn create_srtp_iv(salt: &[u8], ssrc: u32, packet_index: u64) -> Result<Vec<u8>> {
-    if salt.len() < 14 {
+    if salt.len() != 14 {
         return Err(Error::SrtpError(format!(
-            "Salt too short: expected at least 14 bytes, got {}",
+            "SRTP salt must be exactly 14 bytes, got {}",
             salt.len()
         )));
     }
@@ -188,8 +188,13 @@ impl KeyRotationFrequency {
         match self {
             Self::None => false,
             Self::Power2(power) => {
-                let mask = (1u64 << power) - 1;
-                (packet_index & mask) == 0
+                let Some(period) = 1_u64.checked_shl(u32::from(*power)) else {
+                    // The public enum accepts every u8. An unrepresentable
+                    // interval must never panic or silently mean "never";
+                    // report a boundary so SrtpContext fails closed.
+                    return true;
+                };
+                (packet_index & (period - 1)) == 0
             }
         }
     }
@@ -222,6 +227,13 @@ mod tests {
         assert!(freq.should_rotate(256));
         assert!(!freq.should_rotate(257));
         assert!(freq.should_rotate(512));
+
+        // Public values that cannot be represented by a u64 interval are a
+        // required fail-closed boundary, not a shift panic or "never rotate".
+        assert!(KeyRotationFrequency::Power2(64).should_rotate(0));
+        assert!(KeyRotationFrequency::Power2(64).should_rotate(u64::MAX));
+        assert!(KeyRotationFrequency::Power2(255).should_rotate(0));
+        assert!(KeyRotationFrequency::Power2(255).should_rotate(u64::MAX));
     }
 
     #[test]

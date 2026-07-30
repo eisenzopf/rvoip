@@ -48,6 +48,7 @@ impl DefaultServerSecurityContext {
     pub async fn new(
         config: ServerSecurityConfig,
     ) -> Result<Arc<dyn ServerSecurityContext + Send + Sync>, SecurityError> {
+        config.validate()?;
         if config.security_mode != crate::api::common::config::SecurityMode::DtlsSrtp {
             return Err(SecurityError::UnsupportedFeature(format!(
                 "DTLS server context cannot implement {:?}",

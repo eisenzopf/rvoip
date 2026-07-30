@@ -33,7 +33,7 @@ use crate::buffer::{
     TransmitBufferStats,
 };
 use crate::session::{RtpSession, RtpSessionConfig};
-use crate::transport::RtpTransport;
+use crate::transport::{RtpTransport, SecurityRtpTransport, UdpRtpTransport};
 use crate::{CsrcManager, CsrcMapping, RtpCsrc, RtpSsrc};
 
 // Import module functions
@@ -59,6 +59,10 @@ pub struct DefaultMediaTransportClient {
 
     /// Connected flag
     connected: Arc<AtomicBool>,
+
+    /// True only while the connected transport has an enabled cryptographic
+    /// SRTP context installed on its on-wire path.
+    secure_transport_ready: Arc<AtomicBool>,
 
     /// Frame sender for passing received frames to the application
     frame_sender: mpsc::Sender<MediaFrame>,
@@ -106,6 +110,28 @@ pub struct DefaultMediaTransportClient {
 impl DefaultMediaTransportClient {
     /// Create a new DefaultMediaTransportClient
     pub async fn new(config: ClientConfig) -> Result<Self, MediaTransportError> {
+        config
+            .security_config
+            .validate()
+            .map_err(|error| MediaTransportError::Security(error.to_string()))?;
+        if config.security_config.security_mode == crate::api::common::config::SecurityMode::None
+            && (config.security_config.validate_fingerprint
+                || !config.security_config.srtp_profiles.is_empty()
+                || config.security_config.srtp_key.is_some()
+                || config.security_config.remote_fingerprint.is_some()
+                || config
+                    .security_config
+                    .remote_fingerprint_algorithm
+                    .is_some()
+                || config.security_config.certificate_path.is_some()
+                || config.security_config.private_key_path.is_some())
+        {
+            return Err(MediaTransportError::Security(
+                "plain RTP client configuration cannot retain security requirements or key material"
+                    .to_string(),
+            ));
+        }
+
         // Create channel for frames
         let (frame_sender, frame_receiver) = mpsc::channel(config.frame_channel_capacity.max(1));
 
@@ -130,6 +156,15 @@ impl DefaultMediaTransportClient {
         let session = RtpSession::new(session_config).await.map_err(|e| {
             MediaTransportError::InitializationError(format!("Failed to create RTP session: {}", e))
         })?;
+        if config.security_config.security_mode.requires_srtp() {
+            if let Some(udp) = session
+                .transport()
+                .as_any()
+                .downcast_ref::<UdpRtpTransport>()
+            {
+                udp.require_srtp();
+            }
+        }
 
         // Create security context if enabled
         let security_context = if config.security_config.security_mode.is_enabled() {
@@ -220,6 +255,7 @@ impl DefaultMediaTransportClient {
             security: security_context,
             transport: Arc::new(Mutex::new(None)),
             connected: Arc::new(AtomicBool::new(false)),
+            secure_transport_ready: Arc::new(AtomicBool::new(false)),
             frame_sender,
             frame_receiver: Arc::new(Mutex::new(frame_receiver)),
             event_callbacks: Arc::new(Mutex::new(Vec::new())),
@@ -253,6 +289,7 @@ impl Clone for DefaultMediaTransportClient {
             security: self.security.clone(),
             transport: Arc::clone(&self.transport),
             connected: Arc::clone(&self.connected),
+            secure_transport_ready: Arc::clone(&self.secure_transport_ready),
             frame_sender: self.frame_sender.clone(),
             frame_receiver: Arc::clone(&self.frame_receiver),
             event_callbacks: Arc::clone(&self.event_callbacks),
@@ -306,6 +343,28 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         )
         .await?;
 
+        let security_requested = self.config.security_config.security_mode.requires_srtp();
+        let secure_transport_ready = if security_requested {
+            let transport = self.transport.lock().await.clone();
+            match transport
+                .as_ref()
+                .and_then(|transport| transport.as_any().downcast_ref::<SecurityRtpTransport>())
+            {
+                Some(security_transport) => security_transport.is_srtp_ready().await,
+                None => false,
+            }
+        } else {
+            false
+        };
+        self.secure_transport_ready
+            .store(secure_transport_ready, Ordering::SeqCst);
+        if security_requested && !secure_transport_ready {
+            self.connected.store(false, Ordering::SeqCst);
+            return Err(MediaTransportError::Security(
+                "connected transport has no active SRTP cryptographic context".to_string(),
+            ));
+        }
+
         // Initialize transmit buffer if high-performance buffers are enabled
         if self.config.high_performance_buffers_enabled {
             // Get SSRC from session
@@ -328,13 +387,15 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     }
 
     async fn disconnect(&self) -> Result<(), MediaTransportError> {
-        connection::disconnect(
+        let result = connection::disconnect(
             &self.security,
             &self.connected,
             &self.transport,
             &self.disconnect_callbacks,
         )
-        .await
+        .await;
+        self.secure_transport_ready.store(false, Ordering::SeqCst);
+        result
     }
 
     async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
@@ -463,10 +524,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
     }
 
     fn is_secure(&self) -> bool {
-        client_security::is_secure(
-            &self.security,
-            self.config.security_config.security_mode.is_enabled(),
-        )
+        self.connected.load(Ordering::SeqCst) && self.secure_transport_ready.load(Ordering::SeqCst)
     }
 
     async fn set_jitter_buffer_size(&self, _size_ms: Duration) -> Result<(), MediaTransportError> {
