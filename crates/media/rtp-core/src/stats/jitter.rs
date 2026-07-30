@@ -2,7 +2,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::RtpTimestamp;
+use crate::{RtpSequenceNumber, RtpTimestamp};
 
 /// Jitter estimator implementing RFC 3550 jitter calculation algorithm
 #[derive(Debug, Clone)]
@@ -15,6 +15,9 @@ pub struct JitterEstimator {
 
     /// Last RTP timestamp
     last_timestamp: Option<RtpTimestamp>,
+
+    /// Highest extended sequence number used as a timing reference.
+    last_sequence: Option<u64>,
 
     /// Clock rate for timestamp conversion
     clock_rate: u32,
@@ -39,6 +42,7 @@ impl JitterEstimator {
             jitter: 0.0,
             last_arrival: None,
             last_timestamp: None,
+            last_sequence: None,
             clock_rate,
             max_jitter: 0.0,
             min_jitter: f64::MAX,
@@ -81,6 +85,32 @@ impl JitterEstimator {
         self.jitter
     }
 
+    /// Update the jitter estimate using an RTP sequence number.
+    ///
+    /// Duplicated, late, and reordered packets do not advance the timing
+    /// reference. This prevents their later arrival time from corrupting the
+    /// RFC 3550 transit-time calculation for the next in-order packet.
+    pub fn update_with_sequence(
+        &mut self,
+        sequence: RtpSequenceNumber,
+        timestamp: RtpTimestamp,
+        arrival: Instant,
+    ) -> f64 {
+        if let Some(last_sequence) = self.last_sequence {
+            let Some(extended_sequence) = extend_sequence_near(sequence, last_sequence) else {
+                return self.jitter;
+            };
+            if extended_sequence <= last_sequence {
+                return self.jitter;
+            }
+            self.last_sequence = Some(extended_sequence);
+        } else {
+            self.last_sequence = Some(sequence as u64);
+        }
+
+        self.update(timestamp, arrival)
+    }
+
     /// Get the current jitter estimate in seconds
     pub fn get_jitter(&self) -> f64 {
         self.jitter
@@ -111,10 +141,27 @@ impl JitterEstimator {
         self.jitter = 0.0;
         self.last_arrival = None;
         self.last_timestamp = None;
+        self.last_sequence = None;
         self.max_jitter = 0.0;
         self.min_jitter = f64::MAX;
         self.samples = 0;
         self.avg_jitter = 0.0;
+    }
+}
+
+fn extend_sequence_near(sequence: RtpSequenceNumber, reference: u64) -> Option<u64> {
+    let reference_low = (reference & 0xffff) as i32;
+    let difference = sequence as i32 - reference_low;
+    let cycle_base = reference & !0xffff;
+
+    if difference < -0x8000 {
+        Some(cycle_base + 0x1_0000 + sequence as u64)
+    } else if difference > 0x8000 {
+        cycle_base
+            .checked_sub(0x1_0000)
+            .map(|previous_cycle| previous_cycle + sequence as u64)
+    } else {
+        Some(cycle_base + sequence as u64)
     }
 }
 
@@ -195,5 +242,48 @@ mod tests {
         // Check stats
         assert!(estimator.get_max_jitter_ms() >= estimator.get_jitter_ms());
         assert!(estimator.get_min_jitter_ms() <= estimator.get_jitter_ms());
+    }
+
+    #[test]
+    fn reordered_and_duplicate_packets_do_not_change_jitter_reference() {
+        let mut estimator = JitterEstimator::new(8000);
+        let start = Instant::now();
+
+        estimator.update_with_sequence(10, 0, start);
+        estimator.update_with_sequence(12, 320, start + Duration::from_millis(40));
+        let before_late_packet = estimator.get_jitter();
+
+        // This missing packet arrives much later. Including it would create a
+        // multi-second jitter sample and poison the next calculation.
+        estimator.update_with_sequence(11, 160, start + Duration::from_secs(5));
+        estimator.update_with_sequence(12, 320, start + Duration::from_secs(6));
+        assert_eq!(estimator.get_jitter(), before_late_packet);
+
+        estimator.update_with_sequence(13, 480, start + Duration::from_millis(60));
+        assert!(estimator.get_jitter() < 0.000_001);
+    }
+
+    #[test]
+    fn sequence_aware_jitter_handles_wraparound() {
+        let mut estimator = JitterEstimator::new(8000);
+        let start = Instant::now();
+
+        estimator.update_with_sequence(65535, 0, start);
+        estimator.update_with_sequence(0, 160, start + Duration::from_millis(20));
+
+        assert!(estimator.get_jitter() < 0.000_001);
+        assert_eq!(estimator.last_sequence, Some(0x1_0000));
+    }
+
+    #[test]
+    fn late_packet_before_cycle_zero_does_not_change_jitter() {
+        let mut estimator = JitterEstimator::new(8000);
+        let start = Instant::now();
+        estimator.update_with_sequence(1, 160, start);
+
+        let before = estimator.get_jitter();
+        estimator.update_with_sequence(65535, 0, start + Duration::from_secs(5));
+        assert_eq!(estimator.get_jitter(), before);
+        assert_eq!(estimator.last_sequence, Some(1));
     }
 }

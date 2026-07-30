@@ -78,13 +78,13 @@ impl RttEstimator {
             return None;
         }
 
-        // Find the corresponding SR record
-        // We need to match the NTP timestamp from our sent SRs with the one in the receiver report
-        // The last_sr in the receiver report contains the middle 16 bits of the NTP timestamp seconds
+        // The LSR field is the complete middle 32 bits of the 64-bit NTP
+        // timestamp: low 16 bits of seconds followed by high 16 bits of the
+        // fractional part (RFC 3550 section 6.4.1).
         let sr_record = self
             .sr_timestamps
             .iter()
-            .find(|(s, ntp, _)| *s == ssrc && ((ntp.seconds >> 16) as u32) == last_sr);
+            .find(|(s, ntp, _)| *s == ssrc && ntp.to_u32() == last_sr);
 
         if let Some((_, _, sent_time)) = sr_record {
             // Calculate RTT
@@ -222,12 +222,12 @@ mod tests {
         let mut estimator = RttEstimator::new();
 
         // Record an SR sent with NTP timestamp
-        // The NTP timestamp has seconds in the upper 32 bits, which we'll set to 0xabcd0000
-        // In the receiver report, last_sr would be the middle 16 bits, which is 0xabcd
+        // LSR contains the low 16 bits of seconds and the high 16 bits of the
+        // fractional part.
         let ssrc = 0x12345678;
         let ntp = NtpTimestamp {
-            seconds: 0xabcd0000,
-            fraction: 0x12345678,
+            seconds: 0xabcd1234,
+            fraction: 0x5678ef01,
         };
         estimator.record_sr_sent(ssrc, ntp);
 
@@ -235,8 +235,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // Process a receiver report
-        // The last_sr field in a receiver report is the middle 16 bits of NTP timestamp seconds
-        let last_sr = 0xabcd;
+        let last_sr = 0x12345678;
         let delay = (0.01 * 65536.0) as u32; // 10ms delay, in Q16 format
 
         let rtt = estimator.process_receiver_report(ssrc, last_sr, delay);
@@ -257,16 +256,35 @@ mod tests {
     }
 
     #[test]
+    fn test_lsr_requires_all_middle_ntp_bits() {
+        let mut estimator = RttEstimator::new();
+        let ssrc = 0x12345678;
+        estimator.record_sr_sent(
+            ssrc,
+            NtpTimestamp {
+                seconds: 0xaaaa1234,
+                fraction: 0x5678bbbb,
+            },
+        );
+
+        assert!(estimator
+            .process_receiver_report(ssrc, 0x12345678, 0)
+            .is_some());
+        assert!(estimator
+            .process_receiver_report(ssrc, 0x12340000, 0)
+            .is_none());
+    }
+
+    #[test]
     fn test_rtt_tracking() {
         let mut estimator = RttEstimator::new();
 
         // Simulate several measurements
         for i in 0..5 {
             let ssrc = 0x12345678;
-            // Create an NTP timestamp where the middle 16 bits of the seconds will be 0xabcd + i
             let ntp = NtpTimestamp {
-                seconds: ((0xabcd + i) << 16),
-                fraction: 0x12345678,
+                seconds: 0xabcd1200 | i,
+                fraction: ((0x3400 | i) << 16) | 0x5678,
             };
             estimator.record_sr_sent(ssrc, ntp);
 
@@ -274,8 +292,7 @@ mod tests {
             let delay_ms = 50 + (i * 10); // 50, 60, 70, 80, 90 ms
             std::thread::sleep(Duration::from_millis(delay_ms.into()));
 
-            // The last_sr field in a receiver report is the middle 16 bits of NTP timestamp seconds
-            let last_sr = (0xabcd + i) as u32;
+            let last_sr = ntp.to_u32();
             let delay = (0.01 * 65536.0) as u32; // 10ms delay
 
             let rtt = estimator.process_receiver_report(ssrc, last_sr, delay);

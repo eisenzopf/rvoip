@@ -114,6 +114,7 @@ impl SecurityRtpTransport {
                                             timestamp: decrypted_packet.header.timestamp,
                                             marker: decrypted_packet.header.marker,
                                             payload: decrypted_packet.payload.clone(),
+                                            padding_size: decrypted_packet.padding_size,
                                             source: addr,
                                             ssrc: decrypted_packet.header.ssrc,
                                         };
@@ -148,6 +149,7 @@ impl SecurityRtpTransport {
                                     timestamp: rtp_packet.header.timestamp,
                                     marker: rtp_packet.header.marker,
                                     payload: rtp_packet.payload.clone(),
+                                    padding_size: rtp_packet.padding_size,
                                     source: addr,
                                     ssrc: rtp_packet.header.ssrc,
                                 };

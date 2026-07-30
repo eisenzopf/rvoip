@@ -187,9 +187,12 @@ impl SrtpCrypto {
             .as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
-        // Extract header and payload
+        // Serialize once to validate RTP padding and obtain the complete RTP
+        // payload region. RFC 3711 encrypts RTP padding together with the
+        // media payload; the padding count is therefore ciphertext on wire.
         let header = packet.header.clone();
-        let payload = packet.payload.clone();
+        let serialized = packet.serialize()?;
+        let header_size = packet.header.size();
 
         // Create an IV for encryption
         let ssrc = packet.header.ssrc;
@@ -209,8 +212,8 @@ impl SrtpCrypto {
             }
         };
 
-        // Create a mutable copy of the payload for encryption
-        let mut encrypted_payload = BytesMut::from(&payload[..]);
+        // Encrypt the media payload and any RFC 3550 padding as one region.
+        let mut encrypted_payload = BytesMut::from(&serialized[header_size..]);
 
         // Encrypt the payload
         match self.suite.encryption {
@@ -224,13 +227,24 @@ impl SrtpCrypto {
             }
         }
 
-        // Create a new packet with the encrypted payload
-        let encrypted_packet = RtpPacket::new(header, encrypted_payload.freeze());
+        // `padding_size == 0` marks that the protected payload already
+        // contains encrypted padding. The RTP P bit remains on wire, but its
+        // final padding-count octet cannot be interpreted until decryption.
+        let encrypted_packet = RtpPacket {
+            header,
+            payload: encrypted_payload.freeze(),
+            padding_size: 0,
+        };
 
         // Calculate authentication tag if authentication is enabled
         let auth_tag = if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            // Serialize the encrypted packet for authentication
-            let encrypted_serialized = encrypted_packet.serialize()?;
+            // Serialize the protected representation without asking the
+            // ordinary RTP serializer to interpret encrypted padding.
+            let mut encrypted_serialized = BytesMut::with_capacity(encrypted_packet.size());
+            encrypted_packet
+                .header
+                .serialize(&mut encrypted_serialized)?;
+            encrypted_serialized.extend_from_slice(&encrypted_packet.payload);
 
             // Calculate the authentication tag
             let auth_tag = self.calculate_auth_tag(&encrypted_serialized, roc)?;
@@ -323,17 +337,19 @@ impl SrtpCrypto {
             }
         }
 
-        // Parse the RTP header first (it's not encrypted)
-        let packet = RtpPacket::parse(packet_data)?;
-
         if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
-            // If only authentication is enabled, return the parsed packet
-            return Ok(packet);
+            // If only authentication is enabled, RTP padding remains in the
+            // clear and the ordinary parser can validate and strip it.
+            return RtpPacket::parse(packet_data);
         }
 
+        // Parse only the clear RTP header. The encrypted payload's final byte
+        // cannot be interpreted as an RTP padding count until after decryption.
+        let (header, header_size) = crate::packet::RtpHeader::parse_without_consuming(packet_data)?;
+
         // Create an IV for decryption
-        let ssrc = packet.header.ssrc;
-        let sequence = packet.header.sequence_number as u64;
+        let ssrc = header.ssrc;
+        let sequence = header.sequence_number as u64;
         let roc: u32 = 0; // In a real implementation, this would be tracked
         let packet_index = (roc as u64) << 16 | sequence;
 
@@ -349,8 +365,9 @@ impl SrtpCrypto {
             }
         };
 
-        // Create a mutable copy of the payload for decryption
-        let mut decrypted_payload = BytesMut::from(&packet.payload[..]);
+        // Decrypt the complete RTP payload region, including encrypted RTP
+        // padding when the P bit is set.
+        let mut decrypted_payload = BytesMut::from(&packet_data[header_size..]);
 
         // Decrypt the payload
         match self.suite.encryption {
@@ -364,10 +381,30 @@ impl SrtpCrypto {
             }
         }
 
-        // Create a new packet with the decrypted payload
-        let decrypted_packet = RtpPacket::new(packet.header, decrypted_payload.freeze());
+        let decrypted_payload = decrypted_payload.freeze();
+        let padding_size = if header.padding {
+            let Some(&padding_size) = decrypted_payload.last() else {
+                return Err(Error::InvalidPacket(
+                    "decrypted RTP padding flag is set but no padding is present".to_string(),
+                ));
+            };
+            if padding_size == 0 || usize::from(padding_size) > decrypted_payload.len() {
+                return Err(Error::InvalidPacket(format!(
+                    "invalid decrypted RTP padding length {padding_size} for {} payload octets",
+                    decrypted_payload.len()
+                )));
+            }
+            padding_size
+        } else {
+            0
+        };
+        let payload_end = decrypted_payload.len() - usize::from(padding_size);
 
-        Ok(decrypted_packet)
+        Ok(RtpPacket {
+            header,
+            payload: decrypted_payload.slice(..payload_end),
+            padding_size,
+        })
     }
 
     /// Reject low-level SRTCP protection until per-SSRC indexes, replay state,

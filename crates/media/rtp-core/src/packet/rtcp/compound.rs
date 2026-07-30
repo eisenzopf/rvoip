@@ -9,7 +9,7 @@ use bytes::{Buf, Bytes, BytesMut};
 
 use super::{
     RtcpApplicationDefined, RtcpExtendedReport, RtcpGoodbye, RtcpPacket, RtcpReceiverReport,
-    RtcpSenderReport, RtcpSourceDescription,
+    RtcpSenderReport, RtcpSourceDescription, RtcpUnknownPacket,
 };
 use crate::error::Error;
 use crate::Result;
@@ -25,6 +25,140 @@ use crate::Result;
 pub struct RtcpCompoundPacket {
     /// Packets in the compound packet
     pub packets: Vec<RtcpPacket>,
+}
+
+/// A member of a tolerantly parsed compound RTCP packet.
+///
+/// Keeping unknown members in this new wrapper avoids adding a variant to
+/// [`RtcpPacket`], whose existing public variants can therefore still be
+/// exhaustively matched by downstream 0.3.x users.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RtcpCompoundMember {
+    /// A packet type implemented by this crate.
+    Known(RtcpPacket),
+    /// A well-formed packet type not implemented by this crate.
+    Unknown(RtcpUnknownPacket),
+}
+
+impl RtcpCompoundMember {
+    /// Return the numeric RTCP packet type carried on the wire.
+    pub fn packet_type_byte(&self) -> u8 {
+        match self {
+            Self::Known(packet) => packet.packet_type() as u8,
+            Self::Unknown(packet) => packet.packet_type,
+        }
+    }
+
+    fn has_padding(&self) -> bool {
+        matches!(self, Self::Unknown(packet) if packet.has_padding())
+    }
+
+    fn serialize(&self) -> Result<Bytes> {
+        match self {
+            Self::Known(packet) => packet.serialize(),
+            Self::Unknown(packet) => packet.serialize(),
+        }
+    }
+}
+
+/// A compound RTCP packet that preserves unimplemented but well-formed
+/// packet types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RtcpTolerantCompoundPacket {
+    /// Known and unknown members in their original wire order.
+    pub packets: Vec<RtcpCompoundMember>,
+}
+
+impl RtcpTolerantCompoundPacket {
+    /// Validate the compound-packet ordering and padding rules.
+    pub fn validate(&self) -> Result<()> {
+        match self.packets.first() {
+            Some(RtcpCompoundMember::Known(
+                RtcpPacket::SenderReport(_) | RtcpPacket::ReceiverReport(_),
+            )) => {}
+            Some(_) => {
+                return Err(Error::RtcpError(
+                    "First packet in compound packet must be SR or RR".to_string(),
+                ));
+            }
+            None => {
+                return Err(Error::RtcpError(
+                    "Compound packet must contain at least one packet".to_string(),
+                ));
+            }
+        }
+
+        if self
+            .packets
+            .iter()
+            .take(self.packets.len().saturating_sub(1))
+            .any(RtcpCompoundMember::has_padding)
+        {
+            return Err(Error::RtcpError(
+                "Only the final packet in a compound RTCP packet may be padded".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Serialize all known and preserved unknown members.
+    pub fn serialize(&self) -> Result<Bytes> {
+        self.validate()?;
+
+        let mut buf = BytesMut::new();
+        for packet in &self.packets {
+            buf.extend_from_slice(&packet.serialize()?);
+        }
+        Ok(buf.freeze())
+    }
+
+    /// Parse an entire compound RTCP packet while preserving unimplemented
+    /// but well-formed packet types.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        let mut buf = Bytes::copy_from_slice(data);
+        let mut packets = Vec::new();
+
+        while buf.has_remaining() {
+            if buf.remaining() < 4 {
+                return Err(Error::BufferTooSmall {
+                    required: 4,
+                    available: buf.remaining(),
+                });
+            }
+
+            let mut peek_buf = buf.clone();
+            let first_byte = peek_buf.get_u8();
+            let packet_type = peek_buf.get_u8();
+            let length = peek_buf.get_u16() as usize * 4;
+            let total_packet_size = 4 + length;
+
+            if buf.remaining() < total_packet_size {
+                return Err(Error::BufferTooSmall {
+                    required: total_packet_size,
+                    available: buf.remaining(),
+                });
+            }
+            if first_byte & 0x20 != 0 && total_packet_size != buf.remaining() {
+                return Err(Error::RtcpError(
+                    "Only the final packet in a compound RTCP packet may be padded".to_string(),
+                ));
+            }
+
+            let packet_data = &buf[..total_packet_size];
+            let packet = if super::RtcpPacketType::try_from(packet_type).is_ok() {
+                RtcpCompoundMember::Known(RtcpPacket::parse(packet_data)?)
+            } else {
+                RtcpCompoundMember::Unknown(RtcpUnknownPacket::parse(packet_data)?)
+            };
+            packets.push(packet);
+            buf.advance(total_packet_size);
+        }
+
+        let compound = Self { packets };
+        compound.validate()?;
+        Ok(compound)
+    }
 }
 
 impl RtcpCompoundPacket {
@@ -93,11 +227,13 @@ impl RtcpCompoundPacket {
 
         // Check if the first packet is SR or RR
         match self.packets[0] {
-            RtcpPacket::SenderReport(_) | RtcpPacket::ReceiverReport(_) => Ok(()),
+            RtcpPacket::SenderReport(_) | RtcpPacket::ReceiverReport(_) => {}
             _ => Err(Error::RtcpError(
                 "First packet in compound packet must be SR or RR".to_string(),
-            )),
+            ))?,
         }
+
+        Ok(())
     }
 
     /// Serialize the compound packet
@@ -121,16 +257,18 @@ impl RtcpCompoundPacket {
         let mut buf = Bytes::copy_from_slice(data);
         let mut packets = Vec::new();
 
-        // Parse packets until we run out of data
-        while buf.remaining() >= 4 {
-            // Check if we have enough data for a header
+        // Parse packets until we run out of data.
+        while buf.has_remaining() {
             if buf.remaining() < 4 {
-                break;
+                return Err(Error::BufferTooSmall {
+                    required: 4,
+                    available: buf.remaining(),
+                });
             }
 
             // Look ahead to see packet length without consuming
             let mut peek_buf = buf.clone();
-            let _first_byte = peek_buf.get_u8();
+            let first_byte = peek_buf.get_u8();
             let _packet_type_byte = peek_buf.get_u8();
             let length = peek_buf.get_u16() as usize * 4;
 
@@ -142,6 +280,13 @@ impl RtcpCompoundPacket {
                     required: total_packet_size,
                     available: buf.remaining(),
                 });
+            }
+
+            let has_padding = first_byte & 0x20 != 0;
+            if has_padding && total_packet_size != buf.remaining() {
+                return Err(Error::RtcpError(
+                    "Only the final packet in a compound RTCP packet may be padded".to_string(),
+                ));
             }
 
             // Slice the current packet
@@ -161,11 +306,17 @@ impl RtcpCompoundPacket {
 
         Ok(compound)
     }
+
+    /// Parse a compound packet while preserving well-formed packet types
+    /// this crate does not implement.
+    pub fn parse_tolerant(data: &[u8]) -> Result<RtcpTolerantCompoundPacket> {
+        RtcpTolerantCompoundPacket::parse(data)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::NtpTimestamp;
+    use super::super::{NtpTimestamp, RtcpSdesItem, RtcpSdesItemType};
     use super::*;
 
     #[test]
@@ -263,5 +414,128 @@ mod tests {
             }
             _ => panic!("Expected BYE packet"),
         }
+    }
+
+    #[test]
+    fn tolerant_parser_preserves_unknown_mixed_packets() {
+        let rr = RtcpReceiverReport {
+            ssrc: 0x12345678,
+            report_blocks: Vec::new(),
+        };
+        let unknown = RtcpUnknownPacket {
+            packet_type: 205,
+            count: 1,
+            payload: Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]),
+            padding: Bytes::new(),
+        };
+        let bye = RtcpGoodbye::new_for_source(0x12345678);
+        let compound = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)),
+                RtcpCompoundMember::Unknown(unknown.clone()),
+                RtcpCompoundMember::Known(RtcpPacket::Goodbye(bye)),
+            ],
+        };
+
+        let wire = compound.serialize().unwrap();
+        let parsed = RtcpCompoundPacket::parse_tolerant(&wire).unwrap();
+        assert_eq!(parsed.packets.len(), 3);
+        assert_eq!(parsed.packets[1], RtcpCompoundMember::Unknown(unknown));
+        assert!(matches!(
+            parsed.packets[2],
+            RtcpCompoundMember::Known(RtcpPacket::Goodbye(_))
+        ));
+        assert_eq!(parsed.serialize().unwrap(), wire);
+
+        // The compatibility-preserving strict parser still reports the
+        // unimplemented member rather than changing RtcpPacket's variants.
+        assert!(RtcpCompoundPacket::parse(&wire).is_err());
+    }
+
+    #[test]
+    fn tolerant_mixed_parser_decodes_sdes_and_preserves_unknown_member() {
+        let rr = RtcpReceiverReport {
+            ssrc: 0x12345678,
+            report_blocks: Vec::new(),
+        };
+        let mut sdes = RtcpSourceDescription::new();
+        let mut chunk = super::super::RtcpSdesChunk::new(0x12345678);
+        chunk.add_item(RtcpSdesItem::new(
+            RtcpSdesItemType::CName,
+            "alice@example.test".to_string(),
+        ));
+        sdes.add_chunk(chunk);
+        let unknown = RtcpUnknownPacket {
+            packet_type: 205,
+            count: 1,
+            payload: Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]),
+            padding: Bytes::new(),
+        };
+        let compound = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)),
+                RtcpCompoundMember::Known(RtcpPacket::SourceDescription(sdes)),
+                RtcpCompoundMember::Unknown(unknown),
+            ],
+        };
+
+        let parsed = RtcpTolerantCompoundPacket::parse(&compound.serialize().unwrap()).unwrap();
+        assert!(matches!(
+            &parsed.packets[1],
+            RtcpCompoundMember::Known(RtcpPacket::SourceDescription(description))
+                if description.find_cname(0x12345678) == Some("alice@example.test")
+        ));
+        assert!(matches!(
+            parsed.packets[2],
+            RtcpCompoundMember::Unknown(RtcpUnknownPacket {
+                packet_type: 205,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn malformed_compound_packets_remain_errors() {
+        let rr = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
+
+        let mut bad_version = rr.to_vec();
+        bad_version.extend_from_slice(&[0x40, 205, 0, 0]);
+        assert!(RtcpTolerantCompoundPacket::parse(&bad_version).is_err());
+
+        let mut trailing_bytes = rr.to_vec();
+        trailing_bytes.extend_from_slice(&[0x80, 205, 0]);
+        assert!(RtcpTolerantCompoundPacket::parse(&trailing_bytes).is_err());
+
+        // A padded unknown packet followed by another packet is invalid even
+        // though both individual lengths are well formed.
+        let mut non_final_padding = rr.to_vec();
+        non_final_padding.extend_from_slice(&[0xa0, 205, 0, 1, 0, 0, 0, 4]);
+        non_final_padding.extend_from_slice(&[0x80, 206, 0, 0]);
+        assert!(RtcpTolerantCompoundPacket::parse(&non_final_padding).is_err());
+    }
+
+    #[test]
+    fn final_padded_unknown_packet_round_trips_exactly() {
+        let rr = RtcpReceiverReport {
+            ssrc: 0x12345678,
+            report_blocks: Vec::new(),
+        };
+        let unknown = RtcpUnknownPacket {
+            packet_type: 205,
+            count: 7,
+            payload: Bytes::from_static(&[0xde, 0xad, 0xbe, 0xef]),
+            padding: Bytes::from_static(&[0, 0, 0, 4]),
+        };
+        let compound = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)),
+                RtcpCompoundMember::Unknown(unknown.clone()),
+            ],
+        };
+
+        let wire = compound.serialize().unwrap();
+        let parsed = RtcpTolerantCompoundPacket::parse(&wire).unwrap();
+        assert_eq!(parsed.packets[1], RtcpCompoundMember::Unknown(unknown));
+        assert_eq!(parsed.serialize().unwrap(), wire);
     }
 }

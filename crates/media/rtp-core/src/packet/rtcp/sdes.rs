@@ -218,6 +218,123 @@ pub fn serialize_sdes(sdes: &RtcpSourceDescription) -> Result<BytesMut> {
     sdes.serialize()
 }
 
+/// Parse an SDES body using the source count from the RTCP common header.
+///
+/// Each declared chunk must contain an SSRC, a terminating END item, and
+/// zero-valued alignment octets. Trailing or truncated data is rejected so a
+/// malformed known member cannot be hidden inside an otherwise valid compound
+/// packet.
+pub fn parse_sdes(data: &[u8], source_count: u8) -> Result<RtcpSourceDescription> {
+    let mut offset = 0usize;
+    let mut description = RtcpSourceDescription::new();
+
+    for _ in 0..source_count {
+        if data.len().saturating_sub(offset) < 4 {
+            return Err(Error::RtcpError(
+                "SDES chunk is truncated before its SSRC".to_string(),
+            ));
+        }
+
+        let ssrc = u32::from_be_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .expect("the SDES SSRC length was checked"),
+        );
+        offset += 4;
+        let mut chunk = RtcpSdesChunk::new(ssrc);
+
+        loop {
+            let Some(&item_type) = data.get(offset) else {
+                return Err(Error::RtcpError(
+                    "SDES chunk is missing its END item".to_string(),
+                ));
+            };
+            offset += 1;
+
+            if item_type == RtcpSdesItemType::End as u8 {
+                break;
+            }
+
+            let Some(&item_length) = data.get(offset) else {
+                return Err(Error::RtcpError(
+                    "SDES item is truncated before its length".to_string(),
+                ));
+            };
+            offset += 1;
+            let item_length = usize::from(item_length);
+            if data.len().saturating_sub(offset) < item_length {
+                return Err(Error::RtcpError(
+                    "SDES item value is shorter than its declared length".to_string(),
+                ));
+            }
+
+            let value_bytes = &data[offset..offset + item_length];
+            offset += item_length;
+
+            // RFC 3550 deliberately leaves the SDES item registry open to
+            // later assignments. Keep parsing the chunk when this crate does
+            // not model a registered or future item type; otherwise valid
+            // types such as MID (15) would make the entire compound packet
+            // unusable. Modeled text items still receive UTF-8 validation.
+            if let Ok(item_type) = RtcpSdesItemType::try_from(item_type) {
+                if item_type == RtcpSdesItemType::Private {
+                    // PRIV starts with a binary prefix-length octet, followed
+                    // by separate UTF-8 prefix and value strings. The legacy
+                    // `RtcpSdesItem { value: String }` cannot preserve that
+                    // boundary, so validate and ignore it instead of either
+                    // rejecting valid prefix lengths or inventing a lossy
+                    // representation.
+                    let (&prefix_length, text) = value_bytes.split_first().ok_or_else(|| {
+                        Error::RtcpError("SDES PRIV item has no prefix length".to_string())
+                    })?;
+                    let prefix_length = usize::from(prefix_length);
+                    if prefix_length > text.len() {
+                        return Err(Error::RtcpError(
+                            "SDES PRIV prefix exceeds its item length".to_string(),
+                        ));
+                    }
+                    std::str::from_utf8(&text[..prefix_length]).map_err(|_| {
+                        Error::RtcpError("SDES PRIV prefix is not valid UTF-8".to_string())
+                    })?;
+                    std::str::from_utf8(&text[prefix_length..]).map_err(|_| {
+                        Error::RtcpError("SDES PRIV value is not valid UTF-8".to_string())
+                    })?;
+                } else {
+                    let value = std::str::from_utf8(value_bytes)
+                        .map_err(|_| Error::RtcpError("SDES item is not valid UTF-8".to_string()))?
+                        .to_string();
+                    chunk.add_item(RtcpSdesItem::new(item_type, value));
+                }
+            }
+        }
+
+        while offset % 4 != 0 {
+            let Some(&padding) = data.get(offset) else {
+                return Err(Error::RtcpError(
+                    "SDES chunk alignment padding is truncated".to_string(),
+                ));
+            };
+            if padding != 0 {
+                return Err(Error::RtcpError(
+                    "SDES chunk alignment padding must be zero".to_string(),
+                ));
+            }
+            offset += 1;
+        }
+
+        description.add_chunk(chunk);
+    }
+
+    if offset != data.len() {
+        return Err(Error::RtcpError(format!(
+            "SDES source count leaves {} unexpected body bytes",
+            data.len() - offset
+        )));
+    }
+
+    Ok(description)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +409,62 @@ mod tests {
 
         let cname = sdes.find_cname(0x99999999);
         assert!(cname.is_none());
+    }
+
+    #[test]
+    fn serialized_sdes_round_trips_with_exact_source_count() {
+        let mut sdes = RtcpSourceDescription::new();
+        sdes.add_source(0x1234_5678, Some("alice@example.test".to_string()));
+        sdes.add_source(0x90ab_cdef, None);
+
+        let bytes = sdes.serialize().unwrap();
+        assert_eq!(parse_sdes(&bytes, 2).unwrap(), sdes);
+    }
+
+    #[test]
+    fn source_count_and_chunk_termination_are_enforced() {
+        // One declared chunk but no SSRC.
+        assert!(parse_sdes(&[], 1).is_err());
+        // SSRC without the mandatory END item.
+        assert!(parse_sdes(&[0x12, 0x34, 0x56, 0x78], 1).is_err());
+        // A second body word cannot be ignored when the source count is zero.
+        assert!(parse_sdes(&[0, 0, 0, 0], 0).is_err());
+        // Alignment bytes after END must be present and zero.
+        assert!(parse_sdes(&[0x12, 0x34, 0x56, 0x78, 0, 0, 1, 0], 1).is_err());
+    }
+
+    #[test]
+    fn registered_unmodeled_item_does_not_hide_following_known_items() {
+        let body = [
+            0x12, 0x34, 0x56, 0x78, // SSRC
+            15, 3, b'm', b'i', b'd', // IANA-assigned MID, not modeled here
+            1, 5, b'a', b'l', b'i', b'c', b'e', // CNAME
+            0, 0, 0, 0, // END and chunk alignment
+        ];
+
+        let parsed = parse_sdes(&body, 1).unwrap();
+        assert_eq!(parsed.chunks.len(), 1);
+        assert_eq!(parsed.chunks[0].items.len(), 1);
+        assert_eq!(parsed.find_cname(0x12345678), Some("alice"));
+    }
+
+    #[test]
+    fn private_item_uses_its_rfc_length_prefixed_shape() {
+        let body = [
+            0x12, 0x34, 0x56, 0x78, // SSRC
+            8, 4, 2, b'i', b'd', b'v', // PRIV: prefix "id", value "v"
+            1, 1, b'a', // CNAME
+            0, 0, 0, // END and chunk alignment
+        ];
+        let parsed = parse_sdes(&body, 1).unwrap();
+        assert_eq!(parsed.find_cname(0x12345678), Some("a"));
+        assert_eq!(parsed.chunks[0].items.len(), 1);
+
+        let malformed = [
+            0x12, 0x34, 0x56, 0x78, // SSRC
+            8, 2, 3, b'x', // prefix length exceeds item body
+            0,    // END; already aligned
+        ];
+        assert!(parse_sdes(&malformed, 1).is_err());
     }
 }

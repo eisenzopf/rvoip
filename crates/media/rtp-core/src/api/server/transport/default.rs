@@ -397,6 +397,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         timestamp,
                         marker,
                         ssrc,
+                        padding_size: _,
                     } => {
                         // Debug output to help diagnose issues
                         debug!(

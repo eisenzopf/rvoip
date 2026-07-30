@@ -10,6 +10,9 @@
 //!
 //! Suite under test: AES-CM-128 + HMAC-SHA1-80 (the default in this
 //! stack and in WebRTC).
+//!
+//! SRTCP is intentionally omitted until the authenticated, stateful
+//! implementation lands. Its public entry points currently fail closed.
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
@@ -88,22 +91,5 @@ fn bench_unprotect(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_protect_rtcp(c: &mut Criterion) {
-    let mut group = c.benchmark_group("srtp_protect_rtcp");
-    // Typical compound RTCP report ~60–100 bytes.
-    let rtcp_data: Vec<u8> = (0..96).map(|i| (i & 0xff) as u8).collect();
-    group.throughput(Throughput::Bytes(rtcp_data.len() as u64));
-    group.bench_function("compound_96", |b| {
-        let mut ctx = make_context();
-        b.iter(|| {
-            let out = ctx
-                .protect_rtcp(black_box(&rtcp_data))
-                .expect("protect_rtcp");
-            black_box(out);
-        });
-    });
-    group.finish();
-}
-
-criterion_group!(benches, bench_protect, bench_unprotect, bench_protect_rtcp);
+criterion_group!(benches, bench_protect, bench_unprotect);
 criterion_main!(benches);

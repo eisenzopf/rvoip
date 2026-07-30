@@ -872,6 +872,7 @@ impl UdpRtpTransport {
                                             timestamp: packet.header.timestamp,
                                             marker: packet.header.marker,
                                             payload: packet.payload.clone(), // Use the parsed payload
+                                            padding_size: packet.padding_size,
                                             source: addr,
                                             ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
                                         };
@@ -1176,9 +1177,8 @@ impl UdpRtpTransport {
             ))
         } else {
             buffer.clear();
-            packet.header.serialize(buffer)?;
-            buffer.extend_from_slice(&packet.payload);
-            self.send_rtp_wire_bytes_unchecked(buffer, dest).await
+            let data = packet.serialize_into(buffer)?;
+            self.send_rtp_wire_bytes_unchecked(&data, dest).await
         }
     }
 }
@@ -1783,7 +1783,8 @@ mod tests {
         // Create a test packet
         let header = RtpHeader::new(96, 1000, 12345, 0xabcdef01);
         let payload = Bytes::from_static(b"test payload");
-        let packet = RtpPacket::new(header, payload.clone());
+        let mut packet = RtpPacket::new(header, payload.clone());
+        packet.set_padding(4);
 
         // Send from transport1 to transport2
         let addr2 = transport2.local_rtp_addr().unwrap();

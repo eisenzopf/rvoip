@@ -70,9 +70,9 @@ impl ExtensionElement {
                     )));
                 }
 
-                if self.data.len() > 16 {
+                if self.data.is_empty() || self.data.len() > 16 {
                     return Err(Error::InvalidParameter(format!(
-                        "Invalid extension length for one-byte format: {} (must be ≤ 16 bytes)",
+                        "Invalid extension length for one-byte format: {} (must be 1-16 bytes)",
                         self.data.len()
                     )));
                 }
@@ -273,9 +273,9 @@ impl RtpHeaderExtensions {
                     // Each extension starts with a byte where the 4 most significant bits
                     // are the ID and the 4 least significant bits are the length minus 1
                     let length = element.data.len();
-                    if length > 16 {
+                    if length == 0 || length > 16 {
                         return Err(Error::InvalidParameter(format!(
-                            "Extension data too long for one-byte header: {} (max is 16 bytes)",
+                            "Invalid one-byte extension data length: {} (must be 1-16 bytes)",
                             length
                         )));
                     }
@@ -287,9 +287,6 @@ impl RtpHeaderExtensions {
                     // Then the extension data
                     buf.put_slice(&element.data);
                 }
-
-                // End marker
-                buf.put_u8(0x00);
 
                 // Add padding to align to 32-bit boundary
                 while buf.len() % 4 != 0 {
@@ -326,9 +323,6 @@ impl RtpHeaderExtensions {
                     buf.put_slice(&element.data);
                 }
 
-                // End marker (ID = 0)
-                buf.put_u8(0x00);
-
                 // Add padding to align to 32-bit boundary
                 while buf.len() % 4 != 0 {
                     buf.put_u8(0x00);
@@ -359,18 +353,23 @@ impl RtpHeaderExtensions {
             let header_byte = data[i];
             i += 1;
 
-            // End of extensions is marked by a 0 byte
-            if header_byte == 0 {
-                break;
-            }
+            let id = header_byte >> 4;
 
-            // If the 0xF0 bits are all set, this is padding
-            if (header_byte & 0xF0) == 0xF0 {
+            // ID zero with a zero length nibble is a single padding byte. It
+            // can appear between elements as well as at the end.
+            if id == 0 {
+                // RFC 8285 requires processing to stop when ID zero carries a
+                // non-zero length nibble.
+                if header_byte & 0x0f != 0 {
+                    break;
+                }
                 continue;
             }
 
-            // Extract the ID (top 4 bits)
-            let id = (header_byte >> 4) & 0x0F;
+            // ID 15 is reserved and terminates one-byte extension parsing.
+            if id == 15 {
+                break;
+            }
 
             // Length is stored as L-1, so need to add 1 (bottom 4 bits)
             let length = ((header_byte & 0x0F) + 1) as usize;
@@ -403,9 +402,10 @@ impl RtpHeaderExtensions {
             let id = data[i];
             i += 1;
 
-            // End of extensions is marked by a 0 ID
+            // ID zero is a single padding byte. There is no artificial end
+            // marker in RFC 8285, so parsing continues with the next byte.
             if id == 0 {
-                break;
+                continue;
             }
 
             // Make sure we have enough data for the length
@@ -669,6 +669,9 @@ mod tests {
         let long_data: Vec<u8> = (0..20).collect(); // 20 bytes > 16
         assert!(one_byte.add_extension(1, long_data).is_err());
 
+        // One-byte format cannot encode an empty element.
+        assert!(one_byte.add_extension(1, Vec::<u8>::new()).is_err());
+
         // Test valid extensions
         assert!(one_byte.add_extension(1, vec![1, 2, 3]).is_ok());
         assert!(one_byte.add_extension(14, vec![4, 5, 6]).is_ok());
@@ -729,9 +732,10 @@ mod tests {
 
         let serialized = ext.serialize().unwrap();
 
-        // Should have: 1 byte header + 1 byte data + 1 byte end marker (0x00) + 1 byte padding = 4 bytes
+        // One-byte header + one byte of data + two padding bytes.
         assert_eq!(serialized.len(), 4);
         assert_eq!(serialized.len() % 4, 0);
+        assert_eq!(&serialized[..], &[0x10, 42, 0, 0]);
     }
 
     #[test]
@@ -743,8 +747,63 @@ mod tests {
 
         let serialized = ext.serialize().unwrap();
 
-        // Should have: 1 byte ID + 1 byte length + 1 byte data + 1 byte end marker (0x00) = 4 bytes
+        // ID + length + data + one padding byte.
         assert_eq!(serialized.len(), 4);
         assert_eq!(serialized.len() % 4, 0);
+        assert_eq!(&serialized[..], &[1, 1, 42, 0]);
+    }
+
+    #[test]
+    fn aligned_extensions_do_not_gain_an_artificial_end_word() {
+        let mut one_byte = RtpHeaderExtensions::new_one_byte();
+        one_byte.add_extension(1, vec![1, 2, 3]).unwrap();
+        assert_eq!(&one_byte.serialize().unwrap()[..], &[0x12, 1, 2, 3]);
+        assert_eq!(one_byte.size(), 4);
+
+        let mut two_byte = RtpHeaderExtensions::new_two_byte();
+        two_byte.add_extension(1, vec![1, 2]).unwrap();
+        assert_eq!(&two_byte.serialize().unwrap()[..], &[1, 2, 1, 2]);
+        assert_eq!(two_byte.size(), 4);
+    }
+
+    #[test]
+    fn test_one_byte_padding_between_elements_is_ignored() {
+        let data = [0x10, 0xaa, 0x00, 0x21, 0xbb, 0xcc, 0x00, 0x00];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(ONE_BYTE_EXTENSION_ID, &data).unwrap();
+
+        assert_eq!(parsed.elements.len(), 2);
+        assert_eq!(parsed.elements[0], ExtensionElement::new(1, vec![0xaa]));
+        assert_eq!(
+            parsed.elements[1],
+            ExtensionElement::new(2, vec![0xbb, 0xcc])
+        );
+    }
+
+    #[test]
+    fn test_one_byte_reserved_ids_terminate_parsing() {
+        let reserved_fifteen = [0x10, 0xaa, 0xf7, 0x20, 0xbb, 0xcc, 0x00, 0x00];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(ONE_BYTE_EXTENSION_ID, &reserved_fifteen)
+                .unwrap();
+        assert_eq!(parsed.elements, vec![ExtensionElement::new(1, vec![0xaa])]);
+
+        let invalid_zero_length = [0x10, 0xaa, 0x01, 0x20, 0xbb, 0xcc, 0x00, 0x00];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(ONE_BYTE_EXTENSION_ID, &invalid_zero_length)
+                .unwrap();
+        assert_eq!(parsed.elements, vec![ExtensionElement::new(1, vec![0xaa])]);
+    }
+
+    #[test]
+    fn test_two_byte_padding_and_zero_length_elements() {
+        let data = [0x00, 0x01, 0x00, 0x00];
+        let parsed =
+            RtpHeaderExtensions::from_extension_data(TWO_BYTE_EXTENSION_ID_BASE, &data).unwrap();
+        assert_eq!(parsed.elements, vec![ExtensionElement::new(1, Vec::new())]);
+
+        let mut extensions = RtpHeaderExtensions::new_two_byte();
+        extensions.add_extension(1, Vec::<u8>::new()).unwrap();
+        assert_eq!(&extensions.serialize().unwrap()[..], &[1, 0, 0, 0]);
     }
 }

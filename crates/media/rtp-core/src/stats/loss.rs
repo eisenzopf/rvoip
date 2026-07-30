@@ -1,4 +1,10 @@
+use std::collections::HashSet;
+
 use crate::RtpSequenceNumber;
+
+/// Number of recent extended sequence numbers retained for duplicate and
+/// reordering detection.
+const RECEIVED_WINDOW_SIZE: i64 = 2048;
 
 /// Packet loss tracker for RTP streams
 #[derive(Debug, Clone)]
@@ -6,17 +12,23 @@ pub struct PacketLossTracker {
     /// Base sequence number (first received)
     base_seq: Option<RtpSequenceNumber>,
 
-    /// Highest sequence number received
-    highest_seq: u32,
+    /// Extended sequence number of the first packet.
+    base_extended: Option<i64>,
 
-    /// Previous sequence number
-    prev_seq: Option<RtpSequenceNumber>,
-
-    /// Number of packets expected
-    expected: u64,
+    /// Highest extended sequence number received.
+    highest_seq: i64,
 
     /// Number of packets actually received
     received: u64,
+
+    /// Number of distinct packets received in the tracked sequence range.
+    unique_received: u64,
+
+    /// Expected-packet total captured when the preceding RTCP report was built.
+    expected_prior: u64,
+
+    /// Unique-received total captured when the preceding RTCP report was built.
+    unique_received_prior: u64,
 
     /// Number of packets lost
     lost: u64,
@@ -27,8 +39,11 @@ pub struct PacketLossTracker {
     /// Number of reordered packets
     reordered: u64,
 
-    /// Sequence number cycle count
-    cycles: u16,
+    /// Sequence number cycle count of the highest packet.
+    cycles: u32,
+
+    /// Recently received extended sequence numbers.
+    received_window: HashSet<i64>,
 
     /// Recent loss history (1=received, 0=lost) for burst detection
     loss_history: Vec<bool>,
@@ -51,14 +66,17 @@ impl PacketLossTracker {
     pub fn new() -> Self {
         Self {
             base_seq: None,
+            base_extended: None,
             highest_seq: 0,
-            prev_seq: None,
-            expected: 0,
             received: 0,
+            unique_received: 0,
+            expected_prior: 0,
+            unique_received_prior: 0,
             lost: 0,
             duplicates: 0,
             reordered: 0,
             cycles: 0,
+            received_window: HashSet::with_capacity(RECEIVED_WINDOW_SIZE as usize),
             loss_history: Vec::with_capacity(64),
             history_size: 64,
             burst_count: 0,
@@ -74,43 +92,36 @@ impl PacketLossTracker {
         // Initialize if this is the first packet
         if self.base_seq.is_none() {
             self.base_seq = Some(seq);
-            self.highest_seq = seq as u32;
-            self.prev_seq = Some(seq);
+            self.base_extended = Some(seq as i64);
+            self.highest_seq = seq as i64;
+            self.unique_received = 1;
+            self.received_window.insert(seq as i64);
             self.loss_history.push(true); // First packet is received
             return PacketLossResult::FirstPacket { seq };
         }
 
-        // Check for sequence number wraparound
-        let prev_seq = self.prev_seq.unwrap();
-        if seq < 0x1000 && prev_seq > 0xf000 {
-            // Sequence number wrapped around from 65535 to 0
-            self.cycles += 1;
-        }
-
-        // Calculate extended sequence number (with cycle count)
-        let extended_seq = (self.cycles as u32) << 16 | (seq as u32);
-
-        // Check for duplicate packets - a duplicate is a previously seen sequence number
-        // This applies to all sequence numbers we've previously processed, not just the last one
-        // Only need to check if we already saw this sequence number within the valid window
-        // First check exact match with previous seq (most common case)
-        if seq == prev_seq {
+        let extended_seq = self.extend_sequence(seq);
+        if self.received_window.contains(&extended_seq) {
             self.duplicates += 1;
             return PacketLossResult::Duplicate { seq };
         }
 
-        // For simplicity in this test implementation, we'll consider any reordered packet
-        // that arrives with a sequence number less than highest - but not equal to prev_seq -
-        // as a duplicate if it's already been seen
-
-        // Check if this is a reordered packet
         let highest_seq = self.highest_seq;
         if extended_seq < highest_seq {
-            // Count as reordered
             self.reordered += 1;
 
-            // Add to history
-            self.add_to_history(true); // Mark as received
+            // Sequence numbers older than the bounded window cannot safely be
+            // distinguished from duplicates. Count them as reordered, but do
+            // not change the established loss total.
+            let oldest_tracked = highest_seq - (RECEIVED_WINDOW_SIZE - 1);
+            if extended_seq >= oldest_tracked {
+                self.received_window.insert(extended_seq);
+                if extended_seq >= self.base_extended.expect("tracker is initialized") {
+                    self.unique_received += 1;
+                    self.lost = self.lost.saturating_sub(1);
+                }
+                self.add_to_history(true);
+            }
 
             return PacketLossResult::Reordered {
                 seq,
@@ -118,66 +129,52 @@ impl PacketLossTracker {
             };
         }
 
-        // Calculate expected packets vs. received
         if extended_seq > highest_seq {
-            let gap = extended_seq - highest_seq;
+            let gap = (extended_seq - highest_seq) as u64;
+            self.unique_received += 1;
+            self.received_window.insert(extended_seq);
 
             if gap > 1 {
-                // There was at least one packet loss in the gap
                 let lost_packets = gap - 1;
-                self.lost += lost_packets as u64;
+                self.lost += lost_packets;
 
-                // Update burst statistics
                 self.update_burst_stats(lost_packets);
 
-                // Add lost packets to history
-                for _ in 0..lost_packets {
-                    self.add_to_history(false); // Mark as lost
+                // The history is bounded; avoid work proportional to a
+                // maliciously large sequence jump.
+                for _ in 0..lost_packets.min(self.history_size as u64) {
+                    self.add_to_history(false);
                 }
 
-                // Add this packet to history
-                self.add_to_history(true); // Mark as received
-
-                // Update highest sequence
-                self.highest_seq = extended_seq;
-                self.prev_seq = Some(seq);
+                self.add_to_history(true);
+                self.advance_highest(extended_seq);
 
                 return PacketLossResult::Gap {
                     seq,
                     expected: (highest_seq + 1) as u16,
-                    lost: lost_packets as u16,
+                    lost: lost_packets.min(u16::MAX as u64) as u16,
                 };
             } else {
-                // Normal case - next sequential packet
-                self.add_to_history(true); // Mark as received
-                self.highest_seq = extended_seq;
-                self.prev_seq = Some(seq);
+                self.add_to_history(true);
+                self.advance_highest(extended_seq);
 
                 return PacketLossResult::Sequential { seq };
             }
         }
 
-        // Should not reach here normally, but just in case
-        self.prev_seq = Some(seq);
+        // Equality is handled by the received window above.
         PacketLossResult::Unknown
+    }
+
+    /// Return the extended highest sequence number used in RTCP reports.
+    pub fn highest_extended_sequence(&self) -> u32 {
+        self.highest_seq.clamp(0, u32::MAX as i64) as u32
     }
 
     /// Calculate the total number of expected packets
     pub fn calculate_expected(&self) -> u64 {
-        if let Some(base_seq) = self.base_seq {
-            // For the base sequence, use the raw value with cycle count = 0
-            let base_ext = base_seq as u32;
-
-            // For highest, use the extended sequence with cycle count
-            let highest_ext = self.highest_seq;
-
-            // Handle wraparound case
-            if highest_ext >= base_ext {
-                (highest_ext - base_ext + 1) as u64
-            } else {
-                // In case of wraparound where highest is actually lower after accounting for cycles
-                ((u32::MAX as u64) - (base_ext as u64) + (highest_ext as u64) + 1) as u64
-            }
+        if let Some(base_extended) = self.base_extended {
+            (self.highest_seq - base_extended + 1).max(0) as u64
         } else {
             0
         }
@@ -190,29 +187,50 @@ impl PacketLossTracker {
             return 0;
         }
 
-        // Handle cases where expected < received (e.g., in tests or with reordering)
-        let received_valid = self.received - self.duplicates;
-        let lost = if expected >= received_valid {
-            expected - received_valid
-        } else {
-            0 // No loss if we received more than expected (shouldn't happen normally)
-        };
+        let lost = expected.saturating_sub(self.unique_received);
 
         let fraction = (lost as f64 / expected as f64) * 256.0;
         fraction.min(255.0) as u8
     }
 
+    /// Return the packet-loss fraction for the interval since the preceding
+    /// RTCP report without advancing the report snapshot.
+    ///
+    /// RFC 3550 defines the fraction field over the reporting interval, not
+    /// over the lifetime of the source. Late packets can make the interval's
+    /// received delta exceed its expected delta; that recovery is encoded as
+    /// zero rather than wrapping into a large loss fraction.
+    pub fn interval_fraction_lost(&self) -> u8 {
+        let expected = self.calculate_expected();
+        let expected_interval = expected.saturating_sub(self.expected_prior);
+        let received_interval = self
+            .unique_received
+            .saturating_sub(self.unique_received_prior);
+
+        if expected_interval == 0 || received_interval >= expected_interval {
+            return 0;
+        }
+
+        let lost_interval = expected_interval - received_interval;
+        ((lost_interval * 256) / expected_interval).min(255) as u8
+    }
+
+    /// Return the current interval loss fraction and advance the report
+    /// snapshot so the following report covers only newly expected packets.
+    pub fn take_interval_fraction_lost(&mut self) -> u8 {
+        let fraction_lost = self.interval_fraction_lost();
+        self.expected_prior = self.calculate_expected();
+        self.unique_received_prior = self.unique_received;
+        fraction_lost
+    }
+
     /// Calculate the cumulative number of packets lost
     pub fn get_cumulative_lost(&self) -> u32 {
         let expected = self.calculate_expected();
+        let calculated = expected.saturating_sub(self.unique_received);
+        debug_assert_eq!(self.lost, calculated);
 
-        // Make sure we handle the case where we receive more packets than expected
-        // (e.g., due to duplicates)
-        if expected >= self.received - self.duplicates {
-            (expected - (self.received - self.duplicates)) as u32
-        } else {
-            0
-        }
+        calculated.min(0x00ff_ffff) as u32
     }
 
     /// Get packet loss statistics
@@ -221,7 +239,7 @@ impl PacketLossTracker {
 
         PacketLossStats {
             packets_received: self.received,
-            packets_lost: self.lost,
+            packets_lost: self.get_cumulative_lost() as u64,
             packets_expected: expected,
             duplicates: self.duplicates,
             reordered: self.reordered,
@@ -234,14 +252,17 @@ impl PacketLossTracker {
     /// Reset the tracker
     pub fn reset(&mut self) {
         self.base_seq = None;
+        self.base_extended = None;
         self.highest_seq = 0;
-        self.prev_seq = None;
-        self.expected = 0;
         self.received = 0;
+        self.unique_received = 0;
+        self.expected_prior = 0;
+        self.unique_received_prior = 0;
         self.lost = 0;
         self.duplicates = 0;
         self.reordered = 0;
         self.cycles = 0;
+        self.received_window.clear();
         self.loss_history.clear();
         self.burst_count = 0;
         self.max_burst_length = 0;
@@ -249,6 +270,32 @@ impl PacketLossTracker {
     }
 
     // Internal helper methods
+
+    /// Map a 16-bit sequence number to the cycle nearest the current highest
+    /// sequence number. This permits late packets from the preceding cycle
+    /// without mistaking them for a new wrap.
+    fn extend_sequence(&self, seq: RtpSequenceNumber) -> i64 {
+        let highest_low = (self.highest_seq & 0xffff) as i32;
+        let difference = seq as i32 - highest_low;
+        let cycle_base = self.highest_seq & !0xffff;
+
+        if difference < -0x8000 {
+            cycle_base + 0x1_0000 + seq as i64
+        } else if difference > 0x8000 {
+            cycle_base - 0x1_0000 + seq as i64
+        } else {
+            cycle_base + seq as i64
+        }
+    }
+
+    fn advance_highest(&mut self, extended_seq: i64) {
+        self.highest_seq = extended_seq;
+        self.cycles = (extended_seq >> 16).clamp(0, u32::MAX as i64) as u32;
+
+        let oldest_tracked = extended_seq - (RECEIVED_WINDOW_SIZE - 1);
+        self.received_window
+            .retain(|received| *received >= oldest_tracked);
+    }
 
     /// Add a packet status to the loss history
     fn add_to_history(&mut self, received: bool) {
@@ -259,7 +306,7 @@ impl PacketLossTracker {
     }
 
     /// Update burst statistics when packets are lost
-    fn update_burst_stats(&mut self, lost_count: u32) {
+    fn update_burst_stats(&mut self, lost_count: u64) {
         if lost_count == 0 {
             // Reset current burst if any
             if self.current_burst_length > 0 {
@@ -268,9 +315,9 @@ impl PacketLossTracker {
             return;
         }
 
-        // Each gap counts as one burst
-        self.burst_count = 1; // We always count just 1 burst
-        self.current_burst_length = lost_count as u64;
+        // Each newly observed gap counts as one burst.
+        self.burst_count += 1;
+        self.current_burst_length = lost_count;
 
         // Update max burst length
         if self.current_burst_length > self.max_burst_length {
@@ -416,22 +463,16 @@ mod tests {
             PacketLossResult::Sequential { seq: 1001 }
         );
 
-        // When we send 1000 again, it should be detected as Reordered since it's less than
-        // the highest sequence number we've seen (1001), but not equal to the previous seq
-        // In our implementation, this is considered out of order, not a duplicate
+        // Every sequence number in the bounded received window is recognized
+        // as a duplicate, not only the most recently received one.
         let result1 = tracker.process(1000);
         assert_eq!(
             result1,
-            PacketLossResult::Reordered {
-                seq: 1000,
-                expected: 1001
-            },
-            "Expected Reordered but got {:?}",
+            PacketLossResult::Duplicate { seq: 1000 },
+            "Expected Duplicate but got {:?}",
             result1
         );
 
-        // When we send 1001 again, it should be detected as a Duplicate since it equals
-        // the previous sequence number
         let result2 = tracker.process(1001);
         assert_eq!(
             result2,
@@ -443,8 +484,8 @@ mod tests {
         // Check stats
         let stats = tracker.get_stats();
         assert_eq!(stats.packets_received, 4); // 2 unique + 2 more
-        assert_eq!(stats.duplicates, 1); // Only one true duplicate detected
-        assert_eq!(stats.reordered, 1); // One reordered packet
+        assert_eq!(stats.duplicates, 2);
+        assert_eq!(stats.reordered, 0);
         assert_eq!(stats.packets_expected, 2); // Only expect 2 unique packets
     }
 
@@ -477,7 +518,78 @@ mod tests {
         let stats = tracker.get_stats();
         assert_eq!(stats.packets_received, 3);
         assert_eq!(stats.reordered, 1);
-        assert_eq!(stats.packets_lost, 1); // This doesn't get decremented when we receive the reordered packet
+        assert_eq!(stats.packets_lost, 0);
+        assert_eq!(tracker.get_cumulative_lost(), 0);
+    }
+
+    #[test]
+    fn packet_before_base_does_not_hide_later_loss() {
+        let mut tracker = PacketLossTracker::new();
+
+        tracker.process(1000);
+        assert!(matches!(
+            tracker.process(999),
+            PacketLossResult::Reordered { .. }
+        ));
+        assert_eq!(
+            tracker.process(1002),
+            PacketLossResult::Gap {
+                seq: 1002,
+                expected: 1001,
+                lost: 1,
+            }
+        );
+        assert_eq!(tracker.get_cumulative_lost(), 1);
+    }
+
+    #[test]
+    fn high_late_packet_in_cycle_zero_is_not_a_future_jump() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(1);
+
+        assert!(matches!(
+            tracker.process(65535),
+            PacketLossResult::Reordered { .. }
+        ));
+        assert_eq!(tracker.highest_extended_sequence(), 1);
+        assert_eq!(tracker.get_cumulative_lost(), 0);
+    }
+
+    #[test]
+    fn late_packet_before_sequence_zero_is_then_a_duplicate() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(0);
+
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Reordered {
+                seq: 65535,
+                expected: 0,
+            }
+        );
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Duplicate { seq: 65535 }
+        );
+        assert_eq!(tracker.highest_extended_sequence(), 0);
+        assert_eq!(tracker.get_stats().duplicates, 1);
+    }
+
+    #[test]
+    fn rtcp_fraction_lost_is_scoped_to_each_report_interval() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(10);
+        tracker.process(12);
+
+        assert_eq!(tracker.take_interval_fraction_lost(), 85);
+        assert_eq!(tracker.get_cumulative_lost(), 1);
+
+        for sequence in 13..=20 {
+            tracker.process(sequence);
+        }
+
+        assert_eq!(tracker.take_interval_fraction_lost(), 0);
+        assert_eq!(tracker.get_cumulative_lost(), 1);
     }
 
     #[test]
@@ -508,6 +620,39 @@ mod tests {
 
         // Check cycle count
         assert_eq!(tracker.cycles, 1);
+        assert_eq!(tracker.highest_extended_sequence(), 0x1_0001);
+    }
+
+    #[test]
+    fn test_reordering_around_sequence_wrap_fills_loss() {
+        let mut tracker = PacketLossTracker::new();
+
+        assert_eq!(
+            tracker.process(65534),
+            PacketLossResult::FirstPacket { seq: 65534 }
+        );
+        assert_eq!(
+            tracker.process(0),
+            PacketLossResult::Gap {
+                seq: 0,
+                expected: 65535,
+                lost: 1,
+            }
+        );
+        assert_eq!(tracker.get_cumulative_lost(), 1);
+
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Reordered {
+                seq: 65535,
+                expected: 0,
+            }
+        );
+        assert_eq!(tracker.get_cumulative_lost(), 0);
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Duplicate { seq: 65535 }
+        );
     }
 
     #[test]
@@ -527,8 +672,7 @@ mod tests {
 
         // Check stats
         let stats = tracker.get_stats();
-        // Our implementation counts only 1 burst
-        assert_eq!(stats.burst_count, 1);
+        assert_eq!(stats.burst_count, 2);
         // The max burst length is from the first gap (4 packets)
         assert_eq!(stats.max_burst_length, 4);
     }

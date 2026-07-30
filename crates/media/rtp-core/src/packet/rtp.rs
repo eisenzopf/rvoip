@@ -15,12 +15,23 @@ pub struct RtpPacket {
 
     /// Payload data
     pub payload: Bytes,
+
+    /// Number of RTP padding octets on the wire.
+    ///
+    /// Padding is not included in [`Self::payload`]. A non-zero value must
+    /// agree with [`RtpHeader::padding`]; the final serialized padding octet
+    /// contains this value as required by RFC 3550.
+    pub padding_size: u8,
 }
 
 impl RtpPacket {
     /// Create a new RTP packet with the given header and payload
     pub fn new(header: RtpHeader, payload: Bytes) -> Self {
-        Self { header, payload }
+        Self {
+            header,
+            payload,
+            padding_size: 0,
+        }
     }
 
     /// Create a new RTP packet with the standard header fields and payload
@@ -32,12 +43,77 @@ impl RtpPacket {
         payload: Bytes,
     ) -> Self {
         let header = RtpHeader::new(payload_type, sequence_number, timestamp, ssrc);
-        Self { header, payload }
+        Self {
+            header,
+            payload,
+            padding_size: 0,
+        }
+    }
+
+    /// Configure the number of padding octets to write on the wire.
+    pub fn set_padding(&mut self, padding_size: u8) {
+        self.padding_size = padding_size;
+        self.header.padding = padding_size != 0;
+    }
+
+    /// Remove RTP padding from the packet.
+    pub fn clear_padding(&mut self) {
+        self.set_padding(0);
     }
 
     /// Get the total size of the packet in bytes
     pub fn size(&self) -> usize {
-        self.header.size() + self.payload.len()
+        self.header.size() + self.payload.len() + self.padding_size as usize
+    }
+
+    fn payload_bounds(data: &[u8], header_size: usize, has_padding: bool) -> Result<(usize, u8)> {
+        if !has_padding {
+            return Ok((data.len(), 0));
+        }
+
+        if data.len() <= header_size {
+            return Err(crate::Error::InvalidPacket(
+                "RTP padding flag is set but the packet has no padding octets".to_string(),
+            ));
+        }
+
+        let padding_size = data[data.len() - 1];
+        if padding_size == 0 {
+            return Err(crate::Error::InvalidPacket(
+                "RTP padding length must be non-zero".to_string(),
+            ));
+        }
+
+        let available = data.len() - header_size;
+        if padding_size as usize > available {
+            return Err(crate::Error::InvalidPacket(format!(
+                "RTP padding length {} exceeds {} available payload octets",
+                padding_size, available
+            )));
+        }
+
+        Ok((data.len() - padding_size as usize, padding_size))
+    }
+
+    fn validate_padding(&self) -> Result<()> {
+        if self.header.padding != (self.padding_size != 0) {
+            return Err(crate::Error::InvalidParameter(format!(
+                "RTP padding flag ({}) does not match padding length ({})",
+                self.header.padding, self.padding_size
+            )));
+        }
+        Ok(())
+    }
+
+    fn serialize_padding(&self, buf: &mut BytesMut) {
+        if self.padding_size == 0 {
+            return;
+        }
+
+        for _ in 1..self.padding_size {
+            buf.extend_from_slice(&[0]);
+        }
+        buf.extend_from_slice(&[self.padding_size]);
     }
 
     /// Parse an RTP packet from bytes.
@@ -50,15 +126,21 @@ impl RtpPacket {
         let (header, header_size) = RtpHeader::parse_without_consuming(data)?;
         debug!("Parsed header of size {}", header_size);
 
-        // Extract the payload
-        let payload = if data.len() > header_size {
-            Bytes::copy_from_slice(&data[header_size..])
+        let (payload_end, padding_size) = Self::payload_bounds(data, header_size, header.padding)?;
+
+        // Extract the payload without the RTP padding.
+        let payload = if payload_end > header_size {
+            Bytes::copy_from_slice(&data[header_size..payload_end])
         } else {
             Bytes::new()
         };
         debug!("Extracted payload of size {}", payload.len());
 
-        Ok(Self { header, payload })
+        Ok(Self {
+            header,
+            payload,
+            padding_size,
+        })
     }
 
     /// Parse an RTP packet from an owned `Bytes`, slicing the payload as a
@@ -69,16 +151,22 @@ impl RtpPacket {
         let (header, header_size) = RtpHeader::parse_without_consuming(&data)?;
         debug!("Parsed header of size {}", header_size);
 
+        let (payload_end, padding_size) = Self::payload_bounds(&data, header_size, header.padding)?;
+
         // Zero-copy slice: `Bytes::slice` only bumps the underlying
         // refcount, no allocation.
-        let payload = if data.len() > header_size {
-            data.slice(header_size..)
+        let payload = if payload_end > header_size {
+            data.slice(header_size..payload_end)
         } else {
             Bytes::new()
         };
         debug!("Sliced payload of size {}", payload.len());
 
-        Ok(Self { header, payload })
+        Ok(Self {
+            header,
+            payload,
+            padding_size,
+        })
     }
 
     /// Serialize the packet to bytes.
@@ -88,10 +176,12 @@ impl RtpPacket {
     /// [`Self::serialize_into`] with a per-task buffer to amortise the
     /// allocation across calls.
     pub fn serialize(&self) -> Result<Bytes> {
+        self.validate_padding()?;
         let total_size = self.size();
         let mut buf = BytesMut::with_capacity(total_size);
         self.header.serialize(&mut buf)?;
         buf.extend_from_slice(&self.payload);
+        self.serialize_padding(&mut buf);
         Ok(buf.freeze())
     }
 
@@ -111,6 +201,7 @@ impl RtpPacket {
     /// performs an internal reallocation that only pays off when the
     /// buffer is reused across repeated calls.
     pub fn serialize_into(&self, buf: &mut BytesMut) -> Result<Bytes> {
+        self.validate_padding()?;
         let total_size = self.size();
         buf.reserve(total_size);
 
@@ -119,6 +210,9 @@ impl RtpPacket {
 
         // Add the payload
         buf.extend_from_slice(&self.payload);
+
+        // Add RFC 3550 padding, with the count in the final octet.
+        self.serialize_padding(buf);
 
         // Split off exactly the bytes we wrote and freeze them into an
         // immutable Bytes view. `buf` retains any leftover capacity for
@@ -131,9 +225,10 @@ impl fmt::Debug for RtpPacket {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "RtpPacket {{ header: {:?}, payload_len: {} }}",
+            "RtpPacket {{ header: {:?}, payload_len: {}, padding_size: {} }}",
             self.header,
-            self.payload.len()
+            self.payload.len(),
+            self.padding_size
         )
     }
 }
@@ -213,6 +308,51 @@ mod tests {
 
         assert_eq!(serialized.len(), RTP_MIN_HEADER_SIZE + payload.len());
         assert_eq!(&serialized[RTP_MIN_HEADER_SIZE..], payload.as_ref());
+    }
+
+    #[test]
+    fn test_padding_roundtrip_and_payload_stripping() {
+        let mut packet = RtpPacket::new_with_payload(
+            96,
+            1000,
+            12345,
+            0xabcdef01,
+            Bytes::from_static(b"payload"),
+        );
+        packet.set_padding(4);
+
+        let serialized = packet.serialize().unwrap();
+        assert_eq!(&serialized[serialized.len() - 4..], &[0, 0, 0, 4]);
+
+        let parsed = RtpPacket::parse(&serialized).unwrap();
+        assert!(parsed.header.padding);
+        assert_eq!(parsed.padding_size, 4);
+        assert_eq!(parsed.payload, Bytes::from_static(b"payload"));
+        assert_eq!(parsed, packet);
+    }
+
+    #[test]
+    fn test_parse_rejects_malformed_padding() {
+        let packet =
+            RtpPacket::new_with_payload(96, 1000, 12345, 0xabcdef01, Bytes::from_static(b"x"));
+        let mut serialized = packet.serialize().unwrap().to_vec();
+        serialized[0] |= 0x20;
+
+        serialized.push(0);
+        assert!(RtpPacket::parse(&serialized).is_err());
+
+        *serialized.last_mut().unwrap() = 3;
+        assert!(RtpPacket::parse(&serialized).is_err());
+
+        serialized.truncate(RTP_MIN_HEADER_SIZE);
+        assert!(RtpPacket::parse(&serialized).is_err());
+    }
+
+    #[test]
+    fn test_serialize_rejects_inconsistent_padding_state() {
+        let mut packet = RtpPacket::new_with_payload(96, 1000, 12345, 0xabcdef01, Bytes::new());
+        packet.header.padding = true;
+        assert!(packet.serialize().is_err());
     }
 
     #[test]
