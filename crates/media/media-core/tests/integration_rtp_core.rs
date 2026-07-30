@@ -43,6 +43,10 @@ async fn create_test_rtp_client() -> Box<dyn MediaTransportClient> {
     let remote_addr: SocketAddr = "127.0.0.1:5006".parse().unwrap();
 
     let config = ClientConfigBuilder::sip()
+        // This test exercises plain RTP. The SIP preset intentionally carries
+        // an unprovisioned secure-policy marker in 0.3.5 and must be resolved
+        // explicitly instead of silently downgrading to plaintext.
+        .with_no_security()
         .remote_address(remote_addr)
         .default_payload_type(0)
         .clock_rate(8000)
