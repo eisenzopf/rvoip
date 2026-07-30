@@ -23,6 +23,8 @@
 //!
 //! ### Using the Codec Factory
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::CodecFactory;
 //! use codec_core::types::{CodecConfig, CodecType, SampleRate};
 //!
@@ -35,16 +37,20 @@
 //! let samples = vec![0i16; 160];
 //! let encoded = codec.encode(&samples)?;
 //! let decoded = codec.decode(&encoded)?;
+//! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
 //! ### Direct Codec Access
 //! ```rust
+//! # #[cfg(feature = "g711")]
+//! # {
 //! use codec_core::codecs::g711::{G711Codec, G711Variant};
 //!
 //! // Direct instantiation
 //! let mut g711_ulaw = G711Codec::new(G711Variant::MuLaw);
 //! let mut g711_alaw = G711Codec::new(G711Variant::ALaw);
+//! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
@@ -411,7 +417,12 @@ mod tests {
     #[test]
     fn test_codec_factory_supported_codecs() {
         let supported = CodecFactory::supported_codecs();
+
+        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
         assert!(!supported.is_empty());
+
+        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        assert!(supported.is_empty());
 
         #[cfg(feature = "g711")]
         {
@@ -466,8 +477,18 @@ mod tests {
     #[test]
     fn test_codec_capabilities() {
         let caps = CodecCapabilities::get_all();
-        assert!(!caps.codec_types.is_empty());
-        assert!(!caps.codec_info.is_empty());
+
+        #[cfg(any(feature = "g711", feature = "g729", feature = "opus"))]
+        {
+            assert!(!caps.codec_types.is_empty());
+            assert!(!caps.codec_info.is_empty());
+        }
+
+        #[cfg(not(any(feature = "g711", feature = "g729", feature = "opus")))]
+        {
+            assert!(caps.codec_types.is_empty());
+            assert!(caps.codec_info.is_empty());
+        }
 
         #[cfg(feature = "g711")]
         {
