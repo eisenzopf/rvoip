@@ -247,6 +247,9 @@ pub struct AdvancedProcessorSet {
 pub struct RtpSessionWrapper {
     /// The actual RTP session
     pub session: Arc<tokio::sync::Mutex<RtpSession>>,
+    /// Serializes media configuration generations for this dialog. The guard
+    /// is cloned out of the map before awaiting so no DashMap shard is held.
+    pub(super) update_lock: Arc<tokio::sync::Mutex<()>>,
     /// Local RTP address
     pub local_addr: SocketAddr,
     /// Remote RTP address (if known)

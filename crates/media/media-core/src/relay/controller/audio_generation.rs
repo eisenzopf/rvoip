@@ -15,7 +15,11 @@ use tokio::time::Instant as TokioInstant;
 use tracing::{debug, error, info, warn};
 
 use crate::diagnostics;
+use crate::types::AudioFrame;
 use rvoip_rtp_core::{RtpSendHandle, RtpSession};
+
+use super::codec_runtime::DialogCodecRuntime;
+use super::types::NegotiatedAudioCodec;
 
 const AUDIO_TX_PHASE_MULTIPLIER: u64 = 0x9E37_79B9_7F4A_7C15;
 #[cfg(any(feature = "perf-diagnostics", test))]
@@ -89,12 +93,17 @@ pub enum AudioSource {
 pub struct AudioGenerator {
     /// Sample rate (Hz)
     sample_rate: u32,
+    /// Clock of legacy PCMU custom samples before resampling to `sample_rate`.
+    custom_source_rate: u32,
     /// Current phase for sine wave generation
     phase: f64,
     /// Audio source configuration
     source: AudioSource,
     /// Current position in custom samples (if using custom samples)
     sample_position: usize,
+    /// Output-frame cursor used for deterministic nearest-neighbour custom
+    /// sample-rate conversion.
+    custom_output_position: u64,
     /// One exact encoded period for integral-frequency tones.
     tone_waveform: Option<Vec<u8>>,
     /// Immutable packet payloads keyed by (packet length, waveform offset).
@@ -110,22 +119,34 @@ impl AudioGenerator {
         };
         Self {
             sample_rate,
+            custom_source_rate: sample_rate,
             phase: 0.0,
             tone_waveform: encoded_integral_tone_period(sample_rate, &source),
             source,
             sample_position: 0,
+            custom_output_position: 0,
             tone_payload_cache: HashMap::new(),
         }
     }
 
     /// Create a new audio generator with custom audio source
     pub fn new_with_source(sample_rate: u32, source: AudioSource) -> Self {
+        Self::new_with_source_rates(sample_rate, sample_rate, source)
+    }
+
+    fn new_with_source_rates(
+        sample_rate: u32,
+        custom_source_rate: u32,
+        source: AudioSource,
+    ) -> Self {
         Self {
             sample_rate,
+            custom_source_rate,
             phase: 0.0,
             tone_waveform: encoded_integral_tone_period(sample_rate, &source),
             source,
             sample_position: 0,
+            custom_output_position: 0,
             tone_payload_cache: HashMap::new(),
         }
     }
@@ -188,6 +209,55 @@ impl AudioGenerator {
                 vec![0x7F; num_samples] // μ-law silence
             }
         }
+    }
+
+    /// Generate codec-neutral signed PCM at this generator's sample rate.
+    ///
+    /// `CustomSamples` remains source-compatible with its historical wire
+    /// contract: the bytes are interpreted as PCMU. They are decoded to PCM
+    /// here so the negotiated codec, rather than the source container, owns
+    /// the RTP payload encoding.
+    pub fn generate_pcm_frame(&mut self, frames: usize, channels: u8) -> Vec<i16> {
+        let channels = usize::from(channels.max(1));
+        let mut output = Vec::with_capacity(frames.saturating_mul(channels));
+        match self.source.clone() {
+            AudioSource::Tone {
+                frequency,
+                amplitude,
+            } => {
+                let phase_increment =
+                    2.0 * std::f64::consts::PI * frequency / self.sample_rate.max(1) as f64;
+                for _ in 0..frames {
+                    let sample = (self.phase.sin() * amplitude * 32767.0) as i16;
+                    output.extend(std::iter::repeat_n(sample, channels));
+                    self.phase = (self.phase + phase_increment) % (2.0 * std::f64::consts::PI);
+                }
+            }
+            AudioSource::CustomSamples { samples, repeat } => {
+                for _ in 0..frames {
+                    let source_index = self
+                        .custom_output_position
+                        .saturating_mul(u64::from(self.custom_source_rate.max(1)))
+                        / u64::from(self.sample_rate.max(1));
+                    self.custom_output_position = self.custom_output_position.saturating_add(1);
+                    let encoded = if samples.is_empty() {
+                        0xff
+                    } else if repeat {
+                        let sample_count = u64::try_from(samples.len()).unwrap_or(u64::MAX);
+                        samples[usize::try_from(source_index % sample_count).unwrap_or(0)]
+                    } else {
+                        usize::try_from(source_index)
+                            .ok()
+                            .and_then(|index| samples.get(index).copied())
+                            .unwrap_or(0xff)
+                    };
+                    let sample = codec_core::utils::mulaw_to_linear_scalar(encoded);
+                    output.extend(std::iter::repeat_n(sample, channels));
+                }
+            }
+            AudioSource::PassThrough => output.resize(frames.saturating_mul(channels), 0),
+        }
+        output
     }
 
     /// Generate tone samples
@@ -290,6 +360,7 @@ impl AudioGenerator {
         self.source = source;
         self.phase = 0.0;
         self.sample_position = 0; // Reset position for custom samples
+        self.custom_output_position = 0;
     }
 }
 
@@ -383,6 +454,8 @@ pub struct AudioTransmitter {
     audio_generator: Arc<ParkingMutex<AudioGenerator>>,
     /// Transmission configuration
     config: AudioTransmitterConfig,
+    /// Exact codec generation used for both bytes and RTP payload identity.
+    codec_runtime: Arc<DialogCodecRuntime>,
     /// Whether transmission is active
     is_active: Arc<AtomicBool>,
     /// Background transmission task.
@@ -393,7 +466,7 @@ impl AudioTransmitter {
     /// Create a new audio transmitter with default configuration (pass-through mode)
     pub fn new(rtp_session: Arc<Mutex<RtpSession>>) -> Self {
         let config = AudioTransmitterConfig::default();
-        Self::new_with_config(rtp_session, config)
+        Self::new_with_config(rtp_session, config, default_pcmu_runtime())
     }
 
     /// Create a new audio transmitter with tone generation (for backward compatibility)
@@ -405,16 +478,20 @@ impl AudioTransmitter {
             },
             ..Default::default()
         };
-        Self::new_with_config(rtp_session, config)
+        Self::new_with_config(rtp_session, config, default_pcmu_runtime())
     }
 
     /// Create a new audio transmitter with custom configuration
-    pub fn new_with_config(
+    pub(super) fn new_with_config(
         rtp_session: Arc<Mutex<RtpSession>>,
         config: AudioTransmitterConfig,
+        codec_runtime: Arc<DialogCodecRuntime>,
     ) -> Self {
-        let audio_generator =
-            AudioGenerator::new_with_source(config.sample_rate, config.source.clone());
+        let audio_generator = AudioGenerator::new_with_source_rates(
+            codec_runtime.format.clock_rate,
+            config.sample_rate,
+            config.source.clone(),
+        );
 
         // Build the lock-free send handle once. This briefly locks the
         // session at construction time only; the TX hot path never
@@ -433,6 +510,7 @@ impl AudioTransmitter {
             send_handle,
             audio_generator: Arc::new(ParkingMutex::new(audio_generator)),
             config,
+            codec_runtime,
             is_active: Arc::new(AtomicBool::new(false)),
             tx_task: None,
         }
@@ -491,11 +569,24 @@ impl AudioTransmitter {
         let initial_delay = next_audio_tx_start_delay(self.config.interval);
         diagnostics::record_audio_tx_task_started(initial_delay);
         let pacing_config = audio_tx_pacing_config_from_env();
+        let codec_runtime = Arc::clone(&self.codec_runtime);
+        let payload_type = codec_runtime.format.payload_type;
+        let clock_rate = codec_runtime.format.clock_rate;
+        let channels = codec_runtime.format.channels;
 
         let collect_diagnostics = diagnostics::enabled();
         let mut next_tick_at = TokioInstant::now() + initial_delay;
         let base_packet_interval = self.config.interval;
-        let samples_per_packet = self.config.samples_per_packet;
+        let samples_per_packet = rescale_packet_frames(
+            self.config.samples_per_packet,
+            self.config.sample_rate,
+            clock_rate,
+        );
+        let max_packetization_divisor = if codec_runtime.format.name.eq_ignore_ascii_case("opus") {
+            max_divisor_for_duration(base_packet_interval, Duration::from_millis(60))
+        } else {
+            MAX_AUDIO_TX_PACKETIZATION_DIVISOR
+        };
         let pacing_sequence = pacing_config
             .map(|_| AUDIO_TX_PACING_SEQUENCE.fetch_add(1, Ordering::Relaxed))
             .unwrap_or(0);
@@ -560,63 +651,77 @@ impl AudioTransmitter {
                         pacing_consecutive_skip_count = 0;
                         samples_per_packet
                     } else {
-                        let divisor = adaptive_packetization_divisor(active_guard.active_count());
+                        let divisor = adaptive_packetization_divisor(active_guard.active_count())
+                            .min(max_packetization_divisor);
                         let packet_interval =
                             adaptive_packetization_interval(base_packet_interval, divisor);
                         next_tick_at = next_audio_tx_deadline(next_tick_at, packet_interval);
                         samples_per_packet.saturating_mul(divisor as usize)
                     };
 
-                    // Generate audio samples
-                    let audio_samples = {
+                    // Generate codec-neutral PCM and encode it with the exact
+                    // negotiated codec generation before assigning its PT.
+                    let pcm_samples = {
                         let mut generator = audio_generator.lock();
-                        generator.generate_pcmu_payload(effective_samples_per_packet)
+                        generator.generate_pcm_frame(effective_samples_per_packet, channels)
                     };
-
-                    // Send RTP packet (only if not in pass-through mode)
-                    if !matches!(audio_samples.as_ref(), [0x7F, ..] if audio_samples.iter().all(|&x| x == 0x7F))
-                    {
-                        let current_timestamp = next_timestamp;
-                        next_timestamp =
-                            next_timestamp.wrapping_add(effective_samples_per_packet as u32);
-
-                        // Fast path: send through the lock-free handle —
-                        // no `session.lock().await` per frame.
-                        let send_started = collect_diagnostics.then(Instant::now);
-                        let send_result = if let Some(handle) = &send_handle {
-                            handle
-                                .send_packet(current_timestamp, audio_samples, false)
-                                .await
-                        } else {
-                            // Fallback: session lock per frame. Only reached
-                            // if the session was missing a scheduler when
-                            // we tried to build the handle.
-                            let session = rtp_session.lock().await;
-                            session
-                                .send_packet(current_timestamp, audio_samples, false)
-                                .await
-                        };
-                        if let Some(send_started) = send_started {
-                            let send_elapsed = send_started.elapsed();
-                            send_count = send_count.saturating_add(1);
-                            if send_result.is_err() {
-                                send_failures = send_failures.saturating_add(1);
-                            }
-                            send_total = send_total.saturating_add(send_elapsed);
-                            send_max = send_max.max(send_elapsed);
-                        }
-
-                        if let Err(e) = send_result {
-                            error!("Failed to send RTP audio packet: {}", e);
+                    let frame = AudioFrame::new(pcm_samples, clock_rate, channels, next_timestamp);
+                    let audio_samples = match codec_runtime.encode(&frame).await {
+                        Ok(payload) => Bytes::from(payload),
+                        Err(error) => {
+                            error!("Failed to encode generated RTP audio: {}", error);
                             is_active.store(false, Ordering::Release);
                             break;
-                        } else {
-                            debug!(
-                                "📡 Sent RTP audio packet (timestamp: {}, {} samples)",
-                                current_timestamp, effective_samples_per_packet
-                            );
                         }
+                    };
+                    let current_timestamp = next_timestamp;
+                    next_timestamp = next_timestamp.wrapping_add(
+                        u32::try_from(effective_samples_per_packet).unwrap_or(u32::MAX),
+                    );
+
+                    // Fast path: send through the lock-free handle — no
+                    // `session.lock().await` per frame. PT and bytes come
+                    // from the same immutable codec generation.
+                    let send_started = collect_diagnostics.then(Instant::now);
+                    let send_result = if let Some(handle) = &send_handle {
+                        handle
+                            .send_packet_with_pt(
+                                current_timestamp,
+                                audio_samples,
+                                false,
+                                payload_type,
+                            )
+                            .await
+                    } else {
+                        let session = rtp_session.lock().await;
+                        session
+                            .send_packet_with_pt(
+                                current_timestamp,
+                                audio_samples,
+                                false,
+                                payload_type,
+                            )
+                            .await
+                    };
+                    if let Some(send_started) = send_started {
+                        let send_elapsed = send_started.elapsed();
+                        send_count = send_count.saturating_add(1);
+                        if send_result.is_err() {
+                            send_failures = send_failures.saturating_add(1);
+                        }
+                        send_total = send_total.saturating_add(send_elapsed);
+                        send_max = send_max.max(send_elapsed);
                     }
+
+                    if let Err(e) = send_result {
+                        error!("Failed to send RTP audio packet: {}", e);
+                        is_active.store(false, Ordering::Release);
+                        break;
+                    }
+                    debug!(
+                        "📡 Sent RTP audio packet (timestamp: {}, {} frames, PT {})",
+                        current_timestamp, effective_samples_per_packet, payload_type
+                    );
                 }
 
                 if collect_diagnostics {
@@ -668,6 +773,15 @@ impl AudioTransmitter {
         self.is_active.load(Ordering::Acquire)
     }
 
+    pub(super) fn config(&self) -> &AudioTransmitterConfig {
+        &self.config
+    }
+
+    #[cfg(test)]
+    pub(super) fn codec_format(&self) -> &NegotiatedAudioCodec {
+        &self.codec_runtime.format
+    }
+
     /// Update the audio source during transmission
     pub async fn set_audio_source(&self, source: AudioSource) {
         let mut generator = self.audio_generator.lock();
@@ -695,6 +809,33 @@ impl AudioTransmitter {
         let source = AudioSource::PassThrough;
         self.set_audio_source(source).await;
     }
+}
+
+fn default_pcmu_runtime() -> Arc<DialogCodecRuntime> {
+    Arc::new(
+        DialogCodecRuntime::new(NegotiatedAudioCodec {
+            name: "PCMU".to_string(),
+            payload_type: 0,
+            clock_rate: 8_000,
+            channels: 1,
+        })
+        .expect("the built-in PCMU transmitter format is valid"),
+    )
+}
+
+fn rescale_packet_frames(frames: usize, source_rate: u32, target_rate: u32) -> usize {
+    let source_rate = u64::from(source_rate.max(1));
+    let target_rate = u64::from(target_rate.max(1));
+    let frames = u64::try_from(frames).unwrap_or(u64::MAX);
+    usize::try_from(frames.saturating_mul(target_rate).div_ceil(source_rate))
+        .unwrap_or(usize::MAX)
+        .max(1)
+}
+
+fn max_divisor_for_duration(base: Duration, maximum: Duration) -> u64 {
+    let base_nanos = base.as_nanos().max(1);
+    let divisor = maximum.as_nanos() / base_nanos;
+    u64::try_from(divisor).unwrap_or(u64::MAX).max(1)
 }
 
 fn next_audio_tx_start_delay(interval: Duration) -> Duration {
@@ -800,8 +941,27 @@ mod tests {
     use super::{
         adaptive_packetization_divisor, adaptive_packetization_interval,
         audio_tx_start_delay_for_sequence, pacing_divisor, AudioGenerator, AudioSource,
+        DialogCodecRuntime, NegotiatedAudioCodec,
     };
+    use crate::types::AudioFrame;
+    use std::sync::Arc;
     use std::time::Duration;
+
+    async fn encode_generated(
+        format: NegotiatedAudioCodec,
+        source: AudioSource,
+        frames: usize,
+    ) -> (Vec<u8>, AudioFrame) {
+        let mut generator = AudioGenerator::new_with_source(format.clock_rate, source);
+        let pcm = generator.generate_pcm_frame(frames, format.channels);
+        let runtime = Arc::new(DialogCodecRuntime::new(format.clone()).unwrap());
+        let payload = runtime
+            .encode(&AudioFrame::new(pcm, format.clock_rate, format.channels, 0))
+            .await
+            .unwrap();
+        let decoded = runtime.decode(&payload, 0).await.unwrap();
+        (payload, decoded)
+    }
 
     #[test]
     fn generate_pcmu_samples_returns_requested_length() {
@@ -851,6 +1011,82 @@ mod tests {
         let output = generator.generate_pcmu_samples(5);
 
         assert_eq!(output, vec![1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn custom_pcmu_is_resampled_to_the_negotiated_clock() {
+        let mut generator = AudioGenerator::new_with_source_rates(
+            48_000,
+            8_000,
+            AudioSource::CustomSamples {
+                samples: vec![0xff, 0x7f],
+                repeat: false,
+            },
+        );
+        let output = generator.generate_pcm_frame(12, 1);
+        assert!(output[..6].iter().all(|sample| *sample == output[0]));
+        assert!(output[6..].iter().all(|sample| *sample == output[6]));
+        assert_ne!(output[0], output[6]);
+    }
+
+    #[tokio::test]
+    async fn generated_tone_and_custom_audio_use_pcma_encoding() {
+        let format = NegotiatedAudioCodec {
+            name: "PCMA".to_string(),
+            payload_type: 8,
+            clock_rate: 8_000,
+            channels: 1,
+        };
+        let (tone_payload, tone) = encode_generated(
+            format.clone(),
+            AudioSource::Tone {
+                frequency: 440.0,
+                amplitude: 0.4,
+            },
+            160,
+        )
+        .await;
+        let (custom_payload, custom) = encode_generated(
+            format,
+            AudioSource::CustomSamples {
+                samples: vec![0xff, 0xce, 0x4e],
+                repeat: true,
+            },
+            160,
+        )
+        .await;
+        assert_eq!(tone_payload.len(), 160);
+        assert_eq!(custom_payload.len(), 160);
+        assert_eq!(tone.sample_rate, 8_000);
+        assert_eq!(custom.channels, 1);
+    }
+
+    #[cfg(feature = "opus")]
+    #[tokio::test]
+    async fn generated_tone_and_custom_audio_use_opus_encoding() {
+        let format = NegotiatedAudioCodec {
+            name: "opus".to_string(),
+            payload_type: 96,
+            clock_rate: 48_000,
+            channels: 2,
+        };
+        for source in [
+            AudioSource::Tone {
+                frequency: 440.0,
+                amplitude: 0.4,
+            },
+            AudioSource::CustomSamples {
+                samples: vec![0xff, 0xce, 0x4e],
+                repeat: true,
+            },
+        ] {
+            let (payload, decoded) = encode_generated(format.clone(), source, 960).await;
+            assert!(!payload.is_empty());
+            assert!(payload.len() < decoded.samples.len() * std::mem::size_of::<i16>());
+            assert_eq!(decoded.sample_rate, 48_000);
+            assert_eq!(decoded.channels, 2);
+            assert_eq!(decoded.samples.len(), 1_920);
+        }
     }
 
     #[test]

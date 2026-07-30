@@ -1458,6 +1458,7 @@ impl RtpSession {
         self.config.clock_rate = clock_rate;
         self.clock_rate.store(clock_rate, Ordering::Release);
         self.streams.clear();
+        self.stats.lock().jitter_ms = 0.0;
         if let Some(scheduler) = &mut self.scheduler {
             scheduler.set_clock_rate(clock_rate);
         }
@@ -2508,6 +2509,24 @@ mod tests {
             assert_eq!(packet.packet_type(), expected_type);
             assert_ne!(&wire[..length], plaintext.as_ref());
         }
+        session.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clock_change_resets_session_jitter_diagnostics() {
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        session.stats.lock().jitter_ms = 37.5;
+
+        session.set_clock_rate(48_000);
+
+        assert_eq!(session.config.clock_rate, 48_000);
+        assert_eq!(session.clock_rate.load(Ordering::Acquire), 48_000);
+        assert_eq!(session.stats.lock().jitter_ms, 0.0);
         session.close().await.unwrap();
     }
 }

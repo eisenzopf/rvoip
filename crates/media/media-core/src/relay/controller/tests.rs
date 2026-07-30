@@ -1057,6 +1057,150 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_media_waits_for_the_dialog_generation_lock() {
+        let controller = Arc::new(MediaSessionController::new());
+        let dialog_id = DialogId::new("serialized_codec_update");
+        controller
+            .start_media(
+                dialog_id.clone(),
+                MediaConfig {
+                    local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    remote_addr: None,
+                    preferred_codec: Some("PCMU".to_string()),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let update_lock = controller
+            .rtp_sessions
+            .get(&dialog_id)
+            .map(|wrapper| Arc::clone(&wrapper.update_lock))
+            .unwrap();
+        let guard = update_lock.lock().await;
+        let updating = {
+            let controller = Arc::clone(&controller);
+            let dialog_id = dialog_id.clone();
+            tokio::spawn(async move {
+                controller
+                    .update_media(
+                        dialog_id,
+                        MediaConfig {
+                            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                            remote_addr: None,
+                            preferred_codec: Some("PCMA".to_string()),
+                            parameters: HashMap::new(),
+                        },
+                    )
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !updating.is_finished(),
+            "a second codec generation must not pass the dialog update lock"
+        );
+        drop(guard);
+        updating.await.unwrap().unwrap();
+
+        let config = controller.sessions.get(&dialog_id).unwrap().config.clone();
+        let runtime_format = controller
+            .codec_runtimes
+            .get(&dialog_id)
+            .unwrap()
+            .format
+            .clone();
+        let session = controller
+            .rtp_sessions
+            .get(&dialog_id)
+            .unwrap()
+            .session
+            .clone();
+        assert_eq!(config.preferred_codec.as_deref(), Some("PCMA"));
+        assert_eq!(runtime_format.name, "PCMA");
+        assert_eq!(session.lock().await.get_payload_type(), 8);
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn codec_update_rebuilds_generated_audio_transmitter() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote_addr = peer.local_addr().unwrap();
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("generated_audio_codec_update");
+        controller
+            .start_media(
+                dialog_id.clone(),
+                MediaConfig {
+                    local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    remote_addr: Some(remote_addr),
+                    preferred_codec: Some("PCMU".to_string()),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        controller
+            .start_audio_transmission_with_tone(&dialog_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            controller
+                .rtp_sessions
+                .get(&dialog_id)
+                .unwrap()
+                .audio_transmitter
+                .as_ref()
+                .unwrap()
+                .codec_format()
+                .payload_type,
+            0
+        );
+
+        controller
+            .update_media(
+                dialog_id.clone(),
+                MediaConfig {
+                    local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    remote_addr: Some(remote_addr),
+                    preferred_codec: Some("PCMA".to_string()),
+                    parameters: HashMap::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let wrapper = controller.rtp_sessions.get(&dialog_id).unwrap();
+        let transmitter = wrapper.audio_transmitter.as_ref().unwrap();
+        assert_eq!(transmitter.codec_format().name, "PCMA");
+        assert_eq!(transmitter.codec_format().payload_type, 8);
+        drop(wrapper);
+
+        #[cfg(feature = "opus")]
+        {
+            controller
+                .update_media(
+                    dialog_id.clone(),
+                    MediaConfig {
+                        local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                        remote_addr: Some(remote_addr),
+                        preferred_codec: Some("opus".to_string()),
+                        parameters: HashMap::new(),
+                    }
+                    .with_negotiated_audio_codec("opus", 96, 48_000, 2),
+                )
+                .await
+                .unwrap();
+            let wrapper = controller.rtp_sessions.get(&dialog_id).unwrap();
+            let transmitter = wrapper.audio_transmitter.as_ref().unwrap();
+            assert_eq!(transmitter.codec_format().name, "opus");
+            assert_eq!(transmitter.codec_format().payload_type, 96);
+            assert_eq!(transmitter.codec_format().clock_rate, 48_000);
+        }
+        controller.stop_media(&dialog_id).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_update_media_no_changes() {
         println!("🧪 Testing update_media with no actual changes");
 

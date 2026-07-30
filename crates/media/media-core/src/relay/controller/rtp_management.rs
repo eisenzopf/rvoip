@@ -97,7 +97,13 @@ impl MediaSessionController {
                 } else {
                     // Replace with a freshly-started transmitter.
                     let config = AudioTransmitterConfig::default();
-                    let mut replacement = AudioTransmitter::new_with_config(session, config);
+                    let runtime = self
+                        .codec_runtimes
+                        .get(dialog_id)
+                        .map(|entry| Arc::clone(entry.value()))
+                        .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+                    let mut replacement =
+                        AudioTransmitter::new_with_config(session, config, runtime);
                     replacement.start().await;
                     if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
                         entry.value_mut().audio_transmitter = Some(replacement);
@@ -380,7 +386,7 @@ impl MediaSessionController {
         // Snapshot the per-session Arc + check the already-started
         // guard inside the shard guard, drop the guard, then build &
         // start the transmitter outside the lock.
-        let session_arc = {
+        let (session_arc, codec_runtime) = {
             let entry = self
                 .rtp_sessions
                 .get(dialog_id)
@@ -389,10 +395,16 @@ impl MediaSessionController {
             if wrapper.transmission_enabled && wrapper.audio_transmitter.is_some() {
                 return Ok(()); // Already started
             }
-            wrapper.session.clone()
+            let runtime = self
+                .codec_runtimes
+                .get(dialog_id)
+                .map(|entry| Arc::clone(entry.value()))
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            (wrapper.session.clone(), runtime)
         };
 
-        let mut audio_transmitter = AudioTransmitter::new_with_config(session_arc, config);
+        let mut audio_transmitter =
+            AudioTransmitter::new_with_config(session_arc, config, codec_runtime);
         audio_transmitter.start().await;
 
         // Re-acquire the shard guard to install the transmitter.

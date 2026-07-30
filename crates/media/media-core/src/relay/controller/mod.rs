@@ -930,6 +930,7 @@ impl MediaSessionController {
         // Wrap RTP session
         let rtp_wrapper = RtpSessionWrapper {
             session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
             local_addr: local_rtp_addr,
             remote_addr: config.remote_addr,
             created_at: std::time::Instant::now(),
@@ -1163,6 +1164,13 @@ impl MediaSessionController {
     pub async fn update_media(&self, dialog_id: DialogId, config: MediaConfig) -> Result<()> {
         info!("Updating media session for dialog: {}", dialog_id);
 
+        let update_lock = self
+            .rtp_sessions
+            .get(&dialog_id)
+            .map(|entry| Arc::clone(&entry.value().update_lock))
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let _update_guard = update_lock.lock().await;
+
         let old_config = self
             .sessions
             .get(&dialog_id)
@@ -1194,6 +1202,30 @@ impl MediaSessionController {
             .map(|entry| entry.value().session.clone())
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
+        // A generated-audio task owns one codec generation. Stop it only
+        // after the replacement runtime has been validated, then rebuild it
+        // against the new generation before publishing the update.
+        let transmitter_to_replace = if codec_changed {
+            self.rtp_sessions.get_mut(&dialog_id).and_then(|mut entry| {
+                entry
+                    .value_mut()
+                    .audio_transmitter
+                    .take()
+                    .map(|transmitter| {
+                        let config = transmitter.config().clone();
+                        (transmitter, config)
+                    })
+            })
+        } else {
+            None
+        };
+        let replacement_transmitter_config = transmitter_to_replace
+            .as_ref()
+            .map(|(_, config)| config.clone());
+        if let Some((transmitter, _)) = transmitter_to_replace {
+            transmitter.stop().await;
+        }
+
         {
             let mut rtp_session = rtp_session_arc.lock().await;
             if let Some(remote_addr) = config.remote_addr.filter(|_| remote_changed) {
@@ -1207,8 +1239,9 @@ impl MediaSessionController {
 
         // Commit the externally visible generation only after all validation
         // and lower-layer application succeeds.
-        if let Some(runtime) = replacement_runtime {
-            self.codec_runtimes.insert(dialog_id.clone(), runtime);
+        if let Some(runtime) = replacement_runtime.as_ref() {
+            self.codec_runtimes
+                .insert(dialog_id.clone(), Arc::clone(runtime));
         }
         if let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) {
             entry.value_mut().remote_addr = config.remote_addr;
@@ -1219,6 +1252,22 @@ impl MediaSessionController {
             entry.value_mut().config = config.clone();
         } else {
             return Err(Error::session_not_found(dialog_id.as_str()));
+        }
+
+        if let (Some(transmitter_config), Some(runtime)) =
+            (replacement_transmitter_config, replacement_runtime)
+        {
+            let mut replacement = audio_generation::AudioTransmitter::new_with_config(
+                Arc::clone(&rtp_session_arc),
+                transmitter_config,
+                runtime,
+            );
+            replacement.start().await;
+            if let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) {
+                entry.value_mut().audio_transmitter = Some(replacement);
+            } else {
+                return Err(Error::session_not_found(dialog_id.as_str()));
+            }
         }
 
         if let Some(remote_addr) = config.remote_addr.filter(|_| remote_changed) {

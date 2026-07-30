@@ -99,6 +99,13 @@ impl RtpScheduler {
         self.clock_rate = clock_rate;
         let interval_ms = self.interval.as_millis() as u64;
         self.timestamp_increment = (f64::from(clock_rate) * (interval_ms as f64 / 1_000.0)) as u32;
+        // Timing diagnostics before and after a clock change are not in the
+        // same unit. Start a fresh timing generation while preserving the
+        // current RTP timestamp cursor and sequence continuity.
+        self.initial_timestamp = self.timestamp;
+        self.start_time = Some(Instant::now());
+        self.packets_scheduled = 0;
+        self.packets_sent = 0;
     }
 
     /// Set the output channel
@@ -373,5 +380,20 @@ mod tests {
 
         // Stop the scheduler
         scheduler.stop().await;
+    }
+
+    #[test]
+    fn clock_change_starts_a_fresh_timing_diagnostic_generation() {
+        let mut scheduler = RtpScheduler::new(8_000, 1_000, 42);
+        scheduler.packets_scheduled = 7;
+        scheduler.packets_sent = 6;
+        scheduler.set_interval(20, 160);
+        scheduler.set_clock_rate(48_000);
+
+        assert_eq!(scheduler.timestamp_increment, 960);
+        assert_eq!(scheduler.initial_timestamp, scheduler.timestamp);
+        assert_eq!(scheduler.packets_scheduled, 0);
+        assert_eq!(scheduler.packets_sent, 0);
+        assert!(scheduler.start_time.is_some());
     }
 }
