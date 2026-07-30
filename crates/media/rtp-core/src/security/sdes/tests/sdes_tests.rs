@@ -2,6 +2,7 @@ use crate::security::sdes::{Sdes, SdesConfig, SdesCryptoAttribute, SdesRole, Sde
 use crate::security::SecurityKeyExchange;
 use crate::srtp::{SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 #[test]
 fn test_sdes_crypto_attribute_parsing() {
@@ -99,20 +100,104 @@ fn test_sdes_offer_answer_exchange() {
     assert!(offerer.is_complete());
     assert!(answerer.is_complete());
 
-    // Verify both sides have SRTP keys
-    assert!(offerer.get_srtp_key().is_some());
-    assert!(answerer.get_srtp_key().is_some());
+    let offerer_keys = offerer
+        .get_directional_keys()
+        .expect("offerer directional keys");
+    let answerer_keys = answerer
+        .get_directional_keys()
+        .expect("answerer directional keys");
 
-    // The keys should match
+    // Every endpoint advertises a fresh transmit key, and each peer installs
+    // that key only on its receive side.
+    assert_ne!(offerer_keys.local_tx.key(), answerer_keys.local_tx.key());
+    assert_ne!(offerer_keys.local_tx.salt(), answerer_keys.local_tx.salt());
+    assert_eq!(offerer_keys.local_tx.key(), answerer_keys.remote_rx.key());
+    assert_eq!(offerer_keys.local_tx.salt(), answerer_keys.remote_rx.salt());
+    assert_eq!(answerer_keys.local_tx.key(), offerer_keys.remote_rx.key());
+    assert_eq!(answerer_keys.local_tx.salt(), offerer_keys.remote_rx.salt());
+
+    // The compatibility accessor remains the local transmit key.
     assert_eq!(
         offerer.get_srtp_key().unwrap().key(),
-        answerer.get_srtp_key().unwrap().key()
+        offerer_keys.local_tx.key()
     );
-
     assert_eq!(
-        offerer.get_srtp_key().unwrap().salt(),
-        answerer.get_srtp_key().unwrap().salt()
+        answerer.get_srtp_key().unwrap().key(),
+        answerer_keys.local_tx.key()
     );
+}
+
+#[test]
+fn test_sdes_answer_selects_the_matching_offered_transmit_key() {
+    let mut offerer = Sdes::new(SdesConfig::default(), SdesRole::Offerer);
+    let offer = offerer
+        .process_message(b"")
+        .expect("create offer")
+        .expect("offer body");
+    let offer = std::str::from_utf8(&offer).expect("UTF-8 offer");
+    let tag_two = offer
+        .lines()
+        .find(|line| line.starts_with("a=crypto:2 "))
+        .expect("second offered crypto attribute");
+    let offered = SdesCryptoAttribute::parse(tag_two.trim_start_matches("a=crypto:"))
+        .expect("parse second offered attribute");
+    let offered_key = BASE64
+        .decode(&offered.key_info)
+        .expect("decode offered key");
+
+    let remote_key = vec![0x5a; 30];
+    let answer = format!(
+        "a=crypto:2 AES_CM_128_HMAC_SHA1_32 inline:{}",
+        BASE64.encode(&remote_key)
+    );
+    offerer
+        .process_message(answer.as_bytes())
+        .expect("process tag-two answer");
+
+    let directional = offerer.get_directional_keys().expect("directional keys");
+    assert_eq!(directional.local_tx.key(), &offered_key[..16]);
+    assert_eq!(directional.local_tx.salt(), &offered_key[16..30]);
+    assert_eq!(directional.remote_rx.key(), &remote_key[..16]);
+    assert_eq!(directional.remote_rx.salt(), &remote_key[16..30]);
+    assert_eq!(offerer.get_srtp_suite(), Some(SRTP_AES128_CM_SHA1_32));
+}
+
+#[test]
+fn test_sdes_answer_cannot_change_the_suite_for_an_offered_tag() {
+    let mut offerer = Sdes::new(SdesConfig::default(), SdesRole::Offerer);
+    offerer
+        .process_message(b"")
+        .expect("create offer")
+        .expect("offer body");
+
+    let answer = format!(
+        "a=crypto:2 AES_CM_128_HMAC_SHA1_80 inline:{}",
+        BASE64.encode(vec![0x7c; 30])
+    );
+    let error = offerer
+        .process_message(answer.as_bytes())
+        .expect_err("answer must preserve the suite associated with its tag");
+    assert!(error.to_string().contains("changed suite"));
+    assert!(!offerer.is_complete());
+    assert!(offerer.get_directional_keys().is_err());
+}
+
+#[test]
+fn test_sdes_directional_keys_fail_closed_without_remote_material() {
+    let mut offerer = Sdes::new(SdesConfig::default(), SdesRole::Offerer);
+    offerer
+        .process_message(b"")
+        .expect("create offer")
+        .expect("offer body");
+
+    // The compatibility accessor may expose the local offer key, but callers
+    // cannot obtain a usable directional pair until a peer key is validated.
+    assert!(offerer.get_srtp_key().is_some());
+    assert!(offerer.get_remote_srtp_key().is_none());
+    let error = offerer
+        .get_directional_keys()
+        .expect_err("an incomplete exchange must not yield usable key material");
+    assert!(error.to_string().contains("remote receive key"));
 }
 
 #[test]
@@ -219,7 +304,8 @@ fn unsupported_sdes_parameters_fail_without_answerer_state_or_key_mutation() {
         assert!(answerer.local_attrs.is_empty());
         assert!(answerer.remote_attrs.is_empty());
         assert!(answerer.selected_attr.is_none());
-        assert!(answerer.srtp_key.is_none());
+        assert!(answerer.local_srtp_key.is_none());
+        assert!(answerer.remote_srtp_key.is_none());
         assert!(answerer.srtp_suite.is_none());
     }
 }
@@ -256,6 +342,7 @@ fn unsupported_sdes_parameters_fail_without_offerer_state_or_key_mutation() {
         assert_eq!(offerer.local_attrs, before_local_attrs);
         assert!(offerer.remote_attrs.is_empty());
         assert!(offerer.selected_attr.is_none());
+        assert!(offerer.remote_srtp_key.is_none());
         assert_eq!(offerer.get_srtp_key().unwrap().key(), before_key.key());
         assert_eq!(offerer.get_srtp_key().unwrap().salt(), before_key.salt());
         assert_eq!(offerer.get_srtp_suite(), before_suite);

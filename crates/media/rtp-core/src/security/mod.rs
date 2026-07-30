@@ -22,8 +22,20 @@ pub trait SecurityKeyExchange {
     /// Process incoming message from peer
     fn process_message(&mut self, message: &[u8]) -> Result<Option<Vec<u8>>, Error>;
 
-    /// Get the negotiated SRTP crypto key if available
+    /// Get the local transmit key when key exchange material is available.
+    ///
+    /// This is the historical single-key compatibility accessor. Directional
+    /// exchanges must also expose the peer key through
+    /// [`SecurityKeyExchange::get_remote_srtp_key`].
     fn get_srtp_key(&self) -> Option<SrtpCryptoKey>;
+
+    /// Get the peer's transmit key for inbound unprotection, when the key
+    /// exchange negotiates independent directions.
+    ///
+    /// Shared-key exchanges retain the compatibility default of `None`.
+    fn get_remote_srtp_key(&self) -> Option<SrtpCryptoKey> {
+        None
+    }
 
     /// Get the negotiated SRTP crypto suite if available
     fn get_srtp_suite(&self) -> Option<SrtpCryptoSuite>;

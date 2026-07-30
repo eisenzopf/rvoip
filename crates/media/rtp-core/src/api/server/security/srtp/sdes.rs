@@ -256,26 +256,42 @@ impl SdesServerSession {
         match sdes.process_message(answer_message.as_bytes()) {
             Ok(None) => {
                 // Answer processed successfully
-                // Set up SRTP context if keys are available
-                if let (Some(srtp_key), Some(srtp_suite)) =
-                    (sdes.get_srtp_key(), sdes.get_srtp_suite())
-                {
-                    match SrtpContext::new(srtp_suite, srtp_key) {
-                        Ok(context) => {
-                            *self.srtp_context.write().await = Some(context);
-                            info!(
-                                "SDES server session {}: SRTP context established",
-                                self.session_id
-                            );
-                        }
-                        Err(e) => {
-                            error!("Failed to create SRTP context: {}", e);
-                            *self.state.write().await = SdesServerState::Failed;
-                            return Err(SecurityError::CryptoError(format!(
-                                "Failed to create SRTP context: {}",
-                                e
-                            )));
-                        }
+                // SDES is directional: completing signaling without both
+                // local-transmit and remote-receive material must fail closed.
+                let keys = match sdes.get_directional_keys() {
+                    Ok(keys) => keys,
+                    Err(error) => {
+                        *self.state.write().await = SdesServerState::Failed;
+                        return Err(SecurityError::CryptoError(format!(
+                            "SDES completed without both directional keys: {error}"
+                        )));
+                    }
+                };
+                let srtp_suite = match sdes.get_srtp_suite() {
+                    Some(suite) => suite,
+                    None => {
+                        *self.state.write().await = SdesServerState::Failed;
+                        return Err(SecurityError::CryptoError(
+                            "SDES completed without an SRTP suite".to_string(),
+                        ));
+                    }
+                };
+
+                match SrtpContext::new_directional(srtp_suite, keys.local_tx, keys.remote_rx) {
+                    Ok(context) => {
+                        *self.srtp_context.write().await = Some(context);
+                        info!(
+                            "SDES server session {}: SRTP context established",
+                            self.session_id
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to create SRTP context: {}", e);
+                        *self.state.write().await = SdesServerState::Failed;
+                        return Err(SecurityError::CryptoError(format!(
+                            "Failed to create SRTP context: {}",
+                            e
+                        )));
                     }
                 }
 

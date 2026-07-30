@@ -321,22 +321,42 @@ impl UnifiedSecurityContext {
 
         // Check if key exchange is complete
         if key_exchange.is_complete() {
-            // Get the negotiated keys and set up SRTP
-            if let (Some(srtp_key), Some(srtp_suite)) =
-                (key_exchange.get_srtp_key(), key_exchange.get_srtp_suite())
-            {
-                let srtp_context = SrtpContext::new(srtp_suite, srtp_key).map_err(|e| {
-                    SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
-                })?;
-
-                *self.srtp_context.write().await = Some(Arc::new(RwLock::new(srtp_context)));
-                *self.state.write().await = SecurityState::Established;
-            } else {
+            let Some(local_key) = key_exchange.get_srtp_key() else {
                 *self.state.write().await = SecurityState::Failed;
                 return Err(SecurityError::CryptoError(
-                    "Key exchange completed but no keys available".to_string(),
+                    "Key exchange completed without a local transmit key".to_string(),
                 ));
-            }
+            };
+            let Some(srtp_suite) = key_exchange.get_srtp_suite() else {
+                *self.state.write().await = SecurityState::Failed;
+                return Err(SecurityError::CryptoError(
+                    "Key exchange completed without an SRTP suite".to_string(),
+                ));
+            };
+
+            let context = if self.method == KeyExchangeMethod::Sdes {
+                let Some(remote_key) = key_exchange.get_remote_srtp_key() else {
+                    *self.state.write().await = SecurityState::Failed;
+                    return Err(SecurityError::CryptoError(
+                        "SDES completed without a remote receive key".to_string(),
+                    ));
+                };
+                SrtpContext::new_directional(srtp_suite, local_key, remote_key)
+            } else {
+                SrtpContext::new(srtp_suite, local_key)
+            };
+            let srtp_context = match context {
+                Ok(context) => context,
+                Err(error) => {
+                    *self.state.write().await = SecurityState::Failed;
+                    return Err(SecurityError::CryptoError(format!(
+                        "Failed to create SRTP context: {error}"
+                    )));
+                }
+            };
+
+            *self.srtp_context.write().await = Some(Arc::new(RwLock::new(srtp_context)));
+            *self.state.write().await = SecurityState::Established;
         }
 
         Ok(response)
