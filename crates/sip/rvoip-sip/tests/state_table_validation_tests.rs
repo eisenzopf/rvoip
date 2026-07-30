@@ -147,6 +147,32 @@ fn test_hold_resume_transitions() {
         "Missing resume transition from OnHold state"
     );
 
+    let repeated_hold = table
+        .get(&StateKey {
+            role: Role::Both,
+            state: CallState::OnHold,
+            event: EventType::HoldCall,
+        })
+        .expect("Missing idempotent hold transition from OnHold state");
+    assert_eq!(repeated_hold.next_state, None);
+    assert!(
+        repeated_hold.actions.is_empty(),
+        "Repeated hold must not send another re-INVITE"
+    );
+
+    let repeated_resume = table
+        .get(&StateKey {
+            role: Role::Both,
+            state: CallState::Active,
+            event: EventType::ResumeCall,
+        })
+        .expect("Missing idempotent resume transition from Active state");
+    assert_eq!(repeated_resume.next_state, None);
+    assert!(
+        repeated_resume.actions.is_empty(),
+        "Repeated resume must not send another re-INVITE"
+    );
+
     let hold_commit_key = StateKey {
         role: Role::Both,
         state: CallState::HoldPending,
