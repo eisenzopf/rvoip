@@ -87,7 +87,7 @@ pub trait AsyncUdpSocket: Send + Sync + Debug + 'static {
     fn local_addr(&self) -> io::Result<SocketAddr>;
 }
 
-/// An async mutex that works across different runtimes
+/// Async mutex interface used by the Tokio integration boundary
 pub trait AsyncMutex<T: ?Sized>: Send + Sync {
     /// The guard type returned by lock()
     type Guard<'a>: std::ops::Deref<Target = T> + std::ops::DerefMut + Send + 'a
