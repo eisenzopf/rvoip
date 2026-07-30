@@ -8,10 +8,10 @@ use crate::processing::audio::VoiceActivityDetector;
 use crate::processing::format::FormatConverter;
 use crate::types::conference::{AudioStream, ConferenceError, ConferenceResult, ParticipantId};
 use crate::types::{AudioFrame, SampleRate};
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 /// Manager for audio streams from conference participants
 pub struct AudioStreamManager {
@@ -159,8 +159,7 @@ impl AudioStreamManager {
 
     /// Add a new participant audio stream
     pub fn add_stream(&self, stream_info: AudioStream) -> ConferenceResult<()> {
-        let streams = async_std::task::block_on(self.streams.lock());
-        let mut streams = streams;
+        let mut streams = self.streams.lock();
 
         if streams.contains_key(&stream_info.participant_id) {
             return Err(ConferenceError::ParticipantAlreadyExists {
@@ -190,7 +189,7 @@ impl AudioStreamManager {
 
     /// Remove a participant audio stream
     pub fn remove_stream(&self, participant_id: &ParticipantId) -> ConferenceResult<()> {
-        let mut streams = async_std::task::block_on(self.streams.lock());
+        let mut streams = self.streams.lock();
 
         streams
             .remove(participant_id)
@@ -207,7 +206,7 @@ impl AudioStreamManager {
         participant_id: &ParticipantId,
         mut frame: AudioFrame,
     ) -> ConferenceResult<()> {
-        let mut streams = async_std::task::block_on(self.streams.lock());
+        let mut streams = self.streams.lock();
 
         let managed_stream = streams.get_mut(participant_id).ok_or_else(|| {
             ConferenceError::ParticipantNotFound {
@@ -223,7 +222,7 @@ impl AudioStreamManager {
 
         // Voice activity detection if enabled
         if self.config.enable_voice_activity_detection {
-            let mut vad = async_std::task::block_on(self.vad.lock());
+            let mut vad = self.vad.lock();
             let vad_result =
                 vad.analyze_frame(&frame)
                     .unwrap_or(crate::processing::audio::VadResult {
@@ -281,7 +280,7 @@ impl AudioStreamManager {
 
     /// Get synchronized audio frames for all active participants
     pub fn get_synchronized_frames(&self) -> ConferenceResult<Vec<(ParticipantId, AudioFrame)>> {
-        let mut streams = async_std::task::block_on(self.streams.lock());
+        let mut streams = self.streams.lock();
 
         let mut frames = Vec::new();
         let _now = Instant::now();
@@ -323,7 +322,7 @@ impl AudioStreamManager {
         &self,
         participant_id: &ParticipantId,
     ) -> ConferenceResult<StreamStats> {
-        let streams = async_std::task::block_on(self.streams.lock());
+        let streams = self.streams.lock();
 
         let managed_stream =
             streams
@@ -337,7 +336,7 @@ impl AudioStreamManager {
 
     /// Get list of active participants
     pub fn get_active_participants(&self) -> ConferenceResult<Vec<ParticipantId>> {
-        let streams = async_std::task::block_on(self.streams.lock());
+        let streams = self.streams.lock();
 
         let _now = Instant::now();
         let active_participants: Vec<ParticipantId> = streams
@@ -402,7 +401,7 @@ impl AudioStreamManager {
 
     /// Clean up inactive streams
     pub fn cleanup_inactive_streams(&self) -> ConferenceResult<Vec<ParticipantId>> {
-        let mut streams = async_std::task::block_on(self.streams.lock());
+        let mut streams = self.streams.lock();
 
         let timeout = self.config.stream_timeout;
         let mut removed_participants = Vec::new();

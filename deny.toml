@@ -40,7 +40,7 @@ yanked = "warn"
 # Unmaintained advisories are informational here, matching the beta release
 # gate's `cargo audit` (which does not fail the build on them). The ones
 # currently present are all deep transitive: paste, proc-macro-error2,
-# audiopus_sys (via the opus codec), async-std, rustls-pemfile. Tighten to
+# audiopus_sys (via the opus codec) and rustls-pemfile. Tighten to
 # "workspace" or "all" once those transitive stacks are cleaned up.
 unmaintained = "none"
 # Mirrors the accepted-advisory set enforced by the beta release gate
