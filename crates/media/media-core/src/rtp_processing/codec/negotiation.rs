@@ -74,7 +74,7 @@ impl CodecCapability {
     /// Check if this capability is compatible with another
     pub fn is_compatible_with(&self, other: &CodecCapability) -> bool {
         // Must be same codec
-        if self.codec.name != other.codec.name {
+        if !codec_names_equal(&self.codec.name, &other.codec.name) {
             return false;
         }
 
@@ -118,19 +118,25 @@ pub struct NegotiationPreferences {
 
 impl Default for NegotiationPreferences {
     fn default() -> Self {
+        let preferred_codecs = vec![
+            "PCMU".to_string(),
+            "PCMA".to_string(),
+            "H264".to_string(),
+            "VP8".to_string(),
+        ];
+        #[cfg(feature = "opus")]
+        let preferred_codecs = {
+            let mut codecs = preferred_codecs;
+            codecs.insert(0, "OPUS".to_string());
+            codecs
+        };
+
         Self {
             prefer_audio: true,
             max_codecs: 5,
             prefer_low_bandwidth: false,
             min_quality_factor: 0.3,
-            preferred_codecs: vec![
-                "OPUS".to_string(),
-                "G722".to_string(),
-                "PCMU".to_string(),
-                "PCMA".to_string(),
-                "H264".to_string(),
-                "VP8".to_string(),
-            ],
+            preferred_codecs,
         }
     }
 }
@@ -180,6 +186,9 @@ impl CodecNegotiator {
         let mut compatible_pairs = Vec::new();
 
         for local_cap in &self.local_capabilities {
+            if !codec_is_negotiable(&local_cap.codec.name) {
+                continue;
+            }
             for remote_cap in &self.remote_capabilities {
                 if local_cap.is_compatible_with(remote_cap) {
                     compatible_pairs.push((local_cap, remote_cap));
@@ -239,7 +248,7 @@ impl CodecNegotiator {
             .preferences
             .preferred_codecs
             .iter()
-            .position(|name| name == &local.codec.name)
+            .position(|name| codec_names_equal(name, &local.codec.name))
         {
             score += 1.0 - (pos as f32 / self.preferences.preferred_codecs.len() as f32);
         }
@@ -331,7 +340,8 @@ impl CodecNegotiator {
         let registry = get_global_registry();
         let mut capabilities = Vec::new();
 
-        // Add OPUS capability (high quality)
+        // Opus is negotiable only when the real backend is compiled in.
+        #[cfg(feature = "opus")]
         if let Some(opus_info) = registry.get_payload_info(111) {
             let codec = MediaCodec::new(opus_info.codec_name.clone(), 111, opus_info.clock_rate)
                 .with_channels(2);
@@ -339,17 +349,6 @@ impl CodecNegotiator {
                 CodecCapability::new(codec, MediaDirection::SendReceive)
                     .with_quality_factor(0.9)
                     .with_bitrate_range(32000, 128000),
-            );
-        }
-
-        // Add G.722 capability (good quality)
-        if let Some(g722_info) = registry.get_payload_info(9) {
-            let codec = MediaCodec::new(g722_info.codec_name.clone(), 9, g722_info.clock_rate)
-                .with_channels(1);
-            capabilities.push(
-                CodecCapability::new(codec, MediaDirection::SendReceive)
-                    .with_quality_factor(0.7)
-                    .with_bitrate_range(48000, 64000),
             );
         }
 
@@ -408,6 +407,26 @@ impl CodecNegotiator {
     }
 }
 
+fn codec_names_equal(left: &str, right: &str) -> bool {
+    left.chars()
+        .filter(|character| *character != '.')
+        .map(|character| character.to_ascii_uppercase())
+        .eq(right
+            .chars()
+            .filter(|character| *character != '.')
+            .map(|character| character.to_ascii_uppercase()))
+}
+
+fn codec_is_negotiable(name: &str) -> bool {
+    if codec_names_equal(name, "G722") {
+        return false;
+    }
+    if codec_names_equal(name, "OPUS") {
+        return cfg!(feature = "opus");
+    }
+    true
+}
+
 impl Default for CodecNegotiator {
     fn default() -> Self {
         Self::new()
@@ -435,6 +454,19 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_capability_names_are_case_and_dot_insensitive() {
+        let local = CodecCapability::new(
+            MediaCodec::new("h.264".to_string(), 96, 90000),
+            MediaDirection::SendOnly,
+        );
+        let remote = CodecCapability::new(
+            MediaCodec::new("H264".to_string(), 96, 90000),
+            MediaDirection::ReceiveOnly,
+        );
+        assert!(local.is_compatible_with(&remote));
+    }
+
+    #[test]
     fn test_codec_capability_incompatibility() {
         let opus_cap = CodecCapability::new(
             MediaCodec::new("OPUS".to_string(), 111, 48000),
@@ -449,6 +481,7 @@ mod tests {
         assert!(!opus_cap.is_compatible_with(&pcmu_cap));
     }
 
+    #[cfg(feature = "opus")]
     #[test]
     fn test_negotiation() {
         let mut negotiator = CodecNegotiator::new();
@@ -503,5 +536,39 @@ mod tests {
         let codec_names: Vec<&str> = audio_caps.iter().map(|c| c.codec.name.as_str()).collect();
         assert!(codec_names.contains(&"PCMU"));
         assert!(codec_names.contains(&"PCMA"));
+        assert!(!codec_names.contains(&"G722"));
+        #[cfg(feature = "opus")]
+        assert!(codec_names.contains(&"OPUS"));
+        #[cfg(not(feature = "opus"))]
+        assert!(!codec_names.contains(&"OPUS"));
+    }
+
+    #[cfg(not(feature = "opus"))]
+    #[test]
+    fn test_opus_cannot_be_negotiated_without_backend() {
+        let mut negotiator = CodecNegotiator::new();
+        let capability = || {
+            CodecCapability::new(
+                MediaCodec::new("Opus".to_string(), 111, 48_000),
+                MediaDirection::SendReceive,
+            )
+        };
+        negotiator.add_local_capability(capability());
+        negotiator.add_remote_capability(capability());
+        assert!(negotiator.negotiate().is_err());
+    }
+
+    #[test]
+    fn test_g722_is_not_a_negotiable_codec() {
+        let capability = || {
+            CodecCapability::new(
+                MediaCodec::new("G.722".to_string(), 9, 8_000),
+                MediaDirection::SendReceive,
+            )
+        };
+        let mut negotiator = CodecNegotiator::new();
+        negotiator.add_local_capability(capability());
+        negotiator.add_remote_capability(capability());
+        assert!(negotiator.negotiate().is_err());
     }
 }

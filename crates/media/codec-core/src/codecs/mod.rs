@@ -75,7 +75,7 @@ pub mod g711;
 #[cfg(feature = "g729")]
 pub mod g729;
 
-#[cfg(any(feature = "opus", feature = "opus-sim"))]
+#[cfg(feature = "opus")]
 pub mod opus;
 
 /// Codec factory for creating codec instances
@@ -106,7 +106,7 @@ impl CodecFactory {
                 Ok(Box::new(codec))
             }
 
-            #[cfg(any(feature = "opus", feature = "opus-sim"))]
+            #[cfg(feature = "opus")]
             CodecType::Opus => {
                 let codec = opus::OpusCodec::new(config)?;
                 Ok(Box::new(codec))
@@ -173,7 +173,7 @@ impl CodecFactory {
             "G729A",
             #[cfg(feature = "g729")]
             "G729BA",
-            #[cfg(any(feature = "opus", feature = "opus-sim"))]
+            #[cfg(feature = "opus")]
             "OPUS",
         ]
     }
@@ -186,7 +186,7 @@ impl CodecFactory {
             "PCMU" | "PCMA" => true,
             #[cfg(feature = "g729")]
             "G729" | "G729A" | "G729AB" | "G729BA" => true,
-            #[cfg(any(feature = "opus", feature = "opus-sim"))]
+            #[cfg(feature = "opus")]
             "OPUS" => true,
             _ => false,
         }
@@ -269,7 +269,11 @@ pub struct CodecCapabilities {
 impl CodecCapabilities {
     /// Get capabilities for all supported codecs
     pub fn get_all() -> Self {
+        // Both values are populated by feature-gated blocks. In a deliberately
+        // codec-free build they remain empty and therefore need no mutation.
+        #[allow(unused_mut)]
         let mut codec_types = Vec::new();
+        #[allow(unused_mut)]
         let mut codec_info = HashMap::new();
 
         #[cfg(feature = "g711")]
@@ -302,7 +306,7 @@ impl CodecCapabilities {
             );
         }
 
-        #[cfg(any(feature = "opus", feature = "opus-sim"))]
+        #[cfg(feature = "opus")]
         {
             codec_types.push(CodecType::Opus);
             codec_info.insert(
@@ -402,6 +406,16 @@ mod tests {
         }
 
         assert!(!CodecFactory::is_supported("UNSUPPORTED"));
+        assert!(!CodecFactory::is_supported("G722"));
+
+        #[cfg(feature = "opus")]
+        for name in ["opus", "Opus", "OPUS"] {
+            assert!(CodecFactory::is_supported(name));
+        }
+        #[cfg(not(feature = "opus"))]
+        for name in ["opus", "Opus", "OPUS"] {
+            assert!(!CodecFactory::is_supported(name));
+        }
     }
 
     #[test]

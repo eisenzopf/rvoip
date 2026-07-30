@@ -7,7 +7,6 @@ use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::payload_type::PCM_S16LE;
 #[cfg(feature = "g729")]
 use crate::codec::audio::G729Codec;
-use crate::codec::audio::{OpusApplication, OpusCodec};
 use crate::codec::factory::CodecFactory;
 use crate::error::{CodecError, Result};
 use crate::processing::format::{ConversionParams, FormatConverter};
@@ -176,21 +175,13 @@ impl Transcoder {
             }
             #[cfg(not(feature = "g729"))]
             18 => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
-            111 => {
-                // Opus (dynamic)
-                let codec = OpusCodec::new(
-                    SampleRate::Rate48000,
-                    2,
-                    crate::codec::audio::OpusConfig {
-                        application: OpusApplication::Voip,
-                        bitrate: 64000,
-                        frame_size_ms: 20.0,
-                        vbr: true,
-                        complexity: 5,
-                    },
-                )?;
-                Ok(Box::new(codec))
+            #[cfg(feature = "opus")]
+            111 => CodecFactory::create_codec(111, Some(48_000), Some(2)),
+            #[cfg(not(feature = "opus"))]
+            111 => Err(CodecError::NotFound {
+                name: "Opus (enable the `opus` feature)".to_string(),
             }
+            .into()),
             _ => Err(CodecError::UnsupportedPayloadType { payload_type }.into()),
         }
     }
@@ -215,6 +206,7 @@ impl Transcoder {
             8u8, // PCMA
             #[cfg(feature = "g729")]
             18u8, // G.729
+            #[cfg(feature = "opus")]
             111u8, // Opus
             PCM_S16LE, // Internal pcm_s16le 16 kHz mono
         ];
@@ -371,14 +363,20 @@ mod tests {
             from_codec: 0,
             to_codec: 8
         }));
+        #[cfg(feature = "opus")]
         assert!(paths.contains(&TranscodingPath {
             from_codec: 0,
             to_codec: 111
         }));
+        #[cfg(not(feature = "opus"))]
+        assert!(!paths
+            .iter()
+            .any(|path| path.from_codec == 111 || path.to_codec == 111));
         assert!(paths.contains(&TranscodingPath {
             from_codec: PCM_S16LE,
             to_codec: 0
         }));
+        #[cfg(feature = "opus")]
         assert!(paths.contains(&TranscodingPath {
             from_codec: 111,
             to_codec: PCM_S16LE
@@ -541,10 +539,12 @@ mod tests {
             from_codec: 0,
             to_codec: 18
         })); // PCMU -> G.729
+        #[cfg(feature = "opus")]
         assert!(paths.contains(&TranscodingPath {
             from_codec: 18,
             to_codec: 111
         })); // G.729 -> Opus
+        #[cfg(feature = "opus")]
         assert!(paths.contains(&TranscodingPath {
             from_codec: 111,
             to_codec: 18

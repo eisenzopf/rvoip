@@ -167,6 +167,8 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "G729A",
     #[cfg(feature = "g729")]
     "G729BA",
+    #[cfg(feature = "opus")]
+    "opus",
 ];
 
 /// Initialize the codec library
@@ -241,7 +243,7 @@ mod tests {
             assert!(SUPPORTED_CODECS.contains(&"G729BA"));
         }
 
-        #[cfg(any(feature = "opus", feature = "opus-sim"))]
+        #[cfg(feature = "opus")]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
     }
 }

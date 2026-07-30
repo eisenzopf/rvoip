@@ -30,6 +30,7 @@ tracing.workspace = true
 
 # Crate-specific dependencies not in workspace
 tracing-subscriber = "0.3"   # Logging initialization
+opus = { version = "0.3", optional = true }
 
 [dev-dependencies]
 # Testing
@@ -46,5 +47,7 @@ default = ["g711"]
 # Codec features
 g711 = []                    # G.711 μ-law/A-law codec (always available)
 g729 = []                    # G.729A/G.729AB codec
-opus = []                    # Opus codec (real impl in src/codecs/opus.rs)
-opus-sim = []                # Opus codec simulator variant
+opus = ["dep:opus"]          # Opus codec backed by libopus
+# Deprecated compatibility alias. This now enables the real backend; it no
+# longer selects a simulated codec.
+opus-sim = ["opus"]

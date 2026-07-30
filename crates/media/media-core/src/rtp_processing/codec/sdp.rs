@@ -503,7 +503,7 @@ impl SdpMediaProcessor {
 
     /// Estimate codec quality factor
     fn estimate_codec_quality(&self, codec_name: &str) -> f32 {
-        match codec_name.to_uppercase().as_str() {
+        match codec_name.to_ascii_uppercase().replace('.', "").as_str() {
             "OPUS" => 0.9,
             "G722" => 0.7,
             "PCMU" | "PCMA" => 0.5,
@@ -604,5 +604,23 @@ mod tests {
         assert!(text.contains("m=audio 5004 RTP/AVP 0"));
         assert!(text.contains("a=sendrecv"));
         assert!(text.contains("a=rtpmap:0 PCMU/8000/1"));
+    }
+
+    #[test]
+    fn default_sdp_only_advertises_implemented_audio_codecs() {
+        let processor = SdpMediaProcessor::new();
+        let capabilities = CodecNegotiator::create_default_audio_capabilities();
+        let description = processor
+            .capabilities_to_sdp(&capabilities, "audio", 5004)
+            .unwrap();
+        let text = processor.generate_sdp_text(&description);
+
+        assert!(text.contains("PCMU"));
+        assert!(text.contains("PCMA"));
+        assert!(!text.to_ascii_uppercase().contains("G722"));
+        #[cfg(feature = "opus")]
+        assert!(text.to_ascii_uppercase().contains("OPUS"));
+        #[cfg(not(feature = "opus"))]
+        assert!(!text.to_ascii_uppercase().contains("OPUS"));
     }
 }

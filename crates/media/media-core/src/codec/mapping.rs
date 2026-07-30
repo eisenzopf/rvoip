@@ -65,26 +65,28 @@ impl OpusConfig {
 
     /// Parse codec string back to OpusConfig
     pub fn from_codec_string(codec_str: &str) -> Option<Self> {
-        if !codec_str.starts_with("opus@") {
+        let mut parts = codec_str.split('@');
+        if !parts.next()?.eq_ignore_ascii_case("opus") {
             return None;
         }
 
         let mut config = Self::new(48000, 1); // Default values
 
-        for part in codec_str.split('@').skip(1) {
-            if part.ends_with("Hz") {
-                if let Ok(rate) = part.trim_end_matches("Hz").parse::<u32>() {
+        for part in parts {
+            let lower = part.to_ascii_lowercase();
+            if lower.ends_with("hz") {
+                if let Ok(rate) = part[..part.len() - 2].parse::<u32>() {
                     config.sample_rate = rate;
                 }
-            } else if part.ends_with("ch") {
-                if let Ok(channels) = part.trim_end_matches("ch").parse::<u8>() {
+            } else if lower.ends_with("ch") {
+                if let Ok(channels) = part[..part.len() - 2].parse::<u8>() {
                     config.channels = channels;
                 }
-            } else if part.ends_with("bps") {
-                if let Ok(bitrate) = part.trim_end_matches("bps").parse::<u32>() {
+            } else if lower.ends_with("bps") {
+                if let Ok(bitrate) = part[..part.len() - 3].parse::<u32>() {
                     config.max_bitrate = Some(bitrate);
                 }
-            } else if part == "fec" {
+            } else if part.eq_ignore_ascii_case("fec") {
                 config.fec_enabled = Some(true);
             }
         }
@@ -195,7 +197,7 @@ impl CodecMapper {
         if let Some(old_payload) = self.name_to_payload.get(&name).cloned() {
             self.payload_to_name.remove(&old_payload);
             // Remove from Opus configs if it was an Opus codec
-            if name.starts_with("opus") {
+            if name.to_ascii_lowercase().starts_with("opus") {
                 self.opus_configs.remove(&old_payload);
             }
         }
@@ -203,7 +205,7 @@ impl CodecMapper {
             self.name_to_payload.remove(&old_name);
             self.codec_clock_rates.remove(&old_name);
             // Remove from Opus configs if it was an Opus codec
-            if old_name.starts_with("opus") {
+            if old_name.to_ascii_lowercase().starts_with("opus") {
                 if let Some(config) = self.opus_configs.remove(&payload_type) {
                     self.opus_config_to_payload.remove(&config);
                 }
@@ -303,7 +305,10 @@ impl CodecMapper {
             if codec_name.eq_ignore_ascii_case("opus") {
                 // Look for any registered Opus configuration
                 for (name, payload) in &self.name_to_payload {
-                    if name.starts_with("opus@") {
+                    if name
+                        .get(..5)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("opus@"))
+                    {
                         debug!("Found generic opus match: {} -> PT:{}", name, payload);
                         return Some(*payload);
                     }
@@ -349,7 +354,10 @@ impl CodecMapper {
         if codec_name.eq_ignore_ascii_case("opus") {
             // Look for any registered Opus configuration
             for (name, &clock_rate) in &self.codec_clock_rates {
-                if name.starts_with("opus@") {
+                if name
+                    .get(..5)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("opus@"))
+                {
                     debug!(
                         "Found generic opus clock rate: {} -> {}Hz",
                         name, clock_rate
@@ -360,7 +368,7 @@ impl CodecMapper {
         }
 
         // Fallback based on common codec knowledge
-        let fallback_rate = match codec_name.to_lowercase().as_str() {
+        let fallback_rate = match codec_name.to_ascii_lowercase().as_str() {
             "pcmu" | "pcma" | "g711" => 8000,
             "g729" => 8000,
             "opus" => 48000,
@@ -439,7 +447,7 @@ impl CodecMapper {
             self.codec_clock_rates.remove(codec_name);
 
             // Remove from Opus configs if it was an Opus codec
-            if codec_name.starts_with("opus") {
+            if codec_name.to_ascii_lowercase().starts_with("opus") {
                 if let Some(config) = self.opus_configs.remove(&payload_type) {
                     self.opus_config_to_payload.remove(&config);
                 }
@@ -615,6 +623,12 @@ mod tests {
         let config = OpusConfig::from_codec_string("opus@48000Hz@2ch").unwrap();
         assert_eq!(config.sample_rate, 48000);
         assert_eq!(config.channels, 2);
+
+        let config = OpusConfig::from_codec_string("OpUs@48000HZ@2CH@128000BPS@FEC").unwrap();
+        assert_eq!(config.sample_rate, 48000);
+        assert_eq!(config.channels, 2);
+        assert_eq!(config.max_bitrate, Some(128000));
+        assert_eq!(config.fec_enabled, Some(true));
 
         // Test parsing with bitrate
         let config = OpusConfig::from_codec_string("opus@16000Hz@32000bps").unwrap();

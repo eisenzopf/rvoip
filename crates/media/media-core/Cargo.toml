@@ -71,9 +71,8 @@ num-complex = "0.4"          # Used in AEC v2 implementation
 apodize = "1.0"              # Used in VAD v2 for windowing functions
 biquad = "0.4"               # Used in AGC v2 for digital filters
 
-# Media codecs (optional)
-opus = { version = "0.3", optional = true }
-# g729 = { version = "0.3", optional = true }  # Commented out due to missing dependency
+# Media codecs are implemented by codec-core. media-core only provides the
+# media-frame adapter and negotiation/capability plumbing.
 
 # WAV file support
 hound = "3.5"
@@ -82,6 +81,9 @@ hound = "3.5"
 default = ["pcmu", "pcma"]
 pcmu = []
 pcma = []
+# Compatibility feature retained for callers that previously enabled it.
+# G.722 payload formatting remains available, but no encoder/decoder is
+# advertised or constructed.
 g722 = []
 memory-diagnostics = [
     "rvoip-infra-common/memory-diagnostics",
@@ -89,7 +91,9 @@ memory-diagnostics = [
 rtp-memory-diagnostics = ["rvoip-rtp-core/memory-diagnostics"]
 perf-diagnostics = []
 g729 = ["rvoip-codec-core/g729"]
-opus = ["dep:opus"]
+opus = ["rvoip-codec-core/opus"]
+# Deprecated compatibility alias. It enables the real Opus backend.
+opus-sim = ["opus"]
 all-codecs = ["pcmu", "pcma", "g722", "g729", "opus"]
 
 [dev-dependencies]

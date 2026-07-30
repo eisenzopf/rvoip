@@ -414,8 +414,16 @@ impl CodecConfig {
     }
 
     /// Set bitrate
+    #[must_use]
     pub fn with_bitrate(mut self, bitrate: u32) -> Self {
         self.bitrate = Some(bitrate);
+        // Opus historically treated the codec-specific bitrate as the
+        // authoritative value. Keep the generic convenience setter and that
+        // public field synchronized so existing callers do not silently get
+        // the default 64 kbit/s configuration.
+        if self.codec_type == CodecType::Opus {
+            self.parameters.opus.bitrate = bitrate;
+        }
         self
     }
 
@@ -532,7 +540,7 @@ impl CodecType {
             Self::G711Pcmu | Self::G711Pcma => (64000, 64000),
 
             Self::G729 | Self::G729A | Self::G729BA => (8000, 8000),
-            Self::Opus => (6000, 510000),
+            Self::Opus => (6_000, 510_000),
         }
     }
 }
