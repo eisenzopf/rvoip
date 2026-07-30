@@ -585,6 +585,12 @@ impl UserRegistry {
     }
 }
 
+impl Default for UserRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn same_binding(existing: &ContactInfo, incoming: &ContactInfo) -> bool {
     existing.uri == incoming.uri
         || (incoming.reg_id.is_some()

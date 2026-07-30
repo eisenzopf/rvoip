@@ -186,6 +186,12 @@ pub struct RegistrarEventAdapter {
     session_handler: Option<Box<dyn Fn(RegistrarServiceEvent) + Send + Sync>>,
 }
 
+impl Default for RegistrarEventAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RegistrarEventAdapter {
     pub fn new() -> Self {
         Self {

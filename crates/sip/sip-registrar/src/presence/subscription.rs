@@ -19,6 +19,12 @@ pub struct SubscriptionManager {
     watching: Arc<DashMap<String, Vec<String>>>,
 }
 
+impl Default for SubscriptionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubscriptionManager {
     pub fn new() -> Self {
         Self {
@@ -172,7 +178,7 @@ impl SubscriptionManager {
 
         // Remove expired subscriptions
         for sub_id in to_expire {
-            if let Ok(_) = self.remove_subscription(&sub_id).await {
+            if self.remove_subscription(&sub_id).await.is_ok() {
                 expired.push(sub_id);
             }
         }

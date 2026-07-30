@@ -28,6 +28,12 @@ pub struct Registrar {
     domain_aliases: Arc<DashMap<String, String>>,
 }
 
+impl Default for Registrar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registrar {
     pub fn new() -> Self {
         Self::with_config(RegistrarConfig::default())

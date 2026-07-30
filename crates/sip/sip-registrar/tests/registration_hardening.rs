@@ -126,9 +126,11 @@ async fn refresh_and_unregister_update_individual_aor_bindings() {
 
 #[tokio::test]
 async fn expired_contacts_are_not_returned_by_live_lookup() {
-    let mut config = RegistrarConfig::default();
-    config.min_expires = 1;
-    config.default_expires = 1;
+    let config = RegistrarConfig {
+        min_expires: 1,
+        default_expires: 1,
+        ..RegistrarConfig::default()
+    };
     let registrar = service_with_config(config).await;
     let alice = aor("sip:alice@example.com");
 
@@ -259,8 +261,10 @@ async fn path_and_outbound_flow_metadata_round_trip() {
         .unwrap();
     assert_eq!(registrar.lookup_aor(&alice).await.unwrap().len(), 2);
 
-    let mut no_path_config = RegistrarConfig::default();
-    no_path_config.support_path = false;
+    let no_path_config = RegistrarConfig {
+        support_path: false,
+        ..RegistrarConfig::default()
+    };
     let no_path_registrar = service_with_config(no_path_config).await;
     let bob = aor("sip:bob@example.com");
     let mut path_contact = contact("sip:bob@192.0.2.10:5060", 1.0);
@@ -276,10 +280,12 @@ async fn path_and_outbound_flow_metadata_round_trip() {
 
 #[tokio::test]
 async fn max_contact_policy_rejects_replaces_or_removes_unavailable() {
-    let mut reject_config = RegistrarConfig::default();
-    reject_config.max_contacts_per_aor = 1;
-    reject_config.remove_existing = false;
-    reject_config.remove_unavailable = false;
+    let reject_config = RegistrarConfig {
+        max_contacts_per_aor: 1,
+        remove_existing: false,
+        remove_unavailable: false,
+        ..RegistrarConfig::default()
+    };
     let reject_registrar = service_with_config(reject_config).await;
     let alice = aor("sip:alice@example.com");
     reject_registrar
@@ -311,9 +317,11 @@ async fn max_contact_policy_rejects_replaces_or_removes_unavailable() {
         Err(RegistrarError::UserNotFound(_))
     ));
 
-    let mut replace_config = RegistrarConfig::default();
-    replace_config.max_contacts_per_aor = 1;
-    replace_config.remove_existing = true;
+    let replace_config = RegistrarConfig {
+        max_contacts_per_aor: 1,
+        remove_existing: true,
+        ..RegistrarConfig::default()
+    };
     let replace_registrar = service_with_config(replace_config).await;
     let bob = aor("sip:bob@example.com");
     replace_registrar
@@ -328,10 +336,12 @@ async fn max_contact_policy_rejects_replaces_or_removes_unavailable() {
     assert_eq!(contacts.len(), 1);
     assert_eq!(contacts[0].uri, "sip:bob@192.0.2.11:5060");
 
-    let mut remove_unavailable_config = RegistrarConfig::default();
-    remove_unavailable_config.max_contacts_per_aor = 1;
-    remove_unavailable_config.remove_existing = false;
-    remove_unavailable_config.remove_unavailable = true;
+    let remove_unavailable_config = RegistrarConfig {
+        max_contacts_per_aor: 1,
+        remove_existing: false,
+        remove_unavailable: true,
+        ..RegistrarConfig::default()
+    };
     let remove_unavailable_registrar = service_with_config(remove_unavailable_config).await;
     let carol = aor("sip:carol@example.com");
     remove_unavailable_registrar
