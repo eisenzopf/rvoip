@@ -151,7 +151,6 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 111,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -163,7 +162,6 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(audio_codec.clone(), RtpCodecKind::Audio)?;
@@ -370,9 +368,11 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
 
                         // Record the track kind for this receiver on first packet
                         let mut kind_map = receiver_id_to_kind.lock().await;
-                        if !kind_map.contains_key(&receiver_id) {
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            kind_map.entry(receiver_id)
+                        {
                             let kind = track.kind();
-                            kind_map.insert(receiver_id, kind);
+                            e.insert(kind);
 
                             let codec = track
                                 .codec(
@@ -395,13 +395,13 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
                         match kind_map.get(&receiver_id) {
                             Some(RtpCodecKind::Audio) => {
                                 audio_received += 1;
-                                if audio_received % 10 == 0 {
+                                if audio_received.is_multiple_of(10) {
                                     log::info!("RTC received audio RTP packet #{}", audio_received);
                                 }
                             }
                             Some(RtpCodecKind::Video) => {
                                 video_received += 1;
-                                if video_received % 10 == 0 {
+                                if video_received.is_multiple_of(10) {
                                     log::info!("RTC received video RTP packet #{}", video_received);
                                 }
                             }

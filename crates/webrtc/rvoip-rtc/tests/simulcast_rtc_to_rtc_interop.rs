@@ -72,7 +72,6 @@ async fn test_simulcast_rtc_to_rtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     let audio_codec = RTCRtpCodecParameters {
@@ -84,7 +83,6 @@ async fn test_simulcast_rtc_to_rtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     answerer_media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -221,9 +219,9 @@ async fn test_simulcast_rtc_to_rtc() -> Result<()> {
     }
 
     let output_track = MediaStreamTrack::new(
-        format!("rtc-rs_simulcast"),
-        format!("video_simulcast"),
-        format!("video_simulcast"),
+        "rtc-rs_simulcast".to_string(),
+        "video_simulcast".to_string(),
+        "video_simulcast".to_string(),
         RtpCodecKind::Video,
         codings,
     );
@@ -390,10 +388,9 @@ async fn test_simulcast_rtc_to_rtc() -> Result<()> {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     // Get the receiver for this track
-                    let receiver_id = track_id2_receiver_id
+                    let receiver_id = *track_id2_receiver_id
                         .get(&track_id)
-                        .ok_or(Error::ErrRTPReceiverNotExisted)?
-                        .clone();
+                        .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
                     let rtp_receiver = answerer_pc
                         .rtp_receiver(receiver_id)

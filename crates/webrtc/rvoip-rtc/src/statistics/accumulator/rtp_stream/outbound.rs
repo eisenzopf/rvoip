@@ -536,11 +536,12 @@ mod tests {
 
     #[test]
     fn test_quality_limitation_tracking() {
-        let mut acc = OutboundRtpStreamAccumulator::default();
-
-        acc.quality_limitation_reason = RTCQualityLimitationReason::Bandwidth;
-        acc.quality_limitation_resolution_changes = 3;
-        acc.target_bitrate = 1_500_000.0;
+        let acc = OutboundRtpStreamAccumulator {
+            quality_limitation_reason: RTCQualityLimitationReason::Bandwidth,
+            quality_limitation_resolution_changes: 3,
+            target_bitrate: 1_500_000.0,
+            ..Default::default()
+        };
 
         let now = Instant::now();
         let stats = acc.snapshot(now, "test");

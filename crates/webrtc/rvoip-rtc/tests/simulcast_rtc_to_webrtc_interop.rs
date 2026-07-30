@@ -150,7 +150,6 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     let audio_codec = RTCRtpCodecParameters {
@@ -162,7 +161,6 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -227,9 +225,9 @@ async fn test_simulcast_rtc_to_webrtc() -> Result<()> {
     }
 
     let output_track = MediaStreamTrack::new(
-        format!("webrtc-rs_simulcast"),
-        format!("video_simulcast"),
-        format!("video_simulcast"),
+        "webrtc-rs_simulcast".to_string(),
+        "video_simulcast".to_string(),
+        "video_simulcast".to_string(),
         RtpCodecKind::Video,
         codings,
     );

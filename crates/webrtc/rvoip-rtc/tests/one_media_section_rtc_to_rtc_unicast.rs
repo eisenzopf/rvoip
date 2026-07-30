@@ -68,7 +68,6 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     answerer_media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -146,9 +145,9 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
     log::info!("✅ Offerer added track with SSRC: {}", ssrc);
 
     let output_track = MediaStreamTrack::new(
-        format!("rtc-rs_unicast"),
-        format!("video_unicast"),
-        format!("video_unicast"),
+        "rtc-rs_unicast".to_string(),
+        "video_unicast".to_string(),
+        "video_unicast".to_string(),
         RtpCodecKind::Video,
         codings,
     );
@@ -307,10 +306,9 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     // Get the receiver for this track
-                    let receiver_id = track_id2_receiver_id
+                    let receiver_id = *track_id2_receiver_id
                         .get(&track_id)
-                        .ok_or(Error::ErrRTPReceiverNotExisted)?
-                        .clone();
+                        .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
                     let rtp_receiver = answerer_pc
                         .rtp_receiver(receiver_id)

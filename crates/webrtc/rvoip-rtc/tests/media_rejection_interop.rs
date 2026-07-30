@@ -333,7 +333,7 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
         while let Some(message) = rtc_pc.poll_read() {
             if let RTCMessage::RtpPacket(_track_id, rtp_packet) = message {
                 video_packets_received += 1;
-                if video_packets_received == 1 || video_packets_received % 10 == 0 {
+                if video_packets_received == 1 || video_packets_received.is_multiple_of(10) {
                     log::info!(
                         "RTC received RTP packet #{} (seq: {}, ssrc: {})",
                         video_packets_received,
