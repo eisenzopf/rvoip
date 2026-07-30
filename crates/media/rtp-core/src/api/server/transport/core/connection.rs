@@ -59,6 +59,7 @@ pub async fn handle_client_static(
         session_buffer_config,
         transport_buffer_config,
         false,
+        None,
     )
     .await
 }
@@ -70,6 +71,7 @@ pub(crate) async fn handle_client_static_with_security_requirement(
     session_buffer_config: RtpSessionBufferConfig,
     transport_buffer_config: RtpTransportBufferConfig,
     secure_media_required: bool,
+    pre_shared_srtp: Option<(crate::srtp::SrtpCryptoSuite, Vec<u8>)>,
 ) -> Result<String, crate::api::common::error::MediaTransportError> {
     info!("Handling new client from {}", addr);
 
@@ -96,12 +98,40 @@ pub(crate) async fn handle_client_static_with_security_requirement(
         MediaTransportError::Transport(format!("Failed to create client RTP session: {}", e))
     })?;
     if secure_media_required {
-        if let Some(udp) = rtp_session
-            .transport()
+        let transport = rtp_session.transport();
+        let udp = transport
             .as_any()
             .downcast_ref::<UdpRtpTransport>()
-        {
-            udp.require_srtp();
+            .ok_or_else(|| {
+                MediaTransportError::Security(
+                    "secure server session is not backed by UDP transport".to_string(),
+                )
+            })?;
+        udp.require_srtp();
+        if let Some((crypto_suite, combined_key)) = pre_shared_srtp {
+            let expected_length = crypto_suite.key_length + 14;
+            if combined_key.len() != expected_length {
+                return Err(MediaTransportError::Security(format!(
+                    "SRTP key material for {crypto_suite:?} must be exactly {expected_length} bytes, got {}",
+                    combined_key.len(),
+                )));
+            }
+            let key = combined_key[..crypto_suite.key_length].to_vec();
+            let salt = combined_key[crypto_suite.key_length..].to_vec();
+            udp.set_srtp_contexts(
+                crate::srtp::SrtpContext::new(
+                    crypto_suite.clone(),
+                    crate::srtp::SrtpCryptoKey::new(key.clone(), salt.clone()),
+                )
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?,
+                crate::srtp::SrtpContext::new(
+                    crypto_suite,
+                    crate::srtp::SrtpCryptoKey::new(key, salt),
+                )
+                .map_err(|error| MediaTransportError::Security(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| MediaTransportError::Security(error.to_string()))?;
         }
     }
 
@@ -328,7 +358,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn direct_srtp_server_session_never_emits_plaintext_rtcp() {
+    async fn direct_secure_server_session_never_emits_plaintext_rtcp() {
         let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let clients = Arc::new(DashMap::new());
         let (frame_sender, _) = broadcast::channel(8);
@@ -340,6 +370,7 @@ mod tests {
             RtpSessionBufferConfig::default(),
             RtpTransportBufferConfig::default(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -347,20 +378,68 @@ mod tests {
 
         assert!(matches!(
             session.lock().await.send_sender_report().await,
-            Err(crate::Error::UnsupportedFeature(_))
+            Err(crate::Error::InvalidState(_))
         ));
         assert!(matches!(
             session.lock().await.send_receiver_report().await,
-            Err(crate::Error::UnsupportedFeature(_))
+            Err(crate::Error::InvalidState(_))
         ));
 
-        let mut wire = [0_u8; 2048];
+        let mut wire = [0u8; 2048];
         assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(1_200),
+            std::time::Duration::from_millis(200),
             peer.recv_from(&mut wire)
         )
         .await
         .is_err());
+
+        let (_, mut client) = clients.remove(&client_id).unwrap();
+        if let Some(task) = client.task.take() {
+            task.abort();
+        }
+        client.session.lock().await.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_secure_server_session_emits_authenticated_srtcp() {
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let clients = Arc::new(DashMap::new());
+        let (frame_sender, _) = broadcast::channel(8);
+
+        let combined_key = [vec![0x42; 16], vec![0x37; 14]].concat();
+        let client_id = handle_client_static_with_security_requirement(
+            peer.local_addr().unwrap(),
+            &clients,
+            &frame_sender,
+            RtpSessionBufferConfig::default(),
+            RtpTransportBufferConfig::default(),
+            true,
+            Some((crate::srtp::SRTP_AES128_CM_SHA1_80, combined_key)),
+        )
+        .await
+        .unwrap();
+        let session = clients.get(&client_id).unwrap().session.clone();
+        let key = crate::srtp::SrtpCryptoKey::new(vec![0x42; 16], vec![0x37; 14]);
+        let suite = crate::srtp::SRTP_AES128_CM_SHA1_80;
+        let mut peer_receive = crate::srtp::SrtpContext::new(suite.clone(), key.clone()).unwrap();
+
+        {
+            let session = session.lock().await;
+            session.send_sender_report().await.unwrap();
+        }
+
+        let mut wire = [0u8; 2048];
+        let (length, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), peer.recv_from(&mut wire))
+                .await
+                .unwrap()
+                .unwrap();
+        let plaintext = peer_receive.unprotect_rtcp(&wire[..length]).unwrap();
+        assert!(matches!(
+            crate::packet::rtcp::RtcpPacket::parse(&plaintext).unwrap(),
+            crate::packet::rtcp::RtcpPacket::SenderReport(_)
+        ));
+        assert_ne!(&wire[..length], plaintext.as_ref());
 
         let (_, mut client) = clients.remove(&client_id).unwrap();
         if let Some(task) = client.task.take() {

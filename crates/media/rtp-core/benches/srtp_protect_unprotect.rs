@@ -10,14 +10,13 @@
 //!
 //! Suite under test: AES-CM-128 + HMAC-SHA1-80 (the default in this
 //! stack and in WebRTC).
-//!
-//! SRTCP is intentionally omitted until the authenticated, stateful
-//! implementation lands. Its public entry points currently fail closed.
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
-use rvoip_rtp_core::{RtpHeader, RtpPacket};
+use rvoip_rtp_core::{
+    RtcpApplicationDefined, RtcpCompoundPacket, RtcpReceiverReport, RtpHeader, RtpPacket,
+};
 
 const PAYLOAD_SIZES: [(&str, usize); 4] = [
     ("opus_80", 80),
@@ -91,5 +90,29 @@ fn bench_unprotect(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_protect, bench_unprotect);
+fn bench_protect_rtcp(c: &mut Criterion) {
+    let mut group = c.benchmark_group("srtp_protect_rtcp");
+    // Typical compound RTCP report ~60–100 bytes.
+    let mut compound = RtcpCompoundPacket::new_with_rr(RtcpReceiverReport::new(0xdead_beef));
+    compound.add_app(RtcpApplicationDefined::new_with_data(
+        0xdead_beef,
+        *b"LOAD",
+        make_payload(76),
+    ));
+    let rtcp_data = compound.serialize().expect("serialize valid compound RTCP");
+    assert_eq!(rtcp_data.len(), 96);
+    group.throughput(Throughput::Bytes(rtcp_data.len() as u64));
+    group.bench_function("compound_96", |b| {
+        let mut ctx = make_context();
+        b.iter(|| {
+            let out = ctx
+                .protect_rtcp(black_box(&rtcp_data))
+                .expect("protect_rtcp");
+            black_box(out);
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_protect, bench_unprotect, bench_protect_rtcp);
 criterion_main!(benches);

@@ -201,6 +201,17 @@ impl SrtpCryptoSuite {
                 self.tag_length, HMAC_SHA1_OUTPUT_LEN
             )));
         }
+
+        if self != &SRTP_AES128_CM_SHA1_80
+            && self != &SRTP_AES128_CM_SHA1_32
+            && self != &SRTP_AES256_CM_SHA1_80
+            && self != &SRTP_AES256_CM_SHA1_32
+        {
+            return Err(crate::Error::UnsupportedFeature(
+                "unreviewed SRTP suite combination is unavailable; use an exact AES-CM/HMAC-SHA1 built-in profile"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 }
@@ -355,6 +366,61 @@ fn commit_rtp_index(state: &mut RtpStreamState, roc: u32, seq: u16, index: u64) 
     state.replay.commit(index);
 }
 
+/// Validate every plaintext RTCP member before SRTCP state can change.
+///
+/// This intentionally accepts both RFC 3550 compound packets and RFC 5506
+/// reduced-size RTCP. It still validates each common header, declared length,
+/// version, packet-specific body, and the rule that padding may appear only
+/// on the final member.
+fn validate_plaintext_rtcp(data: &[u8]) -> Result<(), crate::Error> {
+    if data.is_empty() {
+        return Err(crate::Error::RtcpError(
+            "RTCP packet must not be empty".to_string(),
+        ));
+    }
+
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let remaining = data.len() - offset;
+        if remaining < 4 {
+            return Err(crate::Error::BufferTooSmall {
+                required: 4,
+                available: remaining,
+            });
+        }
+
+        let packet = &data[offset..];
+        let words_minus_one = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+        let packet_size = words_minus_one
+            .checked_add(1)
+            .and_then(|words| words.checked_mul(4))
+            .ok_or_else(|| {
+                crate::Error::RtcpError("RTCP packet length overflows usize".to_string())
+            })?;
+        if offset == 0 && packet_size < 8 {
+            return Err(crate::Error::RtcpError(
+                "SRTCP requires the first RTCP member to carry an SSRC".to_string(),
+            ));
+        }
+        if packet_size > remaining {
+            return Err(crate::Error::BufferTooSmall {
+                required: packet_size,
+                available: remaining,
+            });
+        }
+        if packet[0] & 0x20 != 0 && packet_size != remaining {
+            return Err(crate::Error::RtcpError(
+                "Only the final packet in an RTCP datagram may be padded".to_string(),
+            ));
+        }
+
+        crate::packet::rtcp::RtcpPacket::parse(&packet[..packet_size])?;
+        offset += packet_size;
+    }
+
+    Ok(())
+}
+
 /// Protected RTP packet with authentication tag
 pub struct ProtectedRtpPacket {
     /// The encrypted RTP packet
@@ -479,6 +545,17 @@ impl SrtpContext {
         self.enabled = enabled;
     }
 
+    /// Validate that this context may be installed in a secure transport.
+    pub(crate) fn validate_for_secure_transport(&self) -> Result<(), crate::Error> {
+        if !self.enabled {
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot be installed as secure media".to_string(),
+            ));
+        }
+        self.outbound_crypto.suite().validate()?;
+        self.inbound_crypto.suite().validate()
+    }
+
     /// Set key rotation frequency
     pub fn set_key_rotation(&mut self, frequency: key_derivation::KeyRotationFrequency) {
         self.key_rotation = frequency;
@@ -492,10 +569,9 @@ impl SrtpContext {
     ) -> Result<ProtectedRtpPacket, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return Ok(ProtectedRtpPacket {
-                packet: packet.clone(),
-                auth_tag: None,
-            });
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot pass RTP through as plaintext".to_string(),
+            ));
         }
 
         let ssrc = packet.header.ssrc;
@@ -520,7 +596,10 @@ impl SrtpContext {
 
         // Check for key rotation
         if self.key_rotation.should_rotate(packet_index) {
-            // In a real implementation, we would rotate keys here
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP key rotation is not implemented; refusing to reuse the old key after the configured rotation boundary"
+                    .to_string(),
+            ));
         }
 
         // Encrypt the packet using SRTP
@@ -540,7 +619,9 @@ impl SrtpContext {
     pub fn unprotect(&mut self, data: &[u8]) -> Result<crate::packet::RtpPacket, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return crate::packet::RtpPacket::parse(data);
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot accept RTP as plaintext".to_string(),
+            ));
         }
 
         let (header, _) = crate::packet::RtpHeader::parse_without_consuming(data)?;
@@ -579,12 +660,13 @@ impl SrtpContext {
     pub fn protect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return Ok(bytes::Bytes::copy_from_slice(data));
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot pass RTCP through as plaintext".to_string(),
+            ));
         }
 
-        if data.len() < 8 {
-            return Err(crate::Error::SrtpError("RTCP packet too short".to_string()));
-        }
+        // Parse the complete plaintext before choosing or consuming an index.
+        validate_plaintext_rtcp(data)?;
         let ssrc = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let index = match self.outbound_srtcp.get(&ssrc) {
             Some(send_state) if send_state.exhausted => {
@@ -626,17 +708,25 @@ impl SrtpContext {
     pub fn unprotect_rtcp(&mut self, data: &[u8]) -> Result<bytes::Bytes, crate::Error> {
         // Check if SRTP is enabled
         if !self.enabled {
-            return Ok(bytes::Bytes::copy_from_slice(data));
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot accept RTCP as plaintext".to_string(),
+            ));
         }
 
-        // Authentication and decryption complete before replay state changes.
+        // Authentication and decryption complete before parsing, replay
+        // decisions, or any state entry is inserted.
         let (packet, ssrc, index) = self.inbound_crypto.decrypt_rtcp_with_index(data)?;
-        let replay = self.inbound_srtcp.entry(ssrc).or_default();
-        if !replay.accepts(u64::from(index)) {
+        validate_plaintext_rtcp(&packet)?;
+        if self
+            .inbound_srtcp
+            .get(&ssrc)
+            .is_some_and(|replay| !replay.accepts(u64::from(index)))
+        {
             return Err(crate::Error::SrtpError(
                 "SRTCP packet is a duplicate or outside the replay window".to_string(),
             ));
         }
+        let replay = self.inbound_srtcp.entry(ssrc).or_default();
         replay.commit(u64::from(index));
         Ok(packet)
     }
@@ -678,6 +768,20 @@ mod tests {
         )
     }
 
+    fn sender_report(ssrc: u32) -> Vec<u8> {
+        let mut packet = vec![0x80, 200, 0, 6];
+        packet.extend_from_slice(&ssrc.to_be_bytes());
+        packet.extend_from_slice(&[0x5a; 20]);
+        packet
+    }
+
+    fn inbound_srtcp_snapshot(context: &SrtpContext, ssrc: u32) -> Option<(Option<u64>, u64)> {
+        context
+            .inbound_srtcp
+            .get(&ssrc)
+            .map(|state| (state.highest, state.bitmap))
+    }
+
     fn protect_bytes(context: &mut SrtpContext, packet: &crate::packet::RtpPacket) -> Bytes {
         context.protect(packet).unwrap().serialize().unwrap()
     }
@@ -714,14 +818,10 @@ mod tests {
     }
 
     #[test]
-    fn test_srtp_context_creation() {
-        // Create a key
+    fn null_profiles_are_retained_but_fail_closed() {
         let key = SrtpCryptoKey::new(vec![0; 16], vec![0; 14]);
-
-        // Create context with null encryption
         let context = SrtpContext::new(SRTP_NULL_NULL, key);
-
-        assert!(context.is_ok());
+        assert!(matches!(context, Err(crate::Error::UnsupportedFeature(_))));
     }
 
     #[test]
@@ -731,6 +831,53 @@ mod tests {
             .err()
             .expect("placeholder GCM profile must be rejected");
         assert!(matches!(error, crate::Error::UnsupportedFeature(_)));
+    }
+
+    #[test]
+    fn disabled_context_rejects_plaintext_passthrough_without_state() {
+        let (mut context, _) = contexts();
+        let rtp = packet(0x0102_0304, 1);
+        let plain_rtp = rtp.serialize().unwrap();
+        let rtcp = sender_report(0x0102_0304);
+        context.set_enabled(false);
+
+        assert!(matches!(
+            context.protect(&rtp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.unprotect(&plain_rtp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.protect_rtcp(&rtcp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(matches!(
+            context.unprotect_rtcp(&rtcp),
+            Err(crate::Error::InvalidState(_))
+        ));
+        assert!(context.outbound_rtp.is_empty());
+        assert!(context.inbound_rtp.is_empty());
+        assert!(context.outbound_srtcp.is_empty());
+        assert!(context.inbound_srtcp.is_empty());
+    }
+
+    #[test]
+    fn unsupported_key_rotation_does_not_mutate_outbound_state() {
+        let rtp = packet(0x0102_0304, 0);
+        for power in [8, 64, 255] {
+            let (mut context, _) = contexts();
+            context.set_key_rotation(KeyRotationFrequency::Power2(power));
+            assert!(matches!(
+                context.protect(&rtp),
+                Err(crate::Error::UnsupportedFeature(_))
+            ));
+            assert!(context.outbound_rtp.is_empty());
+
+            context.set_key_rotation(KeyRotationFrequency::None);
+            context.protect(&rtp).unwrap();
+        }
     }
 
     #[test]
@@ -883,13 +1030,142 @@ mod tests {
     #[test]
     fn srtcp_index_changes_ciphertext_and_replay_is_rejected() {
         let (mut a, mut b) = contexts();
-        let plain = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
+        let plain = sender_report(0x1234_5678);
         let first = a.protect_rtcp(&plain).unwrap();
         let second = a.protect_rtcp(&plain).unwrap();
         assert_ne!(first, second);
+        assert_ne!(&first[8..plain.len()], &plain[8..]);
         assert_eq!(b.unprotect_rtcp(&first).unwrap().as_ref(), plain);
         assert_eq!(b.unprotect_rtcp(&second).unwrap().as_ref(), plain);
         assert!(b.unprotect_rtcp(&first).is_err());
+    }
+
+    #[test]
+    fn srtcp_directional_keys_are_used() {
+        let (mut a, mut b) = contexts();
+        let plain = sender_report(0x1020_3040);
+        let wire = a.protect_rtcp(&plain).unwrap();
+        assert_eq!(b.unprotect_rtcp(&wire).unwrap().as_ref(), plain);
+        assert!(a.unprotect_rtcp(&wire).is_err());
+    }
+
+    #[test]
+    fn srtcp_reordering_duplicates_and_old_packets_use_a_per_ssrc_window() {
+        let (mut a, mut b) = contexts();
+        let ssrc = 0x7654_3210;
+        let plain = sender_report(ssrc);
+        let wires: Vec<_> = (0..70).map(|_| a.protect_rtcp(&plain).unwrap()).collect();
+
+        b.unprotect_rtcp(&wires[0]).unwrap();
+        b.unprotect_rtcp(&wires[2]).unwrap();
+        b.unprotect_rtcp(&wires[1])
+            .expect("reordered packet inside the replay window");
+        assert!(b.unprotect_rtcp(&wires[1]).is_err());
+
+        for wire in &wires[3..] {
+            b.unprotect_rtcp(wire).unwrap();
+        }
+        assert!(
+            b.unprotect_rtcp(&wires[1]).is_err(),
+            "packet older than the 64-packet window must remain rejected"
+        );
+    }
+
+    #[test]
+    fn malformed_authenticated_srtcp_does_not_mutate_receive_state() {
+        let (a, mut b) = contexts();
+        let ssrc = 0x1112_1314;
+        let malformed = [0x80, 200, 0, 6, 0x11, 0x12, 0x13, 0x14];
+        let (encrypted, tag) = a
+            .outbound_crypto
+            .encrypt_rtcp_with_index(&malformed, 1)
+            .unwrap();
+        let mut wire = encrypted.to_vec();
+        wire.extend_from_slice(&tag.unwrap());
+
+        assert!(b.unprotect_rtcp(&wire).is_err());
+        assert_eq!(inbound_srtcp_snapshot(&b, ssrc), None);
+
+        let mut sender = a;
+        let valid = sender.protect_rtcp(&sender_report(ssrc)).unwrap();
+        assert!(b.unprotect_rtcp(&valid).is_ok());
+    }
+
+    #[test]
+    fn malformed_sdes_cannot_consume_srtcp_send_or_receive_state() {
+        let (sender, mut receiver) = contexts();
+        let ssrc = 0x2122_2324;
+        // One declared SDES chunk containing only its SSRC and no mandatory
+        // END item. The common header and declared packet length are valid.
+        let malformed = [0x81, 202, 0, 1, 0x21, 0x22, 0x23, 0x24];
+
+        let mut outbound = sender;
+        assert!(outbound.protect_rtcp(&malformed).is_err());
+        assert!(!outbound.outbound_srtcp.contains_key(&ssrc));
+
+        let (encrypted, tag) = outbound
+            .outbound_crypto
+            .encrypt_rtcp_with_index(&malformed, 1)
+            .unwrap();
+        let mut wire = encrypted.to_vec();
+        wire.extend_from_slice(&tag.unwrap());
+        assert!(receiver.unprotect_rtcp(&wire).is_err());
+        assert_eq!(inbound_srtcp_snapshot(&receiver, ssrc), None);
+    }
+
+    #[test]
+    fn authenticated_cleartext_srtcp_is_rejected_without_state_mutation() {
+        use hmac::{Hmac, Mac};
+        use sha1::Sha1;
+
+        let (_, mut receiver) = contexts();
+        let ssrc = 0x3141_5926;
+        let plain = sender_report(ssrc);
+        let mut wire = plain.clone();
+        // Index one with E=0: the packet is correctly authenticated below but
+        // contradicts the negotiated AES-CM encryption policy.
+        wire.extend_from_slice(&1_u32.to_be_bytes());
+
+        let remote_master = SrtpCryptoKey::new(vec![0x11; 16], vec![0x22; 14]);
+        let auth_key = srtp_kdf(
+            &remote_master,
+            &SrtpKeyDerivationParams {
+                label: KeyDerivationLabel::RtcpAuthentication,
+                key_derivation_rate: 0,
+                index: 0,
+            },
+            20,
+        )
+        .unwrap();
+        let mut mac = Hmac::<Sha1>::new_from_slice(&auth_key).unwrap();
+        mac.update(&wire);
+        wire.extend_from_slice(&mac.finalize().into_bytes()[..10]);
+
+        assert!(matches!(
+            receiver.unprotect_rtcp(&wire),
+            Err(crate::Error::AuthenticationFailed(message))
+                if message.contains("requires the E flag")
+        ));
+        assert_eq!(inbound_srtcp_snapshot(&receiver, ssrc), None);
+    }
+
+    #[test]
+    fn malformed_plaintext_rtcp_does_not_consume_an_outbound_index() {
+        let (mut a, _) = contexts();
+        let ssrc = 0x2233_4455;
+        assert!(a.protect_rtcp(&[0x80, 205, 0, 0]).is_err());
+        assert!(a.outbound_srtcp.is_empty());
+        let malformed = [0x80, 200, 0, 6, 0x22, 0x33, 0x44, 0x55];
+        assert!(a.protect_rtcp(&malformed).is_err());
+        assert!(!a.outbound_srtcp.contains_key(&ssrc));
+
+        let wire = a.protect_rtcp(&sender_report(ssrc)).unwrap();
+        let index_offset = wire.len() - SRTP_AES128_CM_SHA1_80.srtcp_tag_length() - 4;
+        assert_eq!(
+            u32::from_be_bytes(wire[index_offset..index_offset + 4].try_into().unwrap())
+                & 0x7fff_ffff,
+            1
+        );
     }
 
     #[test]
@@ -912,6 +1188,7 @@ mod tests {
     fn srtcp_auth_failure_does_not_consume_an_index() {
         let (mut a, mut b) = contexts();
         let plain = [0x80, 201, 0, 1, 0x12, 0x34, 0x56, 0x78];
+        let ssrc = 0x1234_5678;
         let valid = a.protect_rtcp(&plain).unwrap();
         let mut tampered = valid.to_vec();
         *tampered.last_mut().unwrap() ^= 0x01;
@@ -919,6 +1196,7 @@ mod tests {
             b.unprotect_rtcp(&tampered),
             Err(crate::Error::AuthenticationFailed(_))
         ));
+        assert_eq!(inbound_srtcp_snapshot(&b, ssrc), None);
         assert_eq!(b.unprotect_rtcp(&valid).unwrap().as_ref(), plain);
     }
 
