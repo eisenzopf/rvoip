@@ -1451,8 +1451,7 @@ impl RtpSession {
 
     /// Get a list of all SSRCs known to this session
     ///
-    /// This returns all SSRCs that have been seen, even if their streams
-    /// haven't released any packets from their jitter buffers yet.
+    /// This returns all SSRCs that have been seen or explicitly precreated.
     pub async fn get_all_ssrcs(&self) -> Vec<RtpSsrc> {
         self.streams.iter().map(|entry| *entry.key()).collect()
     }
@@ -1471,23 +1470,12 @@ impl RtpSession {
             return false;
         }
 
-        // Create the stream
+        // Session ingress remains deliberately unbuffered in this correctness
+        // repair. Enabling the legacy RtpStream jitter buffer here while the
+        // first-packet path stays unbuffered makes precreated streams hold the
+        // second sequential packet and can reverse later delivery.
         info!("Manually creating new RTP stream for SSRC={:08x}", ssrc);
-        let mut stream = if self.config.enable_jitter_buffer {
-            debug!("Creating stream with jitter buffer for SSRC={:08x}", ssrc);
-            RtpStream::with_jitter_buffer(
-                ssrc,
-                self.config.clock_rate,
-                self.config.jitter_buffer_size.unwrap_or(50),
-                self.config.max_packet_age_ms.unwrap_or(200) as u64,
-            )
-        } else {
-            debug!(
-                "Creating stream without jitter buffer for SSRC={:08x}",
-                ssrc
-            );
-            RtpStream::new(ssrc, self.config.clock_rate)
-        };
+        let mut stream = RtpStream::new(ssrc, self.config.clock_rate);
         if let Some(sender_report) = self.received_sender_reports.get(&ssrc) {
             stream.update_last_sr_info(sender_report.lsr, sender_report.received_at);
         }
@@ -1941,6 +1929,36 @@ mod tests {
         assert_eq!(stats.packets_lost, 0);
         assert_eq!(stats.packets_duplicated, 1);
         assert_eq!(stats.packets_out_of_order, 1);
+    }
+
+    #[tokio::test]
+    async fn precreated_stream_delivers_sequential_packets_promptly_and_in_order() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let remote_ssrc = 0xb1b2_b3b4;
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            // Exercise the configuration that previously gave manually
+            // precreated streams a broken legacy jitter buffer.
+            enable_jitter_buffer: true,
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        let destination = session.local_addr().unwrap();
+        let mut events = session.subscribe();
+
+        assert!(session.create_stream_for_ssrc(remote_ssrc).await);
+        send_raw_rtp(&peer, destination, 100, 16_000, remote_ssrc).await;
+        send_raw_rtp(&peer, destination, 101, 16_160, remote_ssrc).await;
+
+        let first = next_packet_event(&mut events).await;
+        let second = next_packet_event(&mut events).await;
+        assert_eq!(first.header.sequence_number, 100);
+        assert_eq!(second.header.sequence_number, 101);
+
+        let stream = session.get_stream(remote_ssrc).await.unwrap();
+        assert_eq!(stream.packets_received, 2);
+        assert_eq!(stream.highest_seq, 101);
     }
 
     #[tokio::test]
