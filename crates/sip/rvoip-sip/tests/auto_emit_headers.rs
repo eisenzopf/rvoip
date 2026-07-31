@@ -73,6 +73,21 @@ async fn config_auto_emit_extra_headers_stamps_legacy_bye() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{bob_port}>").into_bytes()),
                     ));
+                    response.body = format!(
+                        "v=0\r\no=auto-emit 1 1 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio {} RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n",
+                        bob_port + 1_000
+                    )
+                    .into_bytes()
+                    .into();
+                    response
+                        .headers
+                        .retain(|header| !matches!(header, TypedHeader::ContentLength(_)));
+                    response.headers.push(TypedHeader::ContentLength(
+                        rvoip_sip_core::types::ContentLength::new(response.body.len() as u32),
+                    ));
+                    response.headers.push(TypedHeader::ContentType(
+                        rvoip_sip_core::types::ContentType::sdp(),
+                    ));
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send INVITE response");
