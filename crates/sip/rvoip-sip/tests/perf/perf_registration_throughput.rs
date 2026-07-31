@@ -151,6 +151,7 @@ async fn run_one_register(
 
 /// One sweep point: fresh histograms + counters, run the offered REG
 /// rate for the configured steady window. Returns the per-point report.
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the registration load profile.
 async fn run_one_point(
     alice: Arc<UnifiedCoordinator>,
     registrar_uri: String,

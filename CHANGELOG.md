@@ -19,6 +19,9 @@ the high-level APIs, and makes Tokio the sole WebRTC runtime.
   libSRTP interoperability.
 - Generate directional SDES answer keys and accept safely unpadded AES-256 key
   material in compatible mode with secret-safe diagnostics (issue #46).
+- Preserve the 0.3.x `Config`, `Event`, `SessionError`, state-table, and
+  negotiated-media shapes while exposing new auth, SDES, and renegotiation
+  details through bounded additive diagnostic/runtime APIs.
 
 ### SIP, codecs, and WebRTC
 

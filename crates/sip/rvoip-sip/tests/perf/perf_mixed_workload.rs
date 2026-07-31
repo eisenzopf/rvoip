@@ -214,6 +214,7 @@ async fn run_one_register(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the mixed load profile.
 async fn run_one_point(
     alice: Arc<UnifiedCoordinator>,
     call_from: String,

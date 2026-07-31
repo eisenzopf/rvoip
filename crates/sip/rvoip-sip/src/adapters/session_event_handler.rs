@@ -1974,6 +1974,42 @@ pub struct SessionCrossCrateEventHandler {
 }
 
 impl SessionCrossCrateEventHandler {
+    fn publish_renegotiation_failure(
+        &self,
+        handle: &SessionRegistryHandle,
+        method: impl Into<String>,
+        reason: impl Into<String>,
+    ) {
+        self.app_event_publisher.publish_diagnostic_exact(
+            handle,
+            crate::api::events::DiagnosticEvent::RenegotiationFailed(
+                crate::api::events::RenegotiationFailure {
+                    call_id: handle.session_id().clone(),
+                    method: method.into(),
+                    reason: reason.into(),
+                },
+            ),
+        );
+    }
+
+    fn publish_sdes_negotiation_failure(
+        &self,
+        handle: &SessionRegistryHandle,
+        response: crate::api::incoming::IncomingResponse,
+        diagnostic: crate::errors::SdesNegotiationDiagnostic,
+    ) {
+        self.app_event_publisher.publish_diagnostic_exact(
+            handle,
+            crate::api::events::DiagnosticEvent::SdesNegotiationFailed(
+                crate::api::events::SdesNegotiationFailure {
+                    call_id: handle.session_id().clone(),
+                    response,
+                    diagnostic,
+                },
+            ),
+        );
+    }
+
     async fn send_retained_info_failure_response(
         &self,
         transaction_id: rvoip_sip_dialog::transaction::TransactionKey,
@@ -4301,13 +4337,10 @@ impl SessionCrossCrateEventHandler {
             if !termination.committed() {
                 return Ok(());
             }
-            self.app_event_publisher.publish_exact(
+            self.publish_renegotiation_failure(
                 handle,
-                crate::api::events::Event::RenegotiationFailed {
-                    call_id: session_id.clone(),
-                    method: "INVITE".to_string(),
-                    reason: "successful response contained no SDP answer".to_string(),
-                },
+                "INVITE",
+                "successful response contained no SDP answer",
             );
             self.release_zero_wire_confirmed_negotiation(
                 termination,
@@ -4349,13 +4382,10 @@ impl SessionCrossCrateEventHandler {
             if !termination.committed() {
                 return Ok(());
             }
-            self.app_event_publisher.publish_exact(
+            self.publish_renegotiation_failure(
                 handle,
-                crate::api::events::Event::RenegotiationFailed {
-                    call_id: session_id.clone(),
-                    method: "INVITE".to_string(),
-                    reason: "offerless INVITE received no usable 200 OK SDP offer".to_string(),
-                },
+                "INVITE",
+                "offerless INVITE received no usable 200 OK SDP offer",
             );
             self.publish_initial_invite_negotiation_failure(
                 handle,
@@ -4422,8 +4452,8 @@ impl SessionCrossCrateEventHandler {
                 if !termination.committed() {
                     return Ok(());
                 }
-                if let Some(crate::errors::SessionError::SdesNegotiationFailed(diagnostic)) =
-                    e.downcast_ref::<SessionError>()
+                if let Some(failure) =
+                    e.downcast_ref::<crate::adapters::srtp_negotiator::SdesNegotiationFailure>()
                 {
                     let response = parsed_response.as_ref().map_or_else(
                         || {
@@ -4444,26 +4474,20 @@ impl SessionCrossCrateEventHandler {
                             )
                         },
                     );
-                    self.app_event_publisher.publish_exact(
+                    self.publish_sdes_negotiation_failure(
                         handle,
-                        crate::api::events::Event::SdesNegotiationFailed {
-                            call_id: session_id.clone(),
-                            response,
-                            diagnostic: diagnostic.clone(),
-                        },
+                        response,
+                        failure.diagnostic().clone(),
                     );
                 }
                 if mid_dialog_offer || delayed_offer {
-                    self.app_event_publisher.publish_exact(
+                    self.publish_renegotiation_failure(
                         handle,
-                        crate::api::events::Event::RenegotiationFailed {
-                            call_id: session_id.clone(),
-                            method: "INVITE".to_string(),
-                            reason: if delayed_offer {
-                                "invalid SDP offer or failed answer-bearing ACK".to_string()
-                            } else {
-                                "invalid or unacceptable SDP answer".to_string()
-                            },
+                        "INVITE",
+                        if delayed_offer {
+                            "invalid SDP offer or failed answer-bearing ACK"
+                        } else {
+                            "invalid or unacceptable SDP answer"
                         },
                     );
                     if delayed_offer {
@@ -4550,7 +4574,7 @@ impl SessionCrossCrateEventHandler {
         }
         let result = self
             .state_machine
-            .process_event_exact(handle, EventType::ConfirmedNegotiationFailure)
+            .process_confirmed_negotiation_failure_exact(handle)
             .await;
         match result {
             Ok(result) => {
@@ -4822,16 +4846,10 @@ impl SessionCrossCrateEventHandler {
                                     "failed to roll back an authenticated session modification: {error}"
                                 ))
                             })?;
-                        self.app_event_publisher.publish_exact(
+                        self.publish_renegotiation_failure(
                             &handle,
-                            crate::api::events::Event::RenegotiationFailed {
-                                call_id: session_id.clone(),
-                                method: tracked_method.as_sip_method().to_string(),
-                                reason: format!(
-                                    "authentication failed (class={})",
-                                    failure_class.label()
-                                ),
-                            },
+                            tracked_method.as_sip_method().to_string(),
+                            format!("authentication failed (class={})", failure_class.label()),
                         );
                     }
                 }
@@ -5060,10 +5078,41 @@ impl SessionCrossCrateEventHandler {
                 None
             };
             if let Some(answer) = remote_answer {
-                self.state_machine
-                    .process_event_with_remote_sdp_exact(&handle, completion_event, Some(answer))
-                    .await
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                let result = self
+                    .state_machine
+                    .process_event_with_remote_sdp_exact(
+                        &handle,
+                        completion_event,
+                        Some(answer.clone()),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    if let Some(failure) = error
+                        .downcast_ref::<crate::adapters::srtp_negotiator::SdesNegotiationFailure>(
+                    ) {
+                        let status_code = match outcome {
+                            OutboundRequestOutcome::FinalResponse { status_code } => status_code,
+                            OutboundRequestOutcome::Timeout
+                            | OutboundRequestOutcome::TransportFailure => 200,
+                        };
+                        self.publish_sdes_negotiation_failure(
+                            &handle,
+                            crate::api::incoming::IncomingResponse::synthetic(
+                                session_id.clone(),
+                                status_code,
+                                "UPDATE response".to_string(),
+                                Some(answer),
+                            ),
+                            failure.diagnostic().clone(),
+                        );
+                    }
+                    self.publish_renegotiation_failure(
+                        &handle,
+                        "UPDATE",
+                        "invalid or unacceptable SDP answer",
+                    );
+                    return Ok(());
+                }
             } else {
                 self.state_machine
                     .process_event_exact(&handle, completion_event)
@@ -5071,14 +5120,7 @@ impl SessionCrossCrateEventHandler {
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             }
             if let Some(reason) = failure_reason {
-                self.app_event_publisher.publish_exact(
-                    &handle,
-                    crate::api::events::Event::RenegotiationFailed {
-                        call_id: session_id.clone(),
-                        method: "UPDATE".to_string(),
-                        reason: reason.to_string(),
-                    },
-                );
+                self.publish_renegotiation_failure(&handle, "UPDATE", reason);
             }
         } else if tracked_method == TrackedInDialogMethod::Reinvite
             && pending_offer_correlation == PendingOfferTransactionCorrelation::Exact
@@ -5088,14 +5130,7 @@ impl SessionCrossCrateEventHandler {
                     .process_event_exact(&handle, failure_event)
                     .await
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-                self.app_event_publisher.publish_exact(
-                    &handle,
-                    crate::api::events::Event::RenegotiationFailed {
-                        call_id: session_id,
-                        method: "INVITE".to_string(),
-                        reason: reason.to_string(),
-                    },
-                );
+                self.publish_renegotiation_failure(&handle, "INVITE", reason);
             }
         }
         Ok(())
@@ -5298,13 +5333,10 @@ impl SessionCrossCrateEventHandler {
                     session_id, status
                 );
                 if pending_correlation == PendingOfferTransactionCorrelation::Exact {
-                    self.app_event_publisher.publish_exact(
+                    self.publish_renegotiation_failure(
                         handle,
-                        crate::api::events::Event::RenegotiationFailed {
-                            call_id: session_id.clone(),
-                            method: "INVITE".to_string(),
-                            reason: format!("re-INVITE failed with SIP status {status}"),
-                        },
+                        "INVITE",
+                        format!("re-INVITE failed with SIP status {status}"),
                     );
                 }
                 return Ok(());
@@ -6010,6 +6042,25 @@ impl SessionCrossCrateEventHandler {
                     error_class = %error,
                     "Rejected invalid inbound session-modification offer"
                 );
+                if let Some(failure) =
+                    error.downcast_ref::<crate::adapters::srtp_negotiator::SdesNegotiationFailure>()
+                {
+                    self.publish_sdes_negotiation_failure(
+                        handle,
+                        crate::api::incoming::IncomingResponse::synthetic(
+                            handle.session_id().clone(),
+                            488,
+                            "Not Acceptable Here".to_string(),
+                            Some(offer.to_string()),
+                        ),
+                        failure.diagnostic().clone(),
+                    );
+                }
+                self.publish_renegotiation_failure(
+                    handle,
+                    method.clone(),
+                    "invalid or unacceptable SDP offer",
+                );
                 if let Some(error) = terminal.terminal_error {
                     return Err(anyhow::anyhow!(error.to_string()));
                 }
@@ -6351,13 +6402,10 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
             if delayed_offer_answer {
-                self.app_event_publisher.publish_exact(
+                self.publish_renegotiation_failure(
                     handle,
-                    crate::api::events::Event::RenegotiationFailed {
-                        call_id: session_id.clone(),
-                        method: "ACK".to_string(),
-                        reason: "missing, invalid, or unacceptable ACK SDP answer".to_string(),
-                    },
+                    "ACK",
+                    "missing, invalid, or unacceptable ACK SDP answer",
                 );
             }
             self.release_zero_wire_confirmed_negotiation(
@@ -6867,6 +6915,7 @@ mod tests {
     use rvoip_infra_common::events::{EventCoordinatorConfig, GlobalEventCoordinator};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use tokio::net::UdpSocket;
     use tokio::sync::{mpsc, oneshot, watch, Notify};
 
     fn committed_result(
@@ -7343,7 +7392,7 @@ mod tests {
             .find("terminate_confirmed_negotiation")
             .expect("terminal failed-call transition");
         let observation = failure
-            .find("Event::SdesNegotiationFailed")
+            .find("publish_sdes_negotiation_failure")
             .expect("application-visible SDES failure");
         assert!(ack < terminal && terminal < observation);
         assert!(
@@ -7371,6 +7420,256 @@ mod tests {
             "re-INVITE/UPDATE failure classification was not propagated through its processing ACK"
         );
         assert!(handler.contains("get_session_snapshot_exact(handle)\n            .map_err"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn malformed_inbound_sdes_update_returns_one_cached_488_without_state_mutation() {
+        use rvoip_sip_core::{Message, Method};
+
+        async fn receive_response(
+            socket: &UdpSocket,
+            cseq: u32,
+            method: Method,
+        ) -> rvoip_sip_core::Response {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut packet = vec![0_u8; 65_535];
+                loop {
+                    let (length, _) = socket
+                        .recv_from(&mut packet)
+                        .await
+                        .expect("receive SIP response");
+                    let Ok(Message::Response(response)) =
+                        rvoip_sip_core::parse_message(&packet[..length])
+                    else {
+                        continue;
+                    };
+                    if response
+                        .cseq()
+                        .is_some_and(|value| value.sequence() == cseq && value.method() == &method)
+                        && response.status_code() >= 200
+                    {
+                        return response;
+                    }
+                }
+            })
+            .await
+            .expect("timed out waiting for SIP response")
+        }
+
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
+        let uas_port = reservation
+            .local_addr()
+            .expect("reserved UAS address")
+            .port();
+        drop(reservation);
+        let client = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw SIP client");
+        let client_port = client.local_addr().expect("raw client address").port();
+
+        let mut config = crate::api::unified::Config::local("sdes-update-uas", uas_port)
+            .with_auto_180_ringing(false)
+            .with_fast_auto_accept_incoming_calls(true);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        config.offer_srtp = true;
+        config.srtp_required = false;
+        config.srtp_offered_suites =
+            vec![rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80];
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
+            .await
+            .expect("start SDES UAS");
+        let mut diagnostics = coordinator.subscribe_diagnostics();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        const WIRE_CALL_ID: &str = "malformed-sdes-update@example.test";
+        let from = format!("<sip:alice@127.0.0.1:{client_port}>;tag=alice-sdes");
+        let to = format!("<sip:bob@127.0.0.1:{uas_port}>");
+        let initial_sdp = "v=0\r\n\
+o=alice 900 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 24000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n"
+            .to_string();
+        let initial_invite = format!(
+            "INVITE sip:bob@127.0.0.1:{uas_port} SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bK-sdes-initial;rport\r\n\
+Max-Forwards: 70\r\n\
+From: {from}\r\n\
+To: {to}\r\n\
+Call-ID: {WIRE_CALL_ID}\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:{client_port}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{initial_sdp}",
+            initial_sdp.len()
+        );
+        client
+            .send_to(initial_invite.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("send initial INVITE");
+        let initial_response = receive_response(&client, 1, Method::Invite).await;
+        assert_eq!(initial_response.status_code(), 200);
+        let dialog_to = initial_response.to().expect("200 OK To header").to_string();
+
+        let initial_ack = format!(
+            "ACK sip:bob@127.0.0.1:{uas_port} SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bK-sdes-ack;rport\r\n\
+Max-Forwards: 70\r\n\
+From: {from}\r\n\
+To: {dialog_to}\r\n\
+Call-ID: {WIRE_CALL_ID}\r\n\
+CSeq: 1 ACK\r\n\
+Contact: <sip:alice@127.0.0.1:{client_port}>\r\n\
+Content-Length: 0\r\n\r\n"
+        );
+        client
+            .send_to(initial_ack.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("send initial ACK");
+
+        let handle = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(handle) = coordinator
+                    .session_registry
+                    .get_handle_by_sip_call_id_exact(WIRE_CALL_ID)
+                {
+                    if coordinator
+                        .helpers
+                        .state_machine
+                        .store
+                        .get_session_snapshot_exact(&handle)
+                        .is_ok_and(|snapshot| snapshot.call_state == CallState::Active)
+                    {
+                        return handle;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial dialog did not become active");
+        let stable = coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(&handle)
+            .expect("read stable dialog");
+        let stable_revision = stable.revision();
+        let stable_local_sdp = stable.local_sdp.clone();
+        let stable_remote_sdp = stable.remote_sdp.clone();
+        let stable_config = stable.negotiated_config.clone();
+        let stable_payload_type = stable.negotiated_payload_type();
+        let stable_security = stable.media_security.clone();
+        let stable_local_direction = stable.local_media_direction;
+        let stable_remote_direction = stable.remote_media_direction;
+
+        let malformed_sdp = "v=0\r\n\
+o=alice 900 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 24000 RTP/SAVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:not-base64\r\n\
+a=sendonly\r\n";
+        let update = format!(
+            "UPDATE sip:bob@127.0.0.1:{uas_port} SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{client_port};branch=z9hG4bK-sdes-update;rport\r\n\
+Max-Forwards: 70\r\n\
+From: {from}\r\n\
+To: {dialog_to}\r\n\
+Call-ID: {WIRE_CALL_ID}\r\n\
+CSeq: 2 UPDATE\r\n\
+Contact: <sip:alice@127.0.0.1:{client_port}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{malformed_sdp}",
+            malformed_sdp.len()
+        );
+        client
+            .send_to(update.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("send malformed UPDATE");
+        assert_eq!(
+            receive_response(&client, 2, Method::Update)
+                .await
+                .status_code(),
+            488
+        );
+
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), diagnostics.recv())
+            .await
+            .expect("first malformed-offer diagnostic")
+            .expect("diagnostic stream remains open");
+        let second = tokio::time::timeout(std::time::Duration::from_secs(1), diagnostics.recv())
+            .await
+            .expect("second malformed-offer diagnostic")
+            .expect("diagnostic stream remains open");
+        assert!(
+            matches!(
+                (&first, &second),
+                (
+                    crate::api::events::DiagnosticEvent::SdesNegotiationFailed(_),
+                    crate::api::events::DiagnosticEvent::RenegotiationFailed(_)
+                ) | (
+                    crate::api::events::DiagnosticEvent::RenegotiationFailed(_),
+                    crate::api::events::DiagnosticEvent::SdesNegotiationFailed(_)
+                )
+            ),
+            "first request must publish one structured SDES and one renegotiation diagnostic"
+        );
+
+        client
+            .send_to(update.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("retransmit malformed UPDATE");
+        assert_eq!(
+            receive_response(&client, 2, Method::Update)
+                .await
+                .status_code(),
+            488
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(250), diagnostics.recv())
+                .await
+                .is_err(),
+            "transaction retransmission reapplied the malformed offer"
+        );
+
+        let after = coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(&handle)
+            .expect("read dialog after malformed retransmission");
+        assert_eq!(after.revision(), stable_revision);
+        assert_eq!(after.call_state, CallState::Active);
+        assert_eq!(after.local_sdp, stable_local_sdp);
+        assert_eq!(after.remote_sdp, stable_remote_sdp);
+        assert_eq!(after.negotiated_payload_type(), stable_payload_type);
+        assert_eq!(after.media_security, stable_security);
+        assert_eq!(after.local_media_direction, stable_local_direction);
+        assert_eq!(after.remote_media_direction, stable_remote_direction);
+        match (&after.negotiated_config, &stable_config) {
+            (Some(after), Some(stable)) => {
+                assert_eq!(after.local_addr, stable.local_addr);
+                assert_eq!(after.remote_addr, stable.remote_addr);
+                assert_eq!(after.codec, stable.codec);
+                assert_eq!(after.sample_rate, stable.sample_rate);
+                assert_eq!(after.channels, stable.channels);
+            }
+            (None, None) => {}
+            _ => panic!("malformed UPDATE changed negotiated media presence"),
+        }
+
+        coordinator
+            .shutdown_gracefully(Some(std::time::Duration::from_secs(1)))
+            .await
+            .expect("shutdown SDES UAS");
     }
 
     #[test]

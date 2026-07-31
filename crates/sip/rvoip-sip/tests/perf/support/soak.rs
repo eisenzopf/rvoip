@@ -1116,6 +1116,7 @@ pub fn burst_retention_drain_wait_for_configured(configured_secs: Option<usize>)
     Duration::from_secs(seconds.try_into().unwrap_or(u64::MAX))
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep the soak load shape visible at call sites.
 pub async fn run_caller_load(
     caller: Arc<UnifiedCoordinator>,
     from: String,
@@ -2250,7 +2251,7 @@ pub fn rss_endpoint_median_growth_mb_per_hr(
 fn median_f64(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     let midpoint = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[midpoint - 1] + values[midpoint]) / 2.0
     } else {
         values[midpoint]

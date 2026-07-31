@@ -1,5 +1,16 @@
 use rvoip_sip_core::types::{ContentLength, ContentType, Response, TypedHeader};
 
+/// Choose a distinct fixture media port without overflowing when an
+/// ephemeral signaling socket is allocated near the top of the u16 range.
+pub fn fixture_media_port(signaling_port: u16) -> u16 {
+    const OFFSET: u16 = 1_000;
+    if signaling_port <= u16::MAX - OFFSET {
+        signaling_port + OFFSET
+    } else {
+        signaling_port - OFFSET
+    }
+}
+
 /// Attach a minimal valid PCMU answer to a raw-UAS 200 OK fixture.
 pub fn attach_pcmu_sdp_answer(response: &mut Response, media_port: u16) {
     response.body = format!(

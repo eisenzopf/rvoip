@@ -2,7 +2,7 @@
 //!
 //! This client demonstrates how to interact with the users-core REST API
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -83,7 +83,10 @@ async fn main() -> Result<()> {
     }
 
     let login: LoginResponse = resp.json().await?;
-    println!("   ✅ Admin login successful, got access token");
+    println!(
+        "   ✅ Admin login successful (type: {}, expires in: {}s)",
+        login.token_type, login.expires_in
+    );
     let auth_header = format!("Bearer {}", login.access_token);
 
     // Test 3: Create regular user (requires admin auth)
@@ -117,7 +120,10 @@ async fn main() -> Result<()> {
     let users: Vec<UserResponse> = resp.json().await?;
     println!("   ✅ Found {} users:", users.len());
     for user in &users {
-        println!("      - {} (roles: {:?})", user.username, user.roles);
+        println!(
+            "      - {} (active: {}, roles: {:?})",
+            user.username, user.active, user.roles
+        );
     }
 
     // Test 5: Get specific user
@@ -161,6 +167,7 @@ async fn main() -> Result<()> {
     println!("   ✅ User updated:");
     println!("      - Email: {:?}", updated_user.email);
     println!("      - Display name: {:?}", updated_user.display_name);
+    println!("      - Active: {}", updated_user.active);
 
     // Test 8: Change password
     println!("\n8️⃣ Testing password change...");
@@ -219,7 +226,10 @@ async fn main() -> Result<()> {
         .await?;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let api_key: ApiKeyResponse = resp.json().await?;
-    println!("   ✅ API key created: {}", api_key.key);
+    println!(
+        "   ✅ API key created: {} ({:?})",
+        api_key.key_info.name, api_key.key_info.permissions
+    );
 
     // Test 10: Use API key authentication
     println!("\n🔟 Testing API key authentication...");

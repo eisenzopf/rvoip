@@ -22,8 +22,6 @@ pub struct NegotiatedConfig {
     pub local_addr: SocketAddr,
     pub remote_addr: SocketAddr,
     pub codec: String,
-    #[serde(default)]
-    pub payload_type: u8,
     pub sample_rate: u32,
     pub channels: u8,
 }
@@ -35,10 +33,23 @@ impl fmt::Debug for NegotiatedConfig {
             .field("local_address_present", &true)
             .field("remote_address_present", &true)
             .field("codec_bytes", &self.codec.len())
-            .field("payload_type", &self.payload_type)
             .field("sample_rate", &self.sample_rate)
             .field("channels", &self.channels)
             .finish()
+    }
+}
+
+#[derive(Clone)]
+struct NegotiatedPayloadIdentity {
+    payload_type: u8,
+    config: NegotiatedConfig,
+}
+
+impl NegotiatedPayloadIdentity {
+    fn matches(&self, config: &NegotiatedConfig) -> bool {
+        self.config.codec.eq_ignore_ascii_case(&config.codec)
+            && self.config.sample_rate == config.sample_rate
+            && self.config.channels == config.channels
     }
 }
 
@@ -66,6 +77,7 @@ pub(crate) struct PendingOfferAnswer {
     stable_local_sdp: Option<String>,
     stable_remote_sdp: Option<String>,
     stable_negotiated_config: Option<NegotiatedConfig>,
+    stable_negotiated_payload: Option<NegotiatedPayloadIdentity>,
     stable_media_security: Option<MediaSecurityState>,
     stable_sdp_negotiated: bool,
     stable_local_direction: MediaDirection,
@@ -187,6 +199,7 @@ pub struct SessionStateCold {
     pub redirect_attempts: u8,
     pub pending_reinvite: Option<PendingReinvite>,
     pub(crate) pending_offer_answer: Option<PendingOfferAnswer>,
+    negotiated_payload: Option<NegotiatedPayloadIdentity>,
     /// Stable local SDP captured before an outbound re-INVITE replaces the
     /// working offer. The outer option marks an in-flight snapshot; the inner
     /// option preserves whether the stable dialog had local SDP at all.
@@ -455,6 +468,10 @@ impl fmt::Debug for SessionState {
             .field(
                 "negotiated_config_present",
                 &self.negotiated_config.is_some(),
+            )
+            .field(
+                "negotiated_payload_type_present",
+                &self.negotiated_payload.is_some(),
             )
             .field("media_security_keying", &media_security_keying)
             .field("media_security_suite", &media_security_suite)
@@ -930,6 +947,7 @@ impl SessionState {
                 redirect_attempts: 0,
                 pending_reinvite: None,
                 pending_offer_answer: None,
+                negotiated_payload: None,
                 stable_local_sdp_before_reinvite: None,
                 reinvite_retry_attempts: 0,
                 session_timer_min_se: None,
@@ -990,6 +1008,55 @@ impl SessionState {
         }
     }
 
+    /// Return the exact negotiated RTP payload type when SDP negotiation
+    /// supplied one.
+    ///
+    /// Legacy callers can still assign [`Self::negotiated_config`] directly.
+    /// In that case this falls back to the pre-0.3.5 static mapping used by
+    /// `SipMediaStream`.
+    pub fn negotiated_payload_type(&self) -> Option<u8> {
+        self.negotiated_payload
+            .as_ref()
+            .filter(|identity| {
+                self.negotiated_config
+                    .as_ref()
+                    .is_some_and(|config| identity.matches(config))
+            })
+            .map(|identity| identity.payload_type)
+            .or_else(|| {
+                let codec = self.negotiated_config.as_ref()?.codec.as_str();
+                if matches!(
+                    codec.to_ascii_lowercase().as_str(),
+                    "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
+                ) {
+                    Some(0)
+                } else if matches!(
+                    codec.to_ascii_lowercase().as_str(),
+                    "pcma" | "g.711-a" | "g711-a"
+                ) {
+                    Some(8)
+                } else if codec.eq_ignore_ascii_case("opus") {
+                    Some(111)
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub(crate) fn set_negotiated_config(&mut self, config: NegotiatedConfig, payload_type: u8) {
+        let identity = NegotiatedPayloadIdentity {
+            payload_type,
+            config: config.clone(),
+        };
+        self.negotiated_config = Some(config);
+        self.negotiated_payload = Some(identity);
+    }
+
+    pub(crate) fn clear_negotiated_config(&mut self) {
+        self.negotiated_config = None;
+        self.negotiated_payload = None;
+    }
+
     pub(crate) fn begin_offer_answer(
         &mut self,
         method: rvoip_sip_core::Method,
@@ -1005,6 +1072,7 @@ impl SessionState {
             stable_local_sdp: self.local_sdp.clone(),
             stable_remote_sdp: self.remote_sdp.clone(),
             stable_negotiated_config: self.negotiated_config.clone(),
+            stable_negotiated_payload: self.negotiated_payload.clone(),
             stable_media_security: self.media_security.clone(),
             stable_sdp_negotiated: self.sdp_negotiated,
             stable_local_direction: self.local_media_direction,
@@ -1055,6 +1123,7 @@ impl SessionState {
         self.local_sdp = pending.stable_local_sdp;
         self.remote_sdp = pending.stable_remote_sdp;
         self.negotiated_config = pending.stable_negotiated_config;
+        self.negotiated_payload = pending.stable_negotiated_payload;
         self.media_security = pending.stable_media_security;
         self.sdp_negotiated = pending.stable_sdp_negotiated;
         self.local_media_direction = pending.stable_local_direction;
@@ -1310,6 +1379,16 @@ mod tests {
         )
     }
 
+    fn negotiated_config(codec: &str) -> NegotiatedConfig {
+        NegotiatedConfig {
+            local_addr: "127.0.0.1:16000".parse().unwrap(),
+            remote_addr: "127.0.0.1:16002".parse().unwrap(),
+            codec: codec.to_string(),
+            sample_rate: 48_000,
+            channels: 2,
+        }
+    }
+
     #[test]
     fn session_state_cold_split_keeps_hot_revision_below_sixty_percent() {
         const PRE_COLD_SPLIT_INLINE_BYTES: usize = 1_984;
@@ -1422,6 +1501,7 @@ mod tests {
         session.sdp_negotiated = true;
         session.local_media_direction = MediaDirection::SendRecv;
         session.remote_media_direction = MediaDirection::SendRecv;
+        session.set_negotiated_config(negotiated_config("Opus"), 96);
 
         session
             .begin_offer_answer(rvoip_sip_core::Method::Invite, "hold-offer".into())
@@ -1436,12 +1516,21 @@ mod tests {
         session.remote_sdp = Some("invalid-answer".into());
         session.sdp_negotiated = false;
         session.local_media_direction = MediaDirection::SendOnly;
+        session.set_negotiated_config(negotiated_config("PCMA"), 8);
         session.rollback_offer_answer();
 
         assert_eq!(session.local_sdp.as_deref(), Some("stable-local"));
         assert_eq!(session.remote_sdp.as_deref(), Some("stable-remote"));
         assert!(session.sdp_negotiated);
         assert_eq!(session.local_media_direction, MediaDirection::SendRecv);
+        assert_eq!(session.negotiated_payload_type(), Some(96));
+        assert_eq!(
+            session
+                .negotiated_config
+                .as_ref()
+                .map(|config| config.codec.as_str()),
+            Some("Opus")
+        );
         assert!(session.pending_offer_answer.is_none());
 
         session
@@ -1449,12 +1538,51 @@ mod tests {
             .expect("begin successful offer");
         session.remote_sdp = Some("committed-answer".into());
         session.local_media_direction = MediaDirection::SendOnly;
+        session.set_negotiated_config(negotiated_config("Opus"), 112);
         session.commit_offer_answer();
 
         assert_eq!(session.local_sdp.as_deref(), Some("committed-offer"));
         assert_eq!(session.remote_sdp.as_deref(), Some("committed-answer"));
         assert_eq!(session.local_media_direction, MediaDirection::SendOnly);
+        assert_eq!(session.negotiated_payload_type(), Some(112));
         assert!(session.pending_offer_answer.is_none());
+    }
+
+    #[test]
+    fn negotiated_payload_type_preserves_dynamic_sdp_identity_and_legacy_fallbacks() {
+        let mut session = SessionState::new(SessionId::new(), Role::UAC);
+        session.set_negotiated_config(negotiated_config("Opus"), 96);
+        assert_eq!(session.negotiated_payload_type(), Some(96));
+
+        let rebound = session
+            .negotiated_config
+            .as_mut()
+            .expect("negotiated Opus config");
+        rebound.local_addr = "127.0.0.1:26000".parse().unwrap();
+        rebound.remote_addr = "127.0.0.1:26002".parse().unwrap();
+        assert_eq!(
+            session.negotiated_payload_type(),
+            Some(96),
+            "address-only NAT rebinding must retain the negotiated payload identity"
+        );
+
+        session.negotiated_config = Some(negotiated_config("PCMA"));
+        assert_eq!(
+            session.negotiated_payload_type(),
+            Some(8),
+            "direct public config replacement must invalidate a stale dynamic payload sidecar"
+        );
+
+        session.set_negotiated_config(negotiated_config("Opus"), 96);
+        session.clear_negotiated_config();
+        assert_eq!(session.negotiated_payload_type(), None);
+
+        session.negotiated_config = Some(negotiated_config("OPUS"));
+        assert_eq!(session.negotiated_payload_type(), Some(111));
+        session.negotiated_config = Some(negotiated_config("pcmu"));
+        assert_eq!(session.negotiated_payload_type(), Some(0));
+        session.negotiated_config = Some(negotiated_config("PcMa"));
+        assert_eq!(session.negotiated_payload_type(), Some(8));
     }
 
     #[test]

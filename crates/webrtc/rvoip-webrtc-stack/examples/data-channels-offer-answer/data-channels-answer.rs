@@ -174,7 +174,7 @@ async fn async_main(cli: Cli) -> Result<()> {
     let answer_port = cli
         .answer_address
         .split(':')
-        .last()
+        .next_back()
         .and_then(|p| p.parse::<u16>().ok())
         .unwrap_or(60000);
     let mut sdp_rx = signal::http_sdp_server(answer_port).await;

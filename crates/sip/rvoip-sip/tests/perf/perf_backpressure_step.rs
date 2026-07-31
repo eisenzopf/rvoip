@@ -103,6 +103,7 @@ async fn boot_alice(port: u16, call_setup_diag: &CallSetupDiagnostics) -> Arc<Un
 
 /// Drives calls at `cps` for `duration`. Latencies land in `hist`.
 /// Failures during spike phase are flagged via `is_spike_phase`.
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the pressure phase.
 async fn drive_phase(
     alice: Arc<UnifiedCoordinator>,
     from: String,

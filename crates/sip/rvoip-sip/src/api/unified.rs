@@ -337,6 +337,7 @@ pub enum SrtpSuitePolicy {
 
 /// Validation policy for Base64 key material in RFC 4568 `a=crypto` lines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SdesBase64Mode {
     /// Accept canonical Base64 and the interoperable form that omits only the
     /// trailing `=` padding. All other malformed encodings and decoded-length
@@ -403,6 +404,44 @@ impl SipNatConfig {
         self.symmetric_rtp
             .validate()
             .map_err(|detail| SessionError::ConfigError(detail.to_string()))
+    }
+}
+
+/// Construction-time options that cannot be added to the literal-friendly
+/// [`Config`] struct without breaking existing 0.3.x callers.
+///
+/// The default preserves the existing bounded NAT policy and accepts canonical
+/// SDES Base64 plus the interoperable form that omits trailing padding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SipRuntimeConfig {
+    nat: SipNatConfig,
+    sdes_base64_mode: SdesBase64Mode,
+}
+
+impl SipRuntimeConfig {
+    /// Replace the SIP/RTP NAT policy.
+    pub const fn with_nat(mut self, nat: SipNatConfig) -> Self {
+        self.nat = nat;
+        self
+    }
+
+    /// Select the inbound RFC 4568 SDES Base64 validation policy.
+    ///
+    /// Outbound SDP remains canonical in both modes.
+    pub const fn with_sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
+        self.sdes_base64_mode = mode;
+        self
+    }
+
+    /// Return the configured SIP/RTP NAT policy.
+    pub const fn nat(self) -> SipNatConfig {
+        self.nat
+    }
+
+    /// Return the configured inbound SDES Base64 policy.
+    pub const fn sdes_base64_mode(self) -> SdesBase64Mode {
+        self.sdes_base64_mode
     }
 }
 
@@ -2183,11 +2222,6 @@ pub struct Config {
     /// preference.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
-    /// Base64 acceptance policy for inbound RFC 4568 SDES key material.
-    /// Outbound SDP always uses canonical padded Base64 in either mode.
-    /// Default: [`SdesBase64Mode::Compatible`].
-    pub sdes_base64_mode: SdesBase64Mode,
-
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
     ///
@@ -2677,7 +2711,6 @@ impl std::fmt::Debug for Config {
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
-            .field("sdes_base64_mode", &self.sdes_base64_mode)
             .field(
                 "media_public_address_configured",
                 &self.media_public_addr.is_some(),
@@ -2832,7 +2865,6 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
-            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -2944,7 +2976,6 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
-            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -3204,14 +3235,6 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
-        self
-    }
-
-    /// Select the inbound RFC 4568 SDES Base64 validation policy.
-    ///
-    /// Outbound SDP remains canonical in both modes.
-    pub fn with_sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
-        self.sdes_base64_mode = mode;
         self
     }
 
@@ -8317,20 +8340,30 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn new(config: Config) -> Result<Arc<Self>> {
-        Self::new_with_listener_auth_and_nat(
+        Self::new_with_listener_auth_and_runtime(
             config,
             crate::auth::SipListenerAuthPolicy::disabled(),
-            SipNatConfig::default(),
+            SipRuntimeConfig::default(),
         )
         .await
     }
 
     /// Create a coordinator with explicit SIP/RTP NAT behavior.
     pub async fn new_with_nat(config: Config, nat: SipNatConfig) -> Result<Arc<Self>> {
-        Self::new_with_listener_auth_and_nat(
+        Self::new_with_listener_auth_and_runtime(
             config,
             crate::auth::SipListenerAuthPolicy::disabled(),
-            nat,
+            SipRuntimeConfig::default().with_nat(nat),
+        )
+        .await
+    }
+
+    /// Create a coordinator with source-compatible construction-time options.
+    pub async fn new_with_runtime(config: Config, runtime: SipRuntimeConfig) -> Result<Arc<Self>> {
+        Self::new_with_listener_auth_and_runtime(
+            config,
+            crate::auth::SipListenerAuthPolicy::disabled(),
+            runtime,
         )
         .await
     }
@@ -8341,17 +8374,39 @@ impl UnifiedCoordinator {
         config: Config,
         listener_auth_policy: crate::auth::SipListenerAuthPolicy,
     ) -> Result<Arc<Self>> {
-        Self::new_with_listener_auth_and_nat(config, listener_auth_policy, SipNatConfig::default())
-            .await
+        Self::new_with_listener_auth_and_runtime(
+            config,
+            listener_auth_policy,
+            SipRuntimeConfig::default(),
+        )
+        .await
     }
 
     /// Create a coordinator with listener authentication and explicit NAT
     /// behavior installed before any signaling or media task starts.
     pub async fn new_with_listener_auth_and_nat(
-        mut config: Config,
+        config: Config,
         listener_auth_policy: crate::auth::SipListenerAuthPolicy,
         nat: SipNatConfig,
     ) -> Result<Arc<Self>> {
+        Self::new_with_listener_auth_and_runtime(
+            config,
+            listener_auth_policy,
+            SipRuntimeConfig::default().with_nat(nat),
+        )
+        .await
+    }
+
+    /// Create a coordinator with listener authentication and source-compatible
+    /// construction-time options installed before any signaling or media task
+    /// starts.
+    pub async fn new_with_listener_auth_and_runtime(
+        mut config: Config,
+        listener_auth_policy: crate::auth::SipListenerAuthPolicy,
+        runtime: SipRuntimeConfig,
+    ) -> Result<Arc<Self>> {
+        let nat = runtime.nat();
+        let sdes_base64_mode = runtime.sdes_base64_mode();
         // Treat an explicitly absent policy as the safe default too. Verbatim
         // tracing requires `trace_passthrough_for_development` or an explicit
         // `PassthroughRedactor`; absence is never a credential-leaking mode.
@@ -8581,7 +8636,7 @@ impl UnifiedCoordinator {
             config.srtp_required,
             config.srtp_offered_suites.clone(),
         );
-        media_adapter_inner.set_sdes_base64_mode(config.sdes_base64_mode);
+        media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
@@ -9149,6 +9204,18 @@ impl UnifiedCoordinator {
                     e
                 ))
             })
+    }
+
+    /// Subscribe to bounded, opt-in security and renegotiation diagnostics.
+    ///
+    /// This stream carries details that cannot be added to the exhaustive
+    /// 0.3.x [`Event`](crate::api::events::Event) enum without breaking
+    /// existing pattern matches. Lagging receivers may lose observations;
+    /// diagnostics never block signaling or call-state transitions.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.app_event_publisher.subscribe_diagnostics()
     }
 
     /// Return a typed, unfiltered [`EventReceiver`](crate::api::stream_peer::EventReceiver) that yields
@@ -10278,13 +10345,25 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         slot: crate::state_machine::executor::PendingOptionsSlot,
     ) -> Result<()> {
-        let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
+        // The state-machine task retains this same logical wait owner until
+        // it has either stopped before claim or completed the claimed
+        // wire-to-receipt handoff. If the public builder is cancelled after
+        // claim, its alias disappears but the detached task's alias prevents
+        // the last-owner cleanup from running just before a late receipt is
+        // published.
+        let bye_wait_owner = Arc::new(self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?);
         let generation_before_dispatch = self
             .dialog_adapter
             .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
         let dispatch = self
-            .dispatch_outbound_with_options_exact(handle, EventType::SendOutboundBye, slot)
+            .dispatch_outbound_with_options_and_input_exact(
+                handle,
+                EventType::SendOutboundBye,
+                slot,
+                None,
+                Some(Arc::clone(&bye_wait_owner)),
+            )
             .await
             .map(|_| ());
         let retained_new_bye = self
@@ -11009,7 +11088,7 @@ impl UnifiedCoordinator {
     pub(crate) async fn negotiated_media_config(
         &self,
         session_id: &SessionId,
-    ) -> Result<Option<crate::session_store::state::NegotiatedConfig>> {
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config(session_id).await
     }
 
@@ -11658,7 +11737,7 @@ impl UnifiedCoordinator {
             .store
             .lifecycle_handle(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))?;
-        self.dispatch_outbound_with_options_and_input_exact(&handle, event, slot, None)
+        self.dispatch_outbound_with_options_and_input_exact(&handle, event, slot, None, None)
             .await
     }
 
@@ -11669,7 +11748,7 @@ impl UnifiedCoordinator {
         event: crate::state_table::EventType,
         slot: crate::state_machine::executor::PendingOptionsSlot,
     ) -> Result<crate::state_machine::executor::ProcessEventResult> {
-        self.dispatch_outbound_with_options_and_input_exact(handle, event, slot, None)
+        self.dispatch_outbound_with_options_and_input_exact(handle, event, slot, None, None)
             .await
     }
 
@@ -11744,6 +11823,7 @@ impl UnifiedCoordinator {
             crate::state_table::EventType::SendOutboundInvite,
             crate::state_machine::executor::PendingOptionsSlot::Invite(snapshot),
             Some(input),
+            None,
         )
         .await
     }
@@ -11754,6 +11834,7 @@ impl UnifiedCoordinator {
         event: crate::state_table::EventType,
         slot: crate::state_machine::executor::PendingOptionsSlot,
         outbound_session: Option<crate::state_machine::executor::OutboundSessionStateInput>,
+        task_bye_wait_owner: Option<Arc<crate::adapters::dialog_adapter::OutgoingByeWaitOwner>>,
     ) -> Result<crate::state_machine::executor::ProcessEventResult> {
         let state_machine = Arc::clone(&self.helpers.state_machine);
         let task_handle = handle.clone();
@@ -11763,7 +11844,7 @@ impl UnifiedCoordinator {
         let task_claim = Arc::clone(&stage_claim);
         let task = AbortOutboundDispatchTaskOnDrop::with_stage_claim(
             tokio::spawn(async move {
-                state_machine
+                let result = state_machine
                     .process_event_with_staged_options_exact(
                         &task_handle,
                         event,
@@ -11771,7 +11852,12 @@ impl UnifiedCoordinator {
                         task_claim,
                         outbound_session,
                     )
-                    .await
+                    .await;
+                // Keep a claimed BYE's cancellation owner alive through the
+                // complete state-machine action, including publication of its
+                // exact transaction receipt.
+                drop(task_bye_wait_owner);
+                result
             }),
             stage_claim,
         );

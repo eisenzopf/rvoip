@@ -1,31 +1,19 @@
 // SPDX-FileCopyrightText: 2026 Bridgefu contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use moq_native_ietf::{quic, tls};
 use moq_transport::session::{Session, SessionTarget, Transport};
 use tokio::time::timeout;
 
+mod support;
+
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
-
 fn test_tls() -> anyhow::Result<tls::Config> {
-    tls::Args {
-        cert: vec![fixture("localhost-cert.pem")],
-        key: vec![fixture("localhost-key.pem")],
-        root: Vec::new(),
-        disable_verify: true,
-        ..Default::default()
-    }
-    .load()
+    support::localhost_server_tls(tls::ClientAuthMode::Disabled, &[])
 }
 
 async fn assert_target_parity(policy: quic::SubstratePolicy) -> anyhow::Result<Transport> {

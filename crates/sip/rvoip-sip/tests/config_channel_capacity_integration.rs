@@ -795,10 +795,15 @@ fn beta_media_codec_set_requires_real_audio_codec() {
     let err = config
         .validate()
         .expect_err("DTMF-only codec set must fail");
+    let detail = config_error_detail(&err);
     assert!(
-        config_error_detail(&err).contains("offered_codecs must include PCMU (0) or PCMA (8)"),
+        detail.contains("offered_codecs must include PCMU (0)")
+            && detail.contains("PCMA (8)")
+            && detail.contains("for beta full-media support"),
         "unexpected validation error: {err}"
     );
+    assert_eq!(detail.contains("G.729 (18)"), cfg!(feature = "g729"));
+    assert_eq!(detail.contains("Opus (111)"), cfg!(feature = "opus"));
 }
 
 #[test]

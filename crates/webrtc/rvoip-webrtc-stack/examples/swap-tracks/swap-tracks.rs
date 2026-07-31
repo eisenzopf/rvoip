@@ -38,6 +38,8 @@ struct OutputState {
     sequence: u16,
 }
 
+type TrackInfoByIndex = HashMap<usize, (u32, Arc<dyn TrackRemote>)>;
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 struct Shared {
@@ -48,7 +50,7 @@ struct Shared {
     /// Serializes writes to output_track so timestamp/sequence stay monotonic.
     output_state: Mutex<OutputState>,
     /// (ssrc, track_remote) per track_num — for PLI on track switch.
-    track_info: Mutex<HashMap<usize, (u32, Arc<dyn TrackRemote>)>>,
+    track_info: Mutex<TrackInfoByIndex>,
 }
 
 // ── Event handler ─────────────────────────────────────────────────────────────
@@ -262,7 +264,6 @@ async fn async_main() -> Result<()> {
         RTCRtpCodecParameters {
             rtp_codec: video_codec.clone(),
             payload_type: 96,
-            ..Default::default()
         },
         RtpCodecKind::Video,
     )?;

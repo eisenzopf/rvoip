@@ -397,8 +397,16 @@ fn backtraces_enabled() -> bool {
 mod tests {
     use super::*;
 
+    fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn guard_tracks_live_bytes() {
+        let _test_guard = registry_test_guard();
         reset();
         {
             let _guard = ObjectGuard::new("test.guard", 128_u64);
@@ -429,6 +437,7 @@ mod tests {
 
     #[test]
     fn pool_events_track_checkout_return() {
+        let _test_guard = registry_test_guard();
         reset();
         record_checkout("test.pool", 64_u64);
         record_return("test.pool", 64_u64);
@@ -450,11 +459,26 @@ mod tests {
     fn allocator_snapshot_serializes() {
         let snapshot = allocator_snapshot();
         assert_eq!(snapshot["enabled"], true);
-        assert!(snapshot["process"]["current_rss_bytes"].as_u64().is_some());
+        #[cfg(feature = "no-global-allocator")]
+        {
+            assert_eq!(snapshot["active_allocator"], "system");
+            assert!(snapshot["process"].is_null());
+            assert!(snapshot["stats"].is_null());
+            assert_eq!(
+                snapshot["unsupported_reason"],
+                "mimalloc global allocator disabled; use OS heap snapshots for this run"
+            );
+        }
+        #[cfg(not(feature = "no-global-allocator"))]
+        {
+            assert_eq!(snapshot["active_allocator"], "mimalloc");
+            assert!(snapshot["process"]["current_rss_bytes"].as_u64().is_some());
+        }
     }
 
     #[test]
     fn snapshot_reconciles_concurrent_object_event_race() {
+        let _test_guard = registry_test_guard();
         reset();
         let counters = counters("test.concurrent");
         counters.created.store(10, Ordering::Relaxed);
@@ -477,6 +501,7 @@ mod tests {
 
     #[test]
     fn transient_allocation_tracks_churn_without_live_bytes() {
+        let _test_guard = registry_test_guard();
         reset();
         record_transient_allocation("test.transient", 64_u64);
         let snapshot = snapshot();

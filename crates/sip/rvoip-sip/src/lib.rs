@@ -602,7 +602,8 @@ pub use api::lifecycle::{
 // Configuration & registration
 pub use api::unified::{
     AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, Registration, RelUsage,
-    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SymmetricRtpPolicy,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SipRuntimeConfig,
+    SymmetricRtpPolicy,
 };
 pub use api::{
     Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
@@ -615,7 +616,8 @@ pub use api::dialog_package::{
 };
 pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
-    Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SipTrace, SipTraceConfig,
+    CallAuthRetryDetails, DiagnosticEvent, Event, MediaSecurityKeying, MediaSecurityProfile,
+    MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure, SipTrace, SipTraceConfig,
     SipTraceDirection, SubscriptionState, TransferKind, TransferTargetEvidence,
 };
 
@@ -663,10 +665,10 @@ pub mod prelude {
         SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth, SipContactMode,
         SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
         SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
-        SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
-        StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
-        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
-        TypedHeader,
+        SipReason, SipRuntimeConfig, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
+        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher,
+        TransferKind, TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence,
+        TransferWaitMode, TypedHeader,
     };
 }
 

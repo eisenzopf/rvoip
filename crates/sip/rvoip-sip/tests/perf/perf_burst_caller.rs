@@ -845,6 +845,7 @@ fn terminal_json(terminal: &rvoip_sip::CallTerminalInfo) -> Value {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep the burst load phase visible.
 async fn run_burst_load(
     clients: Arc<Vec<LoadClient>>,
     target_uri: String,
@@ -948,6 +949,7 @@ async fn run_burst_load(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep per-call accounting visible.
 fn spawn_call(
     tasks: &mut JoinSet<()>,
     clients: Arc<Vec<LoadClient>>,
@@ -987,6 +989,7 @@ fn spawn_call(
     });
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep per-call accounting visible.
 async fn run_one_call(
     client: LoadClient,
     target_uri: String,
@@ -1108,8 +1111,8 @@ async fn run_one_call(
         counters.pending_setups.load(Ordering::Relaxed)
             + counters.active_calls.load(Ordering::Relaxed),
     );
-    if !skip_audio_source {
-        if client
+    if !skip_audio_source
+        && client
             .peer
             .set_audio_source(
                 &call_id,
@@ -1120,37 +1123,36 @@ async fn run_one_call(
             )
             .await
             .is_err()
-        {
-            counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
-            phase.record_failed(in_stable_recovery, false, phase_elapsed);
-            counters.active_calls.fetch_sub(1, Ordering::Relaxed);
-            let hangup_started = Instant::now();
-            let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
-            let lifecycle_after_hangup = handle
-                .lifecycle()
-                .await
-                .ok()
-                .map(|snapshot| lifecycle_snapshot_json(&snapshot));
-            call_failure_trace.record(json!({
-                "kind": "media_setup_failed",
-                "call_seq": call_seq,
-                "phase_index": phase_index,
-                "phase": phase.label,
-                "phase_elapsed_ms": duration_millis(phase_elapsed),
-                "from": from,
-                "to": target_uri,
-                "call_id": call_id.to_string(),
-                "wire_call_correlation": wire_call_correlation,
-                "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
-                "hangup_elapsed_ms": round2(hangup_started.elapsed().as_secs_f64() * 1000.0),
-                "hangup_result": match hangup_result {
-                    Ok(reason) => json!({"ok": true, "reason": reason}),
-                    Err(err) => json!({"ok": false, "error": err.to_string()}),
-                },
-                "lifecycle_after_hangup": lifecycle_after_hangup,
-            }));
-            return;
-        }
+    {
+        counters.media_setup_failed.fetch_add(1, Ordering::Relaxed);
+        phase.record_failed(in_stable_recovery, false, phase_elapsed);
+        counters.active_calls.fetch_sub(1, Ordering::Relaxed);
+        let hangup_started = Instant::now();
+        let hangup_result = handle.hangup_and_wait(Some(call_timeout)).await;
+        let lifecycle_after_hangup = handle
+            .lifecycle()
+            .await
+            .ok()
+            .map(|snapshot| lifecycle_snapshot_json(&snapshot));
+        call_failure_trace.record(json!({
+            "kind": "media_setup_failed",
+            "call_seq": call_seq,
+            "phase_index": phase_index,
+            "phase": phase.label,
+            "phase_elapsed_ms": duration_millis(phase_elapsed),
+            "from": from,
+            "to": target_uri,
+            "call_id": call_id.to_string(),
+            "wire_call_correlation": wire_call_correlation,
+            "elapsed_ms": round2(t_start.elapsed().as_secs_f64() * 1000.0),
+            "hangup_elapsed_ms": round2(hangup_started.elapsed().as_secs_f64() * 1000.0),
+            "hangup_result": match hangup_result {
+                Ok(reason) => json!({"ok": true, "reason": reason}),
+                Err(err) => json!({"ok": false, "error": err.to_string()}),
+            },
+            "lifecycle_after_hangup": lifecycle_after_hangup,
+        }));
+        return;
     }
 
     tokio::time::sleep(scenario.hold_duration(call_seq)).await;
@@ -1224,9 +1226,8 @@ fn burst_config(
     let mut performance = PerformanceConfig::profile(profile)
         .with_capacity(capacity)
         .with_signaling_only_rtp_port(9);
-    if let Some(path) = std::env::var("RVOIP_PERF_RECIPE_FILE")
+    if let Ok(path) = std::env::var("RVOIP_PERF_RECIPE_FILE")
         .or_else(|_| std::env::var("BETA_PERFORMANCE_RECIPE_FILE"))
-        .ok()
     {
         performance = performance.with_recipe_path(path);
     }

@@ -44,10 +44,10 @@ interop-browser = ["signaling-whip", "signaling-ws", "dep:chromiumoxide"]
 # Asserts tokio task count returns to baseline after sustained churn — catches
 # task leaks that the regular test suite doesn't have time to surface.
 soak-1h = []
-# Enables downstream conformance assertions that require the owner-reviewed
-# UDP TURN/NACK alpha-fork candidate. The authoritative crates.io alpha does
-# not implement relay-only gathering, so default CI keeps these visible as
-# ignored rather than reporting an unapproved dependency as integrated.
+# Deprecated compatibility marker for the unintegrated UDP TURN/NACK fork.
+# It intentionally enables no implementation or qualification tests: Cargo's
+# `--all-features` must not imply that the separately owner-reviewed candidate
+# has landed. The candidate-only tests remain explicit `--ignored` gates.
 turn-fork-candidate = []
 bridge-quic = [
     "signaling-whip",

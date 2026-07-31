@@ -151,13 +151,10 @@ impl TransportMode {
             .unwrap_or_else(|_| "udp".to_string());
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--transport" => {
-                    value = args
-                        .next()
-                        .ok_or_else(|| "--transport requires a value".to_string())?;
-                }
-                _ => {}
+            if arg.as_str() == "--transport" {
+                value = args
+                    .next()
+                    .ok_or_else(|| "--transport requires a value".to_string())?;
             }
         }
         match value.trim().to_ascii_lowercase().as_str() {
@@ -205,13 +202,10 @@ impl Scenario {
             .unwrap_or_else(|_| "registration".to_string());
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--scenario" => {
-                    value = args
-                        .next()
-                        .ok_or_else(|| "--scenario requires a value".to_string())?;
-                }
-                _ => {}
+            if arg.as_str() == "--scenario" {
+                value = args
+                    .next()
+                    .ok_or_else(|| "--scenario requires a value".to_string())?;
             }
         }
         let normalized = value
@@ -300,13 +294,10 @@ impl Role {
         let mut value = std::env::var("PBX_ROLE").unwrap_or_else(|_| "registration".to_string());
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--role" => {
-                    value = args
-                        .next()
-                        .ok_or_else(|| "--role requires a value".to_string())?;
-                }
-                _ => {}
+            if arg.as_str() == "--role" {
+                value = args
+                    .next()
+                    .ok_or_else(|| "--role requires a value".to_string())?;
             }
         }
         match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
@@ -3018,7 +3009,7 @@ fn scan_tone_windows(
     let additional_windows = if remaining == 0 {
         0
     } else {
-        (remaining + step - 1) / step
+        remaining.div_ceil(step)
     };
     let required_passing_run = (additional_windows + 1).min(total_windows).max(1);
     Ok(ToneWindowScan {
@@ -3139,7 +3130,7 @@ pub async fn start_tone_recorder_with_frame_size(
                 buf.extend_from_slice(&frame.samples);
             }
             let frame_count = previous_frames + 1;
-            if frame_count % 50 == 0 {
+            if frame_count.is_multiple_of(50) {
                 if let Some(output_dir) = recv_diag_output_dir.as_deref() {
                     diag_event(
                         output_dir,
@@ -3679,12 +3670,12 @@ pub async fn wait_for_cancelled(
             match events.recv().await {
                 Some(CallbackEvent::Cancelled {
                     call_id: cancelled_id,
-                }) if call_id.map_or(true, |expected| expected == &cancelled_id) => return Ok(()),
+                }) if call_id.is_none_or(|expected| expected == &cancelled_id) => return Ok(()),
                 Some(CallbackEvent::Failed {
                     call_id: failed_id,
                     status_code,
                     reason,
-                }) if call_id.map_or(true, |expected| expected == &failed_id) => {
+                }) if call_id.is_none_or(|expected| expected == &failed_id) => {
                     return Err(format!(
                         "call failed while waiting for cancellation: {} {}",
                         status_code, reason

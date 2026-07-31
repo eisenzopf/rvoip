@@ -127,6 +127,7 @@ async fn boot_alice(port: u16, call_setup_diag: &CallSetupDiagnostics) -> Arc<Un
 
 /// One sweep point: establish `target` concurrent calls, push audio
 /// for `duration`, then teardown. All calls share one alice + one bob.
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the media load profile.
 async fn run_one_point(
     alice: Arc<UnifiedCoordinator>,
     from: String,

@@ -453,7 +453,10 @@ async fn generated_sip_compliance_invite_407_retry_uses_proxy_authorization() {
         captured[1].call_id().unwrap().value()
     );
     assert!(captured[1].cseq().unwrap().seq > captured[0].cseq().unwrap().seq);
-    assert!(captured[1].body().len() > 0, "retry must preserve SDP body");
+    assert!(
+        !captured[1].body().is_empty(),
+        "retry must preserve SDP body"
+    );
     assert!(
         captured[1]
             .header(&HeaderName::ProxyAuthorization)

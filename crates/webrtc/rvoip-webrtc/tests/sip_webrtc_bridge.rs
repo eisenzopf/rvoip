@@ -26,6 +26,7 @@ use std::sync::Arc;
 use rvoip_core::adapter::ConnectionAdapter;
 use rvoip_core::config::Config;
 use rvoip_core::connection::Transport;
+use rvoip_core::error::RvoipError;
 use rvoip_core::orchestrator::Orchestrator;
 use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
 use rvoip_sip::SipAdapter;
@@ -133,12 +134,17 @@ async fn sip_adapter_streams_returns_connection_not_found_for_unknown_id() {
         .expect("sip coordinator");
     let sip = SipAdapter::new(coord).await.expect("sip adapter");
     let unknown = rvoip_core::ids::ConnectionId::new();
-    let result = <SipAdapter as ConnectionAdapter>::streams(&*sip, unknown).await;
-    let err = result
-        .map(|v| format!("Ok({} streams)", v.len()))
-        .unwrap_or_else(|e| format!("Err({e})"));
+    let result = <SipAdapter as ConnectionAdapter>::streams(&*sip, unknown.clone()).await;
+    let error = match result {
+        Err(error) => error,
+        Ok(streams) => panic!(
+            "expected ConnectionNotFound on unknown id, got {} streams",
+            streams.len()
+        ),
+    };
+    assert_eq!(error.diagnostic_class(), "connection-not-found");
     assert!(
-        err.starts_with("Err(") && err.contains("not found"),
-        "expected ConnectionNotFound on unknown id, got {err}"
+        matches!(error, RvoipError::ConnectionNotFound(id) if id == unknown),
+        "unknown connection must retain its typed identity"
     );
 }

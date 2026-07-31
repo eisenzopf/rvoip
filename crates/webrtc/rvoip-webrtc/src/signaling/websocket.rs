@@ -1031,28 +1031,30 @@ fn ensure_route_terminal_forwarder(
         let mut readiness_sent = false;
         loop {
             match *admission.borrow_and_update() {
-                RemoteAdmissionOutcome::Accepted if !readiness_sent && request_id.is_some() => {
-                    readiness_sent = true;
-                    if terminal_tx
-                        .send(RouteLifecycleSignal::Ready {
-                            connection_id: conn_id.clone(),
-                            request_id: request_id.clone().expect("checked above"),
-                        })
-                        .is_err()
-                    {
+                RemoteAdmissionOutcome::Accepted if !readiness_sent => {
+                    if let Some(request_id) = request_id.as_ref() {
+                        readiness_sent = true;
+                        if terminal_tx
+                            .send(RouteLifecycleSignal::Ready {
+                                connection_id: conn_id.clone(),
+                                request_id: request_id.clone(),
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                }
+                RemoteAdmissionOutcome::Rejected => {
+                    if let Some(request_id) = request_id.as_ref() {
+                        let _ = terminal_tx.send(RouteLifecycleSignal::Rejected {
+                            connection_id: conn_id,
+                            request_id: request_id.clone(),
+                        });
                         return;
                     }
                 }
-                RemoteAdmissionOutcome::Rejected if request_id.is_some() => {
-                    let _ = terminal_tx.send(RouteLifecycleSignal::Rejected {
-                        connection_id: conn_id,
-                        request_id: request_id.expect("checked above"),
-                    });
-                    return;
-                }
-                RemoteAdmissionOutcome::Pending
-                | RemoteAdmissionOutcome::Accepted
-                | RemoteAdmissionOutcome::Rejected => {}
+                RemoteAdmissionOutcome::Pending | RemoteAdmissionOutcome::Accepted => {}
             }
             if *cancellation.borrow_and_update() {
                 let _ = terminal_tx.send(RouteLifecycleSignal::Terminal {

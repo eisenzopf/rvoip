@@ -14,6 +14,7 @@ use rvoip_sip_core::types::sdp::CryptoSuite;
 
 /// SDP side on which an RFC 4568 SDES failure was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SdesNegotiationStage {
     /// An inbound SDP offer was being validated.
     RemoteOffer,
@@ -32,6 +33,7 @@ impl fmt::Display for SdesNegotiationStage {
 
 /// Secret-safe class for an RFC 4568 SDES key-material failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SdesNegotiationFailureClass {
     /// The encoded key material was not acceptable Base64.
     InvalidBase64,
@@ -50,6 +52,7 @@ impl fmt::Display for SdesNegotiationFailureClass {
 
 /// Classification of the trailing Base64 padding in an SDES inline key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SdesBase64Padding {
     /// Canonical Base64 ending in one or two `=` characters.
     CanonicalPadded,
@@ -77,6 +80,7 @@ impl fmt::Display for SdesBase64Padding {
 /// The encoded key, decoded key bytes, lifetime/MKI text, and parser source
 /// error are intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SdesNegotiationDiagnostic {
     /// Whether the peer's offer or answer was being processed.
     pub stage: SdesNegotiationStage,
@@ -162,10 +166,6 @@ pub enum SessionError {
     /// SDP offer/answer negotiation failed (no common codec, malformed SDP, etc.).
     #[error("SDP negotiation failed: {}", TextDiagnostic(.0))]
     SDPNegotiationFailed(String),
-
-    /// RFC 4568 SDES key material failed with structured secret-safe details.
-    #[error("{0}")]
-    SdesNegotiationFailed(SdesNegotiationDiagnostic),
 
     /// Invalid or inconsistent configuration supplied to a builder or coordinator.
     #[error("Configuration error: {}", TextDiagnostic(.0))]
@@ -357,10 +357,6 @@ impl fmt::Debug for SessionError {
             Self::SDPNegotiationFailed(value) => formatter
                 .debug_tuple("SDPNegotiationFailed")
                 .field(&TextDiagnostic(value))
-                .finish(),
-            Self::SdesNegotiationFailed(diagnostic) => formatter
-                .debug_tuple("SdesNegotiationFailed")
-                .field(diagnostic)
                 .finish(),
             Self::ConfigurationError(value) => formatter
                 .debug_tuple("ConfigurationError")

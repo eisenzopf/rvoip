@@ -256,7 +256,7 @@ fn retire_lane_owned_media_identity(session: &mut SessionState) {
     session.sdp_negotiated = false;
     session.local_sdp = None;
     session.stable_local_sdp_before_reinvite = None;
-    session.negotiated_config = None;
+    session.clear_negotiated_config();
 }
 
 /// Run lower cleanup without publishing `SessionStore`, then retire the
@@ -993,14 +993,24 @@ pub(crate) struct AuthRetryObservation {
 }
 
 impl AuthRetryObservation {
-    pub(crate) fn into_event(self) -> Event {
+    pub(crate) fn event(&self) -> Event {
         Event::CallAuthRetrying {
-            call_id: self.call_id,
+            call_id: self.call_id.clone(),
             status_code: self.status_code,
-            realm: self.realm,
-            algorithm: self.algorithm,
-            qop: self.qop,
+            realm: self.realm.clone(),
         }
+    }
+
+    pub(crate) fn into_diagnostic(self) -> crate::api::events::DiagnosticEvent {
+        crate::api::events::DiagnosticEvent::CallAuthRetrying(
+            crate::api::events::CallAuthRetryDetails {
+                call_id: self.call_id,
+                status_code: self.status_code,
+                realm: self.realm,
+                algorithm: self.algorithm,
+                qop: self.qop,
+            },
+        )
     }
 }
 
@@ -2208,9 +2218,15 @@ pub(crate) async fn execute_action(
                 }
                 EventType::Dialog200OK => {
                     if media_adapter.has_staged_media_negotiation(session) {
-                        media_adapter
+                        if let Err(error) = media_adapter
                             .commit_staged_media_negotiation_lane_owned(session)
-                            .await?;
+                            .await
+                        {
+                            rollback_reinvite_with_media(session, media_adapter);
+                            session.pending_reinvite = None;
+                            session.reinvite_retry_attempts = 0;
+                            return Err(error.into());
+                        }
                     }
                     commit_reinvite_local_sdp(session);
                 }
@@ -2668,16 +2684,25 @@ pub(crate) async fn execute_action(
                 )
             })?;
             let delayed_offer = initial_invite_used_delayed_offer(session, triggering_event);
-            let (local_answer, config) = if delayed_offer {
-                let (answer, config) = media_adapter
+            let negotiation = if delayed_offer {
+                media_adapter
                     .negotiate_sdp_as_uas_lane_owned(session, &remote_sdp)
-                    .await?;
-                (Some(answer), config)
+                    .await
+                    .map(|(answer, config)| (Some(answer), config))
             } else {
-                let config = media_adapter
+                media_adapter
                     .negotiate_sdp_as_uac_lane_owned(session, &remote_sdp)
-                    .await?;
-                (None, config)
+                    .await
+                    .map(|config| (None, config))
+            };
+            let (local_answer, config) = match negotiation {
+                Ok(negotiated) => negotiated,
+                Err(error) => {
+                    if session.pending_offer_answer.is_some() {
+                        rollback_reinvite_with_media(session, media_adapter);
+                    }
+                    return Err(error);
+                }
             };
 
             // Convert to session_store NegotiatedConfig
@@ -2685,18 +2710,16 @@ pub(crate) async fn execute_action(
                 local_addr: config.local_addr,
                 remote_addr: config.remote_addr,
                 codec: config.codec,
-                payload_type: config.payload_type,
                 sample_rate: config.clock_rate,
                 channels: config.channels,
             };
-            session.negotiated_config = Some(session_config);
+            session.set_negotiated_config(session_config, config.payload_type);
             session.local_media_direction = config.local_direction;
             session.remote_media_direction = config.remote_direction;
             session.sdp_negotiated = true;
             if let Some(local_answer) = local_answer {
                 session.local_sdp = Some(local_answer);
             }
-            commit_reinvite_local_sdp(session);
             info!("SDP negotiated as UAC for session {}", session.session_id);
         }
         Action::NegotiateSDPAsUAS => {
@@ -2730,12 +2753,11 @@ pub(crate) async fn execute_action(
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    payload_type: config.payload_type,
                     sample_rate: config.clock_rate,
                     channels: config.channels,
                 };
                 session.local_sdp = Some(local_sdp);
-                session.negotiated_config = Some(session_config);
+                session.set_negotiated_config(session_config, config.payload_type);
                 session.local_media_direction = config.local_direction;
                 session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
@@ -2759,12 +2781,11 @@ pub(crate) async fn execute_action(
                     local_addr: config.local_addr,
                     remote_addr: config.remote_addr,
                     codec: config.codec,
-                    payload_type: config.payload_type,
                     sample_rate: config.clock_rate,
                     channels: config.channels,
                 };
                 session.local_sdp = Some(local_sdp);
-                session.negotiated_config = Some(session_config);
+                session.set_negotiated_config(session_config, config.payload_type);
                 session.local_media_direction = config.local_direction;
                 session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
@@ -5681,7 +5702,6 @@ mod lane_owned_action_state_tests {
             local_addr: "127.0.0.1:16000".parse().expect("local address"),
             remote_addr: "127.0.0.1:16002".parse().expect("remote address"),
             codec: "PCMU".to_string(),
-            payload_type: 0,
             sample_rate: 8_000,
             channels: 1,
         });
@@ -6407,24 +6427,26 @@ mod invite_option_diagnostic_tests {
                 &selected,
                 Some(b"v=0\r\n"),
             )
-            .expect("Digest retry observation")
-            .into_event();
-            match &with_body {
-                Event::CallAuthRetrying {
-                    status_code,
-                    realm,
-                    algorithm: observed_algorithm,
-                    qop,
-                    ..
-                } => {
-                    assert_eq!(*status_code, 401);
-                    assert_eq!(realm, "private-realm");
-                    assert_eq!(*observed_algorithm, algorithm);
-                    assert_eq!(qop.as_deref(), Some("auth-int"));
+            .expect("Digest retry observation");
+            match with_body.clone().into_diagnostic() {
+                crate::api::events::DiagnosticEvent::CallAuthRetrying(details) => {
+                    assert_eq!(details.status_code, 401);
+                    assert_eq!(details.realm, "private-realm");
+                    assert_eq!(details.algorithm, algorithm);
+                    assert_eq!(details.qop.as_deref(), Some("auth-int"));
                 }
-                _ => panic!("unexpected authentication observation"),
+                _ => panic!("unexpected authentication diagnostic"),
             }
-            let debug = format!("{with_body:?}");
+            let event = with_body.event();
+            assert!(matches!(
+                event,
+                Event::CallAuthRetrying {
+                    status_code: 401,
+                    ref realm,
+                    ..
+                } if realm == "private-realm"
+            ));
+            let debug = format!("{event:?}");
             assert!(!debug.contains("private-realm"));
             assert!(!debug.contains("private-nonce"));
             assert!(!debug.contains("secret-hash"));
@@ -6435,15 +6457,12 @@ mod invite_option_diagnostic_tests {
                 &selected,
                 None,
             )
-            .expect("bodyless Digest retry observation")
-            .into_event();
+            .expect("bodyless Digest retry observation");
             assert!(matches!(
-                bodyless,
-                Event::CallAuthRetrying {
-                    status_code: 407,
-                    qop: Some(ref qop),
-                    ..
-                } if qop == "auth"
+                bodyless.into_diagnostic(),
+                crate::api::events::DiagnosticEvent::CallAuthRetrying(details)
+                    if details.status_code == 407
+                        && details.qop.as_deref() == Some("auth")
             ));
         }
     }

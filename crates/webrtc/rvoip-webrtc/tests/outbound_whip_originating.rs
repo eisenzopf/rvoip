@@ -39,6 +39,7 @@ async fn stall_creation(State(state): State<StalledOrigin>) -> StatusCode {
 struct MismatchedAnswerOrigin {
     adapter: Arc<WebRtcAdapter>,
     connection: Arc<tokio::sync::Mutex<Option<ConnectionId>>>,
+    published_connection: Arc<tokio::sync::Mutex<Option<ConnectionId>>>,
     corruption: AnswerCorruption,
     resource_location: &'static str,
 }
@@ -75,7 +76,8 @@ async fn create_mismatched_answer(
             .await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
-    *state.connection.lock().await = Some(connection);
+    *state.connection.lock().await = Some(connection.clone());
+    *state.published_connection.lock().await = Some(connection);
 
     let answer = match state.corruption {
         AnswerCorruption::NoIceCandidates => strip_ice_candidates(&answer),
@@ -213,6 +215,7 @@ async fn candidate_less_ice_has_a_bounded_failure_and_releases_both_routes() {
     let origin = MismatchedAnswerOrigin {
         adapter: Arc::clone(&server_adapter),
         connection: Arc::new(tokio::sync::Mutex::new(None)),
+        published_connection: Arc::new(tokio::sync::Mutex::new(None)),
         corruption: AnswerCorruption::NoIceCandidates,
         resource_location: "/whip/ice-mismatch-resource",
     };
@@ -266,22 +269,18 @@ async fn candidate_less_ice_has_a_bounded_failure_and_releases_both_routes() {
         .connection
         .id;
 
-    client_adapter
-        .activate_outbound(connection.clone())
-        .await
-        .expect("WHIP signaling succeeds before ICE is evaluated");
-    let server_connection = wait_for_origin_connection(&origin).await;
     let failure = tokio::time::timeout(
         Duration::from_secs(3),
-        client_adapter.accept(connection.clone()),
+        client_adapter.activate_outbound(connection.clone()),
     )
     .await
-    .expect("candidate-less ICE failure exceeded the configured bound")
-    .expect_err("candidate-less ICE unexpectedly connected");
+    .expect("candidate-less answer rejection exceeded the configured bound")
+    .expect_err("candidate-less answer unexpectedly activated");
     assert!(
         !failure.to_string().is_empty(),
-        "ICE failure must remain diagnosable"
+        "candidate-less answer rejection must remain diagnosable"
     );
+    let server_connection = wait_for_origin_connection(&origin).await;
 
     client_adapter
         .end(connection.clone(), EndReason::Timeout)
@@ -305,6 +304,7 @@ async fn mismatched_answer_fingerprint_has_a_bounded_dtls_failure_and_releases_b
     let origin = MismatchedAnswerOrigin {
         adapter: Arc::clone(&server_adapter),
         connection: Arc::new(tokio::sync::Mutex::new(None)),
+        published_connection: Arc::new(tokio::sync::Mutex::new(None)),
         corruption: AnswerCorruption::DtlsFingerprint,
         resource_location: "/whip/mismatch-resource",
     };
@@ -358,22 +358,18 @@ async fn mismatched_answer_fingerprint_has_a_bounded_dtls_failure_and_releases_b
         .connection
         .id;
 
-    client_adapter
-        .activate_outbound(connection.clone())
-        .await
-        .expect("the syntactically valid mismatched answer is applied");
-    let server_connection = wait_for_origin_connection(&origin).await;
     let failure = tokio::time::timeout(
         Duration::from_secs(3),
-        client_adapter.accept(connection.clone()),
+        client_adapter.activate_outbound(connection.clone()),
     )
     .await
-    .expect("DTLS fingerprint failure exceeded the configured bound")
-    .expect_err("mismatched certificate fingerprint unexpectedly connected");
+    .expect("DTLS fingerprint rejection exceeded the configured bound")
+    .expect_err("mismatched certificate fingerprint unexpectedly activated");
     assert!(
         !failure.to_string().is_empty(),
-        "DTLS failure must remain diagnosable"
+        "DTLS fingerprint rejection must remain diagnosable"
     );
+    let server_connection = wait_for_origin_connection(&origin).await;
 
     client_adapter
         .end(connection.clone(), EndReason::Timeout)
@@ -563,7 +559,7 @@ async fn wait_for_route_release(adapter: &WebRtcAdapter, connection: &Connection
 async fn wait_for_origin_connection(origin: &MismatchedAnswerOrigin) -> ConnectionId {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            if let Some(connection) = origin.connection.lock().await.clone() {
+            if let Some(connection) = origin.published_connection.lock().await.clone() {
                 return connection;
             }
             tokio::task::yield_now().await;

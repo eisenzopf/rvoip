@@ -9,7 +9,12 @@ use chrono::Utc;
 use rvoip_auth_core::bearer_stub;
 use rvoip_quic::{UctpQuicAdapter, UctpQuicClient, UctpQuicConfig};
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::{auth, session::SessionInvite};
+use rvoip_uctp::payloads::{
+    auth,
+    connection::{ConnectionOffer, StreamOffer},
+    session::SessionInvite,
+    stream::StreamOpened,
+};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
 
@@ -170,6 +175,54 @@ impl QuicLegHarness {
             signature: None,
         };
         client.send(invite).await.expect("session.invite");
+
+        let connection_id = format!("conn_{}", rand_env_id());
+        let stream_id = format!("strm_{}", rand_env_id());
+        let offer = UctpEnvelope::new(
+            MessageType::ConnectionOffer,
+            serde_json::to_value(ConnectionOffer {
+                by_participant: participant.into(),
+                substrate: "quic".into(),
+                capabilities: serde_json::Value::Object(Default::default()),
+                streams_offered: vec![StreamOffer {
+                    id: stream_id,
+                    kind: "audio".into(),
+                    direction: "sendrecv".into(),
+                    codec_preferences: vec!["opus".into()],
+                }],
+                substrate_setup: serde_json::Value::Null,
+            })
+            .expect("serialize connection.offer"),
+        )
+        .with_sid(sid)
+        .with_connid(&connection_id);
+        client.send(offer).await.expect("connection.offer");
+        client
+            .send(
+                UctpEnvelope::new(MessageType::ConnectionReady, serde_json::json!({}))
+                    .with_sid(sid)
+                    .with_connid(&connection_id),
+            )
+            .await
+            .expect("connection.ready");
+
+        let stream_local_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let envelope = inbound.recv().await.expect("signaling channel closed");
+                if envelope.msg_type == MessageType::StreamOpened {
+                    let opened: StreamOpened = envelope
+                        .decode_payload()
+                        .expect("decode negotiated stream.opened");
+                    break opened.stream.stream_local_id;
+                }
+            }
+        })
+        .await
+        .expect("negotiated stream.opened timeout");
+        assert_eq!(
+            stream_local_id, 1,
+            "the first negotiated QUIC stream must use local id 1"
+        );
         client
     }
 }

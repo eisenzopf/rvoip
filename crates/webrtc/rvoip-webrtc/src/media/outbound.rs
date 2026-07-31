@@ -164,7 +164,10 @@ impl OutboundAudioRtpWriter {
     }
 
     pub(crate) fn set_mid(&self, mid: Option<String>) {
-        *self.mid.lock().expect("outbound audio MID mutex poisoned") = mid;
+        *self
+            .mid
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = mid;
     }
 
     pub(crate) async fn write_audio(
@@ -194,7 +197,7 @@ impl OutboundAudioRtpWriter {
         let mid = self
             .mid
             .lock()
-            .expect("outbound audio MID mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
             .ok_or_else(|| {
                 webrtc::error::Error::Other(

@@ -21,25 +21,35 @@ not by itself make that mechanism available through SIP offer/answer.
 Outbound SDES key material always uses canonical RFC 4648 Base64. Inbound key
 material defaults to `SdesBase64Mode::Compatible`, which accepts canonical
 Base64 or omission of only the required trailing `=` characters. Set
-`Config::sdes_base64_mode` to `SdesBase64Mode::Strict` to require canonical
-padding. Both modes require the suite's exact decoded key-plus-salt length.
+`EndpointBuilder::sdes_base64_mode` or
+`StreamPeerBuilder::sdes_base64_mode` to `SdesBase64Mode::Strict` to require
+canonical padding. Direct coordinator users pass
+`SipRuntimeConfig::default().with_sdes_base64_mode(...)` to
+`UnifiedCoordinator::new_with_runtime`. Both modes require the suite's exact
+decoded key-plus-salt length.
 
-`Event::SdesNegotiationFailed` reports the stage, failure class, crypto tag,
-suite, encoded length, padding classification, and expected/actual decoded
-length. It also carries the received `IncomingResponse` so an application can
-inspect the rejected message. The structured diagnostic and the event's
-`Debug` output never render the encoded key, decoded key material,
-lifetime/MKI content, parser source text, or response body. Applications must
-still treat the explicitly accessed response body as sensitive SDP.
+`DiagnosticEvent::SdesNegotiationFailed`, received from
+`subscribe_diagnostics`, reports the stage, failure class, crypto tag, suite,
+encoded length, padding classification, and expected/actual decoded length. It
+also carries a response envelope: the received response for answer failures,
+or the locally authored 488 outcome plus rejected remote offer for offer
+failures, so an application can inspect the rejected message. The bounded
+diagnostic stream is observational and never
+blocks signaling. The structured diagnostic and the event's `Debug` output
+never render the encoded key, decoded key material, lifetime/MKI content,
+parser source text, or response body. Applications must still treat the
+explicitly accessed response body as sensitive SDP.
 
 ## SIP authentication
 
 The public Digest client and server paths support MD5, MD5-sess, SHA-256,
 SHA-256-sess, SHA-512-256, and SHA-512-256-sess. They support `qop=auth` and
 `qop=auth-int` when the request body is available. `CallAuthRetrying` is emitted
-only after a challenged INVITE was successfully authorized and dispatched; it
-reports status, realm, selected algorithm, and selected qop. It never reports a
-nonce, password, HA1, cnonce, or response hash.
+only after a challenged INVITE was successfully authorized and dispatched. The
+source-compatible `Event::CallAuthRetrying` reports status and realm;
+`DiagnosticEvent::CallAuthRetrying` adds the selected algorithm and qop on the
+bounded opt-in diagnostic stream. Neither reports a nonce, password, HA1,
+cnonce, or response hash.
 
 Digest algorithm availability does not mean a remote service can be forced to
 challenge with every algorithm. SIP trace correlation identifies the initial

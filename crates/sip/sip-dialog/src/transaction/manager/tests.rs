@@ -7923,7 +7923,7 @@ mod tests {
             .await
             .expect("termination supervisor task")
             .expect("termination supervisor result");
-        manager.clear_termination_takeover_test_gate();
+        manager.clear_termination_takeover_test_gate(&transaction);
 
         assert!(!manager.client_transactions.contains_key(&transaction));
         assert!(live.data().event_loop_handle.lock().await.is_none());
@@ -8023,7 +8023,7 @@ mod tests {
         .await
         .expect("manager-owned termination stopped with its public waiter");
         assert!(manager.explicit_termination_operations.is_empty());
-        manager.clear_termination_takeover_test_gate();
+        manager.clear_termination_takeover_test_gate(&transaction);
         tokio::time::timeout(Duration::from_secs(2), shutdown_complete.notified())
             .await
             .expect("shutdown deadlocked behind queued explicit termination");
