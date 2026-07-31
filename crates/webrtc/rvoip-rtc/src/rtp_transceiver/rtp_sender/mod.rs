@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn outbound_payload_type_preserves_represented_same_clock_supplemental_codec() {
+    fn outbound_payload_type_rejects_codec_bound_to_another_ssrc() {
         let opus = codec(111, "audio/opus", 48_000);
         let telephone_event = codec(110, "audio/telephone-event", 48_000);
         let codecs = vec![opus.clone(), telephone_event.clone()];
@@ -505,7 +505,7 @@ mod tests {
 
         assert_eq!(
             outbound_payload_type(telephone_event.payload_type, &opus, &codecs, &encodings),
-            telephone_event.payload_type
+            opus.payload_type
         );
     }
 
