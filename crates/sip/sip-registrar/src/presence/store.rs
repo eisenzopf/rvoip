@@ -12,6 +12,12 @@ pub struct PresenceStore {
     presence: Arc<DashMap<String, PresenceState>>,
 }
 
+impl Default for PresenceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PresenceStore {
     pub fn new() -> Self {
         Self {

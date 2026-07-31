@@ -66,11 +66,11 @@ impl PresenceServer {
                     display_name: Some(buddy_id.clone()),
                     status: presence
                         .extended_status
-                        .map(|s| PresenceStatus::from(s))
+                        .map(PresenceStatus::from)
                         .unwrap_or(PresenceStatus::Offline),
                     note: presence.note,
                     last_updated: presence.last_updated,
-                    is_online: presence.devices.len() > 0,
+                    is_online: !presence.devices.is_empty(),
                     active_devices: presence.devices.len(),
                 });
             }
