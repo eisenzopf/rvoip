@@ -1,0 +1,282 @@
+name: Release qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Commit or main ref to qualify
+        required: true
+        default: main
+        type: string
+      profile:
+        description: Core dry run or complete release qualification
+        required: true
+        default: remote-core
+        type: choice
+        options:
+          - remote-core
+          - remote-release
+      first_candidate:
+        description: Force every selected gate to run fresh
+        required: true
+        default: true
+        type: boolean
+      prior_run_id:
+        description: Optional successful/failed qualification run to reuse exactly matching evidence
+        required: false
+        type: string
+      changed_since:
+        description: Optional prior candidate SHA for fail-closed changed-path validation
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: release-qualification-${{ inputs.candidate }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.88-nextest-0.9.140
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  plan:
+    name: Plan exact-candidate gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
+      environment_id: ${{ steps.plan.outputs.environment_id }}
+      run_count: ${{ steps.plan.outputs.run_count }}
+      reuse_count: ${{ steps.plan.outputs.reuse_count }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.candidate }}
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+
+      - name: Require candidate to belong to origin/main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "release candidates must be commits on origin/main" >&2
+            exit 1
+          }
+
+      - name: Require provisioned specialty runners
+        if: inputs.profile == 'remote-release'
+        env:
+          GCP_RUNNERS_READY: ${{ vars.RVOIP_GCP_RUNNERS_READY }}
+        run: |
+          if test "$GCP_RUNNERS_READY" != true; then
+            echo "remote-release requires the approved ephemeral GCP runner fleet" >&2
+            echo "set repository variable RVOIP_GCP_RUNNERS_READY=true only after runner labels and cleanup are verified" >&2
+            exit 1
+          fi
+
+      - name: Require complete structured release coverage
+        if: inputs.profile == 'remote-release'
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          coverage = json.loads(Path('scripts/release/gates.json').read_text())['remote_release_legacy_coverage']
+          missing = coverage['unautomated_legacy_ids']
+          if missing:
+              print('remote-release is fail-closed until every legacy gate has a structured replacement:', *missing, sep='\n- ')
+              raise SystemExit(1)
+          PY
+
+      - name: Download prior qualification evidence
+        if: inputs.prior_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_RUN_ID: ${{ inputs.prior_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          gh run download "$PRIOR_RUN_ID"
+          --repo "$REPOSITORY"
+          --name release-gate-evidence
+          --dir target/prior-evidence
+
+      - name: Plan fresh and reusable gates
+        id: plan
+        shell: bash
+        env:
+          FIRST_CANDIDATE: ${{ inputs.first_candidate }}
+          PRIOR_RUN_ID: ${{ inputs.prior_run_id }}
+          CHANGED_SINCE: ${{ inputs.changed_since }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          args=(
+            --profile "$PROFILE"
+            --candidate HEAD
+            --environment-id "$RELEASE_ENVIRONMENT_ID"
+            --output target/release-plan/plan.json
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if test "$FIRST_CANDIDATE" = true; then
+            args+=(--first-candidate)
+          fi
+          if test -n "$PRIOR_RUN_ID"; then
+            args+=(--prior-evidence target/prior-evidence)
+          fi
+          if test -n "$CHANGED_SINCE"; then
+            args+=(--changed-since "$CHANGED_SINCE")
+          fi
+          python3 scripts/release/gates.py plan "${args[@]}"
+
+      - name: Summarize plan
+        run: |
+          {
+            echo "## Release qualification plan"
+            echo
+            echo "- Candidate: \`${{ steps.plan.outputs.candidate_sha }}\`"
+            echo "- Profile: \`${{ inputs.profile }}\`"
+            echo "- Fresh gates: ${{ steps.plan.outputs.run_count }}"
+            echo "- Reused gates: ${{ steps.plan.outputs.reuse_count }}"
+            echo "- Runner shards: ${{ steps.plan.outputs.shard_count }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload qualification plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gate-plan
+          path: target/release-plan/plan.json
+          retention-days: 90
+          if-no-files-found: error
+
+  gate:
+    name: ${{ matrix.resource_class }} / ${{ matrix.id }}
+    needs: plan
+    runs-on: ${{ matrix.runs_on }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+          components: clippy,rustfmt
+
+      - name: Install nightly for bounded fuzz gates
+        if: matrix.needs_nightly
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        if: matrix.needs_nightly
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: Install cargo-deny
+        if: matrix.needs_cargo_deny
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: Restore content-addressed Rust cache
+        if: matrix.hosted
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-${{ matrix.id }}
+
+      - name: Install hosted-runner native dependencies
+        if: matrix.hosted
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+
+      - name: Run gate shard
+        run: >-
+          python3 scripts/release/gates.py run-shard
+          --candidate '${{ needs.plan.outputs.candidate_sha }}'
+          --environment-id '${{ needs.plan.outputs.environment_id }}'
+          --gates '${{ matrix.gates_csv }}'
+          --output target/release-shard
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gate-shard-${{ matrix.id }}
+          path: target/release-shard/
+          retention-days: 90
+          if-no-files-found: warn
+
+  collect:
+    name: Release Gate
+    if: always()
+    needs: [plan, gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+
+      - name: Download qualification plan
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-gate-plan
+          path: target/release-plan
+
+      - name: Download fresh gate evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-gate-shard-*
+          path: target/release-evidence
+          merge-multiple: true
+
+      - name: Reconcile exact-candidate qualification
+        run: >-
+          python3 scripts/release/gates.py collect
+          --plan target/release-plan/plan.json
+          --evidence target/release-evidence
+          --output target/release-qualification/aggregate.json
+
+      - name: Attest release qualification bundle
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: target/release-qualification/aggregate.json
+
+      - name: Upload reusable release evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gate-evidence
+          path: |
+            target/release-plan/plan.json
+            target/release-evidence/
+            target/release-qualification/aggregate.json
+          retention-days: 90
+          if-no-files-found: warn

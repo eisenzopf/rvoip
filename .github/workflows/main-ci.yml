@@ -1,0 +1,242 @@
+name: Main Gate
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan all 44 crates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.plan.outputs.shards }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      specialty: ${{ steps.plan.outputs.specialty }}
+      specialty_count: ${{ steps.plan.outputs.specialty_count }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+
+      - name: Build full-workspace plan
+        id: plan
+        run: |
+          args=(
+            --base HEAD
+            --head HEAD
+            --changed-file Cargo.lock
+            --github-output "$GITHUB_OUTPUT"
+            --specialty-gate release-tooling
+            --specialty-gate rtp-interop
+            --specialty-gate vcon-postgres
+            --specialty-gate webrtc-runtime
+            --specialty-gate examples-smoke
+          )
+          while IFS= read -r manifest; do
+            example="${manifest#examples/}"
+            example="${example%/Cargo.toml}"
+            args+=(--specialty-gate "example--$example")
+          done < <(find examples -mindepth 2 -maxdepth 2 -name Cargo.toml -print | sort)
+          python3 scripts/ci/pr_plan.py "${args[@]}"
+
+      - name: Require exactly 44 workspace crates
+        run: |
+          count="$(jq '.selected_crates | length' target/ci-plan/plan.json)"
+          test "$count" = 44 || {
+            echo "expected 44 workspace crates, planned $count" >&2
+            exit 1
+          }
+
+      - name: Upload main plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-plan
+          path: target/ci-plan/plan.json
+          retention-days: 30
+          if-no-files-found: error
+
+  policy:
+    name: Universal policy
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+          components: rustfmt
+      - name: Formatting and CI policy tests
+        run: >-
+          python3 scripts/ci/run_checks.py policy
+          --name policy
+          --output target/ci-receipts/policy.json
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          command: check advisories bans sources
+      - name: Upload policy receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-policy
+          path: target/ci-receipts/policy.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  crate-tests:
+    name: Full crate shard ${{ matrix.id }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: main-shard-${{ matrix.id }}
+      - name: Install system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
+      - name: Test and lint shard
+        run: >-
+          python3 scripts/ci/run_checks.py shard
+          --name shard-${{ matrix.id }}
+          --packages '${{ matrix.packages_csv }}'
+          --output target/ci-receipts/shard-${{ matrix.id }}.json
+      - name: Upload shard receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-shard-${{ matrix.id }}
+          path: target/ci-receipts/shard-${{ matrix.id }}.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  doctest:
+    name: Workspace doctests
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: main-doctest
+      - name: Install system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
+      - name: Run doctests separately
+        run: >-
+          python3 scripts/ci/run_checks.py doctest
+          --name doctest
+          --output target/ci-receipts/doctest.json
+      - name: Upload doctest receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-doctest
+          path: target/ci-receipts/doctest.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  specialty:
+    name: Full specialty ${{ matrix.gate }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.specialty) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: main-specialty-${{ matrix.gate }}
+      - name: Install common native dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake lsof
+      - name: Run full specialty gate
+        run: >-
+          python3 scripts/ci/run_checks.py specialty
+          --name 'specialty-${{ matrix.gate }}'
+          --gate '${{ matrix.gate }}'
+          --output 'target/ci-receipts/specialty-${{ matrix.gate }}.json'
+      - name: Upload specialty receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-specialty-${{ matrix.gate }}
+          path: target/ci-receipts/specialty-${{ matrix.gate }}.json
+          retention-days: 30
+          if-no-files-found: warn
+
+  main-gate:
+    name: Main Gate
+    if: always()
+    needs: [plan, policy, crate-tests, doctest, specialty]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Download all command evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: main-evidence-*
+          path: target/main-evidence
+          merge-multiple: true
+      - name: Reconcile full-workspace evidence
+        run: |
+          python3 scripts/ci/aggregate_receipts.py \
+            --plan target/main-evidence/plan.json \
+            --evidence target/main-evidence \
+            --output target/main-receipt/main-receipt.json \
+            --job 'plan=${{ needs.plan.result }}' \
+            --job 'policy=${{ needs.policy.result }}' \
+            --job 'crate-tests=${{ needs.crate-tests.result }}' \
+            --job 'specialty=${{ needs.specialty.result }}' \
+            --job 'doctest=${{ needs.doctest.result }}' \
+            --required-job doctest \
+            --required-receipt doctest
+      - name: Upload full main receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-test-receipt
+          path: target/main-receipt/main-receipt.json
+          retention-days: 30
+          if-no-files-found: warn

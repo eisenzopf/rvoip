@@ -441,6 +441,77 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             )
             self.assertEqual(set(receipt["package_sha256"]), {"leaf"})
 
+    def test_remote_qualification_is_exact_commit_catalog_and_profile_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "scripts/release/gates.json"
+            catalog_path.parent.mkdir(parents=True)
+            gate_ids = [f"core.gate-{index}" for index in range(45)]
+            catalog = {
+                "schema": release.REMOTE_GATE_CATALOG_SCHEMA,
+                "profiles": {"remote-release": gate_ids},
+                "remote_release_legacy_coverage": {
+                    "required_legacy_count": 108,
+                    "profile_legacy_count": 108,
+                    "unautomated_legacy_ids": [],
+                },
+            }
+            catalog_path.write_text(json.dumps(catalog))
+            head = "a" * 40
+            aggregate = root / "aggregate.json"
+            payload = {
+                "schema": release.REMOTE_QUALIFICATION_SCHEMA,
+                "status": "PASS",
+                "failures": [],
+                "candidate_sha": head,
+                "profile": "remote-release",
+                "catalog_sha256": release.canonical_json_sha256(catalog),
+                "gate_count": len(gate_ids),
+                "fresh_count": 4,
+                "reused_count": len(gate_ids) - 4,
+                "accepted_gates": [{"gate_id": gate_id} for gate_id in gate_ids],
+            }
+            aggregate.write_text(json.dumps(payload))
+            qualification = release.verify_remote_qualification(
+                root, "0.3.6", head, str(aggregate), mock.Mock()
+            )
+            self.assertEqual(qualification["mode"], "remote-release")
+            self.assertEqual(qualification["gate_count"], len(gate_ids))
+
+            catalog["remote_release_legacy_coverage"]["unautomated_legacy_ids"] = [
+                "legacy.missing"
+            ]
+            catalog["remote_release_legacy_coverage"]["profile_legacy_count"] = 107
+            catalog_path.write_text(json.dumps(catalog))
+            payload["catalog_sha256"] = release.canonical_json_sha256(catalog)
+            aggregate.write_text(json.dumps(payload))
+            with self.assertRaises(release.ReleaseError):
+                release.verify_remote_qualification(
+                    root, "0.3.6", head, str(aggregate), mock.Mock()
+                )
+
+            payload["candidate_sha"] = "b" * 40
+            aggregate.write_text(json.dumps(payload))
+            with self.assertRaises(release.ReleaseError):
+                release.verify_remote_qualification(
+                    root, "0.3.6", head, str(aggregate), mock.Mock()
+                )
+
+    def test_remote_qualification_cli_is_mutually_exclusive(self) -> None:
+        parser = release.parser()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser.parse_args(
+                [
+                    "verify",
+                    "--version",
+                    "0.3.6",
+                    "--beta-report-root",
+                    "strict",
+                    "--remote-qualification",
+                    "aggregate.json",
+                ]
+            )
+
     def test_beta_exception_is_explicit_and_hash_bound(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

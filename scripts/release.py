@@ -28,6 +28,8 @@ USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
+REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
+REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
 TARGETED_DELTA_ATTESTATION_SCHEMA = "rvoip-targeted-delta-attestation-v1"
 TARGETED_POSTGRES_EVIDENCE_SCHEMA = "rvoip-vcon-postgres-live-evidence-v1"
 CARRY_FORWARD_ATTESTATION_SCHEMA = "rvoip-release-carry-forward-attestation-v1"
@@ -1205,6 +1207,87 @@ def write_verification_receipt(
     log.event("verification-receipt", path=destination.relative_to(root).as_posix())
 
 
+def canonical_json_sha256(value: Any) -> str:
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verify_remote_qualification(
+    root: Path,
+    version: str,
+    head: str,
+    qualification_path: str,
+    log: ReleaseLog,
+) -> dict[str, Any]:
+    path = Path(qualification_path)
+    if not path.is_absolute():
+        path = root / path
+    if not path.is_file():
+        raise ReleaseError(f"missing remote qualification aggregate: {path}")
+    aggregate = load_json_object(path, "remote qualification aggregate")
+    catalog_path = root / "scripts/release/gates.json"
+    catalog = load_json_object(catalog_path, "release gate catalog")
+    if catalog.get("schema") != REMOTE_GATE_CATALOG_SCHEMA:
+        raise ReleaseError("release gate catalog has an unsupported schema")
+    expected_gates = catalog.get("profiles", {}).get("remote-release")
+    coverage = catalog.get("remote_release_legacy_coverage", {})
+    accepted = aggregate.get("accepted_gates")
+    accepted_ids = (
+        [item.get("gate_id") for item in accepted]
+        if isinstance(accepted, list)
+        and all(isinstance(item, dict) for item in accepted)
+        else []
+    )
+    expected_catalog_hash = canonical_json_sha256(catalog)
+    valid = (
+        aggregate.get("schema") == REMOTE_QUALIFICATION_SCHEMA
+        and aggregate.get("status") == "PASS"
+        and aggregate.get("failures") == []
+        and aggregate.get("candidate_sha") == head
+        and aggregate.get("profile") == "remote-release"
+        and aggregate.get("catalog_sha256") == expected_catalog_hash
+        and isinstance(expected_gates, list)
+        and len(expected_gates) > 44
+        and coverage.get("required_legacy_count") == 108
+        and coverage.get("profile_legacy_count") == 108
+        and coverage.get("unautomated_legacy_ids") == []
+        and aggregate.get("gate_count") == len(expected_gates)
+        and len(accepted_ids) == len(expected_gates)
+        and len(set(accepted_ids)) == len(accepted_ids)
+        and set(accepted_ids) == set(expected_gates)
+        and aggregate.get("fresh_count", 0) >= 4
+        and aggregate.get("fresh_count", 0) + aggregate.get("reused_count", 0)
+        == len(expected_gates)
+    )
+    if not valid:
+        raise ReleaseError(
+            "remote qualification does not bind the complete remote-release "
+            "profile to this release commit"
+        )
+    aggregate_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+    log.event(
+        "remote-qualification",
+        path=relative_or_absolute(root, path),
+        sha256=aggregate_sha256,
+        gate_count=len(expected_gates),
+        fresh_count=aggregate["fresh_count"],
+        reused_count=aggregate["reused_count"],
+    )
+    return {
+        "mode": "remote-release",
+        "disposition": "RELEASE-CANDIDATE",
+        "strict_automated_status": "PASS",
+        "version": version,
+        "git_commit": head,
+        "aggregate_path": relative_or_absolute(root, path),
+        "aggregate_sha256": aggregate_sha256,
+        "catalog_sha256": expected_catalog_hash,
+        "gate_count": len(expected_gates),
+        "fresh_count": aggregate["fresh_count"],
+        "reused_count": aggregate["reused_count"],
+    }
+
+
 def verify(
     root: Path,
     version: str,
@@ -1212,6 +1295,7 @@ def verify(
     beta_exception_attestation: str | None,
     beta_carry_forward_attestation: str | None,
     targeted_delta_attestation: str | None,
+    remote_qualification: str | None,
 ) -> None:
     head = ensure_release_state(root, version, require_no_tag=True)
     packages, ordered = validate_workspace(root, version, locked=True)
@@ -1235,7 +1319,24 @@ def verify(
         "--locked",
     ]
     named_commands: list[tuple[str, list[str]]]
-    if targeted_delta_attestation:
+    if remote_qualification:
+        beta_qualification = verify_remote_qualification(
+            root, version, head, remote_qualification, log
+        )
+        named_commands = []
+        verification_scope = {
+            "mode": "remote-release",
+            "workspace_manifest": "PASS",
+            "workspace_compile": "PASS-REMOTE",
+            "workspace_tests": "PASS-REMOTE",
+            "workspace_doctests": "PASS-REMOTE",
+            "beta_suite": "REPLACED-BY-REMOTE-GATES",
+            "targeted_commands": [],
+            "postgresql_evidence": None,
+            "package_file_manifests": "PASS",
+            "package_archives": "VERIFIED-WHEN-REGISTRY-RESOLVABLE",
+        }
+    elif targeted_delta_attestation:
         beta_qualification, named_commands = verify_targeted_delta_attestation(
             root,
             version,
@@ -1378,7 +1479,7 @@ def read_verification_receipt(
     common_scope = (
         isinstance(scope, dict)
         and scope.get("workspace_manifest") == "PASS"
-        and scope.get("workspace_compile") == "PASS"
+        and scope.get("workspace_compile") in {"PASS", "PASS-REMOTE"}
         and scope.get("package_file_manifests") == "PASS"
         and scope.get("package_archives")
         == "VERIFIED-WHEN-REGISTRY-RESOLVABLE"
@@ -1520,6 +1621,37 @@ def read_verification_receipt(
         is not None
         and qualification.get("postgresql") == postgres_evidence
     ) if isinstance(scope, dict) and isinstance(qualification, dict) else False
+    remote_aggregate_current = False
+    if qualification_mode == "remote-release" and isinstance(qualification, dict):
+        aggregate_value = qualification.get("aggregate_path")
+        if isinstance(aggregate_value, str) and aggregate_value:
+            aggregate_path = Path(aggregate_value)
+            if not aggregate_path.is_absolute():
+                aggregate_path = root / aggregate_path
+            remote_aggregate_current = (
+                aggregate_path.is_file()
+                and hashlib.sha256(aggregate_path.read_bytes()).hexdigest()
+                == qualification.get("aggregate_sha256")
+            )
+    remote_scope = (
+        scope_mode == "remote-release"
+        and qualification_mode == "remote-release"
+        and qualification.get("disposition") == "RELEASE-CANDIDATE"
+        and qualification.get("strict_automated_status") == "PASS"
+        and qualification.get("git_commit") == head
+        and isinstance(qualification.get("gate_count"), int)
+        and qualification.get("gate_count", 0) > 44
+        and qualification.get("fresh_count", 0) >= 4
+        and qualification.get("fresh_count", 0)
+        + qualification.get("reused_count", 0)
+        == qualification.get("gate_count")
+        and remote_aggregate_current
+        and scope.get("workspace_tests") == "PASS-REMOTE"
+        and scope.get("workspace_doctests") == "PASS-REMOTE"
+        and scope.get("beta_suite") == "REPLACED-BY-REMOTE-GATES"
+        and scope.get("targeted_commands") == []
+        and scope.get("postgresql_evidence") is None
+    ) if isinstance(scope, dict) and isinstance(qualification, dict) else False
     expected = (
         receipt.get("schema") == VERIFICATION_RECEIPT_SCHEMA
         and receipt.get("version") == version
@@ -1531,7 +1663,7 @@ def read_verification_receipt(
         and isinstance(package_hashes, dict)
         and set(package_hashes) <= set(ordered)
         and common_scope
-        and (full_scope or targeted_scope)
+        and (full_scope or targeted_scope or remote_scope)
         and (
             qualification_mode != "owner-approved-carry-forward"
             or (
@@ -1753,6 +1885,10 @@ def parser() -> argparse.ArgumentParser:
                 "--targeted-delta-attestation",
                 default=os.environ.get("RVOIP_TARGETED_DELTA_ATTESTATION"),
             )
+            report_group.add_argument(
+                "--remote-qualification",
+                default=os.environ.get("RVOIP_REMOTE_QUALIFICATION"),
+            )
         if name == "publish":
             command.add_argument(
                 "--execute",
@@ -1780,6 +1916,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.beta_exception_attestation,
                     args.beta_carry_forward_attestation,
                     args.targeted_delta_attestation,
+                    args.remote_qualification,
                 )
             elif args.command == "publish":
                 publish(root, version, execute=args.execute)

@@ -24,20 +24,29 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch: {}
 
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-interop
+  cancel-in-progress: true
+
 jobs:
   interop:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
           workspaces: "."
       - name: Install Chromium
         run: |
           sudo apt-get update
-          sudo apt-get install -y chromium-browser
+          sudo apt-get install -y chromium
       - name: Build interop tests
         run: |
           cargo test -p rvoip-webrtc \
@@ -61,3 +70,40 @@ jobs:
           curl -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"rvoip-webrtc nightly interop failed on ${{ github.ref }} (commit ${{ github.sha }})\"}" \
             "$WEBHOOK"
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.88.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tests/browser-smoke/package-lock.json
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: nightly-browser-smoke
+      - name: Install native dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake
+      - name: Run browser smoke with receipt
+        run: >-
+          python3 scripts/ci/run_checks.py specialty
+          --name specialty-browser-smoke
+          --gate browser-smoke
+          --output target/ci-receipts/specialty-browser-smoke.json
+      - name: Upload nightly evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-browser-smoke-evidence
+          path: |
+            target/ci-receipts/specialty-browser-smoke.json
+            tests/browser-smoke/playwright-report/
+          retention-days: 14
+          if-no-files-found: warn
