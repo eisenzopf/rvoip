@@ -2576,6 +2576,17 @@ pub(crate) async fn execute_action(
 
         // Media actions
         Action::StartMediaSession => {
+            // A received provisional answer (for example 183 early media) has
+            // no ACK boundary. Likewise, an offerless UAS completes the
+            // exchange when it receives the ACK answer. Commit either staged
+            // negotiation on this exact-session lane before exposing media as
+            // started. Ordinary final UAC answers have already crossed their
+            // wire boundary in SendACK, so this is a no-op for that path.
+            if media_adapter.has_staged_media_negotiation(session) {
+                media_adapter
+                    .commit_staged_media_negotiation_lane_owned(session)
+                    .await?;
+            }
             media_adapter.start_session(&session.session_id).await?;
             // Mark media as ready after successfully starting
             session.media_session_ready = true;
@@ -2612,6 +2623,17 @@ pub(crate) async fn execute_action(
             }
         }
         Action::NegotiateSDPAsUAC => {
+            if matches!(triggering_event, EventType::Dialog200OK)
+                && session.media_session_ready
+                && session.sdp_negotiated
+                && session.pending_offer_answer.is_none()
+            {
+                info!(
+                    "Action::NegotiateSDPAsUAC for session {}: final response confirms committed early-media answer",
+                    session.session_id
+                );
+                return Ok(ActionOutcome::default());
+            }
             if matches!(triggering_event, EventType::DialogACK) && session.sdp_negotiated {
                 info!(
                     "Action::NegotiateSDPAsUAC for session {}: ordinary ACK has no new offer/answer",

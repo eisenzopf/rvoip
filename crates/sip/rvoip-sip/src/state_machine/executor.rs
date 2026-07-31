@@ -538,6 +538,11 @@ struct EventStateInput {
     /// `None` with this bit set means the response/request carried no SDP;
     /// without the bit, the stable remote description is left untouched.
     remote_sdp_supplied: bool,
+    /// A final response after committed 183 early media confirms the existing
+    /// offer/answer exchange; it is not a second answer. Preserve the stable
+    /// provisional description instead of replacing it with an optional copy
+    /// from the final response.
+    preserve_committed_provisional_sdp: bool,
     local_sdp: Option<String>,
     sdp_negotiated: Option<bool>,
     response: Option<ResponseStateInput>,
@@ -872,7 +877,12 @@ impl AuthRequiredStateInput {
 
 impl EventStateInput {
     fn apply(self, session: &mut SessionState) {
-        if self.remote_sdp_supplied {
+        let committed_provisional_answer = self.preserve_committed_provisional_sdp
+            && session.call_state == CallState::EarlyMedia
+            && session.sdp_negotiated
+            && session.media_session_ready
+            && session.pending_offer_answer.is_none();
+        if self.remote_sdp_supplied && !committed_provisional_answer {
             session.remote_sdp = self.remote_sdp;
         }
         if let Some(local_sdp) = self.local_sdp {
@@ -2691,12 +2701,14 @@ impl StateMachine {
         event: EventType,
         remote_sdp: Option<String>,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let preserve_committed_provisional_sdp = matches!(event, EventType::Dialog200OK);
         self.process_event_with_state_input_exact(
             handle,
             event,
             EventStateInput {
                 remote_sdp,
                 remote_sdp_supplied: true,
+                preserve_committed_provisional_sdp,
                 ..Default::default()
             },
         )
@@ -2715,6 +2727,7 @@ impl StateMachine {
             EventStateInput {
                 remote_sdp,
                 remote_sdp_supplied: true,
+                preserve_committed_provisional_sdp: true,
                 invite_2xx_ack: Some(ack),
                 ..Default::default()
             },
@@ -5919,6 +5932,7 @@ mod tests {
         EventStateInput {
             remote_sdp: Some("remote-sdp".to_string()),
             remote_sdp_supplied: true,
+            preserve_committed_provisional_sdp: false,
             local_sdp: Some("local-sdp".to_string()),
             sdp_negotiated: Some(true),
             response: Some(ResponseStateInput::provisional(181, Vec::new())),
@@ -5982,6 +5996,26 @@ mod tests {
             .pending_auth_transport
             .as_ref()
             .is_some_and(|transport| transport.secure));
+    }
+
+    #[test]
+    fn final_invite_response_preserves_the_committed_provisional_answer() {
+        let session_id = SessionId("committed-provisional-answer".to_string());
+        let mut session = SessionState::new(session_id, crate::state_table::Role::UAC);
+        session.call_state = CallState::EarlyMedia;
+        session.remote_sdp = Some("stable-183-answer".to_string());
+        session.sdp_negotiated = true;
+        session.media_session_ready = true;
+
+        EventStateInput {
+            remote_sdp: Some("untrusted-final-copy".to_string()),
+            remote_sdp_supplied: true,
+            preserve_committed_provisional_sdp: true,
+            ..Default::default()
+        }
+        .apply(&mut session);
+
+        assert_eq!(session.remote_sdp.as_deref(), Some("stable-183-answer"));
     }
 
     #[test]
