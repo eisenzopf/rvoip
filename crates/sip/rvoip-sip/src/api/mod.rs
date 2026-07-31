@@ -325,8 +325,9 @@ pub use crate::types::CallState;
 // Re-export the unified API
 pub use unified::{
     Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
-    RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SipContactMode,
-    SipNatConfig, SipTlsMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
+    RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
+    SipContactMode, SipNatConfig, SipTlsMode, SrtpSuitePolicy, SymmetricRtpPolicy,
+    UnifiedCoordinator,
 };
 
 // Re-export event types

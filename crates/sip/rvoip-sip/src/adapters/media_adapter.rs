@@ -6,7 +6,7 @@
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
-use crate::api::unified::MediaMode;
+use crate::api::unified::{MediaMode, SdesBase64Mode};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_lifecycle::{
@@ -999,6 +999,10 @@ pub struct MediaAdapter {
     /// RFC 4568 §6.2.1 MTI plus low-bandwidth fallback.
     srtp_offered_suites: Vec<CryptoSuite>,
 
+    /// Inbound RFC 4568 key-material Base64 validation policy. This is a
+    /// compact immutable adapter setting and is read only during SDP work.
+    sdes_base64_mode: SdesBase64Mode,
+
     /// UAC-side state held between `generate_sdp_offer` and
     /// `negotiate_sdp_as_uac`. The offerer-role `SrtpNegotiator`
     /// holds our locally-generated keys keyed by tag.
@@ -1142,6 +1146,7 @@ impl MediaAdapter {
                 CryptoSuite::AesCm128HmacSha1_80,
                 CryptoSuite::AesCm128HmacSha1_32,
             ],
+            sdes_base64_mode: SdesBase64Mode::default(),
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
             staged_media_negotiations: Arc::new(DashMap::new()),
@@ -1548,6 +1553,11 @@ impl MediaAdapter {
         }
     }
 
+    /// Configure how inbound SDES inline keys handle trailing Base64 padding.
+    pub fn set_sdes_base64_mode(&mut self, mode: SdesBase64Mode) {
+        self.sdes_base64_mode = mode;
+    }
+
     // ===== Outbound Actions (from state machine) =====
 
     /// Start a media session
@@ -1920,7 +1930,7 @@ impl MediaAdapter {
         let (answer_attr, negotiated_srtp_pair, reject_with_port_zero) =
             if !offered_crypto.is_empty() && self.offer_srtp {
                 // Both sides want SRTP — negotiate.
-                let answerer = SrtpNegotiator::new_answerer();
+                let answerer = SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode);
                 let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
                 tracing::info!(
                     "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
@@ -3266,7 +3276,10 @@ impl MediaAdapter {
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
         // when offering SDES.
         let (transport, crypto_attrs) = if self.offer_srtp {
-            let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            let (negotiator, attrs) = SrtpNegotiator::new_offerer_with_base64_mode(
+                &self.srtp_offered_suites,
+                self.sdes_base64_mode,
+            )?;
             self.pending_srtp_offerers
                 .insert(negotiation_key, negotiator);
             ("RTP/SAVP", attrs)
@@ -4154,7 +4167,10 @@ impl MediaAdapter {
             )
         })?;
         let (transport, crypto_attrs) = if self.offer_srtp {
-            let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            let (negotiator, attrs) = SrtpNegotiator::new_offerer_with_base64_mode(
+                &self.srtp_offered_suites,
+                self.sdes_base64_mode,
+            )?;
             self.pending_srtp_offerers
                 .insert(negotiation_key, negotiator);
             ("RTP/SAVP", attrs)
@@ -4380,6 +4396,7 @@ impl Clone for MediaAdapter {
             offer_srtp: self.offer_srtp,
             srtp_required: self.srtp_required,
             srtp_offered_suites: self.srtp_offered_suites.clone(),
+            sdes_base64_mode: self.sdes_base64_mode,
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
             staged_media_negotiations: self.staged_media_negotiations.clone(),

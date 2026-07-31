@@ -242,7 +242,9 @@ fn session_error_class(error: &SessionError) -> &'static str {
         SessionError::MediaIntegration { reason } => {
             classify_media_detail(reason, "media_integration")
         }
-        SessionError::SDPNegotiationFailed(_) => "sdp_negotiation",
+        SessionError::SDPNegotiationFailed(_) | SessionError::SdesNegotiationFailed(_) => {
+            "sdp_negotiation"
+        }
         SessionError::ConfigurationError(_) | SessionError::ConfigError(_) => "configuration",
         SessionError::InvalidInput(_) => "invalid_input",
         SessionError::Timeout(_) => "timeout",

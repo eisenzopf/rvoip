@@ -139,7 +139,7 @@ fn session_refresh_headers(session: &SessionState) -> crate::errors::Result<Vec<
     };
     Ok(vec![
         TypedHeader::SessionExpires(SessionExpires::new(interval, Some(refresher))),
-        TypedHeader::MinSE(MinSE::new(interval.min(90).max(1))),
+        TypedHeader::MinSE(MinSE::new(interval.clamp(1, 90))),
         TypedHeader::Supported(Supported::new(vec!["timer".to_string()])),
     ])
 }
@@ -980,6 +980,28 @@ pub(crate) enum DeferredActionEffect {
     Registration(RegistrationPostCommitEffect),
     TransferNotify(TransferNotifyEffect),
     SessionRefreshTimer(SessionRefreshTimerEffect),
+    AuthRetryObservation(AuthRetryObservation),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AuthRetryObservation {
+    call_id: SessionId,
+    status_code: u16,
+    realm: String,
+    algorithm: rvoip_auth_core::DigestAlgorithm,
+    qop: Option<String>,
+}
+
+impl AuthRetryObservation {
+    pub(crate) fn into_event(self) -> Event {
+        Event::CallAuthRetrying {
+            call_id: self.call_id,
+            status_code: self.status_code,
+            realm: self.realm,
+            algorithm: self.algorithm,
+            qop: self.qop,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -1717,13 +1739,12 @@ pub(crate) async fn execute_action(
     action: &Action,
     triggering_event: &EventType,
     session: &mut SessionState,
-    dialog_adapter: &Arc<DialogAdapter>,
-    media_adapter: &Arc<MediaAdapter>,
-    _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
+    adapters: (&Arc<DialogAdapter>, &Arc<MediaAdapter>),
     stage_claim: Option<&StageDispatchClaim>,
     mut inbound_response: Option<&mut InboundResponseStateInput>,
     invite_2xx_ack: Option<&Invite2xxAckStateInput>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let (dialog_adapter, media_adapter) = adapters;
     debug!("Executing action: {:?}", action);
 
     match action {
@@ -3384,7 +3405,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINVITEWithAuth => {
-            Box::pin(async {
+            let observation = Box::pin(async {
                 // RFC 3261 §22.2 — compute an Authorization header and
                 // re-issue the INVITE on the same dialog (same Call-ID, bumped
                 // CSeq) via DialogAdapter::resend_invite_with_auth. Origin and
@@ -3510,6 +3531,12 @@ pub(crate) async fn execute_action(
                 } else {
                     preview_auth
                 };
+                let auth_retry_observation = digest_auth_retry_observation(
+                    session.session_id.clone(),
+                    status,
+                    &selected_auth,
+                    body_bytes,
+                );
                 session.invite_auth_retry_count = session.invite_auth_retry_count.saturating_add(1);
                 let header_value = selected_auth.value;
 
@@ -3619,9 +3646,16 @@ pub(crate) async fn execute_action(
                     "Auth-retry INVITE sent for session {} (retry #{}, header {})",
                     session.session_id, session.invite_auth_retry_count, header_name
                 );
-                Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+                Ok::<Option<AuthRetryObservation>, Box<dyn std::error::Error + Send + Sync>>(
+                    auth_retry_observation,
+                )
             })
             .await?;
+            if let Some(observation) = observation {
+                return Ok(ActionOutcome::with_deferred_effect(
+                    DeferredActionEffect::AuthRetryObservation(observation),
+                ));
+            }
         }
 
         Action::SendRequestWithAuth => {
@@ -3975,6 +4009,9 @@ pub(crate) async fn execute_action(
                             header_value,
                         )
                         .await?;
+                    // Rebind before activation can flush a response that raced
+                    // the authenticated transport write.
+                    session.bind_offer_answer_transaction(transaction_id.clone())?;
                     dialog_adapter
                         .outbound_request_tracker
                         .activate(lease, transaction_id.clone())?;
@@ -4011,6 +4048,9 @@ pub(crate) async fn execute_action(
                             header_value,
                         )
                         .await?;
+                    // Rebind before activation can flush a response that raced
+                    // the authenticated transport write.
+                    session.bind_offer_answer_transaction(transaction_id.clone())?;
                     dialog_adapter
                         .outbound_request_tracker
                         .activate(lease, transaction_id.clone())?;
@@ -5118,6 +5158,29 @@ fn selected_invite_auth_realm(selected: &crate::auth::ClientAuthHeader) -> Strin
     }
 }
 
+fn digest_auth_retry_observation(
+    call_id: SessionId,
+    status_code: u16,
+    selected: &crate::auth::ClientAuthHeader,
+    body: Option<&[u8]>,
+) -> Option<AuthRetryObservation> {
+    let challenge = selected.digest_challenge.as_ref()?;
+    let qop = match challenge.qop.as_ref() {
+        Some(options) if body.is_some() && options.iter().any(|qop| qop == "auth-int") => {
+            Some("auth-int".to_string())
+        }
+        Some(options) if options.iter().any(|qop| qop == "auth") => Some("auth".to_string()),
+        _ => None,
+    };
+    Some(AuthRetryObservation {
+        call_id,
+        status_code,
+        realm: challenge.realm.clone(),
+        algorithm: challenge.algorithm,
+        qop,
+    })
+}
+
 fn redacted_invite_auth_error<E>(source: E) -> crate::errors::SessionError {
     crate::errors::redacted_outbound_auth_error(
         crate::errors::OutboundAuthOperation::Invite,
@@ -5402,6 +5465,39 @@ mod negotiated_audio_shape_tests {
         assert_eq!(negotiated_audio_shape("PCMA"), (8_000, 1));
         assert_eq!(negotiated_audio_shape("opus"), (48_000, 2));
         assert_eq!(negotiated_audio_shape("OPUS"), (48_000, 2));
+    }
+}
+
+#[cfg(test)]
+mod authenticated_offer_activation_order_tests {
+    #[test]
+    fn authenticated_sdp_retries_rebind_before_deferred_response_activation() {
+        let source = include_str!("actions.rs");
+        let authenticated = source
+            .split("Action::SendRequestWithAuth =>")
+            .nth(1)
+            .expect("authenticated request action");
+        for (method, next_method, send_call) in [
+            ("UPDATE", "INVITE", "send_update_with_auth_lane_owned"),
+            ("INVITE", "MESSAGE", "send_reinvite_with_auth_lane_owned"),
+        ] {
+            let branch = authenticated
+                .split(&format!("\"{method}\" => {{"))
+                .nth(1)
+                .and_then(|tail| tail.split(&format!("\"{next_method}\" => {{")).next())
+                .unwrap_or_else(|| panic!("authenticated {method} retry branch"));
+            let send = branch.find(send_call).expect("authenticated wire send");
+            let bind = branch
+                .find("bind_offer_answer_transaction")
+                .expect("pending offer transaction rebind");
+            let activate = branch
+                .find(".activate(lease, transaction_id.clone())")
+                .expect("tracked request activation");
+            assert!(
+                send < bind && bind < activate,
+                "authenticated {method} must bind the pending offer before activation can flush a deferred response"
+            );
+        }
     }
 }
 
@@ -6279,5 +6375,76 @@ mod invite_option_diagnostic_tests {
                 .map(|challenge| challenge.nonce.as_str()),
             Some("strong")
         );
+    }
+
+    #[test]
+    fn digest_retry_observation_covers_all_algorithms_and_both_qop_modes() {
+        use rvoip_auth_core::{DigestAlgorithm, DigestChallenge};
+
+        for algorithm in [
+            DigestAlgorithm::MD5,
+            DigestAlgorithm::MD5Sess,
+            DigestAlgorithm::SHA256,
+            DigestAlgorithm::SHA256Sess,
+            DigestAlgorithm::SHA512256,
+            DigestAlgorithm::SHA512256Sess,
+        ] {
+            let selected = crate::auth::ClientAuthHeader {
+                value: "Digest response=secret-hash".to_string(),
+                scheme: crate::auth::SipAuthScheme::Digest,
+                digest_challenge: Some(DigestChallenge {
+                    realm: "private-realm".to_string(),
+                    nonce: "private-nonce".to_string(),
+                    algorithm,
+                    qop: Some(vec!["auth".to_string(), "auth-int".to_string()]),
+                    opaque: None,
+                }),
+                stale: false,
+            };
+            let with_body = digest_auth_retry_observation(
+                SessionId("auth-observation".to_string()),
+                401,
+                &selected,
+                Some(b"v=0\r\n"),
+            )
+            .expect("Digest retry observation")
+            .into_event();
+            match &with_body {
+                Event::CallAuthRetrying {
+                    status_code,
+                    realm,
+                    algorithm: observed_algorithm,
+                    qop,
+                    ..
+                } => {
+                    assert_eq!(*status_code, 401);
+                    assert_eq!(realm, "private-realm");
+                    assert_eq!(*observed_algorithm, algorithm);
+                    assert_eq!(qop.as_deref(), Some("auth-int"));
+                }
+                _ => panic!("unexpected authentication observation"),
+            }
+            let debug = format!("{with_body:?}");
+            assert!(!debug.contains("private-realm"));
+            assert!(!debug.contains("private-nonce"));
+            assert!(!debug.contains("secret-hash"));
+
+            let bodyless = digest_auth_retry_observation(
+                SessionId("auth-observation".to_string()),
+                407,
+                &selected,
+                None,
+            )
+            .expect("bodyless Digest retry observation")
+            .into_event();
+            assert!(matches!(
+                bodyless,
+                Event::CallAuthRetrying {
+                    status_code: 407,
+                    qop: Some(ref qop),
+                    ..
+                } if qop == "auth"
+            ));
+        }
     }
 }

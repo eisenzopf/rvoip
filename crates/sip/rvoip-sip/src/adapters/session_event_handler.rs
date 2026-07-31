@@ -58,6 +58,28 @@ const REFER_DEFAULT_ACTION_COMPLETION_GRACE: Duration = Duration::from_secs(2);
 type StateMachineProcessResult =
     std::result::Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>>;
 
+struct AuthRequiredParts {
+    session_id: SessionId,
+    transaction_id: String,
+    request_uri: String,
+    status: u16,
+    challenge: String,
+    method: String,
+    outbound_transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
+    handle: SessionRegistryHandle,
+    exact_replay: bool,
+}
+
+struct OutboundRequestCompletedParts<'a> {
+    session_id: SessionId,
+    transaction_id: &'a str,
+    method: &'a str,
+    outcome: OutboundRequestOutcome,
+    response_sdp: Option<String>,
+    handle: SessionRegistryHandle,
+    exact_replay: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CommittedDialogTermination {
     Ended,
@@ -75,6 +97,19 @@ enum CommittedCallFailure {
 enum CommittedDialog200 {
     InitialAnswer,
     NonInitial,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfirmedNegotiationTermination {
+    Duplicate,
+    ByeDispatched,
+    ZeroWireByeFailure,
+}
+
+impl ConfirmedNegotiationTermination {
+    const fn committed(self) -> bool {
+        !matches!(self, Self::Duplicate)
+    }
 }
 
 /// Terminal transport classification for a retained fail-fast SIP response.
@@ -493,6 +528,31 @@ fn committed_session_interval_retry(
         cancelled,
         terminated,
         retry_actions
+    )))
+}
+
+fn committed_confirmed_negotiation_failure(
+    session_id: &SessionId,
+    result: &ProcessEventResult,
+) -> SessionResult<()> {
+    let send_bye = executed_action_count(result, &crate::state_table::Action::SendBYE);
+    let (failed, cancelled, terminated) = terminal_template_counts(result);
+    if result.transition.is_some()
+        && result.next_state == Some(CallState::Terminating)
+        && send_bye == 1
+        && (failed, cancelled, terminated) == (0, 0, 0)
+    {
+        return Ok(());
+    }
+    Err(SessionError::InvalidTransition(format!(
+        "ConfirmedNegotiationFailure for session {} state {:?} did not commit the exact Terminating YAML outcome with one BYE action (next={:?}, send_bye={}, failed_events={}, cancelled_events={}, terminated_events={})",
+        session_id,
+        result.old_state,
+        result.next_state,
+        send_bye,
+        failed,
+        cancelled,
+        terminated
     )))
 }
 
@@ -1998,7 +2058,7 @@ impl SessionCrossCrateEventHandler {
                 outbound_transport,
             } => {
                 let session_id = handle.session_id().clone();
-                self.handle_auth_required_parts(
+                self.handle_auth_required_parts(AuthRequiredParts {
                     session_id,
                     transaction_id,
                     request_uri,
@@ -2007,8 +2067,8 @@ impl SessionCrossCrateEventHandler {
                     method,
                     outbound_transport,
                     handle,
-                    true,
-                )
+                    exact_replay: true,
+                })
                 .await
             }
             DeferredTrackedRequestEvent::Completed {
@@ -2019,15 +2079,15 @@ impl SessionCrossCrateEventHandler {
                 response_sdp,
             } => {
                 let session_id = handle.session_id().clone();
-                self.handle_outbound_request_completed_parts(
+                self.handle_outbound_request_completed_parts(OutboundRequestCompletedParts {
                     session_id,
-                    &transaction_id,
-                    &method,
+                    transaction_id: &transaction_id,
+                    method: &method,
                     outcome,
                     response_sdp,
                     handle,
-                    true,
-                )
+                    exact_replay: true,
+                })
                 .await
             }
         }
@@ -2171,19 +2231,19 @@ impl SessionCrossCrateEventHandler {
                 outbound_transport,
                 ..
             } => {
-                self.handle_auth_required_parts(
-                    SessionId(session_id.clone()),
-                    transaction_id.clone(),
-                    request_uri.clone(),
-                    *status_code,
-                    challenge.clone(),
-                    method.clone(),
-                    outbound_transport.clone(),
-                    exact_handle.cloned().ok_or_else(|| {
+                self.handle_auth_required_parts(AuthRequiredParts {
+                    session_id: SessionId(session_id.clone()),
+                    transaction_id: transaction_id.clone(),
+                    request_uri: request_uri.clone(),
+                    status: *status_code,
+                    challenge: challenge.clone(),
+                    method: method.clone(),
+                    outbound_transport: outbound_transport.clone(),
+                    handle: exact_handle.cloned().ok_or_else(|| {
                         anyhow::anyhow!("AuthRequired ingress lost exact session authority")
                     })?,
-                    false,
-                )
+                    exact_replay: false,
+                })
                 .await
             }
             DialogToSessionEvent::OutboundRequestCompleted {
@@ -2193,19 +2253,19 @@ impl SessionCrossCrateEventHandler {
                 outcome,
                 response_sdp,
             } => {
-                self.handle_outbound_request_completed_parts(
-                    SessionId(session_id.clone()),
+                self.handle_outbound_request_completed_parts(OutboundRequestCompletedParts {
+                    session_id: SessionId(session_id.clone()),
                     transaction_id,
                     method,
-                    *outcome,
-                    response_sdp.clone(),
-                    exact_handle.cloned().ok_or_else(|| {
+                    outcome: *outcome,
+                    response_sdp: response_sdp.clone(),
+                    handle: exact_handle.cloned().ok_or_else(|| {
                         anyhow::anyhow!(
                             "OutboundRequestCompleted ingress lost exact session authority"
                         )
                     })?,
-                    false,
-                )
+                    exact_replay: false,
+                })
                 .await
             }
             DialogToSessionEvent::CallRedirected {
@@ -2700,7 +2760,7 @@ impl SessionCrossCrateEventHandler {
                 };
                 if let Err(error) = self
                     .app_event_publisher
-                    .publish_control_exact_now(&handle, event)
+                    .publish_control_exact_now(handle, event)
                     .await
                 {
                     tracing::warn!(
@@ -3097,6 +3157,24 @@ impl SessionCrossCrateEventHandler {
         api_event: crate::api::events::Event,
         handle: SessionRegistryHandle,
     ) {
+        let api_event = if self.app_event_publisher.has_exact_terminal_fact(&handle) {
+            debug!(
+                session = %handle.session_id(),
+                "preserving the exact lifecycle's first terminal observation during release"
+            );
+            None
+        } else {
+            Some(api_event)
+        };
+        self.release_session_after_observations(api_event, handle)
+            .await;
+    }
+
+    async fn release_session_after_observations(
+        &self,
+        api_event: Option<crate::api::events::Event>,
+        handle: SessionRegistryHandle,
+    ) {
         let session_id = handle.session_id().clone();
         let publisher = self.app_event_publisher.clone();
         let store = self.state_machine.store.clone();
@@ -3134,11 +3212,14 @@ impl SessionCrossCrateEventHandler {
         if !self.retained_tasks.spawn_or_child(async move {
             let release_guard =
                 cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
-            if let Err(error) = publisher.publish_terminal_best_effort_exact(&handle, api_event) {
-                tracing::warn!(
-                    "Failed to publish terminal event to global coordinator: {}",
-                    error
-                );
+            if let Some(api_event) = api_event {
+                if let Err(error) = publisher.publish_terminal_best_effort_exact(&handle, api_event)
+                {
+                    tracing::warn!(
+                        "Failed to publish terminal event to global coordinator: {}",
+                        error
+                    );
+                }
             }
             let completion = match crate::api::unified::release_exact_local_resources_with_retry(
                 store,
@@ -4142,11 +4223,9 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
                 }
                 warn!(
                     session_id = %session_id,
@@ -4158,11 +4237,9 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
                 }
                 warn!(
                     session_id = %session_id,
@@ -4211,11 +4288,18 @@ impl SessionCrossCrateEventHandler {
             if let (Some(response), Some(transaction_id)) =
                 (parsed_response.as_ref(), response_transaction.as_ref())
             {
-                if !response.body().is_empty() {
-                    self.dialog_adapter
-                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                        .await?;
-                }
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
+            }
+            let termination = self
+                .terminate_confirmed_negotiation(
+                    handle,
+                    "acknowledged re-INVITE contained no SDP answer",
+                )
+                .await?;
+            if !termination.committed() {
+                return Ok(());
             }
             self.app_event_publisher.publish_exact(
                 handle,
@@ -4225,11 +4309,12 @@ impl SessionCrossCrateEventHandler {
                     reason: "successful response contained no SDP answer".to_string(),
                 },
             );
-            self.terminate_confirmed_negotiation(
+            self.release_zero_wire_confirmed_negotiation(
+                termination,
                 handle,
                 "acknowledged re-INVITE contained no SDP answer",
             )
-            .await?;
+            .await;
             return Ok(());
         }
 
@@ -4251,11 +4336,18 @@ impl SessionCrossCrateEventHandler {
             if let (Some(response), Some(transaction_id)) =
                 (parsed_response.as_ref(), response_transaction.as_ref())
             {
-                if !response.body().is_empty() {
-                    self.dialog_adapter
-                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                        .await?;
-                }
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
+            }
+            let termination = self
+                .terminate_confirmed_negotiation(
+                    handle,
+                    "offerless INVITE received no usable 200 OK SDP offer",
+                )
+                .await?;
+            if !termination.committed() {
+                return Ok(());
             }
             self.app_event_publisher.publish_exact(
                 handle,
@@ -4265,11 +4357,16 @@ impl SessionCrossCrateEventHandler {
                     reason: "offerless INVITE received no usable 200 OK SDP offer".to_string(),
                 },
             );
-            self.fail_initial_invite_negotiation(
+            self.publish_initial_invite_negotiation_failure(
+                handle,
+                "offerless INVITE received no usable 200 OK SDP offer",
+            );
+            self.release_zero_wire_confirmed_negotiation(
+                termination,
                 handle,
                 "offerless INVITE received no usable 200 OK SDP offer",
             )
-            .await?;
+            .await;
             return Ok(());
         }
         let process_result = if let Some(ack) = ack_input {
@@ -4308,11 +4405,53 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
+                }
+                let termination_reason = if delayed_offer {
+                    "delayed-offer SDP negotiation or media commit failed"
+                } else if mid_dialog_offer {
+                    "acknowledged re-INVITE answer could not be applied"
+                } else {
+                    "successful initial INVITE response had missing, invalid, or unusable SDP"
+                };
+                let termination = self
+                    .terminate_confirmed_negotiation(handle, termination_reason)
+                    .await?;
+                if !termination.committed() {
+                    return Ok(());
+                }
+                if let Some(crate::errors::SessionError::SdesNegotiationFailed(diagnostic)) =
+                    e.downcast_ref::<SessionError>()
+                {
+                    let response = parsed_response.as_ref().map_or_else(
+                        || {
+                            crate::api::incoming::IncomingResponse::synthetic(
+                                session_id.clone(),
+                                200,
+                                "OK".to_string(),
+                                sdp_answer.clone(),
+                            )
+                        },
+                        |response| {
+                            crate::api::incoming::IncomingResponse::with_response(
+                                session_id.clone(),
+                                response.status.as_u16(),
+                                response.reason_phrase().to_string(),
+                                sdp_answer.clone(),
+                                Arc::new(response.clone()),
+                            )
+                        },
+                    );
+                    self.app_event_publisher.publish_exact(
+                        handle,
+                        crate::api::events::Event::SdesNegotiationFailed {
+                            call_id: session_id.clone(),
+                            response,
+                            diagnostic: diagnostic.clone(),
+                        },
+                    );
                 }
                 if mid_dialog_offer || delayed_offer {
                     self.app_event_publisher.publish_exact(
@@ -4328,25 +4467,29 @@ impl SessionCrossCrateEventHandler {
                         },
                     );
                     if delayed_offer {
-                        self.fail_initial_invite_negotiation(
+                        self.publish_initial_invite_negotiation_failure(
                             handle,
                             "delayed-offer SDP negotiation or media commit failed",
-                        )
-                        .await?;
-                    } else {
-                        self.terminate_confirmed_negotiation(
-                            handle,
-                            "acknowledged re-INVITE answer could not be applied",
-                        )
-                        .await?;
+                        );
                     }
+                    self.release_zero_wire_confirmed_negotiation(
+                        termination,
+                        handle,
+                        termination_reason,
+                    )
+                    .await;
                     return Ok(());
                 }
-                self.fail_initial_invite_negotiation(
+                self.publish_initial_invite_negotiation_failure(
                     handle,
                     "successful initial INVITE response had missing, invalid, or unusable SDP",
+                );
+                self.release_zero_wire_confirmed_negotiation(
+                    termination,
+                    handle,
+                    termination_reason,
                 )
-                .await?;
+                .await;
                 return Ok(());
             }
         };
@@ -4376,11 +4519,11 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
-    async fn fail_initial_invite_negotiation(
+    fn publish_initial_invite_negotiation_failure(
         &self,
         handle: &SessionRegistryHandle,
         reason: &str,
-    ) -> Result<()> {
+    ) {
         self.app_event_publisher.publish_exact(
             handle,
             crate::api::events::Event::CallFailed {
@@ -4389,37 +4532,89 @@ impl SessionCrossCrateEventHandler {
                 reason: reason.to_string(),
             },
         );
-        self.terminate_confirmed_negotiation(handle, reason).await
     }
 
     async fn terminate_confirmed_negotiation(
         &self,
         handle: &SessionRegistryHandle,
         reason: &str,
-    ) -> Result<()> {
-        self.state_machine
+    ) -> Result<ConfirmedNegotiationTermination> {
+        let before = self
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        if before.call_state == crate::types::CallState::Terminating || before.call_state.is_final()
+        {
+            return Ok(ConfirmedNegotiationTermination::Duplicate);
+        }
+        let result = self
+            .state_machine
             .process_event_exact(handle, EventType::ConfirmedNegotiationFailure)
-            .await
-            .map_err(|error| {
-                SessionError::InvalidTransition(format!(
-                    "failed to terminate confirmed dialog after negotiation failure ({reason}): {error}"
-                ))
-            })?;
-        Ok(())
+            .await;
+        match result {
+            Ok(result) => {
+                committed_confirmed_negotiation_failure(handle.session_id(), &result)
+                    .map_err(anyhow::Error::from)?;
+                Ok(ConfirmedNegotiationTermination::ByeDispatched)
+            }
+            Err(error) => {
+                let committed = self
+                    .state_machine
+                    .store
+                    .get_session_snapshot_exact(handle)
+                    .is_ok_and(|snapshot| {
+                        snapshot.call_state == crate::types::CallState::Terminating
+                    });
+                if committed {
+                    warn!(
+                        session_id = %handle.session_id(),
+                        %error,
+                        %reason,
+                        "confirmed negotiation failure committed terminal state but BYE dispatch failed"
+                    );
+                    Ok(ConfirmedNegotiationTermination::ZeroWireByeFailure)
+                } else {
+                    Err(SessionError::InvalidTransition(format!(
+                        "failed to terminate confirmed dialog after negotiation failure ({reason}): {error}"
+                    ))
+                    .into())
+                }
+            }
+        }
     }
 
-    async fn handle_auth_required_parts(
+    async fn release_zero_wire_confirmed_negotiation(
         &self,
-        session_id: SessionId,
-        transaction_id: String,
-        request_uri: String,
-        status: u16,
-        challenge: String,
-        method: String,
-        outbound_transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
-        handle: SessionRegistryHandle,
-        exact_replay: bool,
-    ) -> Result<()> {
+        outcome: ConfirmedNegotiationTermination,
+        handle: &SessionRegistryHandle,
+        reason: &str,
+    ) {
+        if outcome != ConfirmedNegotiationTermination::ZeroWireByeFailure {
+            return;
+        }
+        self.publish_and_release_session(
+            crate::api::events::Event::CallEnded {
+                call_id: handle.session_id().clone(),
+                reason: format!("{reason}; BYE dispatch failed before wire"),
+            },
+            handle.clone(),
+        )
+        .await;
+    }
+
+    async fn handle_auth_required_parts(&self, parts: AuthRequiredParts) -> Result<()> {
+        let AuthRequiredParts {
+            session_id,
+            transaction_id,
+            request_uri,
+            status,
+            challenge,
+            method,
+            outbound_transport,
+            handle,
+            exact_replay,
+        } = parts;
         if handle.session_id() != &session_id
             || self
                 .state_machine
@@ -4647,14 +4842,17 @@ impl SessionCrossCrateEventHandler {
 
     async fn handle_outbound_request_completed_parts(
         &self,
-        session_id: SessionId,
-        transaction_id: &str,
-        method: &str,
-        outcome: OutboundRequestOutcome,
-        response_sdp: Option<String>,
-        handle: SessionRegistryHandle,
-        exact_replay: bool,
+        parts: OutboundRequestCompletedParts<'_>,
     ) -> Result<()> {
+        let OutboundRequestCompletedParts {
+            session_id,
+            transaction_id,
+            method,
+            outcome,
+            response_sdp,
+            handle,
+            exact_replay,
+        } = parts;
         if handle.session_id() != &session_id
             || self
                 .state_machine
@@ -6139,6 +6337,19 @@ impl SessionCrossCrateEventHandler {
                 "Failed to process DialogACK event after AckReceived: {}",
                 error
             );
+            let termination = self
+                .terminate_confirmed_negotiation(
+                    handle,
+                    if delayed_offer_answer {
+                        "ACK carried a missing, invalid, or unusable SDP answer"
+                    } else {
+                        "confirmed UAS dialog could not activate negotiated media"
+                    },
+                )
+                .await?;
+            if !termination.committed() {
+                return Ok(());
+            }
             if delayed_offer_answer {
                 self.app_event_publisher.publish_exact(
                     handle,
@@ -6149,7 +6360,8 @@ impl SessionCrossCrateEventHandler {
                     },
                 );
             }
-            self.terminate_confirmed_negotiation(
+            self.release_zero_wire_confirmed_negotiation(
+                termination,
                 handle,
                 if delayed_offer_answer {
                     "ACK carried a missing, invalid, or unusable SDP answer"
@@ -6157,7 +6369,7 @@ impl SessionCrossCrateEventHandler {
                     "confirmed UAS dialog could not activate negotiated media"
                 },
             )
-            .await?;
+            .await;
         } else if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
             coordinator
                 .schedule_active_call_media_timeout_if_current(session_id)
@@ -6197,7 +6409,6 @@ impl SessionCrossCrateEventHandler {
     /// emits `Event::ReferNotify` plus derived `ReferProgress`,
     /// `ReferCompleted`, or `TransferFailed` events so transferor apps
     /// (including b2bua wrappers) can observe the transferee's progress.
-
     #[allow(clippy::too_many_arguments)]
     async fn handle_notify_received_parts(
         &self,
@@ -6616,7 +6827,8 @@ mod tests {
     use super::{
         build_incoming_request_from_bytes, build_incoming_response_from_bytes,
         capture_dialog_ingress_handle, committed_bye_termination, committed_call_failure,
-        committed_dialog_200, committed_dialog_termination, committed_session_interval_retry,
+        committed_confirmed_negotiation_failure, committed_dialog_200,
+        committed_dialog_termination, committed_session_interval_retry,
         correlate_inbound_info_transaction, derive_inbound_response_state_input,
         dialog_event_requires_processing_ack, exact_final_response_outcome,
         exact_final_response_result, exact_final_response_retires_routes,
@@ -7105,6 +7317,38 @@ mod tests {
         assert!(
             !retransmission.contains("body().is_empty()"),
             "a bodyless INVITE 2xx retransmission still requires ACK"
+        );
+    }
+
+    #[test]
+    fn failed_sdes_2xx_is_acked_observable_and_terminal() {
+        let source = include_str!("session_event_handler.rs");
+        let handler = source
+            .split("async fn handle_call_established_parts")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn publish_initial_invite_negotiation_failure")
+                    .next()
+            })
+            .expect("INVITE 2xx handler source");
+        let failure = handler
+            .split("Err(e) =>")
+            .nth(1)
+            .expect("failed INVITE 2xx branch");
+
+        let ack = failure
+            .find("send_invite_2xx_ack_exact")
+            .expect("failed INVITE 2xx ACK");
+        let terminal = failure
+            .find("terminate_confirmed_negotiation")
+            .expect("terminal failed-call transition");
+        let observation = failure
+            .find("Event::SdesNegotiationFailed")
+            .expect("application-visible SDES failure");
+        assert!(ack < terminal && terminal < observation);
+        assert!(
+            !failure[..observation].contains("body().is_empty()"),
+            "every INVITE 2xx requires ACK, including bodyless failures"
         );
     }
 
@@ -8548,6 +8792,37 @@ mod tests {
             cleanup,
         );
         assert!(committed_bye_termination(&session_id, &duplicate).is_err());
+    }
+
+    #[test]
+    fn confirmed_negotiation_failure_requires_exact_terminating_bye_transition() {
+        let session_id = SessionId::from("strict-confirmed-negotiation-failure");
+        assert!(committed_confirmed_negotiation_failure(
+            &session_id,
+            &missing_result(CallState::Active)
+        )
+        .is_err());
+        assert!(committed_confirmed_negotiation_failure(
+            &session_id,
+            &committed_result(CallState::Active, CallState::Terminating, vec![])
+        )
+        .is_err());
+
+        let committed = committed_result_with_actions(
+            CallState::Active,
+            CallState::Terminating,
+            vec![],
+            vec![crate::state_table::Action::SendBYE],
+        );
+        assert!(committed_confirmed_negotiation_failure(&session_id, &committed).is_ok());
+
+        let wrong_terminal_event = ProcessEventResult {
+            events_published: vec![crate::state_table::EventTemplate::CallFailed],
+            ..committed
+        };
+        assert!(
+            committed_confirmed_negotiation_failure(&session_id, &wrong_terminal_event).is_err()
+        );
     }
 
     #[test]

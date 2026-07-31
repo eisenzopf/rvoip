@@ -15,8 +15,8 @@ mod tests {
         RetiredClientDeadlineScheduler, RetiredClientTransaction, TransactionDispatchLane,
         TransactionIngressKind, DEFAULT_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
         DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX, MANAGER_ADMISSION_STOPPING,
-        MAX_EAGER_TRANSACTION_INDEX_CAPACITY, RETAINED_CLIENT_DEADLINE_BATCH_MAX,
-        TERMINATED_CLEANUP_BATCH_MAX,
+        MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION, MAX_EAGER_TRANSACTION_INDEX_CAPACITY,
+        RETAINED_CLIENT_DEADLINE_BATCH_MAX, TERMINATED_CLEANUP_BATCH_MAX,
     };
     use super::super::{ServerInviteAckIndexEntry, ServerInviteDialogKey};
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
@@ -393,6 +393,61 @@ mod tests {
 
         fn default_transport_type(&self) -> TransportType {
             self.prepared_transport
+        }
+    }
+
+    /// Transport that lets the initial INVITE complete but holds an ACK at
+    /// the wire boundary so the test can verify its admission generation
+    /// remains owned for the complete asynchronous write.
+    #[derive(Debug)]
+    struct AckWriteBarrierTransport {
+        local_addr: SocketAddr,
+        ack_entered: tokio::sync::Notify,
+        release_ack: tokio::sync::Notify,
+    }
+
+    impl AckWriteBarrierTransport {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                local_addr: "127.0.0.1:5060".parse().unwrap(),
+                ack_entered: tokio::sync::Notify::new(),
+                release_ack: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for AckWriteBarrierTransport {
+        fn local_addr(&self) -> std::result::Result<SocketAddr, rvoip_sip_transport::Error> {
+            Ok(self.local_addr)
+        }
+
+        async fn send_message(
+            &self,
+            message: Message,
+            _destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            if matches!(&message, Message::Request(request) if request.method() == Method::Ack) {
+                self.ack_entered.notify_one();
+                self.release_ack.notified().await;
+            }
+            Ok(())
+        }
+
+        async fn send_message_via(
+            &self,
+            message: Message,
+            route: TransportRoute,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            self.send_message(message, route.destination).await
+        }
+
+        async fn close(&self) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            false
         }
     }
 
@@ -3184,6 +3239,214 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ack_write_holds_exact_admission_generation_until_transport_completion() -> Result<()> {
+        let transport = AckWriteBarrierTransport::new();
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let invite_request =
+            create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let transaction = manager
+            .create_client_transaction(invite_request.clone(), destination)
+            .await?;
+        manager.send_request(&transaction).await?;
+        let response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+            &invite_request,
+            StatusCode::Ok,
+            Some("OK"),
+        )
+        .to("Bob", "sip:bob@example.com", Some("ack-write-fence-tag"))
+        .build();
+
+        let ack = {
+            let manager = manager.clone();
+            let transaction = transaction.clone();
+            let response = response.clone();
+            tokio::spawn(async move { manager.send_ack_for_2xx(&transaction, &response).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), transport.ack_entered.notified())
+            .await
+            .expect("ACK did not reach the transport boundary");
+
+        manager.terminate_transaction(&transaction).await?;
+        assert!(manager.reschedule_retired_client_deadline_for_test(
+            &transaction,
+            Instant::now() - Duration::from_millis(1),
+        ));
+        assert!(manager.transaction_route(&transaction).await.is_none());
+        assert!(
+            manager
+                .create_client_transaction(invite_request.clone(), destination)
+                .await
+                .is_err(),
+            "same-key admission succeeded while the preceding ACK write still owned its generation"
+        );
+
+        transport.release_ack.notify_one();
+        tokio::time::timeout(Duration::from_secs(1), ack)
+            .await
+            .expect("ACK did not finish after its transport gate opened")
+            .expect("ACK task panicked")?;
+        let replacement = manager
+            .create_client_transaction(invite_request, destination)
+            .await?;
+        assert_eq!(replacement, transaction);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_offer_fork_answer_cache_is_bounded_and_expires_with_its_generation(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(10)).await?;
+
+        let invite_request =
+            create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let transaction = manager
+            .create_client_transaction(invite_request.clone(), destination)
+            .await?;
+        manager.send_request(&transaction).await?;
+        let answer = "v=0\r\ns=bounded-fork-answer\r\n";
+
+        for index in 0..MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION {
+            let remote_tag = format!("bounded-fork-{index}");
+            let response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+                &invite_request,
+                StatusCode::Ok,
+                Some("OK"),
+            )
+            .to("Bob", "sip:bob@example.com", Some(remote_tag.as_str()))
+            .build();
+            manager
+                .send_ack_for_2xx_with_sdp(&transaction, &response, answer)
+                .await?;
+        }
+        let overflow_response =
+            rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+                &invite_request,
+                StatusCode::Ok,
+                Some("OK"),
+            )
+            .to("Bob", "sip:bob@example.com", Some("bounded-fork-overflow"))
+            .build();
+        let overflow = manager
+            .send_ack_for_2xx_with_sdp(&transaction, &overflow_response, answer)
+            .await
+            .expect_err("the per-transaction fork-answer bound must fail closed");
+        assert!(overflow.to_string().contains("fork limit"));
+
+        let generation = manager
+            .client_response_route_generation(&transaction)
+            .expect("active response-route generation");
+        let answers = generation
+            .delayed_offer_ack_answers
+            .as_ref()
+            .expect("bounded delayed-offer answer cache")
+            .clone();
+        assert_eq!(
+            answers.entries.len(),
+            MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION
+        );
+        let answers_weak = Arc::downgrade(&answers);
+        drop(answers);
+        drop(generation);
+
+        manager.terminate_transaction(&transaction).await?;
+        assert!(manager.reschedule_retired_client_deadline_for_test(
+            &transaction,
+            Instant::now() - Duration::from_millis(1),
+        ));
+        assert!(manager.transaction_route(&transaction).await.is_none());
+        assert!(
+            answers_weak.upgrade().is_none(),
+            "expiry retained a bounded fork-answer cache after its exact generation was released"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delayed_offer_answer_expires_with_exact_route_and_never_crosses_key_reuse(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let transaction = manager
+            .create_client_transaction(invite_request.clone(), destination)
+            .await?;
+        manager.send_request(&transaction).await?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let answer = "v=0\r\ns=old-generation-answer\r\n";
+        manager
+            .send_ack_for_2xx_with_sdp(&transaction, &response, answer)
+            .await?;
+
+        let active_generation = manager
+            .client_response_route_generation(&transaction)
+            .expect("active response route generation");
+        let old_answers = active_generation
+            .delayed_offer_ack_answers
+            .as_ref()
+            .expect("active delayed-offer answer cache")
+            .clone();
+        let old_answers_weak = Arc::downgrade(&old_answers);
+        drop(active_generation);
+        drop(old_answers);
+
+        manager.terminate_transaction(&transaction).await?;
+        let retained_generation = manager
+            .client_response_route_generation(&transaction)
+            .expect("retained response route generation");
+        assert!(retained_generation.delayed_offer_ack_answers.is_some());
+        drop(retained_generation);
+
+        assert!(manager.reschedule_retired_client_deadline_for_test(
+            &transaction,
+            Instant::now() - Duration::from_millis(1),
+        ));
+        assert!(manager.transaction_route(&transaction).await.is_none());
+        assert!(
+            old_answers_weak.upgrade().is_none(),
+            "lazy expiry must drop the route-owned answer cache"
+        );
+
+        let replacement = manager
+            .create_client_transaction(invite_request.clone(), destination)
+            .await?;
+        assert_eq!(
+            replacement, transaction,
+            "test must reuse the exact SIP key"
+        );
+        manager.send_request(&replacement).await?;
+        manager.send_ack_for_2xx(&replacement, &response).await?;
+
+        let sent = transport.get_sent_messages().await;
+        let Message::Request(replacement_ack) = &sent.last().expect("replacement ACK").0 else {
+            panic!("last message was not an ACK request");
+        };
+        assert_eq!(replacement_ack.method(), Method::Ack);
+        assert!(
+            replacement_ack.body().is_empty(),
+            "same-key replacement inherited stale delayed-offer SDP"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn invalid_delayed_offer_ack_cannot_leave_an_unretired_answer() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
         let (_, transport_rx) = mpsc::channel(10);
@@ -3205,8 +3468,10 @@ mod tests {
             .await
             .is_err());
         assert!(
-            manager.delayed_offer_ack_answers.is_empty(),
-            "an answer without a retained transaction route has no cleanup owner"
+            manager
+                .client_response_route_generation(&unknown_transaction)
+                .is_none(),
+            "an answer without an exact route generation has no cleanup owner"
         );
 
         manager.shutdown().await;

@@ -10,6 +10,111 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::api::headers::options::{HeaderNameDiagnostic, HeaderNamesDiagnostic, MethodDiagnostic};
+use rvoip_sip_core::types::sdp::CryptoSuite;
+
+/// SDP side on which an RFC 4568 SDES failure was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdesNegotiationStage {
+    /// An inbound SDP offer was being validated.
+    RemoteOffer,
+    /// An inbound SDP answer was being validated.
+    RemoteAnswer,
+}
+
+impl fmt::Display for SdesNegotiationStage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::RemoteOffer => "remote-offer",
+            Self::RemoteAnswer => "remote-answer",
+        })
+    }
+}
+
+/// Secret-safe class for an RFC 4568 SDES key-material failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdesNegotiationFailureClass {
+    /// The encoded key material was not acceptable Base64.
+    InvalidBase64,
+    /// Base64 decoded successfully but did not have the suite's exact length.
+    DecodedLength,
+}
+
+impl fmt::Display for SdesNegotiationFailureClass {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidBase64 => "invalid-base64",
+            Self::DecodedLength => "decoded-length",
+        })
+    }
+}
+
+/// Classification of the trailing Base64 padding in an SDES inline key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdesBase64Padding {
+    /// Canonical Base64 ending in one or two `=` characters.
+    CanonicalPadded,
+    /// Canonical Base64 for a byte length that requires no `=` padding.
+    CanonicalUnpadded,
+    /// Otherwise-valid Base64 with only required trailing padding omitted.
+    OmittedTrailing,
+    /// Padding was misplaced, excessive, or structurally invalid.
+    Malformed,
+}
+
+impl fmt::Display for SdesBase64Padding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::CanonicalPadded => "canonical-padded",
+            Self::CanonicalUnpadded => "canonical-unpadded",
+            Self::OmittedTrailing => "omitted-trailing",
+            Self::Malformed => "malformed",
+        })
+    }
+}
+
+/// Public, secret-safe diagnostics for one failed SDES key negotiation.
+///
+/// The encoded key, decoded key bytes, lifetime/MKI text, and parser source
+/// error are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SdesNegotiationDiagnostic {
+    /// Whether the peer's offer or answer was being processed.
+    pub stage: SdesNegotiationStage,
+    /// Stable failure class suitable for metrics and alerts.
+    pub failure_class: SdesNegotiationFailureClass,
+    /// RFC 4568 crypto attribute tag.
+    pub tag: u32,
+    /// Suite named by the peer's crypto attribute.
+    pub suite: CryptoSuite,
+    /// Length of the encoded key token, excluding lifetime/MKI suffixes.
+    pub encoded_bytes: usize,
+    /// Classification of the token's trailing Base64 padding.
+    pub padding: SdesBase64Padding,
+    /// Exact decoded key-plus-salt length required by the suite.
+    pub expected_decoded_bytes: usize,
+    /// Decoded byte length when decoding succeeded, otherwise `None`.
+    pub actual_decoded_bytes: Option<usize>,
+}
+
+impl fmt::Display for SdesNegotiationDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let actual = self
+            .actual_decoded_bytes
+            .map(|bytes| bytes.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        write!(
+            formatter,
+            "SDES negotiation failed (stage={}, class={}, tag={}, suite={:?}, encoded_bytes={}, padding={}, expected_decoded_bytes={}, actual_decoded_bytes={actual})",
+            self.stage,
+            self.failure_class,
+            self.tag,
+            self.suite,
+            self.encoded_bytes,
+            self.padding,
+            self.expected_decoded_bytes
+        )
+    }
+}
 
 /// Convenience alias for `Result<T, SessionError>` used across the crate's API.
 pub type Result<T> = std::result::Result<T, SessionError>;
@@ -57,6 +162,10 @@ pub enum SessionError {
     /// SDP offer/answer negotiation failed (no common codec, malformed SDP, etc.).
     #[error("SDP negotiation failed: {}", TextDiagnostic(.0))]
     SDPNegotiationFailed(String),
+
+    /// RFC 4568 SDES key material failed with structured secret-safe details.
+    #[error("{0}")]
+    SdesNegotiationFailed(SdesNegotiationDiagnostic),
 
     /// Invalid or inconsistent configuration supplied to a builder or coordinator.
     #[error("Configuration error: {}", TextDiagnostic(.0))]
@@ -248,6 +357,10 @@ impl fmt::Debug for SessionError {
             Self::SDPNegotiationFailed(value) => formatter
                 .debug_tuple("SDPNegotiationFailed")
                 .field(&TextDiagnostic(value))
+                .finish(),
+            Self::SdesNegotiationFailed(diagnostic) => formatter
+                .debug_tuple("SdesNegotiationFailed")
+                .field(diagnostic)
                 .finish(),
             Self::ConfigurationError(value) => formatter
                 .debug_tuple("ConfigurationError")

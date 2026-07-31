@@ -79,15 +79,15 @@ impl ProvisionalBuilder {
         // Preserve the compatibility path's peer-capability rejection for
         // ordinary 180/183 sends. Dispatch itself still enters through the
         // captured exact lifecycle below.
-        if extras.is_empty() && (self.code == 183 || self.code == 180) {
-            if !self
+        if extras.is_empty()
+            && (self.code == 183 || self.code == 180)
+            && !self
                 .coord
                 .dialog_adapter()
                 .peer_supports_100rel(&self.call_id)
                 .await?
-            {
-                return Err(crate::errors::SessionError::UnreliableProvisionalsNotSupported);
-            }
+        {
+            return Err(crate::errors::SessionError::UnreliableProvisionalsNotSupported);
         }
 
         // The requested 1xx, body, and headers enter the exact-session lane as

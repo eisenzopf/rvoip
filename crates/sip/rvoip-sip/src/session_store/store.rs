@@ -40,7 +40,7 @@ struct SessionIndexDelta {
 impl SessionIndexDelta {
     fn between(old: &SessionState, new: &SessionState) -> Self {
         Self {
-            dialog: (old.dialog_id != new.dialog_id).then(|| (old.dialog_id, new.dialog_id)),
+            dialog: (old.dialog_id != new.dialog_id).then_some((old.dialog_id, new.dialog_id)),
             media: (old.media_session_id != new.media_session_id)
                 .then(|| (old.media_session_id.clone(), new.media_session_id.clone())),
             call: (old.call_id != new.call_id).then(|| (old.call_id.clone(), new.call_id.clone())),

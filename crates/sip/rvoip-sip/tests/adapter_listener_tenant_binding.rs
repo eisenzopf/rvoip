@@ -89,10 +89,11 @@ fn invite_wire(
     // These UDP clients bind an ephemeral source port but advertise the fixed
     // sent-by port 5099. RFC 3261 routes a response to sent-by unless the
     // client requests symmetric response routing with RFC 3581 `rport`.
-    let rport = transport
-        .eq_ignore_ascii_case("UDP")
-        .then_some(";rport")
-        .unwrap_or_default();
+    let rport = if transport.eq_ignore_ascii_case("UDP") {
+        ";rport"
+    } else {
+        Default::default()
+    };
     let mut wire = format!(
         "INVITE {scheme}:bridge@{host}:{};transport={} SIP/2.0\r\n\
          Via: SIP/2.0/{transport} 127.0.0.1:5099;branch={branch}{rport}\r\n\

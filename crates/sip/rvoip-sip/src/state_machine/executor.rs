@@ -1897,6 +1897,10 @@ impl StateMachine {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for effect in effects {
             match effect {
+                actions::DeferredActionEffect::AuthRetryObservation(observation) => {
+                    self.dialog_adapter
+                        .publish_api_event_exact(handle, observation.into_event());
+                }
                 actions::DeferredActionEffect::TransferNotify(effect) => {
                     let store = Arc::clone(&self.store);
                     let dialog_adapter = Arc::clone(&self.dialog_adapter);
@@ -3387,9 +3391,7 @@ impl StateMachine {
                 action,
                 &event,
                 &mut session,
-                &self.dialog_adapter,
-                &self.media_adapter,
-                &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
+                (&self.dialog_adapter, &self.media_adapter),
                 stage_claim.map(Arc::as_ref),
                 inbound_response_input.as_mut(),
                 invite_2xx_ack_input.as_ref(),
@@ -3649,7 +3651,7 @@ impl StateMachine {
                     }
                 }
                 let event = self
-                    .instantiate_event(event_template, &session, old_state)
+                    .instantiate_event(event_template, session, old_state)
                     .await;
                 let guard = cleanup_diag::stage_guard(
                     CleanupStage::StateMachineEventPublish,
@@ -3911,7 +3913,7 @@ mod tests {
             .registry()
             .install_dialog_identity_handle(
                 &handle,
-                dialog_id.clone(),
+                dialog_id,
                 "uas-dialog-adoption-wire-call".to_string(),
             )
             .expect("install exact inbound dialog owner");
@@ -3987,6 +3989,33 @@ mod tests {
         assert!(scheduler.contains("DeferredActionEffect::SessionRefreshTimer"));
         assert!(scheduler.contains("spawn_owned_exact"));
         assert!(scheduler.contains("SessionOperationKind::Signaling"));
+    }
+
+    #[test]
+    fn auth_retry_observation_is_post_commit_and_inline() {
+        let source = include_str!("executor.rs");
+        let transition = source
+            .split("async fn process_one_event")
+            .nth(1)
+            .and_then(|tail| tail.split("fn should_skip_action").next())
+            .expect("single-event canonical commit source");
+        let commit = transition
+            .find("let published = match commit_lane_state(&self.store, session)")
+            .expect("canonical exact-state publication");
+        let schedule = transition
+            .find("self.schedule_deferred_action_effects")
+            .expect("post-commit effect scheduler");
+        assert!(commit < schedule);
+
+        let scheduler = source
+            .split("fn schedule_deferred_action_effects")
+            .nth(1)
+            .and_then(|tail| tail.split("DeferredActionEffect::TransferNotify").next())
+            .expect("API observation scheduler arm");
+        assert!(scheduler.contains("DeferredActionEffect::AuthRetryObservation"));
+        assert!(scheduler.contains("publish_api_event_exact(handle, observation.into_event())"));
+        assert!(!scheduler.contains("spawn"));
+        assert!(!scheduler.contains("await"));
     }
 
     fn accept_call_table(
@@ -4343,8 +4372,10 @@ mod tests {
         let coordinator = input_admission_coordinator("rejected-input-history").await;
         let machine = state_machine_with_table(&coordinator, MasterStateTable::new());
 
-        let mut paused = HistoryConfig::default();
-        paused.enabled = false;
+        let paused = HistoryConfig {
+            enabled: false,
+            ..Default::default()
+        };
         for (name, history, expect_record) in [
             ("history-enabled", Some(HistoryConfig::default()), true),
             ("history-absent", None, false),
@@ -4409,8 +4440,10 @@ mod tests {
                 Some(CallState::Active),
             ),
         );
-        let mut tracked = HistoryConfig::default();
-        tracked.track_guards = true;
+        let tracked = HistoryConfig {
+            track_guards: true,
+            ..Default::default()
+        };
         let (rejected_id, rejected_handle) =
             create_input_admission_session(&rejecting, "guard-rejected", Some(tracked)).await;
         let rejected_before = rejecting

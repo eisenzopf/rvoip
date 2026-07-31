@@ -290,6 +290,7 @@ fn classify_bye_failure(error: &rvoip_sip::SessionError) -> (&'static str, &'sta
         | SessionError::RequestAuthConstructionFailed => ("authentication_failed", "dispatch"),
         SessionError::Conflict { .. } => ("concurrent_control_conflict", "dispatch"),
         SessionError::SDPNegotiationFailed(_)
+        | SessionError::SdesNegotiationFailed(_)
         | SessionError::ConfigurationError(_)
         | SessionError::ConfigError(_)
         | SessionError::InvalidInput(_)

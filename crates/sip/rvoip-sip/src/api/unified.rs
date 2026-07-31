@@ -263,7 +263,7 @@ impl Drop for AbortOutboundDispatchTaskOnDrop {
         let abort = self
             .stage_claim
             .as_ref()
-            .map_or(true, |claim| claim.cancel_before_claim());
+            .is_none_or(|claim| claim.cancel_before_claim());
         if abort {
             self.handle.abort();
         }
@@ -333,6 +333,19 @@ pub enum SrtpSuitePolicy {
     /// suites in a deliberate preference order while avoiding AEAD-GCM until
     /// rtp-core supports it end to end.
     FreeSwitchCompatible,
+}
+
+/// Validation policy for Base64 key material in RFC 4568 `a=crypto` lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SdesBase64Mode {
+    /// Accept canonical Base64 and the interoperable form that omits only the
+    /// trailing `=` padding. All other malformed encodings and decoded-length
+    /// mismatches remain errors.
+    #[default]
+    Compatible,
+    /// Require the canonical RFC 4648 representation, including any trailing
+    /// `=` padding required by the selected SDES suite.
+    Strict,
 }
 
 impl SrtpSuitePolicy {
@@ -2170,6 +2183,11 @@ pub struct Config {
     /// preference.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
+    /// Base64 acceptance policy for inbound RFC 4568 SDES key material.
+    /// Outbound SDP always uses canonical padded Base64 in either mode.
+    /// Default: [`SdesBase64Mode::Compatible`].
+    pub sdes_base64_mode: SdesBase64Mode,
+
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
     ///
@@ -2659,6 +2677,7 @@ impl std::fmt::Debug for Config {
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
+            .field("sdes_base64_mode", &self.sdes_base64_mode)
             .field(
                 "media_public_address_configured",
                 &self.media_public_addr.is_some(),
@@ -2813,6 +2832,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -2924,6 +2944,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -3183,6 +3204,14 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
+        self
+    }
+
+    /// Select the inbound RFC 4568 SDES Base64 validation policy.
+    ///
+    /// Outbound SDP remains canonical in both modes.
+    pub fn with_sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
+        self.sdes_base64_mode = mode;
         self
     }
 
@@ -7391,12 +7420,8 @@ pub(crate) async fn release_exact_local_resources(
     let dialog_result = dialog_adapter.cleanup_session_exact(&handle).await;
     let media_result = media_adapter.cleanup_session_exact(&handle).await;
     helpers.cleanup_session(handle.session_id()).await;
-    if let Err(error) = dialog_result {
-        return Err(error);
-    }
-    if let Err(error) = media_result {
-        return Err(error);
-    }
+    dialog_result?;
+    media_result?;
     let removal = match session_store.remove_quiesced_session_exact(&handle) {
         Ok(()) => Ok(()),
         Err(_)
@@ -8556,6 +8581,7 @@ impl UnifiedCoordinator {
             config.srtp_required,
             config.srtp_offered_suites.clone(),
         );
+        media_adapter_inner.set_sdes_base64_mode(config.sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
@@ -9273,10 +9299,7 @@ impl UnifiedCoordinator {
             .state_machine
             .store
             .with_session(id, |session| {
-                (
-                    Some(session.call_state.clone()),
-                    session.media_security.clone(),
-                )
+                (Some(session.call_state), session.media_security.clone())
             })
             .unwrap_or((None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
@@ -9300,7 +9323,7 @@ impl UnifiedCoordinator {
             .store
             .get_session_snapshot_exact(handle)
             .ok();
-        let state = current.as_ref().map(|session| session.call_state.clone());
+        let state = current.as_ref().map(|session| session.call_state);
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
@@ -9593,7 +9616,7 @@ impl UnifiedCoordinator {
             .store
             .get_session_snapshot_exact(handle)
             .ok()
-            .map(|session| session.call_state.clone());
+            .map(|session| session.call_state);
         // Fence the per-session retained transaction before dispatch. A BYE
         // send can complete and retain its exact transaction, then lose the
         // final state-store revision race to a synchronous peer response. In
@@ -9736,7 +9759,7 @@ impl UnifiedCoordinator {
             .with_session(session_id, |session| {
                 (
                     session.role,
-                    session.call_state.clone(),
+                    session.call_state,
                     session.lifecycle_handle.clone(),
                     session.entered_state_at,
                 )
@@ -9864,7 +9887,7 @@ impl UnifiedCoordinator {
             .store
             .with_session(session_id, |session| {
                 (
-                    session.call_state.clone(),
+                    session.call_state,
                     session.lifecycle_handle.clone(),
                     session.entered_state_at,
                 )

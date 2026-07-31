@@ -1370,10 +1370,10 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_sip_trace(&self, trace: SipTrace) {}
 
-    /// Called when an outgoing call receives a 401/407 and the coordinator is
-    /// about to retry with `Authorization` / `Proxy-Authorization` (RFC 3261
-    /// §22.2). Informational — the retry proceeds automatically if credentials
-    /// are on file via [`Config.credentials`] or
+    /// Called after an outgoing call receives a 401/407 and the coordinator
+    /// successfully dispatches the authenticated retry (RFC 3261 §22.2).
+    /// Informational — the retry proceeds automatically if credentials are on
+    /// file via [`Config.credentials`] or
     /// `coord.invite(...).with_credentials(...)`; this hook does not alter
     /// flow. Useful for logging or surfacing auth activity in a UI.
     ///
@@ -2558,6 +2558,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                     call_id,
                     status_code,
                     realm,
+                    ..
                 } => {
                     handler.on_auth_retrying(call_id, status_code, realm).await;
                 }
@@ -2579,7 +2580,8 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
                 | Event::CallFailedDetailed(_)
-                | Event::RenegotiationFailed { .. } => {}
+                | Event::RenegotiationFailed { .. }
+                | Event::SdesNegotiationFailed { .. } => {}
                 // SIP_API_DESIGN_2 Phase E: typed mid-dialog inbound
                 // events. Rehydrate the coordinator hook on the
                 // IncomingRequest before forwarding to the handler so

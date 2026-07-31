@@ -2314,17 +2314,13 @@ impl SessionLeaseAuthority {
                 generation,
                 retired_at,
                 ..
-            }) if *generation == key.generation => {
-                return Some(SessionPhase::Retired {
-                    retired_at: *retired_at,
-                });
-            }
+            }) if *generation == key.generation => Some(SessionPhase::Retired {
+                retired_at: *retired_at,
+            }),
             Some(AdmissionSlot::Live(_))
             | Some(AdmissionSlot::NonReusable(_))
             | Some(AdmissionSlot::Retired { .. })
-            | None => {
-                return None;
-            }
+            | None => None,
         }
     }
 
