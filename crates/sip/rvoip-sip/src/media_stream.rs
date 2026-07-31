@@ -114,6 +114,7 @@ impl SipPayloadCodec {
 
 fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
+    payload_type: u8,
 ) -> Result<(CodecInfo, u8), &'static str> {
     let name = if matches!(
         config.codec.to_ascii_lowercase().as_str(),
@@ -149,7 +150,7 @@ fn codec_descriptor(
             channels: config.channels,
             fmtp: None,
         },
-        config.payload_type,
+        payload_type,
     ))
 }
 
@@ -768,7 +769,7 @@ async fn run_media_driver(
     // keeps the retained driver dormant across the INVITE/answer gap instead
     // of treating a normal pre-answer subscription miss as terminal failure.
     let negotiation_deadline = setup_deadline;
-    let negotiated = loop {
+    let (negotiated, payload_type) = loop {
         if *cancel_tx.borrow() {
             return;
         }
@@ -799,7 +800,7 @@ async fn run_media_driver(
             }
         }
     };
-    let (resolved_descriptor, payload_type) = match codec_descriptor(&negotiated) {
+    let (resolved_descriptor, payload_type) = match codec_descriptor(&negotiated, payload_type) {
         Ok(resolved) => resolved,
         Err(reason) => {
             tracing::warn!(
@@ -1197,13 +1198,6 @@ mod negotiated_codec_tests {
             local_addr: SocketAddr::from(([127, 0, 0, 1], 10_000)),
             remote_addr: SocketAddr::from(([127, 0, 0, 1], 20_000)),
             codec: codec.to_string(),
-            payload_type: if codec.eq_ignore_ascii_case("opus") {
-                111
-            } else if codec.eq_ignore_ascii_case("PCMA") {
-                8
-            } else {
-                0
-            },
             sample_rate,
             channels,
         }
@@ -1211,8 +1205,8 @@ mod negotiated_codec_tests {
 
     #[test]
     fn descriptor_uses_exact_negotiated_g711_variant() {
-        let (pcmu, pcmu_pt) = codec_descriptor(&negotiated("PCMU", 8_000, 1)).unwrap();
-        let (pcma, pcma_pt) = codec_descriptor(&negotiated("PCMA", 8_000, 1)).unwrap();
+        let (pcmu, pcmu_pt) = codec_descriptor(&negotiated("PCMU", 8_000, 1), 0).unwrap();
+        let (pcma, pcma_pt) = codec_descriptor(&negotiated("PCMA", 8_000, 1), 8).unwrap();
 
         assert_eq!(pcmu.name, "g.711-mu");
         assert_eq!(pcmu_pt, 0);
@@ -1237,9 +1231,8 @@ mod negotiated_codec_tests {
     #[cfg(feature = "opus")]
     #[test]
     fn opus_descriptor_and_codec_follow_sdp_clock_and_channels() {
-        let mut config = negotiated("opus", 48_000, 2);
-        config.payload_type = 96;
-        let (descriptor, payload_type) = codec_descriptor(&config).unwrap();
+        let config = negotiated("opus", 48_000, 2);
+        let (descriptor, payload_type) = codec_descriptor(&config, 96).unwrap();
         assert_eq!(descriptor.name, "opus");
         assert_eq!(descriptor.clock_rate_hz, 48_000);
         assert_eq!(descriptor.channels, 2);
@@ -1262,11 +1255,11 @@ mod negotiated_codec_tests {
     #[test]
     fn unsupported_negotiated_codec_fails_closed() {
         let config = negotiated("peer-controlled-unknown", 8_000, 1);
-        assert!(codec_descriptor(&config).is_err());
+        assert!(codec_descriptor(&config, 96).is_err());
         assert!(SipPayloadCodec::from_negotiated(&config).is_err());
 
         let internal_pcm = negotiated("pcm_s16le", 16_000, 1);
-        assert!(codec_descriptor(&internal_pcm).is_err());
+        assert!(codec_descriptor(&internal_pcm, 96).is_err());
         assert!(SipPayloadCodec::from_negotiated(&internal_pcm).is_err());
     }
 }

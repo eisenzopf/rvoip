@@ -89,6 +89,7 @@ async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
 
 /// Held-call task: INVITE → 200 → ACK → sleep `call_duration ± jitter`
 /// → BYE. Industry-standard load shape (matches OpenSIPS' 30-s test).
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the held-call load profile.
 async fn run_held_call(
     alice: Arc<UnifiedCoordinator>,
     from: String,

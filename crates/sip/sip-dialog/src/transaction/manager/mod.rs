@@ -1104,15 +1104,14 @@ static RETIRED_CLIENT_TRANSITION_TEST_GATE: std::sync::LazyLock<
 #[cfg(test)]
 #[derive(Clone)]
 struct TerminationTakeoverTestGate {
-    transaction_id: TransactionKey,
     runner_joined: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
 #[cfg(test)]
 static TERMINATION_TAKEOVER_TEST_GATE: std::sync::LazyLock<
-    std::sync::Mutex<Option<TerminationTakeoverTestGate>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+    std::sync::Mutex<HashMap<TransactionKey, TerminationTakeoverTestGate>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
 pub(crate) struct InboundPrincipalBinding {
@@ -6469,20 +6468,24 @@ impl TransactionManager {
         runner_joined: Arc<tokio::sync::Notify>,
         release: Arc<tokio::sync::Notify>,
     ) {
-        *TERMINATION_TAKEOVER_TEST_GATE
+        TERMINATION_TAKEOVER_TEST_GATE
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(TerminationTakeoverTestGate {
-            transaction_id,
-            runner_joined,
-            release,
-        });
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                transaction_id,
+                TerminationTakeoverTestGate {
+                    runner_joined,
+                    release,
+                },
+            );
     }
 
     #[cfg(test)]
-    fn clear_termination_takeover_test_gate(&self) {
-        *TERMINATION_TAKEOVER_TEST_GATE
+    fn clear_termination_takeover_test_gate(&self, transaction_id: &TransactionKey) {
+        TERMINATION_TAKEOVER_TEST_GATE
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(transaction_id);
     }
 
     /// Subscribe to events from all transactions.

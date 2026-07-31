@@ -22,14 +22,16 @@ use rvoip_core::error::{Result, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
-use rvoip_core::stream::{MediaFrame, MediaStream, QualitySnapshot, StreamKind};
+use rvoip_core::stream::{
+    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+};
 use tokio::sync::mpsc;
 
 pub struct MockMediaStream {
     id: StreamId,
     codec: rvoip_core::capability::CodecInfo,
     external_in_tx: mpsc::Sender<MediaFrame>,
-    in_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
+    in_rx: std::sync::Arc<StdMutex<Option<mpsc::Receiver<MediaFrame>>>>,
     out_tx: mpsc::Sender<MediaFrame>,
     external_out_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
 }
@@ -47,7 +49,7 @@ impl MockMediaStream {
                 fmtp: None,
             },
             external_in_tx,
-            in_rx: StdMutex::new(Some(in_rx)),
+            in_rx: std::sync::Arc::new(StdMutex::new(Some(in_rx))),
             out_tx,
             external_out_rx: StdMutex::new(Some(external_out_rx)),
         })
@@ -85,11 +87,31 @@ impl MediaStream for MockMediaStream {
         Direction::Inbound
     }
     fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
-        self.in_rx
+        self.try_frames_in().unwrap_or_else(|_| mpsc::channel(1).1)
+    }
+    fn try_frames_in(&self) -> Result<mpsc::Receiver<MediaFrame>> {
+        Ok(self.reserve_frames_in()?.commit())
+    }
+    fn reserve_frames_in(&self) -> Result<MediaReceiverReservation> {
+        let receiver = self
+            .in_rx
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-            .unwrap_or_else(|| mpsc::channel(1).1)
+            .ok_or(RvoipError::InvalidState(
+                "mock QUIC media receiver has already been acquired",
+            ))?;
+        let slot = std::sync::Arc::clone(&self.in_rx);
+        Ok(MediaReceiverReservation::new(receiver, move |receiver| {
+            let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            debug_assert!(
+                slot.is_none(),
+                "reserved mock QUIC receiver slot was replaced"
+            );
+            if slot.is_none() {
+                *slot = Some(receiver);
+            }
+        }))
     }
     fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
         self.out_tx.clone()

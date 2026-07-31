@@ -270,19 +270,19 @@ async fn run_test() -> Result<()> {
         // Send periodic messages from RTC side, then close
         if rtc_connected && webrtc_connected && rtc_data_channel_opened {
             let elapsed = Instant::now().duration_since(last_message_time);
-            if elapsed >= message_interval {
-                if let Some(dc_id) = rtc_dc_id {
-                    let mut dc = rtc_pc.data_channel(dc_id).expect("dc should exist");
-                    if messages_to_send > 0 {
-                        let message = format!("Message #{}", 4 - messages_to_send);
-                        log::info!("RTC sending: '{}'", message);
-                        dc.send_text(message)?;
-                        last_message_time = Instant::now();
-                        messages_to_send -= 1;
-                    } else {
-                        log::info!("RTC finished sending, closing data channel");
-                        dc.close()?;
-                    }
+            if elapsed >= message_interval
+                && let Some(dc_id) = rtc_dc_id
+            {
+                let mut dc = rtc_pc.data_channel(dc_id).expect("dc should exist");
+                if messages_to_send > 0 {
+                    let message = format!("Message #{}", 4 - messages_to_send);
+                    log::info!("RTC sending: '{}'", message);
+                    dc.send_text(message)?;
+                    last_message_time = Instant::now();
+                    messages_to_send -= 1;
+                } else {
+                    log::info!("RTC finished sending, closing data channel");
+                    dc.close()?;
                 }
             }
         }

@@ -49,7 +49,6 @@ use rvoip_core::{Config, Orchestrator};
 use rvoip_uctp::envelope::UctpEnvelope;
 use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::types::MessageType;
-use rvoip_webrtc::media::pump::opus_rtp_payload;
 use rvoip_webrtc::peer::RvoipPeerConnection;
 use rvoip_websocket::{UctpWsAdapter, UctpWsClient, UctpWsConfig, WebRtcMediaBridge};
 use tokio::net::TcpListener;
@@ -382,40 +381,17 @@ async fn ws_to_ws_bridge_flows_frames_end_to_end() {
         drained
     );
 
-    // Inject 10 frames as **full RTP wire bytes** (legacy path through the
-    // outbound pump), with sequence numbers well above what
-    // `prime_remote_track` used so webrtc-rs's RTP receiver doesn't drop
-    // them as duplicates. The pump's `bytes_to_rtp_packet` will parse
-    // these and forward as-is.
-    //
-    // On the answerer_1 side, the inbound pump strips the RTP header and
-    // emits `MediaFrame { payload: pkt.payload, ...
-    // emits `MediaFrame { payload: pkt.payload, ... payload_type: None,
-    // emits `MediaFrame { payload: pkt.payload, ... }` — i.e. just the
-    // codec payload (our 5-byte marker). The bridge forwards that to
-    // answerer_2's outbound pump, which wraps it in a fresh RTP packet
-    // (V=2, the marker still fails bytes_to_rtp because of the leading
-    // 0xFA = V=3, so the wrap path is used; that's fine because the
-    // marker survives as the inner payload). offerer_2's inbound pump
-    // strips the RTP header again, exposing the marker bytes for the test.
-    let ssrc = offerer_1
-        .peer()
-        .local_audio_ssrc()
-        .expect("offerer_1 local audio ssrc");
+    // Inject codec payloads directly. `MediaFrame::payload` is deliberately
+    // transport-neutral: the outbound WebRTC boundary wraps these bytes in
+    // RTP, the remote inbound boundary strips RTP again, and the bridge keeps
+    // the marker payload opaque throughout.
     for i in 0u8..10 {
         let marker = bytes::Bytes::from(vec![0xFA, 0xCE, 0xFE, 0xED, i]);
-        let rtp_bytes = opus_rtp_payload(
-            ssrc,
-            /* seq */ 100 + i as u16,
-            /* timestamp */ (100 + i as u32) * 960,
-            /* marker */ false,
-            marker,
-        );
         let frame = MediaFrame {
             stream_id: stream_1.id(),
             kind: StreamKind::Audio,
-            payload: rtp_bytes,
-            timestamp_rtp: 0,
+            payload: marker,
+            timestamp_rtp: (100 + i as u32) * 960,
             captured_at: Utc::now(),
             payload_type: None,
         };

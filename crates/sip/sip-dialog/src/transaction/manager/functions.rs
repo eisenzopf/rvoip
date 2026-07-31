@@ -815,8 +815,8 @@ impl TransactionManager {
             let gate = super::TERMINATION_TAKEOVER_TEST_GATE
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-                .filter(|gate| gate.transaction_id == *tx_id);
+                .get(tx_id)
+                .cloned();
             if let Some(gate) = gate {
                 gate.runner_joined.notify_one();
                 gate.release.notified().await;

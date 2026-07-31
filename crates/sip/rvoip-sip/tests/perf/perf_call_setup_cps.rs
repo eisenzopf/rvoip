@@ -290,7 +290,6 @@ fn classify_bye_failure(error: &rvoip_sip::SessionError) -> (&'static str, &'sta
         | SessionError::RequestAuthConstructionFailed => ("authentication_failed", "dispatch"),
         SessionError::Conflict { .. } => ("concurrent_control_conflict", "dispatch"),
         SessionError::SDPNegotiationFailed(_)
-        | SessionError::SdesNegotiationFailed(_)
         | SessionError::ConfigurationError(_)
         | SessionError::ConfigError(_)
         | SessionError::InvalidInput(_)
@@ -371,6 +370,7 @@ async fn boot_alice(cfg: Config) -> Arc<UnifiedCoordinator> {
     coord
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep per-call load accounting visible.
 async fn run_one_call(
     alice: Arc<UnifiedCoordinator>,
     from: String,
@@ -438,6 +438,7 @@ async fn run_one_call(
 /// One sweep point: fresh histograms + counters, run the load profile
 /// once, return a populated `ScenarioReport`. Peers stay shared across
 /// sweep points so the bind cost is paid once per test.
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the load point.
 async fn run_one_point(
     report_scenario: String,
     clients: Arc<Vec<LoadClient>>,

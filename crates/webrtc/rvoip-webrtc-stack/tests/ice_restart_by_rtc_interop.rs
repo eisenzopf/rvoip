@@ -214,12 +214,10 @@ async fn run_test() -> Result<()> {
                         rtc_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
-                    if let RTCDataChannelEvent::OnOpen(channel_id) = dc_event {
-                        let dc = rtc_pc.data_channel(channel_id).expect("dc should exist");
-                        log::info!("RTC DC '{}' opened (id: {})", dc.label(), channel_id);
-                        rtc_dc_id = Some(channel_id);
-                    }
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
+                    let dc = rtc_pc.data_channel(channel_id).expect("dc should exist");
+                    log::info!("RTC DC '{}' opened (id: {})", dc.label(), channel_id);
+                    rtc_dc_id = Some(channel_id);
                 }
                 _ => {}
             }
@@ -310,10 +308,7 @@ async fn run_test() -> Result<()> {
                 rtc_received.push(s);
             }
         }
-        if webrtc_msg_rx
-            .try_recv()
-            .map_or(false, |m| m == TEST_MESSAGE)
-        {
+        if webrtc_msg_rx.try_recv().is_ok_and(|m| m == TEST_MESSAGE) {
             log::info!("WebRTC received message: {}", TEST_MESSAGE);
             break;
         }
@@ -561,7 +556,7 @@ async fn run_test() -> Result<()> {
         }
         if webrtc_msg_rx
             .try_recv()
-            .map_or(false, |m| m == TEST_MESSAGE_AFTER_RESTART)
+            .is_ok_and(|m| m == TEST_MESSAGE_AFTER_RESTART)
         {
             log::info!(
                 "WebRTC received message after restart: {}",

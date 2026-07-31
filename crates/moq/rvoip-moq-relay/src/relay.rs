@@ -2825,15 +2825,6 @@ mod security_tests {
         ));
     }
 
-    fn fixture(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("rvoip-moq-native")
-            .join("tests")
-            .join("fixtures")
-            .join(name)
-    }
-
     struct ProductionPki {
         _directory: tempfile::TempDir,
         ca: PathBuf,
@@ -2895,9 +2886,10 @@ mod security_tests {
     }
 
     fn development_tls() -> anyhow::Result<tls::Config> {
+        let pki = production_pki()?;
         tls::Args {
-            cert: vec![fixture("localhost-cert.pem")],
-            key: vec![fixture("localhost-key.pem")],
+            cert: vec![pki.server_cert],
+            key: vec![pki.server_key],
             disable_verify: true,
             ..Default::default()
         }
@@ -4688,13 +4680,13 @@ mod security_tests {
         .expect("production disable-verify must fail");
         assert!(error.to_string().contains("tls-disable-verify"));
 
-        let cert = fixture("localhost-cert.pem");
+        let pki = production_pki().unwrap();
         let optional = tls::Args {
-            cert: vec![cert.clone()],
-            key: vec![fixture("localhost-key.pem")],
-            root: vec![cert.clone()],
+            cert: vec![pki.server_cert],
+            key: vec![pki.server_key],
+            root: vec![pki.ca.clone()],
             client_auth: tls::ClientAuthMode::Optional,
-            client_ca: vec![cert],
+            client_ca: vec![pki.ca],
             ..Default::default()
         }
         .load()

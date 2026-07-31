@@ -98,7 +98,7 @@ impl CallSetupDiagnostics {
             .lock()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        samples.sort_by(|left, right| right.elapsed_ns.cmp(&left.elapsed_ns));
+        samples.sort_by_key(|sample| std::cmp::Reverse(sample.elapsed_ns));
         json!({
             "enabled": self.enabled,
             "env": CALL_SETUP_DIAGNOSTICS_ENV,

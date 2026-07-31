@@ -1391,6 +1391,13 @@ pub struct CallbackPeerControl {
 }
 
 impl CallbackPeerControl {
+    /// Subscribe to bounded security and renegotiation diagnostics.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.coordinator.subscribe_diagnostics()
+    }
+
     /// Begin building an outbound REGISTER from this peer.
     ///
     /// Returns a [`RegisterBuilder`](crate::api::send::RegisterBuilder)
@@ -2579,9 +2586,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::IncomingCallAuthenticated { .. }
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
-                | Event::CallFailedDetailed(_)
-                | Event::RenegotiationFailed { .. }
-                | Event::SdesNegotiationFailed { .. } => {}
+                | Event::CallFailedDetailed(_) => {}
                 // SIP_API_DESIGN_2 Phase E: typed mid-dialog inbound
                 // events. Rehydrate the coordinator hook on the
                 // IncomingRequest before forwarding to the handler so

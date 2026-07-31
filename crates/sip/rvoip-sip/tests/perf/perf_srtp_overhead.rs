@@ -97,6 +97,7 @@ async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
     coord
 }
 
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the SRTP load profile.
 async fn run_one_point(
     alice: Arc<UnifiedCoordinator>,
     from: String,

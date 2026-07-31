@@ -37,8 +37,8 @@ use crate::api::incoming::IncomingCall;
 use crate::api::performance::PerformanceConfig;
 use crate::api::unified::{
     Config, MediaMode, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
-    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SymmetricRtpPolicy,
-    UnifiedCoordinator,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode, SipNatConfig,
+    SipRuntimeConfig, SymmetricRtpPolicy, UnifiedCoordinator,
 };
 use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
@@ -803,6 +803,13 @@ impl PeerControl {
         Ok(EventReceiver::new(rx))
     }
 
+    /// Subscribe to bounded security and renegotiation diagnostics.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.coordinator.subscribe_diagnostics()
+    }
+
     /// Access the underlying [`UnifiedCoordinator`] for advanced use.
     ///
     /// This accessor is intentionally trivial and does not clone the
@@ -1050,7 +1057,7 @@ impl StreamPeer {
     /// # }
     /// ```
     pub async fn with_config(config: Config) -> Result<Self> {
-        Self::with_config_and_nat(config, SipNatConfig::default()).await
+        Self::with_config_and_runtime(config, SipRuntimeConfig::default()).await
     }
 
     /// Create a peer with explicit signaling/media configuration and RTP NAT policy.
@@ -1060,8 +1067,16 @@ impl StreamPeer {
     /// `StreamPeer` users to tune bounded symmetric-RTP rebinding without
     /// dropping down to the coordinator API.
     pub async fn with_config_and_nat(config: Config, nat: SipNatConfig) -> Result<Self> {
+        Self::with_config_and_runtime(config, SipRuntimeConfig::default().with_nat(nat)).await
+    }
+
+    /// Create a peer with source-compatible construction-time options.
+    pub async fn with_config_and_runtime(
+        config: Config,
+        runtime: SipRuntimeConfig,
+    ) -> Result<Self> {
         let local_uri = config.local_uri.clone();
-        let coordinator = UnifiedCoordinator::new_with_nat(config, nat).await?;
+        let coordinator = UnifiedCoordinator::new_with_runtime(config, runtime).await?;
         let event_rx = coordinator.subscribe_events().await?;
         let control_rx = coordinator.claim_session_control_events().await?;
         Ok(Self {
@@ -1071,6 +1086,13 @@ impl StreamPeer {
             },
             events: EventReceiver::with_control(event_rx, control_rx, coordinator),
         })
+    }
+
+    /// Subscribe to bounded security and renegotiation diagnostics.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.control.subscribe_diagnostics()
     }
 
     /// Split the peer into independent control and event halves.
@@ -1525,6 +1547,7 @@ fn media_security_state_from_event(event: Event) -> Option<(CallId, MediaSecurit
 pub struct StreamPeerBuilder {
     config: Config,
     nat: SipNatConfig,
+    sdes_base64_mode: SdesBase64Mode,
     name: Option<String>,
 }
 
@@ -1541,6 +1564,7 @@ impl StreamPeerBuilder {
         Self {
             config: Config::default(),
             nat: SipNatConfig::default(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             name: None,
         }
     }
@@ -1662,6 +1686,14 @@ impl StreamPeerBuilder {
     /// Set the bounded symmetric-RTP source learning and rebinding policy.
     pub fn symmetric_rtp_policy(mut self, policy: SymmetricRtpPolicy) -> Self {
         self.nat = self.nat.with_symmetric_rtp_policy(policy);
+        self
+    }
+
+    /// Select the inbound RFC 4568 SDES Base64 validation policy.
+    ///
+    /// Outbound SDP remains canonical in both modes.
+    pub fn sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
+        self.sdes_base64_mode = mode;
         self
     }
 
@@ -1922,7 +1954,10 @@ impl StreamPeerBuilder {
                 name, self.config.local_ip, self.config.sip_port
             );
         }
-        StreamPeer::with_config_and_nat(self.config, self.nat).await
+        let runtime = SipRuntimeConfig::default()
+            .with_nat(self.nat)
+            .with_sdes_base64_mode(self.sdes_base64_mode);
+        StreamPeer::with_config_and_runtime(self.config, runtime).await
     }
 }
 

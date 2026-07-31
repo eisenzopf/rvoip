@@ -532,9 +532,8 @@ fn burst_config(
     let mut performance = PerformanceConfig::profile(profile)
         .with_capacity(capacity)
         .with_signaling_only_rtp_port(9);
-    if let Some(path) = std::env::var("RVOIP_PERF_RECIPE_FILE")
+    if let Ok(path) = std::env::var("RVOIP_PERF_RECIPE_FILE")
         .or_else(|_| std::env::var("BETA_PERFORMANCE_RECIPE_FILE"))
-        .ok()
     {
         performance = performance.with_recipe_path(path);
     }

@@ -557,14 +557,18 @@ impl StateMachineHelpers {
     pub(crate) async fn negotiated_media_config(
         &self,
         session_id: &SessionId,
-    ) -> Result<Option<crate::session_store::state::NegotiatedConfig>> {
-        let (negotiated_config, sdp_negotiated) = self
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
+        let (negotiated_config, payload_type, sdp_negotiated) = self
             .state_machine
             .store
             .with_session(session_id, |session| {
-                (session.negotiated_config.clone(), session.sdp_negotiated)
+                (
+                    session.negotiated_config.clone(),
+                    session.negotiated_payload_type(),
+                    session.sdp_negotiated,
+                )
             })?;
-        match negotiated_config {
+        match negotiated_config.zip(payload_type) {
             Some(config) => Ok(Some(config)),
             None if sdp_negotiated => Err(crate::errors::SessionError::MediaError(
                 "SDP was supplied without an anchored negotiated media configuration".to_string(),

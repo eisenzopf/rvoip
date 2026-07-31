@@ -19,7 +19,7 @@ use serial_test::serial;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
 
-use support::attach_pcmu_sdp_answer;
+use support::{attach_pcmu_sdp_answer, fixture_media_port};
 
 const CALLER_PORT: u16 = 17_603;
 
@@ -64,7 +64,7 @@ async fn fast_remote_bye_keeps_successful_refer_dispatch_from_resurrecting_sessi
                                 format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes(),
                             ),
                         ));
-                        attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
+                        attach_pcmu_sdp_answer(&mut response, fixture_media_port(uas_port));
                         uas.send_to(&Message::Response(response).to_bytes(), peer)
                             .await
                             .expect("send INVITE 200");

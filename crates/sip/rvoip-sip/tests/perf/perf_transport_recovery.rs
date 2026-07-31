@@ -131,6 +131,7 @@ fn is_address_in_use(err: &str) -> bool {
     err.contains("Address already in use") || err.contains("os error 48")
 }
 
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the recovery phase.
 async fn drive_calls(
     alice: Arc<UnifiedCoordinator>,
     from: String,

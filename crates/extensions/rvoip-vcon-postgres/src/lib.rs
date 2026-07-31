@@ -302,6 +302,7 @@ mod tests {
 
     #[cfg(feature = "live-tests")]
     #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing at an ephemeral PostgreSQL database"]
     async fn live_put_get_delete_list_and_hash() {
         let url = database_url();
         let store = PostgresVconStore::connect(&url).await.expect("connect");

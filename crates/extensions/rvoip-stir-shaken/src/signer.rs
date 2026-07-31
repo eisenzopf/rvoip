@@ -204,11 +204,7 @@ impl PASSporTSigner for ShakenSigner {
         let header = PassportHeader {
             alg: "ES256",
             typ: "passport",
-            ppt: if matches!(self.config.ppt, PptType::Shaken) {
-                Some(self.config.ppt.as_str())
-            } else {
-                Some(self.config.ppt.as_str())
-            },
+            ppt: Some(self.config.ppt.as_str()),
             x5u: self.config.cert_url.as_str(),
         };
 

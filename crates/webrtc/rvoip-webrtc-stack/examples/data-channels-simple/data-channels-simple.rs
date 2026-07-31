@@ -193,10 +193,10 @@ async fn async_main() -> Result<()> {
 
             msg = candidate_rx.recv().fuse() => {
                 let Some(candidate) = msg else { break };
-                if let Some(pc) = peer_connection.as_ref() {
-                    if let Err(e) = pc.add_ice_candidate(candidate).await {
-                        error!("Failed to add ICE candidate: {}", e);
-                    }
+                if let Some(pc) = peer_connection.as_ref()
+                    && let Err(e) = pc.add_ice_candidate(candidate).await
+                {
+                    error!("Failed to add ICE candidate: {}", e);
                 }
             }
         }

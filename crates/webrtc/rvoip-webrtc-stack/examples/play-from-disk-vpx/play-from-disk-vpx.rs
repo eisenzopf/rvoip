@@ -138,15 +138,15 @@ async fn async_main() -> Result<()> {
             .init();
     }
 
-    if let Some(video_path) = &video_file {
-        if !Path::new(video_path).exists() {
-            return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
-        }
+    if let Some(video_path) = &video_file
+        && !Path::new(video_path).exists()
+    {
+        return Err(anyhow::anyhow!("video file: '{}' not exist", video_path));
     }
-    if let Some(audio_path) = &audio_file {
-        if !Path::new(audio_path).exists() {
-            return Err(anyhow::anyhow!("audio file: '{}' not exist", audio_path));
-        }
+    if let Some(audio_path) = &audio_file
+        && !Path::new(audio_path).exists()
+    {
+        return Err(anyhow::anyhow!("audio file: '{}' not exist", audio_path));
     }
 
     // Everything below is the WebRTC-rs API! Thanks for using it ❤️.
@@ -163,7 +163,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -179,7 +178,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: if is_vp9 { 98 } else { 96 },
-        ..Default::default()
     };
 
     if audio_file.is_some() {

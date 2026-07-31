@@ -240,19 +240,17 @@ async fn run_test() -> Result<()> {
                         rtc_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
-                    if let RTCDataChannelEvent::OnOpen(channel_id) = dc_event {
-                        let dc = rtc_pc
-                            .data_channel(channel_id)
-                            .expect("data channel should exist");
-                        log::info!(
-                            "RTC data channel opened: {} (id: {})",
-                            dc.label(),
-                            channel_id
-                        );
-                        rtc_data_channel_opened = true;
-                        rtc_dc_id = Some(channel_id);
-                    }
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
+                    let dc = rtc_pc
+                        .data_channel(channel_id)
+                        .expect("data channel should exist");
+                    log::info!(
+                        "RTC data channel opened: {} (id: {})",
+                        dc.label(),
+                        channel_id
+                    );
+                    rtc_data_channel_opened = true;
+                    rtc_dc_id = Some(channel_id);
                 }
                 _ => {}
             }

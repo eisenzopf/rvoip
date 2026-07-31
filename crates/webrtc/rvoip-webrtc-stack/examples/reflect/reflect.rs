@@ -190,7 +190,6 @@ async fn async_main() -> anyhow::Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -202,7 +201,6 @@ async fn async_main() -> anyhow::Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     // Setup the codecs you want to use.

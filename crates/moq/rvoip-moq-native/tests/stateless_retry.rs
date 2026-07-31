@@ -1,26 +1,15 @@
 // SPDX-FileCopyrightText: 2026 Bridgefu contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
 
 use anyhow::Context;
 use moq_native_ietf::{quic, tls};
 
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join(name)
-}
+mod support;
 
 fn development_tls() -> anyhow::Result<tls::Config> {
-    tls::Args {
-        cert: vec![fixture("localhost-cert.pem")],
-        key: vec![fixture("localhost-key.pem")],
-        disable_verify: true,
-        ..Default::default()
-    }
-    .load()
+    support::localhost_server_tls(tls::ClientAuthMode::Disabled, &[])
 }
 
 async fn connect(stateless_retry: bool) -> anyhow::Result<u64> {

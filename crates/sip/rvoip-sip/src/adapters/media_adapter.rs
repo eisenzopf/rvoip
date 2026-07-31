@@ -3,7 +3,9 @@
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
 
-use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
+use crate::adapters::srtp_negotiator::{
+    into_public_negotiation_error, SrtpDetailedResult, SrtpNegotiator, SrtpPair,
+};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
 use crate::api::unified::{MediaMode, SdesBase64Mode};
@@ -1077,6 +1079,8 @@ pub struct MediaAdapter {
     fail_media_commit_after_srtp_swap: Arc<AtomicBool>,
     #[cfg(test)]
     fail_media_rollback: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_staged_media_commit: Arc<AtomicBool>,
 }
 
 impl MediaAdapter {
@@ -1167,6 +1171,8 @@ impl MediaAdapter {
             fail_media_commit_after_srtp_swap: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
             fail_media_rollback: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_staged_media_commit: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1640,7 +1646,7 @@ impl MediaAdapter {
                 .commit_staged_media_negotiation_lane_owned(&mut session)
                 .await
                 .map(|()| config),
-            Err(error) => Err(error),
+            Err(error) => Err(into_public_negotiation_error(error)),
         };
         if result.is_err() {
             self.discard_staged_media_negotiation_for_session(&session);
@@ -1672,7 +1678,7 @@ impl MediaAdapter {
         &self,
         session: &mut SessionState,
         remote_sdp: &str,
-    ) -> Result<NegotiatedConfig> {
+    ) -> SrtpDetailedResult<NegotiatedConfig> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
         // Parse remote SDP to extract IP and port
@@ -1702,44 +1708,6 @@ impl MediaAdapter {
             ));
         }
 
-        // SDES answer-side handling (RFC 4568 §7.5).
-        // The state machine path that calls us doesn't expose a
-        // failure-with-487 hook today; if `srtp_required` and the
-        // answer can't satisfy SRTP, we surface `SDPNegotiationFailed`
-        // which the executor turns into terminal `CallFailed`.
-        let mut negotiated_srtp_pair = None;
-        if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(&negotiation_key) {
-            // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
-            let attrs = Self::extract_audio_crypto(&parsed_answer);
-            if let Some(chosen) = attrs.first() {
-                let pair = offerer_state.accept_answer(chosen)?;
-                negotiated_srtp_pair = Some(pair);
-                tracing::info!(
-                    "SDES answer accepted for session {}: tag {} suite {:?}",
-                    session_id.0,
-                    chosen.tag,
-                    chosen.suite
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "sdes_answer_accepted session={} suite={:?}",
-                        session_id.0, chosen.suite
-                    ));
-                }
-            } else if self.srtp_required {
-                return Err(SessionError::SDPNegotiationFailed(
-                    "srtp_required is set but the SDP answer carries no a=crypto: line".into(),
-                ));
-            } else {
-                tracing::warn!(
-                    "Session {} offered SRTP but the answer didn't accept it; \
-                     proceeding plaintext (Config::srtp_required = false)",
-                    session_id.0
-                );
-                let _ = offerer_state; // dropped — keys discarded
-            }
-        }
-
         // Validate the exact lower owner while leaving address, codec,
         // direction and SRTP contexts at their last stable values. The answer
         // has not crossed its ACK/response commit boundary yet.
@@ -1755,9 +1723,87 @@ impl MediaAdapter {
             {
                 return Err(SessionError::InvalidTransition(
                     "media resource changed during UAC negotiation validation".to_string(),
-                ));
+                )
+                .into());
             }
         }
+
+        // SDES answer-side handling (RFC 4568 §7.5). Keep the offerer's
+        // generated key state available until the SIP/media commit boundary:
+        // malformed answers and lower-media races must be retryable without
+        // silently falling back to plaintext.
+        let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
+        let answer_crypto = Self::extract_audio_crypto(&parsed_answer);
+        let negotiated_srtp_pair = {
+            let offerer_state = self.pending_srtp_offerers.get(&negotiation_key);
+            match (offered_crypto.is_empty(), offerer_state.as_ref()) {
+                (false, None) => {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "the local SDP offered SRTP but its pending SDES key state is unavailable"
+                            .into(),
+                    )
+                    .into());
+                }
+                (true, Some(_)) => {
+                    return Err(SessionError::SDPNegotiationFailed(
+                        "pending SDES key state does not match the local SDP offer".into(),
+                    )
+                    .into());
+                }
+                (true, None) => {
+                    if !answer_crypto.is_empty() {
+                        return Err(SessionError::SDPNegotiationFailed(
+                            "the SDP answer selected SRTP that was not offered".into(),
+                        )
+                        .into());
+                    }
+                    if self.srtp_required {
+                        return Err(SessionError::SDPNegotiationFailed(
+                            "srtp_required is set but the local SDP did not offer SRTP".into(),
+                        )
+                        .into());
+                    }
+                    None
+                }
+                (false, Some(offerer_state)) => {
+                    if answer_crypto.len() > 1 {
+                        return Err(SessionError::SDPNegotiationFailed(
+                            "the SDP answer selected more than one a=crypto attribute".into(),
+                        )
+                        .into());
+                    }
+                    if let Some(chosen) = answer_crypto.first() {
+                        let pair = offerer_state.accept_answer_detailed(chosen)?;
+                        tracing::info!(
+                            "SDES answer accepted for session {}: tag {} suite {:?}",
+                            session_id.0,
+                            chosen.tag,
+                            chosen.suite
+                        );
+                        if srtp_diagnostics {
+                            emit_srtp_diag(format!(
+                                "sdes_answer_accepted session={} suite={:?}",
+                                session_id.0, chosen.suite
+                            ));
+                        }
+                        Some(pair)
+                    } else if self.srtp_required {
+                        return Err(SessionError::SDPNegotiationFailed(
+                            "srtp_required is set but the SDP answer carries no a=crypto: line"
+                                .into(),
+                        )
+                        .into());
+                    } else {
+                        tracing::warn!(
+                            "Session {} offered SRTP but the answer didn't accept it; \
+                             proceeding plaintext (Config::srtp_required = false)",
+                            session_id.0
+                        );
+                        None
+                    }
+                }
+            }
+        };
 
         let local_port = match signaling_only_port {
             Some(port) => port,
@@ -1814,7 +1860,7 @@ impl MediaAdapter {
 
     /// Validate an inbound re-INVITE/UPDATE offer without mutating media or
     /// session state, allowing malformed offers to receive an exact 488.
-    pub(crate) fn validate_inbound_sdp_offer(&self, remote_sdp: &str) -> Result<()> {
+    pub(crate) fn validate_inbound_sdp_offer(&self, remote_sdp: &str) -> SrtpDetailedResult<()> {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         self.parse_sdp_connection(remote_sdp)?;
@@ -1823,10 +1869,15 @@ impl MediaAdapter {
         if offered_crypto.is_empty() && self.srtp_required {
             return Err(SessionError::SDPNegotiationFailed(
                 "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
-            ));
+            )
+            .into());
         }
         if !offered_crypto.is_empty() && !self.offer_srtp {
             return Ok(());
+        }
+        if !offered_crypto.is_empty() {
+            SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode)
+                .validate_offer_detailed(&offered_crypto)?;
         }
         compute_answer_formats(
             &parsed_offer,
@@ -1863,7 +1914,7 @@ impl MediaAdapter {
                 .commit_staged_media_negotiation_lane_owned(&mut session)
                 .await
                 .map(|()| (answer, config)),
-            Err(error) => Err(error),
+            Err(error) => Err(into_public_negotiation_error(error)),
         };
         if result.is_err() {
             self.discard_staged_media_negotiation_for_session(&session);
@@ -1897,7 +1948,7 @@ impl MediaAdapter {
         &self,
         session: &mut SessionState,
         remote_sdp: &str,
-    ) -> Result<(String, NegotiatedConfig)> {
+    ) -> SrtpDetailedResult<(String, NegotiatedConfig)> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
         let stable_local_direction = session.local_media_direction;
@@ -1931,7 +1982,7 @@ impl MediaAdapter {
             if !offered_crypto.is_empty() && self.offer_srtp {
                 // Both sides want SRTP — negotiate.
                 let answerer = SrtpNegotiator::new_answerer_with_base64_mode(self.sdes_base64_mode);
-                let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
+                let (chosen, pair) = answerer.process_offer_detailed(&offered_crypto)?;
                 tracing::info!(
                     "SDES offer provisionally accepted for session {}: tag {} suite {:?}",
                     session_id.0,
@@ -1948,7 +1999,8 @@ impl MediaAdapter {
             } else if offered_crypto.is_empty() && self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
                     "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
-                ));
+                )
+                .into());
             } else if !offered_crypto.is_empty() && !self.offer_srtp {
                 // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
                 // policy is plaintext. Reject the m-line by setting port=0
@@ -2053,7 +2105,8 @@ impl MediaAdapter {
             {
                 return Err(SessionError::InvalidTransition(
                     "media resource changed during UAS negotiation validation".to_string(),
-                ));
+                )
+                .into());
             }
         }
 
@@ -2187,6 +2240,11 @@ impl MediaAdapter {
     pub(crate) fn has_staged_media_negotiation(&self, session: &SessionState) -> bool {
         Self::media_negotiation_key(session)
             .is_ok_and(|key| self.staged_media_negotiations.contains_key(&key))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_staged_media_commit_for_test(&self) {
+        self.fail_staged_media_commit.store(true, Ordering::Release);
     }
 
     /// Apply one validated negotiation while retaining exact rollback
@@ -2366,6 +2424,7 @@ impl MediaAdapter {
             self.staged_media_negotiations
                 .remove(&prepared.negotiation_key);
             self.negotiated_srtp.remove(&prepared.negotiation_key);
+            self.pending_srtp_offerers.remove(&prepared.negotiation_key);
             if let Some(lower) = prepared.lower.as_ref() {
                 let _ = lower.exact_media._resource.release_lower_once().await;
             }
@@ -2394,6 +2453,7 @@ impl MediaAdapter {
         self.staged_media_negotiations
             .remove(&prepared.negotiation_key);
         self.negotiated_srtp.remove(&prepared.negotiation_key);
+        self.pending_srtp_offerers.remove(&prepared.negotiation_key);
         tracing::info!(
             "Committed negotiated media for session {} at {}",
             session.session_id.0,
@@ -2501,6 +2561,12 @@ impl MediaAdapter {
         &self,
         session: &mut SessionState,
     ) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_staged_media_commit.swap(false, Ordering::AcqRel) {
+            return Err(SessionError::MediaError(
+                "injected staged media commit failure".to_string(),
+            ));
+        }
         let prepared = self
             .prepare_staged_media_negotiation_lane_owned(session)
             .await?;
@@ -4417,6 +4483,8 @@ impl Clone for MediaAdapter {
             fail_media_commit_after_srtp_swap: self.fail_media_commit_after_srtp_swap.clone(),
             #[cfg(test)]
             fail_media_rollback: self.fail_media_rollback.clone(),
+            #[cfg(test)]
+            fail_staged_media_commit: self.fail_staged_media_commit.clone(),
         }
     }
 }
@@ -4543,6 +4611,27 @@ mod sdp_format_tests {
 
     use super::*;
 
+    fn build_srtp_answer(attr: Option<CryptoAttribute>) -> String {
+        let mut media = SdpBuilder::new("Session")
+            .origin("-", "answer", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(
+                18_000,
+                if attr.is_some() {
+                    "RTP/SAVP"
+                } else {
+                    "RTP/AVP"
+                },
+            )
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000");
+        if let Some(attr) = attr {
+            media = media.crypto_attribute(attr);
+        }
+        media.done().build().expect("answer builds").to_string()
+    }
+
     #[tokio::test]
     async fn legacy_bridge_facades_never_report_false_success() {
         use crate::session_store::SessionStore;
@@ -4664,6 +4753,156 @@ mod sdp_format_tests {
         assert!(resume.contains("a=sendrecv"), "{resume}");
         assert!(adapter.media_sessions.is_empty());
         assert!(adapter.media_resources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_sdes_answer_preserves_offer_state_for_valid_retry() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let mut session = SessionState::new(SessionId("sdes-answer-retry".into()), Role::UAC);
+        let offer = adapter
+            .generate_local_sdp_offer_lane_owned(
+                &mut session,
+                crate::types::MediaDirection::SendRecv,
+            )
+            .await
+            .expect("generate SRTP offer");
+        session.local_sdp = Some(offer.clone());
+        let negotiation_key = MediaAdapter::media_negotiation_key(&session).unwrap();
+        let offered_crypto =
+            MediaAdapter::extract_audio_crypto(&SdpSession::from_str(&offer).unwrap());
+        let mut malformed_attr = offered_crypto[0].clone();
+        malformed_attr.key_inline = "not-base64".to_string();
+
+        assert!(
+            adapter
+                .negotiate_sdp_as_uac_lane_owned(
+                    &mut session,
+                    &build_srtp_answer(Some(malformed_attr)),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            adapter.pending_srtp_offerers.contains_key(&negotiation_key),
+            "a rejected answer must not consume the offerer's key state"
+        );
+        assert!(!adapter
+            .staged_media_negotiations
+            .contains_key(&negotiation_key));
+        assert!(!adapter.negotiated_srtp.contains_key(&negotiation_key));
+
+        let answerer = SrtpNegotiator::new_answerer();
+        let (answer_attr, _) = answerer
+            .process_offer(&offered_crypto)
+            .expect("build valid answer keys");
+        adapter
+            .negotiate_sdp_as_uac_lane_owned(&mut session, &build_srtp_answer(Some(answer_attr)))
+            .await
+            .expect("the same offer accepts a corrected answer");
+        assert!(
+            adapter.pending_srtp_offerers.contains_key(&negotiation_key),
+            "provisional negotiation must retain key state until commit"
+        );
+
+        adapter
+            .commit_staged_media_negotiation_lane_owned(&mut session)
+            .await
+            .expect("commit corrected answer");
+        assert!(
+            !adapter.pending_srtp_offerers.contains_key(&negotiation_key),
+            "successful finalization consumes the offerer's key state"
+        );
+        assert!(session.media_security.is_some());
+    }
+
+    #[tokio::test]
+    async fn missing_sdes_offer_state_fails_closed_without_staging_plaintext() {
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let mut session = SessionState::new(SessionId("missing-sdes-state".into()), Role::UAC);
+        let offer = adapter
+            .generate_local_sdp_offer_lane_owned(
+                &mut session,
+                crate::types::MediaDirection::SendRecv,
+            )
+            .await
+            .expect("generate SRTP offer");
+        session.local_sdp = Some(offer);
+        let negotiation_key = MediaAdapter::media_negotiation_key(&session).unwrap();
+        adapter.pending_srtp_offerers.remove(&negotiation_key);
+
+        let error = adapter
+            .negotiate_sdp_as_uac_lane_owned(&mut session, &build_srtp_answer(None))
+            .await
+            .expect_err("lost offer state must not downgrade to plaintext");
+        assert!(
+            matches!(
+                error.downcast_ref::<SessionError>(),
+                Some(SessionError::SDPNegotiationFailed(detail))
+                    if detail.contains("pending SDES key state is unavailable")
+            ),
+            "lost SDES state returned the wrong failure class"
+        );
+        assert!(!adapter
+            .staged_media_negotiations
+            .contains_key(&negotiation_key));
+        assert!(!adapter.negotiated_srtp.contains_key(&negotiation_key));
+        assert!(session.media_security.is_none());
+    }
+
+    #[test]
+    fn inbound_sdes_preflight_rejects_malformed_key_material_before_state_mutation() {
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            Arc::new(SessionStore::new()),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_000,
+            16_100,
+        );
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let malformed = CryptoAttribute::new(1, CryptoSuite::AesCm128HmacSha1_80, "not-base64");
+
+        let error = adapter
+            .validate_inbound_sdp_offer(&build_srtp_answer(Some(malformed)))
+            .expect_err("malformed SDES offer must fail preflight");
+        let diagnostic = error
+            .downcast_ref::<crate::adapters::srtp_negotiator::SdesNegotiationFailure>()
+            .expect("preflight preserves the structured SDES diagnostic")
+            .diagnostic();
+        assert_eq!(
+            diagnostic.stage,
+            crate::errors::SdesNegotiationStage::RemoteOffer
+        );
+        assert_eq!(
+            diagnostic.failure_class,
+            crate::errors::SdesNegotiationFailureClass::InvalidBase64
+        );
     }
 
     #[cfg(feature = "perf-tests")]

@@ -249,10 +249,10 @@ async fn remove_video(
     state: Arc<AppState>,
 ) -> Result<Response<Body>, hyper::Error> {
     let senders = state.peer_connection.get_senders().await;
-    if !senders.is_empty() {
-        if let Err(err) = state.peer_connection.remove_track(&senders[0]).await {
-            panic!("{}", err);
-        }
+    if let Some(sender) = senders.first()
+        && let Err(err) = state.peer_connection.remove_track(sender).await
+    {
+        panic!("{}", err);
     }
 
     println!("Video track has been removed");
@@ -358,12 +358,10 @@ async fn async_main() -> Result<()> {
             .init();
     }
 
-    if let Some(video_file) = &video_file {
-        if !Path::new(video_file).exists() {
-            return Err(anyhow::anyhow!(format!(
-                "video file: '{video_file}' not exist"
-            )));
-        }
+    if let Some(video_file) = &video_file
+        && !Path::new(video_file).exists()
+    {
+        return Err(anyhow::anyhow!("video file: '{video_file}' not exist"));
     }
 
     // Everything below is the WebRTC-rs API! Thanks for using it ❤️.

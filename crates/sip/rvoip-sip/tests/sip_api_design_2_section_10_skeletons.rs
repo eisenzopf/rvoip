@@ -170,6 +170,7 @@ a=rtpmap:0 PCMU/8000\r\n\
 a=sendrecv\r\n";
 
     let mut call = establish_call(18920, 18930).await;
+    let mut diagnostics = call.alice.subscribe_diagnostics();
     call.alice
         .update(&call.call_id)
         .with_sdp(HOLD_OFFER)
@@ -223,11 +224,11 @@ a=sendrecv\r\n";
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(20), call.alice_events.next()).await
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(Duration::from_millis(20), diagnostics.recv()).await
     {
         assert!(
-            !matches!(event, Event::RenegotiationFailed { .. }),
+            !matches!(event, rvoip_sip::DiagnosticEvent::RenegotiationFailed(_)),
             "valid UPDATE offer/answer unexpectedly failed: {event:?}"
         );
     }
@@ -346,6 +347,7 @@ fn in_dialog_reinvite_smoke() {
 
         let _ = tracing_subscriber::fmt::try_init();
         let mut call = establish_call(16720, 16730).await;
+        let mut diagnostics = call.alice.subscribe_diagnostics();
 
         // Minimal SDP suffices — the re-INVITE builder rejects empty bodies
         // since RFC 3261 requires SDP for session modification.
@@ -390,14 +392,11 @@ m=audio 17000 RTP/AVP 0\r\n";
                 .expect("re-INVITE completion state"),
             rvoip_sip::CallState::Active
         );
-        while let Ok(Some(event)) =
-            tokio::time::timeout(Duration::from_millis(20), call.alice_events.next()).await
+        while let Ok(Ok(event)) =
+            tokio::time::timeout(Duration::from_millis(20), diagnostics.recv()).await
         {
             assert!(
-                !matches!(
-                    event,
-                    rvoip_sip::api::events::Event::RenegotiationFailed { .. }
-                ),
+                !matches!(event, rvoip_sip::DiagnosticEvent::RenegotiationFailed(_)),
                 "valid re-INVITE unexpectedly failed: {event:?}"
             );
         }

@@ -35,7 +35,7 @@ pub use invariants::{
 };
 pub use registrar::{boot_mock_registrar, CapturedRegister, MockRegistrar, RegistrarReply};
 pub use ringing_uas::{boot_ringing_uas, CapturedRequest, RingingUas};
-pub use sdp::attach_pcmu_sdp_answer;
+pub use sdp::{attach_pcmu_sdp_answer, fixture_media_port};
 pub use traces::{
     assert_header_on_wire, receiver_config, wait_for_inbound_method, SMOKE_HEADER_NAME,
     SMOKE_HEADER_VALUE,

@@ -263,7 +263,7 @@ fn latency_snapshot(
     let sum_us = sum_us.load(Ordering::Relaxed);
     AdmissionLatencySnapshot {
         count,
-        avg_us: if count == 0 { 0 } else { sum_us / count },
+        avg_us: sum_us.checked_div(count).unwrap_or(0),
         p50_us: percentile_us(buckets, count, 50),
         p95_us: percentile_us(buckets, count, 95),
         p99_us: percentile_us(buckets, count, 99),
@@ -295,7 +295,7 @@ fn percentile_us(buckets: &[AtomicU64; 18], count: u64, percentile: u64) -> u64 
     if count == 0 {
         return 0;
     }
-    let target = ((count * percentile) + 99) / 100;
+    let target = (count * percentile).div_ceil(100);
     let mut seen = 0;
     for (idx, bucket) in buckets.iter().enumerate() {
         seen += bucket.load(Ordering::Relaxed);

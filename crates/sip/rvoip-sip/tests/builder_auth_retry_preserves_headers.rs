@@ -31,8 +31,8 @@ use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
 use rvoip_sip::{
-    CallState, DigestAlgorithm, Event, SdesBase64Padding, SdesNegotiationFailureClass,
-    SdesNegotiationStage, SipTraceConfig, SipTraceDirection,
+    CallState, DiagnosticEvent, DigestAlgorithm, Event, SdesBase64Padding,
+    SdesNegotiationFailureClass, SdesNegotiationStage, SipTraceConfig, SipTraceDirection,
 };
 
 use rvoip_sip_core::parser::parse_message;
@@ -181,6 +181,7 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
         .await
         .expect("UAC coordinator");
     let mut events = coord.events().await.expect("UAC event stream");
+    let mut diagnostics = coord.subscribe_diagnostics();
     sleep(Duration::from_millis(150)).await;
 
     let call_id = coord
@@ -215,85 +216,102 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
     );
 
     let mut auth_retry = None;
+    let mut legacy_auth_retry = false;
     let mut sdes_failure = None;
     let mut terminal_failure = None;
     let mut ack_after_200 = false;
     let mut trace_sequence = Vec::new();
     timeout(Duration::from_secs(8), async {
         while auth_retry.is_none()
+            || !legacy_auth_retry
             || sdes_failure.is_none()
             || terminal_failure.is_none()
             || trace_sequence.len() < 4
             || !ack_after_200
         {
-            match events.next().await {
-                Some(Event::CallAuthRetrying {
-                    call_id: id,
-                    status_code,
-                    realm,
-                    algorithm,
-                    qop,
-                }) if id == call_id => {
-                    auth_retry = Some((status_code, realm, algorithm, qop));
-                }
-                Some(Event::SdesNegotiationFailed {
-                    call_id: id,
-                    response,
-                    diagnostic,
-                }) if id == call_id => {
-                    assert_eq!(response.status_code, 200);
-                    assert!(response
-                        .sdp
-                        .as_deref()
-                        .is_some_and(|sdp| sdp.contains(MALFORMED_SDES_KEY)));
-                    let debug = format!("{response:?} {diagnostic:?}");
-                    assert!(!debug.contains(MALFORMED_SDES_KEY));
-                    assert!(!debug.contains("a=crypto"));
-                    sdes_failure = Some(diagnostic);
-                }
-                Some(Event::CallFailed {
-                    call_id: id,
-                    status_code,
-                    reason,
-                }) if id == call_id => {
-                    let committed = coord.get_state(&id).await;
-                    assert!(
-                        committed
-                            .as_ref()
-                            .map_or(true, |state| !state.is_in_progress()),
-                        "CallFailed must be published only after terminal state commit: {committed:?}"
-                    );
-                    terminal_failure = Some((status_code, reason));
-                }
-                Some(Event::CallEnded { call_id: id, .. }) if id == call_id => {
-                    panic!("initial negotiation failure emitted contradictory CallEnded")
-                }
-                Some(Event::SipTrace(trace)) if trace.session_id.as_ref() == Some(&call_id) => {
-                    let label = match (trace.direction, trace.start_line.as_str()) {
-                        (SipTraceDirection::Outbound, line) if line.starts_with("INVITE ") => {
-                            Some("INVITE")
-                        }
-                        (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 401 ") => {
-                            Some("401")
-                        }
-                        (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 200 ") => {
-                            Some("200")
-                        }
-                        (SipTraceDirection::Outbound, line)
-                            if line.starts_with("ACK ")
-                                && trace_sequence.last() == Some(&"200") =>
-                        {
-                            ack_after_200 = true;
-                            None
-                        }
-                        _ => None,
-                    };
-                    if let Some(label) = label {
-                        trace_sequence.push(label);
+            tokio::select! {
+                event = events.next() => match event {
+                    Some(Event::CallAuthRetrying {
+                        call_id: id,
+                        status_code,
+                        realm,
+                    }) if id == call_id => {
+                        assert_eq!(status_code, 401);
+                        assert_eq!(realm, "testrealm");
+                        legacy_auth_retry = true;
                     }
-                }
-                Some(_) => {}
-                None => panic!("UAC event stream closed before auth observations"),
+                    Some(Event::CallFailed {
+                        call_id: id,
+                        status_code,
+                        reason,
+                    }) if id == call_id => {
+                        let committed = coord.get_state(&id).await;
+                        assert!(
+                            committed
+                                .as_ref()
+                                .map_or(true, |state| !state.is_in_progress()),
+                            "CallFailed must be published only after terminal state commit: {committed:?}"
+                        );
+                        terminal_failure = Some((status_code, reason));
+                    }
+                    Some(Event::CallEnded { call_id: id, .. }) if id == call_id => {
+                        panic!("initial negotiation failure emitted contradictory CallEnded")
+                    }
+                    Some(Event::SipTrace(trace)) if trace.session_id.as_ref() == Some(&call_id) => {
+                        let label = match (trace.direction, trace.start_line.as_str()) {
+                            (SipTraceDirection::Outbound, line) if line.starts_with("INVITE ") => {
+                                Some("INVITE")
+                            }
+                            (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 401 ") => {
+                                Some("401")
+                            }
+                            (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 200 ") => {
+                                Some("200")
+                            }
+                            (SipTraceDirection::Outbound, line)
+                                if line.starts_with("ACK ")
+                                    && trace_sequence.last() == Some(&"200") =>
+                            {
+                                ack_after_200 = true;
+                                None
+                            }
+                            _ => None,
+                        };
+                        if let Some(label) = label {
+                            trace_sequence.push(label);
+                        }
+                    }
+                    Some(_) => {}
+                    None => panic!("UAC event stream closed before auth observations"),
+                },
+                diagnostic = diagnostics.recv() => match diagnostic {
+                    Ok(DiagnosticEvent::CallAuthRetrying(details))
+                        if details.call_id == call_id =>
+                    {
+                        auth_retry = Some((
+                            details.status_code,
+                            details.realm,
+                            details.algorithm,
+                            details.qop,
+                        ));
+                    }
+                    Ok(DiagnosticEvent::SdesNegotiationFailed(details))
+                        if details.call_id == call_id =>
+                    {
+                        assert_eq!(details.response.status_code, 200);
+                        assert!(details
+                            .response
+                            .sdp
+                            .as_deref()
+                            .is_some_and(|sdp| sdp.contains(MALFORMED_SDES_KEY)));
+                        let debug = format!("{details:?}");
+                        assert!(!debug.contains(MALFORMED_SDES_KEY));
+                        assert!(!debug.contains("a=crypto"));
+                        sdes_failure = Some(details.diagnostic);
+                    }
+                    Ok(_) => {}
+                    Err(error) => panic!("UAC diagnostic stream failed: {error}"),
+                },
             }
         }
     })

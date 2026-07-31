@@ -129,19 +129,19 @@ impl PeerConnectionEventHandler for Handler {
                 while let Some(evt) = track.poll().await {
                     if let TrackRemoteEvent::OnRtpPacket(packet) = evt {
                         let mut guard = audio_writer.lock().unwrap();
-                        if let Some(ref mut w) = *guard {
-                            if let Err(err) = w.write_rtp(&packet) {
-                                println!("audio write_rtp error: {err}");
-                                break;
-                            }
+                        if let Some(ref mut w) = *guard
+                            && let Err(err) = w.write_rtp(&packet)
+                        {
+                            println!("audio write_rtp error: {err}");
+                            break;
                         }
                     }
                 }
                 let mut guard = audio_writer.lock().unwrap();
-                if let Some(ref mut w) = *guard {
-                    if let Err(err) = w.close() {
-                        println!("audio file close error: {err}");
-                    }
+                if let Some(ref mut w) = *guard
+                    && let Err(err) = w.close()
+                {
+                    println!("audio file close error: {err}");
                 }
                 println!("Audio track ended, file closed.");
             }));
@@ -157,19 +157,19 @@ impl PeerConnectionEventHandler for Handler {
                 while let Some(evt) = track.poll().await {
                     if let TrackRemoteEvent::OnRtpPacket(packet) = evt {
                         let mut guard = video_writer.lock().unwrap();
-                        if let Some(ref mut w) = *guard {
-                            if let Err(err) = w.write_rtp(&packet) {
-                                println!("video write_rtp error: {err}");
-                                break;
-                            }
+                        if let Some(ref mut w) = *guard
+                            && let Err(err) = w.write_rtp(&packet)
+                        {
+                            println!("video write_rtp error: {err}");
+                            break;
                         }
                     }
                 }
                 let mut guard = video_writer.lock().unwrap();
-                if let Some(ref mut w) = *guard {
-                    if let Err(err) = w.close() {
-                        println!("video file close error: {err}");
-                    }
+                if let Some(ref mut w) = *guard
+                    && let Err(err) = w.close()
+                {
+                    println!("video file close error: {err}");
                 }
                 println!("Video track ended, file closed.");
             }));
@@ -257,7 +257,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 111,
-        ..Default::default()
     };
 
     let video_codec = RTCRtpCodecParameters {
@@ -273,7 +272,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: if is_vp9 { 98 } else { 96 },
-        ..Default::default()
     };
 
     if cli.audio.is_some() {

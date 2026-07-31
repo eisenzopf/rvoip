@@ -351,16 +351,11 @@ async fn async_main() -> Result<()> {
 
                 // Spawn a per-viewer task: reads packets and writes to this viewer's track
                 runtime.spawn(Box::pin(async move {
-                    loop {
-                        match viewer_rx.recv().await {
-                            Ok(mut packet) => {
-                                packet.header.ssrc = viewer_ssrc;
-                                if let Err(err) = viewer_track.write_rtp(packet).await {
-                                    println!("viewer write_rtp error: {err}");
-                                    break;
-                                }
-                            }
-                            Err(_) => break, // closed or lagged
+                    while let Ok(mut packet) = viewer_rx.recv().await {
+                        packet.header.ssrc = viewer_ssrc;
+                        if let Err(err) = viewer_track.write_rtp(packet).await {
+                            println!("viewer write_rtp error: {err}");
+                            break;
                         }
                     }
                 }));

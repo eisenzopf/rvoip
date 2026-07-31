@@ -114,6 +114,7 @@ struct OpCounters {
     resume_fail: AtomicU64,
 }
 
+#[allow(clippy::too_many_arguments)] // Benchmark parameters intentionally mirror the media load profile.
 async fn run_one_point(
     alice: Arc<UnifiedCoordinator>,
     from: String,

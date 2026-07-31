@@ -109,6 +109,7 @@ async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
 
 /// One call: INVITE → wait for first CallProgress (180) → record PDD →
 /// wait for CallAnswered → record setup_latency → BYE → record full_cycle.
+#[allow(clippy::too_many_arguments)] // Explicit inputs keep per-call PDD accounting visible.
 async fn run_one_call(
     alice: Arc<UnifiedCoordinator>,
     from: String,
@@ -147,7 +148,7 @@ async fn run_one_call(
                     call_id: cid,
                     status_code,
                     ..
-                }) if cid == call_id && status_code >= 100 && status_code < 200 => {
+                }) if cid == call_id && (100..200).contains(&status_code) => {
                     return Some("provisional");
                 }
                 Some(Event::CallAnswered { call_id: cid, .. }) if cid == call_id => {

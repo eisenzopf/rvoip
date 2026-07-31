@@ -29,7 +29,7 @@
 
 use serde_json::{json, Value};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::report::ScenarioReport;
 
@@ -494,7 +494,7 @@ impl SweepRunner {
         out
     }
 
-    fn print_aggregated_summary(&self, md_path: &PathBuf) {
+    fn print_aggregated_summary(&self, md_path: &Path) {
         println!();
         println!("════════════════════════════════════════════════════════════════════════");
         println!(" SWEEP COMPLETE: {}", self.scenario);
@@ -542,6 +542,7 @@ impl SweepRunner {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // One display field per benchmark report column.
 fn print_point_line(
     scenario: &str,
     point: f64,

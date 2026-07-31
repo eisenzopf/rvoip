@@ -25,28 +25,28 @@ use rvoip_sip::state_table::EventType;
 use rvoip_sip::{
     AudioFrame, AudioReceiver, AudioSender, AudioStream, AutoAnswerHandler, BodyRedactionDecision,
     BridgeError, BridgeHandle, BuilderHeaderState, BuilderStrictness, CallAnsweredInfo,
-    CallHandler, CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
-    CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, ClosureHandler,
-    Config, DefaultTraceRedactor, DialogInfo, DialogInfoDocument, DialogPackageEvent,
-    DialogPackageState, DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount,
-    EndpointAccountConfig, EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver,
-    EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig,
-    EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
-    EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
-    EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
-    EventReceiver, HeaderCarryThroughReport, HeaderName, HeaderPolicyViolation, IncomingCall,
-    IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse, MediaMode,
-    MediaPoolConfig, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
-    MediaSessionControllerConfig, PassthroughRedactor, PeerControl, PerformanceConfig,
-    PerformanceRecipe, PerformanceRecipeBook, ProfiledSipAdapter, QueueHandler, RedactionDecision,
-    Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, RejectAllHandler,
-    Result, RoutingAction, RoutingHandler, RoutingRule, RtpSessionBufferConfig,
+    CallAuthRetryDetails, CallHandler, CallHandlerDecision, CallId, CallLifecycleSnapshot,
+    CallProgressInfo, CallState, CallTerminalInfo, CallbackPeer, CallbackPeerBuilder,
+    CallbackPeerControl, ClosureHandler, Config, DefaultTraceRedactor, DiagnosticEvent, DialogInfo,
+    DialogInfoDocument, DialogPackageEvent, DialogPackageState, DialogSubscriptionHandle,
+    EndReason, Endpoint, EndpointAccount, EndpointAccountConfig, EndpointAudio, EndpointAudioFrame,
+    EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
+    EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
+    EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
+    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
+    EndpointTransport, Event, EventReceiver, HeaderCarryThroughReport, HeaderName,
+    HeaderPolicyViolation, IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest,
+    IncomingResponse, MediaMode, MediaPoolConfig, MediaSecurityKeying, MediaSecurityProfile,
+    MediaSecurityState, MediaSessionControllerConfig, PassthroughRedactor, PeerControl,
+    PerformanceConfig, PerformanceRecipe, PerformanceRecipeBook, ProfiledSipAdapter, QueueHandler,
+    RedactionDecision, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+    RejectAllHandler, Result, RoutingAction, RoutingHandler, RoutingRule, RtpSessionBufferConfig,
     RtpTransportBufferConfig, SessionError, SessionHandle, SessionId, ShutdownHandle, SipAccount,
     SipContactMode, SipEgressProfilePolicy, SipEgressProfileRegistration, SipHeaderView,
     SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy, SipReason,
-    SipRequestOptions, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
-    StreamPeer, StreamPeerBuilder, SubscriptionState, SymmetricRtpPolicy, TraceRedactor,
-    TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+    SipRequestOptions, SipRuntimeConfig, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
+    SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, SymmetricRtpPolicy,
+    TraceRedactor, TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
     TransferTargetEvidence, TransferWaitMode, TypedHeader, UnifiedCoordinator, ViolationReason,
 };
 
@@ -123,10 +123,27 @@ fn public_event_compatibility_variants_remain_available() {
             }
             Event::CallProgressDetailed(_)
             | Event::CallEstablishedDetailed(_)
-            | Event::CallFailedDetailed(_)
-            | Event::SdesNegotiationFailed { .. } => event,
+            | Event::CallFailedDetailed(_) => event,
             other => other,
         }
     }
     let _ = accept_event;
+}
+
+#[test]
+fn additive_runtime_and_diagnostic_surfaces_remain_available() {
+    let runtime =
+        SipRuntimeConfig::default().with_sdes_base64_mode(rvoip_sip::SdesBase64Mode::Strict);
+    assert_eq!(
+        runtime.sdes_base64_mode(),
+        rvoip_sip::SdesBase64Mode::Strict
+    );
+
+    fn diagnostic_receiver(
+        coordinator: &UnifiedCoordinator,
+    ) -> tokio::sync::broadcast::Receiver<DiagnosticEvent> {
+        coordinator.subscribe_diagnostics()
+    }
+    let _ = diagnostic_receiver;
+    let _ = std::any::type_name::<CallAuthRetryDetails>();
 }

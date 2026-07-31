@@ -122,7 +122,6 @@ async fn run_test() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
     webrtc_media_engine.register_codec(video_codec_for_webrtc, RtpCodecKind::Video)?;
     for extension in [
@@ -178,7 +177,6 @@ async fn run_test() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     let audio_codec = RTCRtpCodecParameters {
@@ -190,7 +188,6 @@ async fn run_test() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 120,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -360,10 +357,10 @@ async fn run_test() -> Result<()> {
 
         // Drain received RTP notifications from webrtc
         while let Ok(tag) = packets_rx.try_recv() {
-            if let Some(ssrc_str) = tag.strip_prefix("ssrc:") {
-                if let Ok(ssrc) = ssrc_str.parse::<u32>() {
-                    *ssrcs_received.entry(ssrc).or_insert(0) += 1;
-                }
+            if let Some(ssrc_str) = tag.strip_prefix("ssrc:")
+                && let Ok(ssrc) = ssrc_str.parse::<u32>()
+            {
+                *ssrcs_received.entry(ssrc).or_insert(0) += 1;
             }
         }
 
@@ -468,10 +465,10 @@ async fn run_test() -> Result<()> {
 
     // Drain any remaining notifications
     while let Ok(tag) = packets_rx.try_recv() {
-        if let Some(ssrc_str) = tag.strip_prefix("ssrc:") {
-            if let Ok(ssrc) = ssrc_str.parse::<u32>() {
-                *ssrcs_received.entry(ssrc).or_insert(0) += 1;
-            }
+        if let Some(ssrc_str) = tag.strip_prefix("ssrc:")
+            && let Ok(ssrc) = ssrc_str.parse::<u32>()
+        {
+            *ssrcs_received.entry(ssrc).or_insert(0) += 1;
         }
     }
 

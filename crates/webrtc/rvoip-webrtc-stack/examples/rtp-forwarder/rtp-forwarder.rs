@@ -134,13 +134,12 @@ impl PeerConnectionEventHandler for Handler {
                     // Re-tag payload type so downstream tools see what they expect
                     packet.header.payload_type = payload_type;
 
-                    if let Ok(n) = packet.marshal_to(&mut buf) {
-                        if let Err(err) = sock.send_to(&buf[..n], forward_addr).await {
-                            if !err.to_string().contains("Connection refused") {
-                                eprintln!("forward {} error: {err}", kind);
-                                break;
-                            }
-                        }
+                    if let Ok(n) = packet.marshal_to(&mut buf)
+                        && let Err(err) = sock.send_to(&buf[..n], forward_addr).await
+                        && !err.to_string().contains("Connection refused")
+                    {
+                        eprintln!("forward {} error: {err}", kind);
+                        break;
                     }
                 }
             }
@@ -200,7 +199,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     let audio_codec = RTCRtpCodecParameters {
@@ -212,7 +210,6 @@ async fn async_main() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 111,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec, RtpCodecKind::Video)?;

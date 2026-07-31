@@ -56,10 +56,9 @@ impl EnvironmentBlock {
     /// Capture the current environment. Panics if running in a debug build
     /// — debug-mode perf numbers are misleading and not citable.
     pub fn capture() -> Self {
-        assert!(
-            !cfg!(debug_assertions),
-            "perf tests must be run with --release; debug-build numbers are not citable"
-        );
+        if cfg!(debug_assertions) {
+            panic!("perf tests must be run with --release; debug-build numbers are not citable");
+        }
 
         let mut sys = System::new();
         sys.refresh_memory();

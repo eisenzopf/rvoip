@@ -14,8 +14,9 @@
 //!
 //! 2. **Media**: per-Connection WebRTC peer (via `rvoip_webrtc` when the
 //!    `media-webrtc` feature is enabled). SDP/ICE/DTLS exchange rides inside
-//!    `connection.offer.substrate_setup`. `MediaFrame.payload` (already RTP-shaped)
-//!    bridges to outbound tracks and back via inbound pumps.
+//!    `connection.offer.substrate_setup`. `MediaFrame.payload` carries
+//!    transport-neutral codec bytes; the WebRTC boundary adds outbound RTP
+//!    headers and strips inbound RTP headers.
 //!
 //! See `crates/uctp/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` for the design.
 

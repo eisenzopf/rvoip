@@ -76,10 +76,12 @@ fn retention_diagnostics_aggregate_planner_state_and_transaction_tombstones() {
 
 #[test]
 fn retention_drain_horizon_covers_invite_state_ttl_with_margin() {
-    assert!(
-        support::soak::DEFAULT_RETENTION_DRAIN_WAIT_SECS
-            > support::soak::RETAINED_INVITE_STATE_TTL_SECS
-    );
+    const {
+        assert!(
+            support::soak::DEFAULT_RETENTION_DRAIN_WAIT_SECS
+                > support::soak::RETAINED_INVITE_STATE_TTL_SECS
+        );
+    }
     assert_eq!(
         support::soak::retention_drain_wait_for_configured(Some(1)),
         Duration::from_secs(support::soak::MIN_RETENTION_DRAIN_WAIT_SECS as u64)

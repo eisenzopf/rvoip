@@ -31,10 +31,7 @@ use support::lossy_turn_fixture::LossyTurnFixture;
 use tokio::sync::Notify;
 
 #[tokio::test]
-#[cfg_attr(
-    not(feature = "turn-fork-candidate"),
-    ignore = "requires the owner-reviewed UDP TURN/NACK alpha-fork candidate"
-)]
+#[ignore = "requires the owner-reviewed UDP TURN/NACK alpha-fork candidate"]
 async fn nack_round_trip_through_lossy_turn() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let fixture = LossyTurnFixture::start(0.05, 0xCAFE)

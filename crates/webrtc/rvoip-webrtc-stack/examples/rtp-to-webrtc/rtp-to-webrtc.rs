@@ -130,7 +130,6 @@ async fn async_main() -> Result<()> {
         rtc::rtp_transceiver::rtp_sender::RTCRtpCodecParameters {
             rtp_codec: video_codec.clone(),
             payload_type: 96,
-            ..Default::default()
         },
         RtpCodecKind::Video,
     )?;

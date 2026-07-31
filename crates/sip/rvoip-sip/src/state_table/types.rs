@@ -2,6 +2,9 @@ use crate::types::CallState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+pub(crate) const CONFIRMED_NEGOTIATION_FAILURE_EVENT: &str = "ConfirmedNegotiationFailure";
+pub(crate) const HAS_PENDING_OFFER_ANSWER_GUARD: &str = "HasPendingOfferAnswer";
+
 /// Session ID type. The public [`CallId`](crate::CallId) is an alias for this.
 ///
 /// Round-trip a call id through a `String` (e.g. when it crosses a UI event
@@ -278,10 +281,6 @@ pub enum EventType {
     DialogTimeout,
     DialogTerminated,
     DialogError(String),
-    /// A successful INVITE crossed its mandatory ACK/response boundary, but
-    /// SDP or lower-media application could not complete. The confirmed
-    /// dialog must terminate with BYE rather than a synthetic non-2xx result.
-    ConfirmedNegotiationFailure,
     DialogStateChanged {
         old_state: String,
         new_state: String,
@@ -564,8 +563,6 @@ pub enum Guard {
     /// Used by the RFC 3261 §14.1 glare path to send 491 Request Pending
     /// in response to a UAS-side re-INVITE while our own is pending.
     HasPendingReinvite,
-    /// True while an exact outbound INVITE or UPDATE offer awaits its answer.
-    HasPendingOfferAnswer,
     Custom(String),
 }
 

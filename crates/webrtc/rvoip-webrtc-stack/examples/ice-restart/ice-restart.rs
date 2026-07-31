@@ -54,10 +54,11 @@ struct IceRestartHandler {
 #[async_trait::async_trait]
 impl PeerConnectionEventHandler for IceRestartHandler {
     async fn on_ice_gathering_state_change(&self, state: RTCIceGatheringState) {
-        if state == RTCIceGatheringState::Complete {
-            if let Some(tx) = self.shared.lock().await.gather_tx.take() {
-                let _ = tx.try_send(());
-            }
+        if state != RTCIceGatheringState::Complete {
+            return;
+        }
+        if let Some(tx) = self.shared.lock().await.gather_tx.take() {
+            let _ = tx.try_send(());
         }
     }
 

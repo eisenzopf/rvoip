@@ -32,7 +32,7 @@ use crate::api::performance::PerformanceConfig;
 use crate::api::stream_peer::{EventReceiver, PeerControl, StreamPeer};
 use crate::api::unified::{
     Config, MediaMode, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
-    SipNatConfig, SipTlsMode, SymmetricRtpPolicy,
+    SdesBase64Mode, SipNatConfig, SipRuntimeConfig, SipTlsMode, SymmetricRtpPolicy,
 };
 use crate::auth::SipClientAuth;
 use crate::errors::{Result, SessionError};
@@ -202,6 +202,13 @@ impl Endpoint {
             self.registrar.clone(),
             self.transport,
         ))
+    }
+
+    /// Subscribe to bounded security and renegotiation diagnostics.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.peer.subscribe_diagnostics()
     }
 
     /// Split the endpoint into cloneable controls and an endpoint event stream.
@@ -392,6 +399,13 @@ impl EndpointControl {
             self.registrar.clone(),
             self.transport,
         ))
+    }
+
+    /// Subscribe to bounded security and renegotiation diagnostics.
+    pub fn subscribe_diagnostics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::api::events::DiagnosticEvent> {
+        self.control.subscribe_diagnostics()
     }
 
     /// Resolve a dial target using this endpoint's account context.
@@ -1830,6 +1844,7 @@ pub struct EndpointBuilder {
     media_mode: Option<MediaMode>,
     stun_server: Option<String>,
     nat: SipNatConfig,
+    sdes_base64_mode: SdesBase64Mode,
     outbound_proxy_uri: Option<String>,
     sip_instance: Option<String>,
     transport: EndpointTransport,
@@ -1882,6 +1897,7 @@ impl EndpointBuilder {
             media_mode: None,
             stun_server: None,
             nat: SipNatConfig::default(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             outbound_proxy_uri: None,
             sip_instance: None,
             transport: EndpointTransport::Udp,
@@ -2231,6 +2247,14 @@ impl EndpointBuilder {
         self
     }
 
+    /// Select the inbound RFC 4568 SDES Base64 validation policy.
+    ///
+    /// Outbound SDP remains canonical in both modes.
+    pub fn sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
+        self.sdes_base64_mode = mode;
+        self
+    }
+
     /// Set an outbound proxy URI for carrier/SBC-style operation.
     pub fn outbound_proxy(mut self, uri: impl Into<String>) -> Self {
         self.outbound_proxy_uri = Some(uri.into());
@@ -2424,7 +2448,7 @@ impl EndpointBuilder {
     /// Build and start the endpoint.
     pub async fn build(self) -> Result<Endpoint> {
         let parts = self.build_parts()?;
-        let peer = StreamPeer::with_config_and_nat(parts.config, parts.nat).await?;
+        let peer = StreamPeer::with_config_and_runtime(parts.config, parts.runtime).await?;
         Ok(Endpoint {
             peer,
             registration: parts.registration,
@@ -2590,7 +2614,9 @@ impl EndpointBuilder {
 
         Ok(EndpointParts {
             config,
-            nat: self.nat,
+            runtime: SipRuntimeConfig::default()
+                .with_nat(self.nat)
+                .with_sdes_base64_mode(self.sdes_base64_mode),
             registration,
             registrar,
             transport: self.transport,
@@ -2713,7 +2739,7 @@ impl Default for EndpointBuilder {
 
 struct EndpointParts {
     config: Config,
-    nat: SipNatConfig,
+    runtime: SipRuntimeConfig,
     registration: Option<Registration>,
     registrar: Option<String>,
     transport: EndpointTransport,
@@ -3460,7 +3486,7 @@ mod tests {
             .symmetric_rtp_policy(policy)
             .build_parts()
             .expect("build endpoint parts");
-        assert_eq!(parts.nat.symmetric_rtp, policy);
+        assert_eq!(parts.runtime.nat().symmetric_rtp, policy);
 
         let nat = SipNatConfig::default().with_symmetric_rtp_policy(policy);
         let configured = EndpointBuilder::new()
@@ -3470,8 +3496,19 @@ mod tests {
             .build_parts()
             .expect("build configured endpoint parts");
         assert_eq!(
-            configured.nat, nat,
+            configured.runtime.nat(),
+            nat,
             "config() must retain explicit NAT policy"
         );
+    }
+
+    #[test]
+    fn endpoint_builder_threads_strict_sdes_policy_without_changing_config_shape() {
+        let parts = EndpointBuilder::new()
+            .sdes_base64_mode(SdesBase64Mode::Strict)
+            .build_parts()
+            .expect("build endpoint parts");
+
+        assert_eq!(parts.runtime.sdes_base64_mode(), SdesBase64Mode::Strict);
     }
 }

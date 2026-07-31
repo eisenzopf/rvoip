@@ -1439,11 +1439,15 @@ mod tests {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
+        let (disconnect, disconnect_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept");
             let socket = accept_hdr_async(stream, select_rvoip_subprotocol)
                 .await
                 .expect("upgrade");
+            disconnect_rx
+                .await
+                .expect("test retains disconnect authority");
             drop(socket);
         });
 
@@ -1452,6 +1456,10 @@ mod tests {
             .open(loopback_context(address))
             .await
             .expect("open session");
+        assert_eq!(pool.live_driver_count(), 1);
+        disconnect
+            .send(())
+            .expect("server still waits for established-session disconnect");
         assert!(matches!(
             tokio::time::timeout(std::time::Duration::from_secs(1), session.events.recv())
                 .await
