@@ -326,8 +326,10 @@ mod tests {
 
     #[test]
     fn test_snapshot() {
-        let mut acc = TransportStatsAccumulator::default();
-        acc.transport_id = "RTCTransport_0".to_string();
+        let mut acc = TransportStatsAccumulator {
+            transport_id: "RTCTransport_0".to_string(),
+            ..Default::default()
+        };
         acc.on_packet_sent(100);
         acc.on_packet_received(80);
         acc.on_ice_state_changed(RTCIceTransportState::Connected);

@@ -255,6 +255,7 @@ impl PidfGenerator {
                 Ok(Event::End(ref e)) if e.name().as_ref() == b"dm:activities" => {
                     in_activities = false;
                 }
+                Ok(Event::End(_)) => {}
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(RegistrarError::PidfError(e.to_string())),
                 _ => {}

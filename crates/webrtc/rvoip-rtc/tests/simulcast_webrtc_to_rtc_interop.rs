@@ -211,7 +211,6 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -465,10 +464,9 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     // Get the receiver for this track
-                    let receiver_id = track_id2_receiver_id
+                    let receiver_id = *track_id2_receiver_id
                         .get(&track_id)
-                        .ok_or(Error::ErrRTPReceiverNotExisted)?
-                        .clone();
+                        .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
                     let rtp_receiver = rtc_pc
                         .rtp_receiver(receiver_id)
