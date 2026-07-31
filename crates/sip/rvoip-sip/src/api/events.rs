@@ -374,10 +374,23 @@ pub enum Event {
         reason: String,
     },
 
-    /// RFC 3261 §22.2 — server challenged our INVITE with 401/407 and we're
-    /// about to retry with a digest authorization header. Informational; no
-    /// action required from the app. If the retry fails (wrong credentials
-    /// or retry cap exceeded), `CallFailed` follows.
+    /// An inbound RFC 4568 SDES offer or answer failed validation.
+    ///
+    /// The received response remains available for typed header inspection;
+    /// the diagnostic deliberately contains no key material.
+    SdesNegotiationFailed {
+        /// Session identifier for the failed exchange.
+        call_id: CallId,
+        /// Received SIP response whose SDP failed, including typed headers.
+        response: crate::api::incoming::IncomingResponse,
+        /// Structured, secret-safe negotiation failure details.
+        diagnostic: crate::errors::SdesNegotiationDiagnostic,
+    },
+
+    /// RFC 3261 §22.2 — a server challenged our INVITE with 401/407 and the
+    /// authenticated retry was successfully dispatched. Informational; no
+    /// action is required from the app. If the retry is subsequently rejected,
+    /// `CallFailed` follows.
     CallAuthRetrying {
         /// Session identifier for the challenged outgoing call.
         call_id: CallId,
@@ -385,6 +398,10 @@ pub enum Event {
         status_code: u16,
         /// Digest realm the server asked us to authenticate against.
         realm: String,
+        /// Digest algorithm selected from the challenge alternatives.
+        algorithm: rvoip_auth_core::DigestAlgorithm,
+        /// Selected quality-of-protection mode, or `None` for legacy Digest.
+        qop: Option<String>,
     },
 
     // ===== Transfer Events =====
@@ -820,13 +837,28 @@ impl std::fmt::Debug for Event {
                 .field("method_bytes", &method.len())
                 .field("reason_bytes", &reason.len())
                 .finish(),
+            Self::SdesNegotiationFailed {
+                response,
+                diagnostic,
+                ..
+            } => formatter
+                .debug_struct("SdesNegotiationFailed")
+                .field("response", response)
+                .field("diagnostic", diagnostic)
+                .finish(),
             Self::CallAuthRetrying {
-                status_code, realm, ..
+                status_code,
+                realm,
+                algorithm,
+                qop,
+                ..
             } => formatter
                 .debug_struct("CallAuthRetrying")
                 .field("status_code", status_code)
                 .field("realm_present", &!realm.is_empty())
                 .field("realm_bytes", &realm.len())
+                .field("algorithm", algorithm)
+                .field("qop", qop)
                 .finish(),
             Self::ReferReceived {
                 refer_to,
@@ -1060,6 +1092,7 @@ impl Event {
             | Event::SessionRefreshed { call_id, .. }
             | Event::SessionRefreshFailed { call_id, .. }
             | Event::RenegotiationFailed { call_id, .. }
+            | Event::SdesNegotiationFailed { call_id, .. }
             | Event::CallAuthRetrying { call_id, .. }
             | Event::ReferReceived { call_id, .. }
             | Event::TransferAccepted { call_id, .. }
@@ -1126,6 +1159,7 @@ impl Event {
                 | Event::CallEstablishedDetailed(_)
                 | Event::CallFailedDetailed(_)
                 | Event::RenegotiationFailed { .. }
+                | Event::SdesNegotiationFailed { .. }
                 | Event::InfoReceived { .. }
                 | Event::MessageReceived { .. }
                 | Event::OptionsReceived { .. }
@@ -1199,6 +1233,49 @@ impl Event {
             } => Some(parsed.clone()),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod security_diagnostic_tests {
+    use super::Event;
+    use crate::errors::{
+        SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
+        SdesNegotiationStage,
+    };
+    use crate::state_table::types::SessionId;
+    use rvoip_sip_core::types::sdp::CryptoSuite;
+
+    #[test]
+    fn sdes_failure_debug_never_renders_response_sdp_or_key_material() {
+        let key_material = "SECRET_INLINE_KEY_MATERIAL==";
+        let event = Event::SdesNegotiationFailed {
+            call_id: SessionId("sdes-failure".to_string()),
+            response: crate::api::incoming::IncomingResponse::synthetic(
+                SessionId("sdes-failure".to_string()),
+                200,
+                "OK".to_string(),
+                Some(format!(
+                    "v=0\r\na=crypto:1 AES_256_CM_HMAC_SHA1_80 inline:{key_material}\r\n"
+                )),
+            ),
+            diagnostic: SdesNegotiationDiagnostic {
+                stage: SdesNegotiationStage::RemoteAnswer,
+                failure_class: SdesNegotiationFailureClass::InvalidBase64,
+                tag: 1,
+                suite: CryptoSuite::AesCm256HmacSha1_80,
+                encoded_bytes: key_material.len(),
+                padding: SdesBase64Padding::Malformed,
+                expected_decoded_bytes: 46,
+                actual_decoded_bytes: None,
+            },
+        };
+
+        let debug = format!("{event:?}");
+        assert!(debug.contains("SdesNegotiationFailed"));
+        assert!(debug.contains("expected_decoded_bytes"));
+        assert!(!debug.contains(key_material));
+        assert!(!debug.contains("a=crypto"));
     }
 }
 

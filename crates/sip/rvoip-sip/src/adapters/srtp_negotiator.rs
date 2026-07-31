@@ -30,7 +30,10 @@
 
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{
+    engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
+    Engine,
+};
 use rand::{rngs::OsRng, RngCore};
 use rvoip_rtp_core::srtp::{
     SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
@@ -38,7 +41,11 @@ use rvoip_rtp_core::srtp::{
 };
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite};
 
-use crate::errors::{Result, SessionError};
+use crate::api::unified::SdesBase64Mode;
+use crate::errors::{
+    Result, SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
+    SdesNegotiationStage, SessionError,
+};
 
 /// Salt length in bytes for SDES SDP inline keys (RFC 4568 §6.1).
 /// Independent of the encryption-key length.
@@ -75,18 +82,88 @@ fn generate_keysalt(suite: &SrtpCryptoSuite) -> (Vec<u8>, Vec<u8>, String) {
 /// of suite-correct length. Tolerates the optional `|lifetime` and
 /// `|MKI:LEN` suffixes by stripping anything after the first `|`
 /// (RFC 4568 §6.1 — we don't honour rekeying or MKI today).
-fn decode_keysalt(inline_b64: &str, suite: &SrtpCryptoSuite) -> Result<(Vec<u8>, Vec<u8>)> {
+fn classify_base64_padding(encoded: &str) -> SdesBase64Padding {
+    let Some(first_padding) = encoded.find('=') else {
+        return match encoded.len() % 4 {
+            0 => SdesBase64Padding::CanonicalUnpadded,
+            2 | 3 => SdesBase64Padding::OmittedTrailing,
+            _ => SdesBase64Padding::Malformed,
+        };
+    };
+    let padding_bytes = encoded.len() - first_padding;
+    if padding_bytes <= 2
+        && encoded.len().is_multiple_of(4)
+        && encoded[first_padding..].bytes().all(|byte| byte == b'=')
+    {
+        SdesBase64Padding::CanonicalPadded
+    } else {
+        SdesBase64Padding::Malformed
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SdesDecodeContext {
+    stage: SdesNegotiationStage,
+    tag: u32,
+    suite: CryptoSuite,
+    encoded_bytes: usize,
+    padding: SdesBase64Padding,
+    expected_decoded_bytes: usize,
+}
+
+impl SdesDecodeContext {
+    fn failure(
+        self,
+        failure_class: SdesNegotiationFailureClass,
+        actual_decoded_bytes: Option<usize>,
+    ) -> SessionError {
+        SessionError::SdesNegotiationFailed(SdesNegotiationDiagnostic {
+            stage: self.stage,
+            failure_class,
+            tag: self.tag,
+            suite: self.suite,
+            encoded_bytes: self.encoded_bytes,
+            padding: self.padding,
+            expected_decoded_bytes: self.expected_decoded_bytes,
+            actual_decoded_bytes,
+        })
+    }
+}
+
+fn decode_keysalt(
+    inline_b64: &str,
+    suite: &SrtpCryptoSuite,
+    mode: SdesBase64Mode,
+    stage: SdesNegotiationStage,
+    tag: u32,
+    public_suite: CryptoSuite,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let key_b64 = inline_b64.split('|').next().unwrap_or(inline_b64);
-    let combined = STANDARD.decode(key_b64).map_err(|e| {
-        SessionError::SDPNegotiationFailed(format!("invalid base64 in a=crypto inline: {}", e))
-    })?;
     let expected = suite.key_length + SDES_SALT_LEN;
-    if combined.len() < expected {
-        return Err(SessionError::SDPNegotiationFailed(format!(
-            "a=crypto inline too short: got {} bytes, need {}",
-            combined.len(),
-            expected
-        )));
+    let padding = classify_base64_padding(key_b64);
+    let diagnostic = SdesDecodeContext {
+        stage,
+        tag,
+        suite: public_suite,
+        encoded_bytes: key_b64.len(),
+        padding,
+        expected_decoded_bytes: expected,
+    };
+    if mode == SdesBase64Mode::Strict && padding == SdesBase64Padding::OmittedTrailing {
+        return Err(diagnostic.failure(SdesNegotiationFailureClass::InvalidBase64, None));
+    }
+    let decoded = if key_b64.contains('=') || mode == SdesBase64Mode::Strict {
+        STANDARD.decode(key_b64)
+    } else {
+        STANDARD_NO_PAD.decode(key_b64)
+    };
+    let combined = decoded
+        .map_err(|_| diagnostic.failure(SdesNegotiationFailureClass::InvalidBase64, None))?;
+    if combined.len() != expected {
+        return Err(diagnostic.failure(
+            SdesNegotiationFailureClass::DecodedLength,
+            Some(combined.len()),
+        ));
     }
     let key = combined[..suite.key_length].to_vec();
     let salt = combined[suite.key_length..suite.key_length + SDES_SALT_LEN].to_vec();
@@ -123,9 +200,12 @@ pub struct SrtpPair {
 /// (offerer / answerer) corresponding to the SIP UAC / UAS sides.
 pub enum SrtpNegotiator {
     /// UAC awaiting an answer to its offered crypto attributes.
-    Offerer { offered: HashMap<u32, OfferedSlot> },
+    Offerer {
+        offered: HashMap<u32, OfferedSlot>,
+        base64_mode: SdesBase64Mode,
+    },
     /// UAS ready to receive an offer.
-    Answerer,
+    Answerer { base64_mode: SdesBase64Mode },
 }
 
 impl SrtpNegotiator {
@@ -135,6 +215,14 @@ impl SrtpNegotiator {
     /// the order supplied — the answerer is expected to pick the
     /// first tag whose suite it supports.
     pub fn new_offerer(suites: &[CryptoSuite]) -> Result<(Self, Vec<CryptoAttribute>)> {
+        Self::new_offerer_with_base64_mode(suites, SdesBase64Mode::Compatible)
+    }
+
+    /// UAC side with an explicit inbound SDES Base64 validation policy.
+    pub fn new_offerer_with_base64_mode(
+        suites: &[CryptoSuite],
+        base64_mode: SdesBase64Mode,
+    ) -> Result<(Self, Vec<CryptoAttribute>)> {
         if suites.is_empty() {
             return Err(SessionError::SDPNegotiationFailed(
                 "SrtpNegotiator::new_offerer requires at least one suite".into(),
@@ -157,20 +245,34 @@ impl SrtpNegotiator {
                 },
             );
         }
-        Ok((SrtpNegotiator::Offerer { offered }, attrs))
+        Ok((
+            SrtpNegotiator::Offerer {
+                offered,
+                base64_mode,
+            },
+            attrs,
+        ))
     }
 
     /// UAS side. Construct an answerer ready to receive an offer.
     pub fn new_answerer() -> Self {
-        SrtpNegotiator::Answerer
+        Self::new_answerer_with_base64_mode(SdesBase64Mode::Compatible)
+    }
+
+    /// UAS side with an explicit inbound SDES Base64 validation policy.
+    pub fn new_answerer_with_base64_mode(base64_mode: SdesBase64Mode) -> Self {
+        SrtpNegotiator::Answerer { base64_mode }
     }
 
     /// UAC: peer's answer arrived. Validate it references one of our
     /// offered tags with the matching suite (RFC 4568 §7.5), decode
     /// the peer's master key, and build the `SrtpPair`.
     pub fn accept_answer(&self, attr: &CryptoAttribute) -> Result<SrtpPair> {
-        let offered = match self {
-            SrtpNegotiator::Offerer { offered } => offered,
+        let (offered, base64_mode) = match self {
+            SrtpNegotiator::Offerer {
+                offered,
+                base64_mode,
+            } => (offered, *base64_mode),
             _ => {
                 return Err(SessionError::SDPNegotiationFailed(
                     "SrtpNegotiator::accept_answer called on non-offerer".into(),
@@ -189,7 +291,14 @@ impl SrtpNegotiator {
                 attr.suite, attr.tag, slot.suite
             )));
         }
-        let (peer_key, peer_salt) = decode_keysalt(&attr.key_inline, &slot.rtp_suite)?;
+        let (peer_key, peer_salt) = decode_keysalt(
+            &attr.key_inline,
+            &slot.rtp_suite,
+            base64_mode,
+            SdesNegotiationStage::RemoteAnswer,
+            attr.tag,
+            attr.suite,
+        )?;
         build_pair(
             slot.rtp_suite.clone(),
             &slot.key,
@@ -205,11 +314,14 @@ impl SrtpNegotiator {
     /// `(chosen_attribute_to_emit_in_answer, SrtpPair)`. The answer
     /// echoes the offerer's chosen tag with our own inline key.
     pub fn process_offer(&self, attrs: &[CryptoAttribute]) -> Result<(CryptoAttribute, SrtpPair)> {
-        if !matches!(self, SrtpNegotiator::Answerer) {
-            return Err(SessionError::SDPNegotiationFailed(
-                "SrtpNegotiator::process_offer called on non-answerer".into(),
-            ));
-        }
+        let base64_mode = match self {
+            SrtpNegotiator::Answerer { base64_mode } => *base64_mode,
+            _ => {
+                return Err(SessionError::SDPNegotiationFailed(
+                    "SrtpNegotiator::process_offer called on non-answerer".into(),
+                ))
+            }
+        };
         // First-supported wins (D2 — offerer ranked, we honour their preference).
         let chosen = attrs.first().ok_or_else(|| {
             SessionError::SDPNegotiationFailed(
@@ -217,7 +329,14 @@ impl SrtpNegotiator {
             )
         })?;
         let rtp_suite = rtp_suite_for(chosen.suite);
-        let (peer_key, peer_salt) = decode_keysalt(&chosen.key_inline, &rtp_suite)?;
+        let (peer_key, peer_salt) = decode_keysalt(
+            &chosen.key_inline,
+            &rtp_suite,
+            base64_mode,
+            SdesNegotiationStage::RemoteOffer,
+            chosen.tag,
+            chosen.suite,
+        )?;
         let (our_key, our_salt, our_inline) = generate_keysalt(&rtp_suite);
 
         let pair = build_pair(
@@ -389,9 +508,144 @@ mod tests {
         let raw = STANDARD.encode(vec![0u8; 30]);
         // Add the optional suffixes the spec allows.
         let inline = format!("{}|2^31|1:4", raw);
-        let (key, salt) = decode_keysalt(&inline, &suite).unwrap();
+        let (key, salt) = decode_keysalt(
+            &inline,
+            &suite,
+            SdesBase64Mode::Compatible,
+            SdesNegotiationStage::RemoteAnswer,
+            1,
+            CryptoSuite::AesCm128HmacSha1_80,
+        )
+        .unwrap();
         assert_eq!(key.len(), 16);
         assert_eq!(salt.len(), 14);
+    }
+
+    #[test]
+    fn canonical_and_unpadded_aes256_answers_follow_configured_policy() {
+        for suite in [
+            CryptoSuite::AesCm256HmacSha1_80,
+            CryptoSuite::AesCm256HmacSha1_32,
+        ] {
+            let (compatible, _) =
+                SrtpNegotiator::new_offerer_with_base64_mode(&[suite], SdesBase64Mode::Compatible)
+                    .unwrap();
+            let canonical = STANDARD.encode([0x46; 46]);
+            assert!(canonical.ends_with("=="));
+            compatible
+                .accept_answer(&CryptoAttribute::new(1, suite, canonical.clone()))
+                .expect("canonical AES-256 answer");
+            compatible
+                .accept_answer(&CryptoAttribute::new(
+                    1,
+                    suite,
+                    canonical.trim_end_matches('=').to_string(),
+                ))
+                .expect("unpadded AES-256 answer in compatible mode");
+
+            let (strict, _) =
+                SrtpNegotiator::new_offerer_with_base64_mode(&[suite], SdesBase64Mode::Strict)
+                    .unwrap();
+            strict
+                .accept_answer(&CryptoAttribute::new(1, suite, canonical.clone()))
+                .expect("canonical AES-256 answer in strict mode");
+            let error = match strict.accept_answer(&CryptoAttribute::new(
+                1,
+                suite,
+                canonical.trim_end_matches('=').to_string(),
+            )) {
+                Ok(_) => panic!("strict mode requires canonical padding"),
+                Err(error) => error,
+            };
+            let SessionError::SdesNegotiationFailed(diagnostic) = error else {
+                panic!("unexpected strict-mode error")
+            };
+            let detail = diagnostic.to_string();
+            assert!(detail.contains("stage=remote-answer"));
+            assert!(detail.contains("class=invalid-base64"));
+            assert!(detail.contains("padding=omitted-trailing"));
+            assert!(detail.contains("expected_decoded_bytes=46"));
+            assert!(detail.contains("actual_decoded_bytes=unknown"));
+            assert!(!detail.contains(&canonical));
+        }
+    }
+
+    #[test]
+    fn all_public_sdes_suites_interoperate_bidirectionally() {
+        for suite in [
+            CryptoSuite::AesCm128HmacSha1_80,
+            CryptoSuite::AesCm128HmacSha1_32,
+            CryptoSuite::AesCm256HmacSha1_80,
+            CryptoSuite::AesCm256HmacSha1_32,
+        ] {
+            let (offerer, offer_attrs) = SrtpNegotiator::new_offerer(&[suite]).unwrap();
+            let answerer = SrtpNegotiator::new_answerer();
+            let (answer_attr, mut answerer_pair) =
+                answerer.process_offer(&offer_attrs).expect("answer offer");
+            let mut offerer_pair = offerer.accept_answer(&answer_attr).expect("accept answer");
+
+            let outbound = RtpPacket::new(
+                RtpHeader::new(0, 7, 56_000, 0x1111_2222),
+                bytes::Bytes::from_static(b"offerer to answerer"),
+            );
+            let protected = offerer_pair.send_ctx.protect(&outbound).unwrap();
+            let clear = answerer_pair
+                .recv_ctx
+                .unprotect(&protected.serialize().unwrap())
+                .unwrap();
+            assert_eq!(clear.payload, outbound.payload);
+
+            let inbound = RtpPacket::new(
+                RtpHeader::new(0, 9, 72_000, 0x3333_4444),
+                bytes::Bytes::from_static(b"answerer to offerer"),
+            );
+            let protected = answerer_pair.send_ctx.protect(&inbound).unwrap();
+            let clear = offerer_pair
+                .recv_ctx
+                .unprotect(&protected.serialize().unwrap())
+                .unwrap();
+            assert_eq!(clear.payload, inbound.payload);
+        }
+    }
+
+    #[test]
+    fn malformed_base64_and_wrong_decoded_lengths_are_secret_safe_errors() {
+        let answerer = SrtpNegotiator::new_answerer();
+        let malformed = match answerer.process_offer(&[CryptoAttribute::new(
+            7,
+            CryptoSuite::AesCm256HmacSha1_80,
+            "not+base64=inside".to_string(),
+        )]) {
+            Ok(_) => panic!("malformed Base64 must fail"),
+            Err(error) => error,
+        };
+        let SessionError::SdesNegotiationFailed(malformed_diagnostic) = malformed else {
+            panic!("unexpected malformed error")
+        };
+        let malformed_detail = malformed_diagnostic.to_string();
+        assert!(malformed_detail.contains("stage=remote-offer"));
+        assert!(malformed_detail.contains("class=invalid-base64"));
+        assert!(malformed_detail.contains("tag=7"));
+        assert!(malformed_detail.contains("padding=malformed"));
+        assert!(!malformed_detail.contains("not+base64=inside"));
+
+        let wrong = STANDARD.encode([0x2a; 45]);
+        let length_error = match answerer.process_offer(&[CryptoAttribute::new(
+            8,
+            CryptoSuite::AesCm256HmacSha1_32,
+            wrong.clone(),
+        )]) {
+            Ok(_) => panic!("wrong decoded length must fail"),
+            Err(error) => error,
+        };
+        let SessionError::SdesNegotiationFailed(length_diagnostic) = length_error else {
+            panic!("unexpected length error")
+        };
+        let length_detail = length_diagnostic.to_string();
+        assert!(length_detail.contains("class=decoded-length"));
+        assert!(length_detail.contains("expected_decoded_bytes=46"));
+        assert!(length_detail.contains("actual_decoded_bytes=45"));
+        assert!(!length_detail.contains(&wrong));
     }
 
     #[test]

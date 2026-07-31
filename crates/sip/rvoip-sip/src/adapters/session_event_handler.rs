@@ -4142,11 +4142,9 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
                 }
                 warn!(
                     session_id = %session_id,
@@ -4158,11 +4156,9 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
                 }
                 warn!(
                     session_id = %session_id,
@@ -4211,11 +4207,9 @@ impl SessionCrossCrateEventHandler {
             if let (Some(response), Some(transaction_id)) =
                 (parsed_response.as_ref(), response_transaction.as_ref())
             {
-                if !response.body().is_empty() {
-                    self.dialog_adapter
-                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                        .await?;
-                }
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
             }
             self.app_event_publisher.publish_exact(
                 handle,
@@ -4251,11 +4245,9 @@ impl SessionCrossCrateEventHandler {
             if let (Some(response), Some(transaction_id)) =
                 (parsed_response.as_ref(), response_transaction.as_ref())
             {
-                if !response.body().is_empty() {
-                    self.dialog_adapter
-                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                        .await?;
-                }
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
             }
             self.app_event_publisher.publish_exact(
                 handle,
@@ -4308,11 +4300,40 @@ impl SessionCrossCrateEventHandler {
                 if let (Some(response), Some(transaction_id)) =
                     (parsed_response.as_ref(), response_transaction.as_ref())
                 {
-                    if !response.body().is_empty() {
-                        self.dialog_adapter
-                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                            .await?;
-                    }
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
+                }
+                if let Some(crate::errors::SessionError::SdesNegotiationFailed(diagnostic)) =
+                    e.downcast_ref::<SessionError>()
+                {
+                    let response = parsed_response.as_ref().map_or_else(
+                        || {
+                            crate::api::incoming::IncomingResponse::synthetic(
+                                session_id.clone(),
+                                200,
+                                "OK".to_string(),
+                                sdp_answer.clone(),
+                            )
+                        },
+                        |response| {
+                            crate::api::incoming::IncomingResponse::with_response(
+                                session_id.clone(),
+                                response.status.as_u16(),
+                                response.reason_phrase().to_string(),
+                                sdp_answer.clone(),
+                                Arc::new(response.clone()),
+                            )
+                        },
+                    );
+                    self.app_event_publisher.publish_exact(
+                        handle,
+                        crate::api::events::Event::SdesNegotiationFailed {
+                            call_id: session_id.clone(),
+                            response,
+                            diagnostic: diagnostic.clone(),
+                        },
+                    );
                 }
                 if mid_dialog_offer || delayed_offer {
                     self.app_event_publisher.publish_exact(
@@ -6197,7 +6218,6 @@ impl SessionCrossCrateEventHandler {
     /// emits `Event::ReferNotify` plus derived `ReferProgress`,
     /// `ReferCompleted`, or `TransferFailed` events so transferor apps
     /// (including b2bua wrappers) can observe the transferee's progress.
-
     #[allow(clippy::too_many_arguments)]
     async fn handle_notify_received_parts(
         &self,
@@ -7105,6 +7125,38 @@ mod tests {
         assert!(
             !retransmission.contains("body().is_empty()"),
             "a bodyless INVITE 2xx retransmission still requires ACK"
+        );
+    }
+
+    #[test]
+    fn failed_sdes_2xx_is_acked_observable_and_terminal() {
+        let source = include_str!("session_event_handler.rs");
+        let handler = source
+            .split("async fn handle_call_established_parts")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("async fn fail_initial_invite_negotiation")
+                    .next()
+            })
+            .expect("INVITE 2xx handler source");
+        let failure = handler
+            .split("Err(e) =>")
+            .nth(1)
+            .expect("failed INVITE 2xx branch");
+
+        let ack = failure
+            .find("send_invite_2xx_ack_exact")
+            .expect("failed INVITE 2xx ACK");
+        let observation = failure
+            .find("Event::SdesNegotiationFailed")
+            .expect("application-visible SDES failure");
+        let terminal = failure
+            .find("fail_initial_invite_negotiation")
+            .expect("terminal failed-call transition");
+        assert!(ack < observation && observation < terminal);
+        assert!(
+            !failure[..observation].contains("body().is_empty()"),
+            "every INVITE 2xx requires ACK, including bodyless failures"
         );
     }
 

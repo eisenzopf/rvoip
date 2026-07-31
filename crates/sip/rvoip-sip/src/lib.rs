@@ -605,8 +605,8 @@ pub use api::unified::{
     RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SymmetricRtpPolicy,
 };
 pub use api::{
-    Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode,
-    SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
+    Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SdesBase64Mode,
+    SipContactMode, SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Events
@@ -620,7 +620,10 @@ pub use api::events::{
 };
 
 // Errors
-pub use errors::{Result, SessionError};
+pub use errors::{
+    Result, SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
+    SdesNegotiationStage, SessionError,
+};
 
 // State / identity types
 pub use state_table::types::SessionId;
@@ -654,9 +657,11 @@ pub mod prelude {
         MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
         MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
         ProfiledSipAdapter, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
-        Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SessionError, SessionHandle,
-        SipAccount, SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-        SipContactMode, SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
+        Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
+        SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
+        SdesNegotiationStage, SessionError, SessionHandle, SipAccount, SipAuthDecision,
+        SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth, SipContactMode,
+        SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
         SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
         SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
         StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,

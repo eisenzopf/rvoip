@@ -1887,6 +1887,10 @@ impl StateMachine {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         for effect in effects {
             match effect {
+                actions::DeferredActionEffect::AuthRetryObservation(observation) => {
+                    self.dialog_adapter
+                        .publish_api_event_exact(handle, observation.into_event());
+                }
                 actions::DeferredActionEffect::TransferNotify(effect) => {
                     let store = Arc::clone(&self.store);
                     let dialog_adapter = Arc::clone(&self.dialog_adapter);
@@ -3974,6 +3978,33 @@ mod tests {
         assert!(scheduler.contains("DeferredActionEffect::SessionRefreshTimer"));
         assert!(scheduler.contains("spawn_owned_exact"));
         assert!(scheduler.contains("SessionOperationKind::Signaling"));
+    }
+
+    #[test]
+    fn auth_retry_observation_is_post_commit_and_inline() {
+        let source = include_str!("executor.rs");
+        let transition = source
+            .split("async fn process_one_event")
+            .nth(1)
+            .and_then(|tail| tail.split("fn should_skip_action").next())
+            .expect("single-event canonical commit source");
+        let commit = transition
+            .find("let published = match commit_lane_state(&self.store, session)")
+            .expect("canonical exact-state publication");
+        let schedule = transition
+            .find("self.schedule_deferred_action_effects")
+            .expect("post-commit effect scheduler");
+        assert!(commit < schedule);
+
+        let scheduler = source
+            .split("fn schedule_deferred_action_effects")
+            .nth(1)
+            .and_then(|tail| tail.split("DeferredActionEffect::TransferNotify").next())
+            .expect("API observation scheduler arm");
+        assert!(scheduler.contains("DeferredActionEffect::AuthRetryObservation"));
+        assert!(scheduler.contains("publish_api_event_exact(handle, observation.into_event())"));
+        assert!(!scheduler.contains("spawn"));
+        assert!(!scheduler.contains("await"));
     }
 
     fn accept_call_table(

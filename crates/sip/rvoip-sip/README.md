@@ -172,7 +172,8 @@ not imply carrier certification or untested peer-version/topology coverage.
   regression fixtures.
 - UDP and TLS SIP paths in the beta-candidate evidence set.
 - RTP media sessions, bidirectional audio frames, RFC 4733 DTMF, and
-  SDES-SRTP negotiation state.
+  SDES-SRTP negotiation state. The exact supported and fail-closed boundaries
+  are documented in [Crypto capability boundaries](docs/CRYPTO_CAPABILITIES.md).
 - Hold/resume, blind transfer, REFER/NOTIFY progress, attended-transfer
   primitives, and transfer outcome events.
 - Builder-shaped outbound requests with custom headers, carry-through reports,

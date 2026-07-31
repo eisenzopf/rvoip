@@ -11,6 +11,8 @@
 //!    Authorization is set.
 //! 3. The retry INVITE carries the **same** `X-Trace: <id>` plus an
 //!    `Authorization` header (the credentialed digest).
+//! 4. The auth selection and all four wire legs are correlated to the call.
+//! 5. The deliberately malformed bodyless 200 is ACKed and fails terminally.
 //!
 //! Closes the F1 stash-preservation contract: §7.3 invariant #2
 //! says auth retry re-reads the same `Arc<XxxRequestOptions>`, never
@@ -27,11 +29,16 @@ use tokio::time::{sleep, timeout};
 use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
+use rvoip_sip::{
+    DigestAlgorithm, Event, SdesBase64Padding, SdesNegotiationFailureClass, SdesNegotiationStage,
+    SipTraceConfig, SipTraceDirection,
+};
 
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
+use rvoip_sip_core::types::sdp::CryptoSuite;
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
@@ -39,6 +46,7 @@ const UAS_PORT: u16 = 35200;
 const UAC_PORT: u16 = 35201;
 const TRACE_HEADER_NAME: &str = "X-Trace";
 const TRACE_HEADER_VALUE: &str = "trace-cafe-babe";
+const MALFORMED_SDES_KEY: &str = "not+base64=inside";
 
 /// Regression: this must complete on Tokio's default worker stack. The
 /// response-to-auth-retry path must not require `RUST_MIN_STACK` or a custom
@@ -54,12 +62,14 @@ async fn invite_extras_survive_401_driven_auth_retry() {
     let sock = Arc::new(UdpSocket::bind(&uas_addr).await.expect("auth UAS bind"));
 
     let invite_count = Arc::new(AtomicU32::new(0));
+    let ack_count = Arc::new(AtomicU32::new(0));
     // For each captured INVITE, record:
     // (has_x_trace, x_trace_value, has_authorization)
     let invites_seen = Arc::new(Mutex::new(Vec::<(bool, Option<String>, bool)>::new()));
 
     let sock_task = sock.clone();
     let count_task = invite_count.clone();
+    let ack_count_task = ack_count.clone();
     let captured_task = invites_seen.clone();
     let uas_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 8192];
@@ -75,7 +85,7 @@ async fn invite_extras_survive_401_driven_auth_retry() {
             let request = match msg {
                 Message::Request(r) if r.method() == Method::Invite => r,
                 Message::Request(r) if r.method() == Method::Ack => {
-                    // ACK to the 401 — fire-and-forget; the auth retry follows.
+                    ack_count_task.fetch_add(1, Ordering::SeqCst);
                     continue;
                 }
                 _ => continue,
@@ -107,24 +117,50 @@ async fn invite_extras_survive_401_driven_auth_retry() {
                 let bytes = Message::Response(resp).to_bytes();
                 let _ = sock_task.send_to(&bytes, from).await;
             } else {
-                // 200 OK on the credentialed retry. Echo the To header
-                // and stamp a To-tag so the dialog completes cleanly.
+                // Deliberately malformed AES-256 SDES answer. The UAC must
+                // ACK the 2xx, expose a secret-safe diagnostic, and fail.
                 let mut resp = create_response(&request, StatusCode::Ok);
+                if let Some(TypedHeader::To(to)) = resp
+                    .headers
+                    .iter_mut()
+                    .find(|header| matches!(header, TypedHeader::To(_)))
+                {
+                    to.set_tag("auth-sdes-uastag");
+                }
                 if let Some(contact) = request.header(&HeaderName::Contact) {
                     resp.headers.push(contact.clone());
                 }
+                resp.body = format!(
+                    "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\na=crypto:1 AES_256_CM_HMAC_SHA1_80 inline:{MALFORMED_SDES_KEY}\r\na=sendrecv\r\n"
+                )
+                .into_bytes()
+                .into();
+                resp.headers
+                    .retain(|header| !matches!(header, TypedHeader::ContentLength(_)));
+                resp.headers.push(TypedHeader::ContentLength(
+                    rvoip_sip_core::types::ContentLength::new(resp.body.len() as u32),
+                ));
+                resp.headers.push(TypedHeader::ContentType(
+                    rvoip_sip_core::types::ContentType::sdp(),
+                ));
                 let bytes = Message::Response(resp).to_bytes();
                 let _ = sock_task.send_to(&bytes, from).await;
             }
         }
     });
 
-    let coord = UnifiedCoordinator::new(Config::local("alice", UAC_PORT))
+    let mut config = Config::local("alice", UAC_PORT);
+    config.sip_trace = SipTraceConfig::enabled();
+    config.offer_srtp = true;
+    config.srtp_required = true;
+    config.srtp_offered_suites = vec![CryptoSuite::AesCm256HmacSha1_80];
+    let coord = UnifiedCoordinator::new(config)
         .await
         .expect("UAC coordinator");
+    let mut events = coord.events().await.expect("UAC event stream");
     sleep(Duration::from_millis(150)).await;
 
-    let _call_id = coord
+    let call_id = coord
         .invite(
             Some("sip:alice@127.0.0.1".to_string()),
             format!("sip:bob@127.0.0.1:{UAS_PORT}"),
@@ -154,6 +190,120 @@ async fn invite_extras_survive_401_driven_auth_retry() {
         "UAS never saw 2 INVITEs (count={})",
         invite_count.load(Ordering::SeqCst)
     );
+
+    let mut auth_retry = None;
+    let mut sdes_failure = None;
+    let mut terminal_failure = None;
+    let mut ack_after_200 = false;
+    let mut trace_sequence = Vec::new();
+    timeout(Duration::from_secs(8), async {
+        while auth_retry.is_none()
+            || sdes_failure.is_none()
+            || terminal_failure.is_none()
+            || trace_sequence.len() < 4
+            || !ack_after_200
+        {
+            match events.next().await {
+                Some(Event::CallAuthRetrying {
+                    call_id: id,
+                    status_code,
+                    realm,
+                    algorithm,
+                    qop,
+                }) if id == call_id => {
+                    auth_retry = Some((status_code, realm, algorithm, qop));
+                }
+                Some(Event::SdesNegotiationFailed {
+                    call_id: id,
+                    response,
+                    diagnostic,
+                }) if id == call_id => {
+                    assert_eq!(response.status_code, 200);
+                    assert!(response
+                        .sdp
+                        .as_deref()
+                        .is_some_and(|sdp| sdp.contains(MALFORMED_SDES_KEY)));
+                    let debug = format!("{response:?} {diagnostic:?}");
+                    assert!(!debug.contains(MALFORMED_SDES_KEY));
+                    assert!(!debug.contains("a=crypto"));
+                    sdes_failure = Some(diagnostic);
+                }
+                Some(Event::CallFailed {
+                    call_id: id,
+                    status_code,
+                    reason,
+                }) if id == call_id => {
+                    terminal_failure = Some((status_code, reason));
+                }
+                Some(Event::SipTrace(trace)) if trace.session_id.as_ref() == Some(&call_id) => {
+                    let label = match (trace.direction, trace.start_line.as_str()) {
+                        (SipTraceDirection::Outbound, line) if line.starts_with("INVITE ") => {
+                            Some("INVITE")
+                        }
+                        (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 401 ") => {
+                            Some("401")
+                        }
+                        (SipTraceDirection::Inbound, line) if line.starts_with("SIP/2.0 200 ") => {
+                            Some("200")
+                        }
+                        (SipTraceDirection::Outbound, line)
+                            if line.starts_with("ACK ")
+                                && trace_sequence.last() == Some(&"200") =>
+                        {
+                            ack_after_200 = true;
+                            None
+                        }
+                        _ => None,
+                    };
+                    if let Some(label) = label {
+                        trace_sequence.push(label);
+                    }
+                }
+                Some(_) => {}
+                None => panic!("UAC event stream closed before auth observations"),
+            }
+        }
+    })
+    .await
+    .expect("auth retry and trace correlation observations");
+    assert_eq!(
+        auth_retry,
+        Some((
+            401,
+            "testrealm".to_string(),
+            DigestAlgorithm::MD5,
+            Some("auth".to_string())
+        ))
+    );
+    let sdes_failure = sdes_failure.expect("typed SDES failure observation");
+    assert_eq!(sdes_failure.stage, SdesNegotiationStage::RemoteAnswer);
+    assert_eq!(
+        sdes_failure.failure_class,
+        SdesNegotiationFailureClass::InvalidBase64
+    );
+    assert_eq!(sdes_failure.tag, 1);
+    assert_eq!(sdes_failure.suite, CryptoSuite::AesCm256HmacSha1_80);
+    assert_eq!(sdes_failure.encoded_bytes, MALFORMED_SDES_KEY.len());
+    assert_eq!(sdes_failure.padding, SdesBase64Padding::Malformed);
+    assert_eq!(sdes_failure.expected_decoded_bytes, 46);
+    assert_eq!(sdes_failure.actual_decoded_bytes, None);
+    assert_eq!(trace_sequence, ["INVITE", "401", "INVITE", "200"]);
+    assert_eq!(
+        terminal_failure.as_ref().map(|failure| failure.0),
+        Some(488)
+    );
+    assert!(terminal_failure
+        .as_ref()
+        .is_some_and(|failure| failure.1.contains("missing, invalid, or unusable SDP")));
+    assert!(ack_after_200, "malformed INVITE 2xx must be ACKed");
+
+    timeout(Duration::from_secs(2), async {
+        while ack_count.load(Ordering::SeqCst) < 1 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("UAS receives the malformed INVITE 2xx ACK");
 
     // Settle.
     sleep(Duration::from_millis(300)).await;

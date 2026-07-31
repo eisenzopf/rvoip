@@ -25,7 +25,8 @@ use crate::transaction::client::builders::ByeBuilder;
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
 use rvoip_infra_common::events::cross_crate::OutboundRequestOutcome;
-use rvoip_sip_core::{HeaderName, Host, Method, Request, Response, TypedHeader};
+use rvoip_sip_core::types::uri::Scheme;
+use rvoip_sip_core::{HeaderName, Host, Method, Request, Response, TypedHeader, Uri};
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -34,6 +35,47 @@ use tracing::{debug, error, info, warn};
 
 fn safe_operation_failure(operation: &'static str, error_class: &'static str) -> String {
     format!("operation={operation}; error_class={error_class}")
+}
+
+fn safe_uri_scheme_class(uri: &Uri) -> &'static str {
+    match uri.scheme() {
+        Scheme::Sip => "sip",
+        Scheme::Sips => "sips",
+        Scheme::Tel => "tel",
+        Scheme::Http => "http",
+        Scheme::Https => "https",
+        Scheme::Custom(_) => "custom",
+    }
+}
+
+fn safe_uri_transport_class(uri: &Uri) -> &'static str {
+    match uri.transport() {
+        Some(value) if value.eq_ignore_ascii_case("udp") => "udp",
+        Some(value) if value.eq_ignore_ascii_case("tcp") => "tcp",
+        Some(value) if value.eq_ignore_ascii_case("tls") => "tls",
+        Some(value) if value.eq_ignore_ascii_case("ws") => "ws",
+        Some(value) if value.eq_ignore_ascii_case("wss") => "wss",
+        Some(_) => "other",
+        None => "unspecified",
+    }
+}
+
+#[cfg(test)]
+mod safe_uri_diagnostic_tests {
+    use super::{safe_uri_scheme_class, safe_uri_transport_class};
+
+    #[test]
+    fn distinguishes_sips_from_sip_over_tls_without_exposing_the_uri() {
+        let sip_tls: rvoip_sip_core::Uri = "sip:private-user@private.example;transport=tls"
+            .parse()
+            .unwrap();
+        let sips: rvoip_sip_core::Uri = "sips:private-user@private.example".parse().unwrap();
+
+        assert_eq!(safe_uri_scheme_class(&sip_tls), "sip");
+        assert_eq!(safe_uri_transport_class(&sip_tls), "tls");
+        assert_eq!(safe_uri_scheme_class(&sips), "sips");
+        assert_eq!(safe_uri_transport_class(&sips), "unspecified");
+    }
 }
 
 fn safe_method_operation_failure(
@@ -6380,9 +6422,14 @@ impl DialogManager {
                         .and_then(|contact| extract_uri_from_contact(contact).ok())
                     {
                         Some(remote_target) => {
+                            let contact_scheme = safe_uri_scheme_class(&remote_target);
+                            let contact_transport = safe_uri_transport_class(&remote_target);
                             if !dialog.update_remote_target(remote_target) {
                                 warn!(
                                     dialog=%dialog_id,
+                                    contact_scheme,
+                                    contact_transport,
+                                    required_scheme = "sips",
                                     "Rejected insecure Contact target refresh for secure dialog"
                                 );
                             }

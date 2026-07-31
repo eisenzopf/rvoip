@@ -123,7 +123,8 @@ fn public_event_compatibility_variants_remain_available() {
             }
             Event::CallProgressDetailed(_)
             | Event::CallEstablishedDetailed(_)
-            | Event::CallFailedDetailed(_) => event,
+            | Event::CallFailedDetailed(_)
+            | Event::SdesNegotiationFailed { .. } => event,
             other => other,
         }
     }

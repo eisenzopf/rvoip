@@ -335,6 +335,19 @@ pub enum SrtpSuitePolicy {
     FreeSwitchCompatible,
 }
 
+/// Validation policy for Base64 key material in RFC 4568 `a=crypto` lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SdesBase64Mode {
+    /// Accept canonical Base64 and the interoperable form that omits only the
+    /// trailing `=` padding. All other malformed encodings and decoded-length
+    /// mismatches remain errors.
+    #[default]
+    Compatible,
+    /// Require the canonical RFC 4648 representation, including any trailing
+    /// `=` padding required by the selected SDES suite.
+    Strict,
+}
+
 impl SrtpSuitePolicy {
     /// Suites to advertise for this policy, in local preference order.
     pub fn suites(self) -> Vec<CryptoSuite> {
@@ -2170,6 +2183,11 @@ pub struct Config {
     /// preference.
     pub srtp_offered_suites: Vec<CryptoSuite>,
 
+    /// Base64 acceptance policy for inbound RFC 4568 SDES key material.
+    /// Outbound SDP always uses canonical padded Base64 in either mode.
+    /// Default: [`SdesBase64Mode::Compatible`].
+    pub sdes_base64_mode: SdesBase64Mode,
+
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
     ///
@@ -2659,6 +2677,7 @@ impl std::fmt::Debug for Config {
             .field("offer_srtp", &self.offer_srtp)
             .field("srtp_required", &self.srtp_required)
             .field("srtp_suite_count", &self.srtp_offered_suites.len())
+            .field("sdes_base64_mode", &self.sdes_base64_mode)
             .field(
                 "media_public_address_configured",
                 &self.media_public_addr.is_some(),
@@ -2813,6 +2832,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -2924,6 +2944,7 @@ impl Config {
             offer_srtp: false,
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
+            sdes_base64_mode: SdesBase64Mode::default(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
             media_session_capacity: None,
@@ -3183,6 +3204,14 @@ impl Config {
     /// ```
     pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
         self.srtp_offered_suites = policy.suites();
+        self
+    }
+
+    /// Select the inbound RFC 4568 SDES Base64 validation policy.
+    ///
+    /// Outbound SDP remains canonical in both modes.
+    pub fn with_sdes_base64_mode(mut self, mode: SdesBase64Mode) -> Self {
+        self.sdes_base64_mode = mode;
         self
     }
 
@@ -8555,6 +8584,7 @@ impl UnifiedCoordinator {
             config.srtp_required,
             config.srtp_offered_suites.clone(),
         );
+        media_adapter_inner.set_sdes_base64_mode(config.sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
