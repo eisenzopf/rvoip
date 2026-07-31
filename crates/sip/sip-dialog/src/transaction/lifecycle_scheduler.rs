@@ -3775,7 +3775,7 @@ mod tests {
         assert!(!tombstones.contains_key(&key));
         let retained = routes.get(&key).expect("replacement route must survive");
         match retained.value() {
-            ClientResponseRouteState::Active { route, owner } => {
+            ClientResponseRouteState::Active { route, owner, .. } => {
                 assert_eq!(route, &replacement_route);
                 assert_eq!(*owner, replacement_owner);
             }

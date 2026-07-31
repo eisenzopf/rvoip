@@ -139,7 +139,7 @@ fn session_refresh_headers(session: &SessionState) -> crate::errors::Result<Vec<
     };
     Ok(vec![
         TypedHeader::SessionExpires(SessionExpires::new(interval, Some(refresher))),
-        TypedHeader::MinSE(MinSE::new(interval.min(90).max(1))),
+        TypedHeader::MinSE(MinSE::new(interval.clamp(1, 90))),
         TypedHeader::Supported(Supported::new(vec!["timer".to_string()])),
     ])
 }
@@ -1739,13 +1739,12 @@ pub(crate) async fn execute_action(
     action: &Action,
     triggering_event: &EventType,
     session: &mut SessionState,
-    dialog_adapter: &Arc<DialogAdapter>,
-    media_adapter: &Arc<MediaAdapter>,
-    _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
+    adapters: (&Arc<DialogAdapter>, &Arc<MediaAdapter>),
     stage_claim: Option<&StageDispatchClaim>,
     mut inbound_response: Option<&mut InboundResponseStateInput>,
     invite_2xx_ack: Option<&Invite2xxAckStateInput>,
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let (dialog_adapter, media_adapter) = adapters;
     debug!("Executing action: {:?}", action);
 
     match action {
@@ -4010,6 +4009,9 @@ pub(crate) async fn execute_action(
                             header_value,
                         )
                         .await?;
+                    // Rebind before activation can flush a response that raced
+                    // the authenticated transport write.
+                    session.bind_offer_answer_transaction(transaction_id.clone())?;
                     dialog_adapter
                         .outbound_request_tracker
                         .activate(lease, transaction_id.clone())?;
@@ -4046,6 +4048,9 @@ pub(crate) async fn execute_action(
                             header_value,
                         )
                         .await?;
+                    // Rebind before activation can flush a response that raced
+                    // the authenticated transport write.
+                    session.bind_offer_answer_transaction(transaction_id.clone())?;
                     dialog_adapter
                         .outbound_request_tracker
                         .activate(lease, transaction_id.clone())?;
@@ -5460,6 +5465,39 @@ mod negotiated_audio_shape_tests {
         assert_eq!(negotiated_audio_shape("PCMA"), (8_000, 1));
         assert_eq!(negotiated_audio_shape("opus"), (48_000, 2));
         assert_eq!(negotiated_audio_shape("OPUS"), (48_000, 2));
+    }
+}
+
+#[cfg(test)]
+mod authenticated_offer_activation_order_tests {
+    #[test]
+    fn authenticated_sdp_retries_rebind_before_deferred_response_activation() {
+        let source = include_str!("actions.rs");
+        let authenticated = source
+            .split("Action::SendRequestWithAuth =>")
+            .nth(1)
+            .expect("authenticated request action");
+        for (method, next_method, send_call) in [
+            ("UPDATE", "INVITE", "send_update_with_auth_lane_owned"),
+            ("INVITE", "MESSAGE", "send_reinvite_with_auth_lane_owned"),
+        ] {
+            let branch = authenticated
+                .split(&format!("\"{method}\" => {{"))
+                .nth(1)
+                .and_then(|tail| tail.split(&format!("\"{next_method}\" => {{")).next())
+                .unwrap_or_else(|| panic!("authenticated {method} retry branch"));
+            let send = branch.find(send_call).expect("authenticated wire send");
+            let bind = branch
+                .find("bind_offer_answer_transaction")
+                .expect("pending offer transaction rebind");
+            let activate = branch
+                .find(".activate(lease, transaction_id.clone())")
+                .expect("tracked request activation");
+            assert!(
+                send < bind && bind < activate,
+                "authenticated {method} must bind the pending offer before activation can flush a deferred response"
+            );
+        }
     }
 }
 

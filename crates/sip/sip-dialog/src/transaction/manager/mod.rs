@@ -172,7 +172,7 @@ use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
@@ -225,33 +225,88 @@ use crate::transaction::{
     TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
-#[derive(Clone, Eq, Hash, PartialEq)]
-struct DelayedOfferAckAnswerKey {
-    transaction_id: TransactionKey,
-    remote_tag: Arc<str>,
+/// A forked INVITE can produce distinct successful dialogs and therefore one
+/// answer-bearing ACK per remote tag. Keep that uncommon cache explicitly
+/// bounded so a single transaction cannot turn one expiry record into
+/// unbounded retained work.
+const MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION: usize = 32;
+const MAX_DELAYED_OFFER_ACK_ANSWER_BYTES: usize = 64 * 1024;
+
+#[derive(Default)]
+struct DelayedOfferAckAnswers {
+    entries: DashMap<Arc<str>, Arc<str>>,
+    reserved_entries: AtomicUsize,
 }
 
-impl DelayedOfferAckAnswerKey {
-    fn from_response(transaction_id: &TransactionKey, response: &Response) -> Result<Self> {
-        if !response.status().is_success()
-            || TransactionKey::from_response(response).as_ref() != Some(transaction_id)
-        {
-            return Err(Error::Other(
-                "delayed-offer ACK requires the exact successful INVITE response".into(),
-            ));
-        }
-        let remote_tag = response
-            .to()
-            .and_then(|to| to.tag())
-            .filter(|tag| !tag.is_empty())
-            .ok_or_else(|| {
-                Error::Other("delayed-offer ACK response has no remote dialog tag".into())
-            })?;
-        Ok(Self {
-            transaction_id: transaction_id.clone(),
-            remote_tag: Arc::from(remote_tag),
-        })
+impl DelayedOfferAckAnswers {
+    fn get(&self, remote_tag: &str) -> Option<Arc<str>> {
+        self.entries
+            .get(remote_tag)
+            .map(|entry| Arc::clone(entry.value()))
     }
+
+    fn insert_exact(&self, remote_tag: Arc<str>, answer: &str) -> Result<()> {
+        if answer.len() > MAX_DELAYED_OFFER_ACK_ANSWER_BYTES {
+            return Err(Error::Other(format!(
+                "delayed-offer ACK SDP exceeds the {}-byte retention limit",
+                MAX_DELAYED_OFFER_ACK_ANSWER_BYTES
+            )));
+        }
+        if let Some(existing) = self.entries.get(remote_tag.as_ref()) {
+            return if existing.value().as_ref() == answer {
+                Ok(())
+            } else {
+                Err(Error::Other(
+                    "delayed-offer ACK answer changed for the same INVITE transaction".into(),
+                ))
+            };
+        }
+        self.reserved_entries
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION).then_some(current + 1)
+            })
+            .map_err(|_| {
+                Error::Other(format!(
+                    "delayed-offer ACK fork limit of {} answers was reached",
+                    MAX_DELAYED_OFFER_ACK_ANSWERS_PER_TRANSACTION
+                ))
+            })?;
+        match self.entries.entry(remote_tag) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(Arc::from(answer));
+                Ok(())
+            }
+            dashmap::mapref::entry::Entry::Occupied(entry) => {
+                self.reserved_entries.fetch_sub(1, Ordering::AcqRel);
+                if entry.get().as_ref() == answer {
+                    Ok(())
+                } else {
+                    Err(Error::Other(
+                        "delayed-offer ACK answer changed for the same INVITE transaction".into(),
+                    ))
+                }
+            }
+        }
+    }
+}
+
+fn delayed_offer_ack_remote_tag(
+    transaction_id: &TransactionKey,
+    response: &Response,
+) -> Result<Arc<str>> {
+    if !response.status().is_success()
+        || TransactionKey::from_response(response).as_ref() != Some(transaction_id)
+    {
+        return Err(Error::Other(
+            "delayed-offer ACK requires the exact successful INVITE response".into(),
+        ));
+    }
+    response
+        .to()
+        .and_then(|to| to.tag())
+        .filter(|tag| !tag.is_empty())
+        .map(Arc::from)
+        .ok_or_else(|| Error::Other("delayed-offer ACK response has no remote dialog tag".into()))
 }
 
 /// Internal first-write classification for one exact CANCEL generation.
@@ -829,7 +884,6 @@ struct RetainedClientDeadlineContext {
     retired_client_deadlines: std::sync::Weak<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
     retired_client_transaction_capacity: Arc<AtomicUsize>,
     retired_client_transaction_count: std::sync::Weak<AtomicUsize>,
-    delayed_offer_ack_answers: std::sync::Weak<DashMap<DelayedOfferAckAnswerKey, Arc<str>>>,
 }
 
 struct RetainedClientDeadlineBatch {
@@ -849,14 +903,12 @@ fn process_retained_client_deadline_batch(
         Some(transaction_destinations),
         Some(retired_client_deadlines),
         Some(retired_client_transaction_count),
-        Some(delayed_offer_ack_answers),
     ) = (
         context.client_completions.upgrade(),
         context.client_completion_deadlines.upgrade(),
         context.transaction_destinations.upgrade(),
         context.retired_client_deadlines.upgrade(),
         context.retired_client_transaction_count.upgrade(),
-        context.delayed_offer_ack_answers.upgrade(),
     )
     else {
         return RetainedClientDeadlineBatch {
@@ -914,8 +966,6 @@ fn process_retained_client_deadline_batch(
             })
             .is_some()
         {
-            delayed_offer_ack_answers
-                .retain(|key, _| &key.transaction_id != deadline.transaction_id.as_ref());
             let _ = retired_client_transaction_count.fetch_update(
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -989,8 +1039,8 @@ pub(crate) enum ClientResponseRouteState {
     Active {
         route: TransportRoute,
         /// Allocation identity of the client transaction data that installed
-        /// this route. Compact Timer K cleanup retains this word-sized proof
-        /// rather than a second complete `TransportRoute`.
+        /// this route. The retained completion's admission owner remembers
+        /// the same identity, so retirement does not duplicate this word.
         owner: usize,
     },
     Retired(RetiredClientTransaction),
@@ -1018,6 +1068,24 @@ impl ClientResponseRouteState {
             Self::Retired(retired) => Some(retired),
         }
     }
+
+    fn response_route_owner(&self) -> usize {
+        match self {
+            Self::Active { owner, .. } => *owner,
+            Self::Retired(retired) => retired
+                .completion
+                .response_route_owner()
+                .expect("retired client route retains its response-route owner"),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ClientResponseRouteGeneration {
+    owner: usize,
+    route: TransportRoute,
+    admission_owner: TransactionAdmissionOwner,
+    delayed_offer_ack_answers: Option<Arc<DelayedOfferAckAnswers>>,
 }
 
 #[cfg(test)]
@@ -1806,6 +1874,8 @@ impl TransactionAdmissionRegistry {
                         registry: Arc::clone(self),
                         key: key.clone(),
                         generation,
+                        response_route_owner: AtomicUsize::new(0),
+                        delayed_offer_ack_answers: OnceLock::new(),
                     }),
                 })
             }
@@ -1817,6 +1887,8 @@ struct TransactionAdmissionOwnerInner {
     registry: Arc<TransactionAdmissionRegistry>,
     key: TransactionKey,
     generation: u64,
+    response_route_owner: AtomicUsize,
+    delayed_offer_ack_answers: OnceLock<Arc<DelayedOfferAckAnswers>>,
 }
 
 impl Drop for TransactionAdmissionOwnerInner {
@@ -1857,6 +1929,54 @@ pub struct TransactionAdmissionOwner {
 impl TransactionAdmissionOwner {
     pub(crate) fn generation(&self) -> u64 {
         self._inner.generation
+    }
+
+    fn install_response_route_owner(&self, owner: usize) {
+        assert_ne!(
+            owner, 0,
+            "response-route allocation identity must be nonzero"
+        );
+        match self._inner.response_route_owner.compare_exchange(
+            0,
+            owner,
+            Ordering::Release,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {}
+            Err(current) => assert_eq!(
+                current, owner,
+                "transaction admission generation cannot change response-route owner"
+            ),
+        }
+    }
+
+    pub(crate) fn response_route_owner(&self) -> Option<usize> {
+        match self._inner.response_route_owner.load(Ordering::Acquire) {
+            0 => None,
+            owner => Some(owner),
+        }
+    }
+
+    fn owns_transaction_generation(&self, transaction_id: &TransactionKey) -> bool {
+        self._inner.key == *transaction_id
+            && self
+                ._inner
+                .registry
+                .entries
+                .get(transaction_id)
+                .is_some_and(|generation| *generation == self._inner.generation)
+    }
+
+    fn delayed_offer_ack_answers(&self) -> Option<Arc<DelayedOfferAckAnswers>> {
+        self._inner.delayed_offer_ack_answers.get().cloned()
+    }
+
+    fn ensure_delayed_offer_ack_answers(&self) -> Arc<DelayedOfferAckAnswers> {
+        Arc::clone(
+            self._inner
+                .delayed_offer_ack_answers
+                .get_or_init(|| Arc::new(DelayedOfferAckAnswers::default())),
+        )
     }
 }
 
@@ -1980,8 +2100,6 @@ pub struct TransactionManager {
     /// retransmitted 2xx responses and retain the request template needed to
     /// ACK them without keeping the transaction runner alive.
     transaction_destinations: Arc<DashMap<Arc<TransactionKey>, ClientResponseRouteState>>,
-    /// Exact SDP answer used for delayed-offer ACK retransmissions.
-    delayed_offer_ack_answers: Arc<DashMap<DelayedOfferAckAnswerKey, Arc<str>>>,
     retired_client_transaction_capacity: Arc<AtomicUsize>,
     retired_client_transaction_count: Arc<AtomicUsize>,
     retired_client_deadlines: Arc<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
@@ -2675,7 +2793,6 @@ impl TransactionManager {
             retired_client_transaction_count: Arc::downgrade(
                 &self.retired_client_transaction_count,
             ),
-            delayed_offer_ack_answers: Arc::downgrade(&self.delayed_offer_ack_answers),
         }
     }
 
@@ -3434,8 +3551,40 @@ impl TransactionManager {
         let mut retained_invite_response_records = 0_usize;
         let mut retired_completion_wire_bytes = 0_usize;
         let mut retired_shared_wire_records = 0_usize;
+        let mut delayed_offer_ack_answer_records = 0_usize;
+        let mut delayed_offer_ack_remote_tag_bytes = 0_usize;
+        let mut delayed_offer_ack_answer_bytes = 0_usize;
         for entry in self.transaction_destinations.iter() {
             retired_route_key_bytes += transaction_key_payload_bytes(entry.key());
+            let route_owner = entry.value().response_route_owner();
+            let admission_owner = entry
+                .value()
+                .retired()
+                .and_then(|retired| retired.completion.admission_owner())
+                .or_else(|| {
+                    self.client_transactions
+                        .get(entry.key().as_ref())
+                        .and_then(|transaction| {
+                            (Arc::as_ptr(transaction.value().data()) as usize == route_owner)
+                                .then(|| transaction.value().data().transaction_admission_owner())
+                                .flatten()
+                        })
+                })
+                .or_else(|| {
+                    self.compact_non_invite_tombstones
+                        .get(entry.key().as_ref())
+                        .filter(|tombstone| tombstone.value().is_client())
+                        .and_then(|tombstone| tombstone.value().admission_owner())
+                });
+            if let Some(answers) =
+                admission_owner.and_then(|owner| owner.delayed_offer_ack_answers())
+            {
+                for answer in answers.entries.iter() {
+                    delayed_offer_ack_answer_records += 1;
+                    delayed_offer_ack_remote_tag_bytes += answer.key().len();
+                    delayed_offer_ack_answer_bytes += answer.value().len();
+                }
+            }
             if let Some(retired) = entry.value().retired() {
                 retained_invite_records += 1;
                 retained_invite_key_bytes += transaction_key_payload_bytes(entry.key());
@@ -3627,6 +3776,9 @@ impl TransactionManager {
                     "map_transaction_key_payload_bytes": retired_route_key_bytes,
                     "request_wire_bytes": retired_client_counts.request_wire_bytes,
                     "completion_wire_bytes": retired_completion_wire_bytes,
+                    "delayed_offer_ack_answer_records": delayed_offer_ack_answer_records,
+                    "delayed_offer_ack_remote_tag_bytes": delayed_offer_ack_remote_tag_bytes,
+                    "delayed_offer_ack_answer_bytes": delayed_offer_ack_answer_bytes,
                     "shared_request_response_wire_records": retired_shared_wire_records,
                     "deadline_records": retired_deadline_count,
                     "deadline_transaction_key_payload_bytes": retired_deadline_key_bytes,
@@ -3915,7 +4067,6 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
-            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4117,7 +4268,6 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
-            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4572,7 +4722,6 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
-            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4754,7 +4903,6 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
-            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4901,7 +5049,6 @@ impl TransactionManager {
             timer_settings,
             running,
             transaction_destinations,
-            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -5690,6 +5837,94 @@ impl TransactionManager {
         }
     }
 
+    fn client_response_route_generation(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<ClientResponseRouteGeneration> {
+        loop {
+            let (owner, route, retained_owner) =
+                self.with_client_response_route_state(transaction_id, |state| {
+                    (
+                        state.response_route_owner(),
+                        state.route().clone(),
+                        state
+                            .retired()
+                            .and_then(|retired| retired.completion.admission_owner()),
+                    )
+                })?;
+            let admission_owner = if let Some(owner) = retained_owner {
+                owner
+            } else {
+                let active_owner =
+                    self.client_transactions
+                        .get(transaction_id)
+                        .and_then(|transaction| {
+                            (Arc::as_ptr(transaction.value().data()) as usize == owner)
+                                .then(|| transaction.value().data().transaction_admission_owner())
+                                .flatten()
+                        });
+                active_owner.or_else(|| {
+                    self.compact_non_invite_tombstones
+                        .get(transaction_id)
+                        .filter(|tombstone| tombstone.value().is_client())
+                        .and_then(|tombstone| tombstone.value().admission_owner())
+                })?
+            };
+            if admission_owner.response_route_owner() != Some(owner) {
+                continue;
+            }
+            let generation = ClientResponseRouteGeneration {
+                owner,
+                route,
+                delayed_offer_ack_answers: admission_owner.delayed_offer_ack_answers(),
+                admission_owner,
+            };
+            if self.client_response_route_generation_matches(transaction_id, &generation) {
+                return Some(generation);
+            }
+        }
+    }
+
+    fn ensure_delayed_offer_ack_answers(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Result<ClientResponseRouteGeneration> {
+        loop {
+            let mut generation = self
+                .client_response_route_generation(transaction_id)
+                .ok_or_else(|| {
+                    Error::transaction_not_found(
+                        transaction_id.clone(),
+                        "delayed-offer ACK route lookup failed",
+                    )
+                })?;
+            generation.delayed_offer_ack_answers = Some(
+                generation
+                    .admission_owner
+                    .ensure_delayed_offer_ack_answers(),
+            );
+            if self.client_response_route_generation_matches(transaction_id, &generation) {
+                return Ok(generation);
+            }
+        }
+    }
+
+    fn client_response_route_generation_matches(
+        &self,
+        transaction_id: &TransactionKey,
+        expected: &ClientResponseRouteGeneration,
+    ) -> bool {
+        expected
+            .admission_owner
+            .owns_transaction_generation(transaction_id)
+            && expected.admission_owner.response_route_owner() == Some(expected.owner)
+            && self
+                .with_client_response_route_state(transaction_id, |state| {
+                    state.response_route_owner() == expected.owner
+                })
+                .unwrap_or(false)
+    }
+
     fn retired_client_request_wire(&self, transaction_id: &TransactionKey) -> Option<bytes::Bytes> {
         self.with_client_response_route_state(transaction_id, |state| {
             state.retired().map(|retired| retired.request_wire.clone())
@@ -5974,6 +6209,7 @@ impl TransactionManager {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .next_version(expires_at);
+        let response_route_owner = Arc::as_ptr(transaction.data()) as usize;
         let retired = RetiredClientTransaction::new(
             transaction.data().request.as_ref(),
             transaction.data().completion.as_ref(),
@@ -5996,7 +6232,11 @@ impl TransactionManager {
             .load(Ordering::Acquire);
         let previous_wake = deadlines.next_wake_at(now, retired_capacity);
         if let Some(mut state) = self.transaction_destinations.get_mut(transaction_id) {
-            if state.is_active() {
+            if matches!(
+                state.value(),
+                ClientResponseRouteState::Active { owner, .. }
+                    if *owner == response_route_owner
+            ) {
                 let shared_transaction_id = Arc::clone(state.key());
                 *state = ClientResponseRouteState::Retired(retired);
                 deadlines.schedule(shared_transaction_id, expires_at, deadline_version);
@@ -6620,7 +6860,6 @@ impl TransactionManager {
             scheduler.clear();
         }
         self.transaction_destinations.clear();
-        self.delayed_offer_ack_answers.clear();
         self.compact_non_invite_tombstones.clear();
         self.retired_client_deadlines
             .lock()
@@ -7431,6 +7670,7 @@ impl TransactionManager {
         let shared_retention_key = Arc::new(key.clone());
         self.install_client_completion(Arc::clone(&shared_retention_key), &transaction);
         let response_route_owner = Arc::as_ptr(transaction.data()) as usize;
+        returned_admission_owner.install_response_route_owner(response_route_owner);
         let response_routes = Arc::downgrade(&self.transaction_destinations);
         let response_route_key = Arc::clone(&shared_retention_key);
         transaction
@@ -7443,7 +7683,7 @@ impl TransactionManager {
                     return false;
                 };
                 match state.value_mut() {
-                    ClientResponseRouteState::Active { route, owner }
+                    ClientResponseRouteState::Active { route, owner, .. }
                         if *owner == response_route_owner =>
                     {
                         *route = prepared_route.clone();
@@ -7487,11 +7727,19 @@ impl TransactionManager {
             .admission_lifecycle
             .try_enter_existing()
             .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
-        let answer_key = DelayedOfferAckAnswerKey::from_response(invite_tx_id, response)?;
-        let cached_answer = self
+        let remote_tag = delayed_offer_ack_remote_tag(invite_tx_id, response)?;
+        let generation = self
+            .client_response_route_generation(invite_tx_id)
+            .ok_or_else(|| {
+                Error::transaction_not_found(
+                    invite_tx_id.clone(),
+                    "delayed-offer ACK route lookup failed",
+                )
+            })?;
+        let cached_answer = generation
             .delayed_offer_ack_answers
-            .get(&answer_key)
-            .map(|entry| Arc::clone(entry.value()));
+            .as_ref()
+            .and_then(|answers| answers.get(remote_tag.as_ref()));
         tokio::select! {
             biased;
             _ = self.operation_cancellation.cancelled() => {
@@ -7501,6 +7749,7 @@ impl TransactionManager {
                 invite_tx_id,
                 response,
                 cached_answer.as_deref(),
+                &generation,
             ) => result,
         }
     }
@@ -7522,7 +7771,8 @@ impl TransactionManager {
             .admission_lifecycle
             .try_enter_existing()
             .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
-        let answer_key = DelayedOfferAckAnswerKey::from_response(invite_tx_id, response)?;
+        let remote_tag = delayed_offer_ack_remote_tag(invite_tx_id, response)?;
+        let generation = self.ensure_delayed_offer_ack_answers(invite_tx_id)?;
         let prepared = tokio::select! {
             biased;
             _ = self.operation_cancellation.cancelled() => {
@@ -7532,30 +7782,21 @@ impl TransactionManager {
                 invite_tx_id,
                 response,
                 Some(sdp_answer),
+                &generation,
             ) => result?,
         };
-        let retained_answer: Arc<str> = Arc::from(sdp_answer);
-        match self.delayed_offer_ack_answers.entry(answer_key.clone()) {
-            dashmap::mapref::entry::Entry::Vacant(entry) => {
-                entry.insert(Arc::clone(&retained_answer));
-            }
-            dashmap::mapref::entry::Entry::Occupied(entry)
-                if entry.get().as_ref() == sdp_answer => {}
-            dashmap::mapref::entry::Entry::Occupied(_) => {
-                return Err(Error::Other(
-                    "delayed-offer ACK answer changed for the same INVITE transaction".into(),
-                ));
-            }
-        }
-        // The retained INVITE response route owns the deadline that removes
-        // this cached answer. Revalidate after insertion so expiry racing the
-        // preparation cannot leave an answer without a cleanup owner.
-        if self.transaction_route(invite_tx_id).await.is_none() {
-            self.delayed_offer_ack_answers
-                .remove_if(&answer_key, |_, answer| answer.as_ref() == sdp_answer);
+        let answers = generation
+            .delayed_offer_ack_answers
+            .as_ref()
+            .expect("delayed-offer answer cache was initialized");
+        answers.insert_exact(remote_tag, sdp_answer)?;
+        // Revalidate the exact route allocation, not merely the bare SIP
+        // transaction key. A same-key replacement must never inherit or send
+        // the preceding generation's delayed-offer answer.
+        if !self.client_response_route_generation_matches(invite_tx_id, &generation) {
             return Err(Error::transaction_not_found(
                 invite_tx_id.clone(),
-                "delayed-offer ACK route expired before send",
+                "delayed-offer ACK route generation changed before send",
             ));
         }
         tokio::select! {
@@ -7572,9 +7813,10 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         response: &Response,
         sdp_answer: Option<&str>,
+        generation: &ClientResponseRouteGeneration,
     ) -> Result<()> {
         let prepared = self
-            .prepare_ack_for_2xx_within_operation(invite_tx_id, response, sdp_answer)
+            .prepare_ack_for_2xx_within_operation(invite_tx_id, response, sdp_answer, generation)
             .await?;
         self.send_prepared_ack_for_2xx_within_operation(prepared)
             .await
@@ -7585,6 +7827,7 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         response: &Response,
         sdp_answer: Option<&str>,
+        generation: &ClientResponseRouteGeneration,
     ) -> Result<(Request, TransportRoute)> {
         if !response.status().is_success()
             || TransactionKey::from_response(response).as_ref() != Some(invite_tx_id)
@@ -7610,9 +7853,13 @@ impl TransactionManager {
             ));
             ack_request.body = bytes::Bytes::copy_from_slice(sdp_answer.as_bytes());
         }
-        let original_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
-            Error::transaction_not_found(invite_tx_id.clone(), "ACK route lookup failed")
-        })?;
+        if !self.client_response_route_generation_matches(invite_tx_id, generation) {
+            return Err(Error::transaction_not_found(
+                invite_tx_id.clone(),
+                "ACK route generation changed during preparation",
+            ));
+        }
+        let original_route = generation.route.clone();
 
         // ACK follows the established dialog route set: top Route if present,
         // otherwise the remote target in the Contact-derived Request-URI.

@@ -179,9 +179,11 @@ impl RegistrarService {
 
     /// Create a new registrar service for B2BUA mode
     pub async fn new_b2bua() -> Result<Self> {
-        let mut config = RegistrarConfig::default();
-        config.auto_buddy_lists = true;
-        config.default_presence_enabled = true;
+        let config = RegistrarConfig {
+            auto_buddy_lists: true,
+            default_presence_enabled: true,
+            ..RegistrarConfig::default()
+        };
 
         Self::new_with_mode(ServiceMode::B2BUA, config).await
     }
@@ -520,10 +522,10 @@ impl RegistrarService {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         replay.sweep(now);
-        if !replay
+        if replay
             .nonces
             .get(nonce)
-            .is_some_and(|issued| issued.expires_at > now)
+            .is_none_or(|issued| issued.expires_at <= now)
         {
             return false;
         }

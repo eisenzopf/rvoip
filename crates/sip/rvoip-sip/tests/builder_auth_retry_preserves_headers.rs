@@ -12,7 +12,8 @@
 //! 3. The retry INVITE carries the **same** `X-Trace: <id>` plus an
 //!    `Authorization` header (the credentialed digest).
 //! 4. The auth selection and all four wire legs are correlated to the call.
-//! 5. The deliberately malformed bodyless 200 is ACKed and fails terminally.
+//! 5. The deliberately malformed 200 is ACKed and remains observable even
+//!    when its post-commit BYE cannot be dispatched.
 //!
 //! Closes the F1 stash-preservation contract: §7.3 invariant #2
 //! says auth retry re-reads the same `Arc<XxxRequestOptions>`, never
@@ -30,8 +31,8 @@ use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
 use rvoip_sip::{
-    DigestAlgorithm, Event, SdesBase64Padding, SdesNegotiationFailureClass, SdesNegotiationStage,
-    SipTraceConfig, SipTraceDirection,
+    CallState, DigestAlgorithm, Event, SdesBase64Padding, SdesNegotiationFailureClass,
+    SdesNegotiationStage, SipTraceConfig, SipTraceDirection,
 };
 
 use rvoip_sip_core::parser::parse_message;
@@ -44,25 +45,24 @@ use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
 const UAS_PORT: u16 = 35200;
 const UAC_PORT: u16 = 35201;
+const SUCCESS_UAS_PORT: u16 = 35202;
+const SUCCESS_UAC_PORT: u16 = 35203;
 const TRACE_HEADER_NAME: &str = "X-Trace";
 const TRACE_HEADER_VALUE: &str = "trace-cafe-babe";
 const MALFORMED_SDES_KEY: &str = "not+base64=inside";
 
-/// Regression: this must complete on Tokio's default worker stack. The
-/// response-to-auth-retry path must not require `RUST_MIN_STACK` or a custom
-/// runtime `thread_stack_size`.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn invite_extras_survive_401_driven_auth_retry() {
+async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_before_wire: bool) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let uas_addr = format!("127.0.0.1:{UAS_PORT}");
+    let uas_addr = format!("127.0.0.1:{uas_port}");
     let sock = Arc::new(UdpSocket::bind(&uas_addr).await.expect("auth UAS bind"));
 
     let invite_count = Arc::new(AtomicU32::new(0));
     let ack_count = Arc::new(AtomicU32::new(0));
+    let bye_count = Arc::new(AtomicU32::new(0));
     // For each captured INVITE, record:
     // (has_x_trace, x_trace_value, has_authorization)
     let invites_seen = Arc::new(Mutex::new(Vec::<(bool, Option<String>, bool)>::new()));
@@ -70,6 +70,7 @@ async fn invite_extras_survive_401_driven_auth_retry() {
     let sock_task = sock.clone();
     let count_task = invite_count.clone();
     let ack_count_task = ack_count.clone();
+    let bye_count_task = bye_count.clone();
     let captured_task = invites_seen.clone();
     let uas_handle = tokio::spawn(async move {
         let mut buf = vec![0u8; 8192];
@@ -86,6 +87,14 @@ async fn invite_extras_survive_401_driven_auth_retry() {
                 Message::Request(r) if r.method() == Method::Invite => r,
                 Message::Request(r) if r.method() == Method::Ack => {
                     ack_count_task.fetch_add(1, Ordering::SeqCst);
+                    continue;
+                }
+                Message::Request(r) if r.method() == Method::Bye => {
+                    bye_count_task.fetch_add(1, Ordering::SeqCst);
+                    let response = create_response(&r, StatusCode::Ok);
+                    let _ = sock_task
+                        .send_to(&Message::Response(response).to_bytes(), from)
+                        .await;
                     continue;
                 }
                 _ => continue,
@@ -127,9 +136,18 @@ async fn invite_extras_survive_401_driven_auth_retry() {
                 {
                     to.set_tag("auth-sdes-uastag");
                 }
-                if let Some(contact) = request.header(&HeaderName::Contact) {
-                    resp.headers.push(contact.clone());
-                }
+                resp.headers.push(TypedHeader::Other(
+                    HeaderName::Contact,
+                    // ACK uses the authenticated INVITE's UDP route, while
+                    // the confirmed-dialog BYE must honor this target's TCP
+                    // transport parameter. The UDP-only fixture therefore
+                    // injects a deterministic post-commit BYE failure.
+                    HeaderValue::Raw(if fail_bye_before_wire {
+                        format!("<sip:bob@127.0.0.1:{uas_port};transport=tcp>").into_bytes()
+                    } else {
+                        format!("<sip:bob@127.0.0.1:{uas_port};transport=udp>").into_bytes()
+                    }),
+                ));
                 resp.body = format!(
                     "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 40000 RTP/SAVP 0\r\na=rtpmap:0 PCMU/8000\r\na=crypto:1 AES_256_CM_HMAC_SHA1_80 inline:{MALFORMED_SDES_KEY}\r\na=sendrecv\r\n"
                 )
@@ -145,11 +163,16 @@ async fn invite_extras_survive_401_driven_auth_retry() {
                 ));
                 let bytes = Message::Response(resp).to_bytes();
                 let _ = sock_task.send_to(&bytes, from).await;
+                let retransmit_socket = Arc::clone(&sock_task);
+                tokio::spawn(async move {
+                    sleep(Duration::from_millis(100)).await;
+                    let _ = retransmit_socket.send_to(&bytes, from).await;
+                });
             }
         }
     });
 
-    let mut config = Config::local("alice", UAC_PORT);
+    let mut config = Config::local("alice", uac_port);
     config.sip_trace = SipTraceConfig::enabled();
     config.offer_srtp = true;
     config.srtp_required = true;
@@ -163,7 +186,7 @@ async fn invite_extras_survive_401_driven_auth_retry() {
     let call_id = coord
         .invite(
             Some("sip:alice@127.0.0.1".to_string()),
-            format!("sip:bob@127.0.0.1:{UAS_PORT}"),
+            format!("sip:bob@127.0.0.1:{uas_port}"),
         )
         .with_credentials(Credentials::new("alice", "password").with_realm("testrealm"))
         .with_raw_header(
@@ -233,7 +256,17 @@ async fn invite_extras_survive_401_driven_auth_retry() {
                     status_code,
                     reason,
                 }) if id == call_id => {
+                    let committed = coord.get_state(&id).await;
+                    assert!(
+                        committed
+                            .as_ref()
+                            .map_or(true, |state| !state.is_in_progress()),
+                        "CallFailed must be published only after terminal state commit: {committed:?}"
+                    );
                     terminal_failure = Some((status_code, reason));
+                }
+                Some(Event::CallEnded { call_id: id, .. }) if id == call_id => {
+                    panic!("initial negotiation failure emitted contradictory CallEnded")
                 }
                 Some(Event::SipTrace(trace)) if trace.session_id.as_ref() == Some(&call_id) => {
                     let label = match (trace.direction, trace.start_line.as_str()) {
@@ -298,12 +331,55 @@ async fn invite_extras_survive_401_driven_auth_retry() {
     assert!(ack_after_200, "malformed INVITE 2xx must be ACKed");
 
     timeout(Duration::from_secs(2), async {
-        while ack_count.load(Ordering::SeqCst) < 1 {
+        while ack_count.load(Ordering::SeqCst) < 2 {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("UAS receives the malformed INVITE 2xx ACK");
+    .expect("UAS receives retransmission ACKs despite terminal BYE failure");
+    if fail_bye_before_wire {
+        assert_eq!(
+            bye_count.load(Ordering::SeqCst),
+            0,
+            "TCP-target BYE unexpectedly reached the UDP-only fixture"
+        );
+    } else {
+        timeout(Duration::from_secs(2), async {
+            while bye_count.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("successful negotiation-failure BYE reached the UAS");
+        assert_eq!(bye_count.load(Ordering::SeqCst), 1);
+    }
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match coord.get_state(&call_id).await {
+                Err(_) => break,
+                Ok(CallState::Terminating) => sleep(Duration::from_millis(10)).await,
+                Ok(state) => panic!("unexpected post-failure state: {state:?}"),
+            }
+        }
+    })
+    .await
+    .expect("negotiation-failure BYE outcome retires the exact session");
+    let contradictory_terminal = timeout(Duration::from_millis(200), async {
+        loop {
+            match events.next().await {
+                Some(Event::CallEnded { call_id: id, .. }) if id == call_id => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or(false);
+    assert!(
+        !contradictory_terminal,
+        "initial negotiation failure emitted both CallFailed and CallEnded"
+    );
 
     // Settle.
     sleep(Duration::from_millis(300)).await;
@@ -352,4 +428,17 @@ async fn invite_extras_survive_401_driven_auth_retry() {
     );
 
     uas_handle.abort();
+}
+
+/// Regression: this must complete on Tokio's default worker stack. The
+/// response-to-auth-retry path must not require `RUST_MIN_STACK` or a custom
+/// runtime `thread_stack_size`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn invite_extras_survive_401_driven_auth_retry() {
+    run_invite_extras_auth_retry(UAS_PORT, UAC_PORT, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn successful_negotiation_failure_bye_preserves_single_terminal_event() {
+    run_invite_extras_auth_retry(SUCCESS_UAS_PORT, SUCCESS_UAC_PORT, false).await;
 }

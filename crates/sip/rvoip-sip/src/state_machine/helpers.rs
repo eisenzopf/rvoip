@@ -532,7 +532,7 @@ impl StateMachineHelpers {
         Ok(self
             .state_machine
             .store
-            .with_session(session_id, |session| session.call_state.clone())?)
+            .with_session(session_id, |session| session.call_state)?)
     }
 
     /// Read call state only from the captured exact lifetime.
@@ -544,8 +544,7 @@ impl StateMachineHelpers {
             .state_machine
             .store
             .get_session_snapshot_exact(handle)?
-            .call_state
-            .clone())
+            .call_state)
     }
 
     /// Return the codec negotiated for one exact live session.

@@ -34,6 +34,7 @@ const TRACE_HEADER_NAME: &str = "X-Trace";
 const BYE_TRACE_VALUE: &str = "trace-bye-proxy-auth";
 const REFER_TRACE_VALUE: &str = "trace-refer-proxy-auth";
 const UPDATE_TRACE_VALUE: &str = "trace-update-auth";
+const REINVITE_TRACE_VALUE: &str = "trace-reinvite-auth";
 const NOTIFY_TRACE_VALUE: &str = "trace-notify-auth";
 const INFO_TRACE_VALUE: &str = "trace-info-auth-int";
 const INFO_BODY: &[u8] = b"binary-info:\xff\x00\xfe";
@@ -50,6 +51,7 @@ enum ChallengedMethod {
     Bye,
     Refer,
     Update,
+    Reinvite,
     Notify,
     Info,
 }
@@ -60,6 +62,7 @@ impl ChallengedMethod {
             Self::Bye => Method::Bye,
             Self::Refer => Method::Refer,
             Self::Update => Method::Update,
+            Self::Reinvite => Method::Invite,
             Self::Notify => Method::Notify,
             Self::Info => Method::Info,
         }
@@ -70,6 +73,7 @@ impl ChallengedMethod {
             Self::Bye => "BYE",
             Self::Refer => "REFER",
             Self::Update => "UPDATE",
+            Self::Reinvite => "INVITE",
             Self::Notify => "NOTIFY",
             Self::Info => "INFO",
         }
@@ -83,6 +87,8 @@ impl ChallengedMethod {
             (Self::Refer, ChallengeKind::Proxy407) => "refer-407-nonce",
             (Self::Update, ChallengeKind::Origin401) => "update-401-nonce",
             (Self::Update, ChallengeKind::Proxy407) => "update-407-nonce",
+            (Self::Reinvite, ChallengeKind::Origin401) => "reinvite-401-nonce",
+            (Self::Reinvite, ChallengeKind::Proxy407) => "reinvite-407-nonce",
             (Self::Notify, ChallengeKind::Origin401) => "notify-401-nonce",
             (Self::Notify, ChallengeKind::Proxy407) => "notify-407-nonce",
             (Self::Info, ChallengeKind::Origin401) => "info-401-nonce",
@@ -90,6 +96,7 @@ impl ChallengedMethod {
             (Self::Bye, ChallengeKind::Origin401AuthInt) => "bye-auth-int-nonce",
             (Self::Refer, ChallengeKind::Origin401AuthInt) => "refer-auth-int-nonce",
             (Self::Update, ChallengeKind::Origin401AuthInt) => "update-auth-int-nonce",
+            (Self::Reinvite, ChallengeKind::Origin401AuthInt) => "reinvite-auth-int-nonce",
             (Self::Notify, ChallengeKind::Origin401AuthInt) => "notify-auth-int-nonce",
             (Self::Info, ChallengeKind::Origin401AuthInt) => "info-auth-int-nonce",
         }
@@ -98,7 +105,7 @@ impl ChallengedMethod {
     fn auth_int_body(self) -> &'static [u8] {
         match self {
             Self::Refer | Self::Bye => b"",
-            Self::Update => UPDATE_SDP.as_bytes(),
+            Self::Update | Self::Reinvite => UPDATE_SDP.as_bytes(),
             Self::Notify => b"<presence/>",
             Self::Info => INFO_BODY,
         }
@@ -186,6 +193,28 @@ async fn update_407_retry_uses_proxy_authorization() {
         36182,
         36183,
         ChallengedMethod::Update,
+        ChallengeKind::Proxy407,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reinvite_401_retry_commits_the_authenticated_answer() {
+    run_in_dialog_auth_retry(
+        36192,
+        36193,
+        ChallengedMethod::Reinvite,
+        ChallengeKind::Origin401,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reinvite_407_retry_commits_the_authenticated_answer() {
+    run_in_dialog_auth_retry(
+        36194,
+        36195,
+        ChallengedMethod::Reinvite,
         ChallengeKind::Proxy407,
     )
     .await;
@@ -290,6 +319,19 @@ async fn run_in_dialog_auth_retry(
                 .await
                 .expect("update.send()");
         }
+        ChallengedMethod::Reinvite => {
+            coord
+                .reinvite(&call_id)
+                .with_sdp(UPDATE_SDP)
+                .with_raw_header(
+                    HeaderName::Other(TRACE_HEADER_NAME.to_string()),
+                    REINVITE_TRACE_VALUE,
+                )
+                .expect("X-Trace on re-INVITE")
+                .send()
+                .await
+                .expect("reinvite.send()");
+        }
         ChallengedMethod::Notify => {
             coord
                 .notify(&call_id, "presence")
@@ -337,6 +379,44 @@ async fn run_in_dialog_auth_retry(
         captures[1].cseq
     );
     assert_retry_request(&captures[1], method, challenge_kind, uas_port);
+
+    if matches!(
+        method,
+        ChallengedMethod::Update | ChallengedMethod::Reinvite
+    ) {
+        // The authenticated 2xx answer must commit and release the pending
+        // offer. A second offer is a public black-box proof that the retry's
+        // new transaction became the exact pending owner and was cleared.
+        timeout(Duration::from_secs(5), async {
+            loop {
+                let sent = match method {
+                    ChallengedMethod::Update => {
+                        coord.update(&call_id).with_sdp(UPDATE_SDP).send().await
+                    }
+                    ChallengedMethod::Reinvite => {
+                        coord.reinvite(&call_id).with_sdp(UPDATE_SDP).send().await
+                    }
+                    _ => unreachable!(),
+                };
+                match sent {
+                    Ok(()) => break,
+                    Err(rvoip_sip::SessionError::Conflict { .. }) => {
+                        sleep(Duration::from_millis(20)).await;
+                    }
+                    Err(error) => panic!("second {} offer failed: {error}", method.as_str()),
+                }
+            }
+        })
+        .await
+        .expect("authenticated answer never released the pending offer");
+        timeout(Duration::from_secs(5), async {
+            while uas.count.load(Ordering::SeqCst) < 3 {
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("UAS did not receive the post-commit offer");
+    }
 
     uas.shutdown();
 }
@@ -386,7 +466,11 @@ async fn spawn_raw_auth_uas(
                 _ => continue,
             };
 
-            if request.method() == Method::Invite {
+            let is_challenged_request = request.method() == challenged_method.sip_method()
+                && (challenged_method != ChallengedMethod::Reinvite
+                    || request.to().and_then(|to| to.tag()).is_some());
+
+            if request.method() == Method::Invite && !is_challenged_request {
                 let mut resp = create_response(&request, StatusCode::Ok);
                 for header in resp.headers.iter_mut() {
                     if let TypedHeader::To(to) = header {
@@ -411,7 +495,7 @@ async fn spawn_raw_auth_uas(
                 continue;
             }
 
-            if request.method() == challenged_method.sip_method() {
+            if is_challenged_request {
                 let idx = count_task.fetch_add(1, Ordering::SeqCst);
                 captures_task.lock().await.push(MidDialogCapture {
                     raw: String::from_utf8_lossy(bytes).into_owned(),
@@ -430,7 +514,14 @@ async fn spawn_raw_auth_uas(
                         challenge_kind,
                     )
                 } else {
-                    Message::Response(create_response(&request, StatusCode::Ok))
+                    let mut response = create_response(&request, StatusCode::Ok);
+                    if matches!(
+                        challenged_method,
+                        ChallengedMethod::Update | ChallengedMethod::Reinvite
+                    ) {
+                        attach_pcmu_sdp_answer(&mut response, port + 1_000);
+                    }
+                    Message::Response(response)
                 };
                 let _ = sock_task.send_to(&resp.to_bytes(), from).await;
                 continue;
@@ -594,6 +685,14 @@ fn assert_method_fields_survive(capture: &MidDialogCapture, method: ChallengedMe
             assert!(
                 capture.raw.contains("m=audio 40000 RTP/AVP 0"),
                 "UPDATE retry must preserve SDP body; got:\n{}",
+                capture.raw
+            );
+        }
+        ChallengedMethod::Reinvite => {
+            assert_eq!(capture.trace_value.as_deref(), Some(REINVITE_TRACE_VALUE));
+            assert!(
+                capture.raw.contains("m=audio 40000 RTP/AVP 0"),
+                "re-INVITE retry must preserve SDP body; got:\n{}",
                 capture.raw
             );
         }

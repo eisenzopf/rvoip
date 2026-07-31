@@ -48,19 +48,19 @@ pub fn load_state_table_with_config(config_path: Option<&str>) -> MasterStateTab
 /// are deliberately not retained in the diagnostic projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StateTableFallbackReason {
-    ReadFailed,
-    DecodeFailed,
-    LoadFailed,
-    ValidationFailed,
+    Read,
+    Decode,
+    Load,
+    Validation,
 }
 
 impl StateTableFallbackReason {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::ReadFailed => "read-failed",
-            Self::DecodeFailed => "decode-failed",
-            Self::LoadFailed => "load-failed",
-            Self::ValidationFailed => "validation-failed",
+            Self::Read => "read-failed",
+            Self::Decode => "decode-failed",
+            Self::Load => "load-failed",
+            Self::Validation => "validation-failed",
         }
     }
 }
@@ -134,19 +134,16 @@ fn yaml_sha256(bytes: &[u8]) -> String {
 fn configured_state_table(
     path: &str,
 ) -> Result<(MasterStateTable, Arc<[u8]>), StateTableFallbackReason> {
-    let yaml = fs::read(path).map_err(|_| StateTableFallbackReason::ReadFailed)?;
-    let yaml_text =
-        std::str::from_utf8(&yaml).map_err(|_| StateTableFallbackReason::DecodeFailed)?;
+    let yaml = fs::read(path).map_err(|_| StateTableFallbackReason::Read)?;
+    let yaml_text = std::str::from_utf8(&yaml).map_err(|_| StateTableFallbackReason::Decode)?;
     let mut loader = YamlTableLoader::new();
     loader
         .load_from_string(yaml_text)
-        .map_err(|_| StateTableFallbackReason::LoadFailed)?;
-    let table = loader
-        .build()
-        .map_err(|_| StateTableFallbackReason::LoadFailed)?;
+        .map_err(|_| StateTableFallbackReason::Load)?;
+    let table = loader.build().map_err(|_| StateTableFallbackReason::Load)?;
     table
         .validate()
-        .map_err(|_| StateTableFallbackReason::ValidationFailed)?;
+        .map_err(|_| StateTableFallbackReason::Validation)?;
     Ok((table, Arc::from(yaml.into_boxed_slice())))
 }
 
@@ -305,7 +302,7 @@ transitions:
         assert!(matches!(
             &selection.metadata.source,
             StateTableSelectedSource::ConfiguredPathFallback {
-                reason: StateTableFallbackReason::ReadFailed,
+                reason: StateTableFallbackReason::Read,
                 ..
             }
         ));
@@ -327,7 +324,7 @@ transitions:
             assert!(matches!(
                 &selection.metadata.source,
                 StateTableSelectedSource::ConfiguredPathFallback {
-                    reason: StateTableFallbackReason::LoadFailed,
+                    reason: StateTableFallbackReason::Load,
                     ..
                 }
             ));
@@ -343,7 +340,7 @@ transitions:
         assert!(matches!(
             &selection.metadata.source,
             StateTableSelectedSource::ConfiguredPathFallback {
-                reason: StateTableFallbackReason::DecodeFailed,
+                reason: StateTableFallbackReason::Decode,
                 ..
             }
         ));
@@ -370,7 +367,7 @@ transitions:
         assert!(matches!(
             &selection.metadata.source,
             StateTableSelectedSource::ConfiguredPathFallback {
-                reason: StateTableFallbackReason::ValidationFailed,
+                reason: StateTableFallbackReason::Validation,
                 ..
             }
         ));

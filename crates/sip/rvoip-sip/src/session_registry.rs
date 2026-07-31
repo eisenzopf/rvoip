@@ -428,12 +428,14 @@ impl SessionRegistry {
         state: &RegistryState,
         sip_call_id: &str,
     ) -> Option<SessionRegistryHandle> {
-        let mut matches = state.entries.iter().filter_map(|(key, entry)| {
-            (entry.sip_call_id.as_deref() == Some(sip_call_id)).then(|| SessionRegistryHandle {
+        let mut matches = state
+            .entries
+            .iter()
+            .filter(|&(_key, entry)| entry.sip_call_id.as_deref() == Some(sip_call_id))
+            .map(|(key, entry)| SessionRegistryHandle {
                 key: key.clone(),
                 slot_revision: entry.slot_revision,
-            })
-        });
+            });
         let only = matches.next()?;
         matches.next().is_none().then_some(only)
     }

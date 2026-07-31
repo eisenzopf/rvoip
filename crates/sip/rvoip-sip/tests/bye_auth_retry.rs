@@ -48,6 +48,7 @@ const CONTACT_USER: &str = "current-target";
 
 /// Per-BYE capture: application extra, auth, and exact request-line target.
 type ByeCapture = (bool, Option<String>, bool, String, Option<String>);
+type LegacyByeCapture = (bool, String, Option<String>);
 
 fn attach_pcmu_sdp_answer(response: &mut Response, media_port: u16) {
     response.body = format!(
@@ -296,8 +297,7 @@ async fn bye_extras_survive_401_driven_auth_retry() {
 async fn legacy_hangup_retries_bye_after_401_from_terminating() {
     let uas_addr = format!("127.0.0.1:{LEGACY_UAS_PORT}");
     let sock = Arc::new(UdpSocket::bind(&uas_addr).await.expect("legacy UAS bind"));
-    let captures: Arc<Mutex<Vec<(bool, String, Option<String>)>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let captures: Arc<Mutex<Vec<LegacyByeCapture>>> = Arc::new(Mutex::new(Vec::new()));
 
     let sock_task = Arc::clone(&sock);
     let captures_task = Arc::clone(&captures);

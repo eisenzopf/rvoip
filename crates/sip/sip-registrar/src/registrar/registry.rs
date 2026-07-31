@@ -126,6 +126,12 @@ impl From<&RegistrarConfig> for RegistryConfig {
     }
 }
 
+impl Default for UserRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UserRegistry {
     pub fn new() -> Self {
         Self::with_config(RegistryConfig::default())

@@ -207,17 +207,12 @@ impl fmt::Debug for ContactInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContactReachability {
+    #[default]
     Unknown,
     Reachable,
     Unreachable,
-}
-
-impl Default for ContactReachability {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl ContactInfo {

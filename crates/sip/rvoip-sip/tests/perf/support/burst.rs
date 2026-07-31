@@ -501,6 +501,29 @@ fn default_client_profile() -> String {
     "endpoint".to_string()
 }
 
+fn default_capacity() -> usize {
+    1_000
+}
+
+fn default_alice_shards() -> usize {
+    4
+}
+
+fn default_min_asr() -> f64 {
+    0.999
+}
+
+fn default_min_rss_gate_window_secs() -> f64 {
+    120.0
+}
+
+fn deterministic_u64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
 #[cfg(test)]
 mod port_layout_tests {
     use super::*;
@@ -524,27 +547,4 @@ mod port_layout_tests {
             .expect_err("capacity must fail closed");
         assert!(error.contains("below the required"));
     }
-}
-
-fn default_capacity() -> usize {
-    1_000
-}
-
-fn default_alice_shards() -> usize {
-    4
-}
-
-fn default_min_asr() -> f64 {
-    0.999
-}
-
-fn default_min_rss_gate_window_secs() -> f64 {
-    120.0
-}
-
-fn deterministic_u64(mut x: u64) -> u64 {
-    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
-    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-    x ^ (x >> 31)
 }

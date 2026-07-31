@@ -22,6 +22,12 @@ pub struct Presence {
     pidf: Arc<PidfGenerator>,
 }
 
+impl Default for Presence {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Presence {
     /// Create a new presence instance
     pub fn new() -> Self {

@@ -573,7 +573,7 @@ enum DataMessageAttemptState<'a> {
     AcquiredExact {
         handle: SessionRegistryHandle,
         _guard: tokio::sync::OwnedMutexGuard<()>,
-        session: SessionState,
+        session: Box<SessionState>,
     },
     AlreadyOwned {
         handle: SessionRegistryHandle,
@@ -644,6 +644,11 @@ impl<'a> RetainedDialogAuthMode<'a> {
     }
 }
 
+struct RetainedDialogAuthRoute<'a> {
+    next_hop: &'a str,
+    transport: &'a crate::auth::SipTransportSecurityContext,
+}
+
 /// Re-author one exact dialog's retained origin/proxy protection spaces.
 ///
 /// This is deliberately a pure working-state mutation: it performs no store,
@@ -658,11 +663,14 @@ fn mutate_retained_dialog_auth(
     mode: RetainedDialogAuthMode<'_>,
     method: &str,
     request_uri: &str,
-    next_hop: &str,
+    route: RetainedDialogAuthRoute<'_>,
     body: Option<&[u8]>,
-    transport: &crate::auth::SipTransportSecurityContext,
 ) -> Result<Vec<rvoip_sip_core::types::TypedHeader>> {
     use crate::session_store::state::{InviteAuthorizationCredential, InviteCredentialKind};
+    let RetainedDialogAuthRoute {
+        next_hop,
+        transport,
+    } = route;
 
     if session
         .dialog_id
@@ -876,9 +884,11 @@ fn authorize_data_message_lane_owned_exact(
             RetainedDialogAuthMode::DataMessage { fresh_challenge },
             "MESSAGE",
             &request_uri,
-            next_hop,
+            RetainedDialogAuthRoute {
+                next_hop,
+                transport,
+            },
             body,
-            transport,
         )
     };
     let headers =
@@ -912,21 +922,20 @@ fn publish_initial_invite_dialog_exact(
     let session_dialog_id: crate::types::DialogId = dialog_id.clone().into();
     let registry_dialog_id = store.registry().get_dialog_handle_exact(handle);
     match store.update_session_exact_with(handle, None, |session| -> Result<()> {
-        match session.dialog_id.as_ref() {
-            Some(current) if current != &session_dialog_id => {
-                // Redirect cleanup retires the old registry owner inside the
-                // same executor transition before this replacement INVITE is
-                // dispatched. The store still contains the transition's
-                // pre-commit dialog snapshot, so replace it only when the
-                // exact registry already proves the new owner.
-                if registry_dialog_id.as_ref() != Some(&session_dialog_id) {
-                    return Err(SessionError::InvalidTransition(
-                        "initial INVITE exact dialog changed before wire dispatch".to_string(),
-                    ));
-                }
+        match (session.dialog_id.as_ref(), registry_dialog_id.as_ref()) {
+            (Some(current), _) if current == &session_dialog_id => return Ok(()),
+            // Redirect cleanup retires the old registry owner inside the same
+            // executor transition before this replacement INVITE is
+            // dispatched. The store still contains the transition's
+            // pre-commit dialog snapshot, so replace it only when the exact
+            // registry already proves the new owner.
+            (Some(_), Some(registry)) if registry == &session_dialog_id => {}
+            (Some(_), _) => {
+                return Err(SessionError::InvalidTransition(
+                    "initial INVITE exact dialog changed before wire dispatch".to_string(),
+                ));
             }
-            Some(_) => return Ok(()),
-            None => {}
+            (None, _) => {}
         }
         session.dialog_id = Some(session_dialog_id);
         Ok(())
@@ -1122,16 +1131,29 @@ pub(crate) enum RegistrationPostCommitEffect {
     },
 }
 
-fn record_registration_success_state(
-    session: &mut SessionState,
-    registrar_uri: &str,
-    from_uri: &str,
-    contact_uri: &str,
+struct RegistrationSuccessStateInput<'a> {
+    registrar_uri: &'a str,
+    from_uri: &'a str,
+    contact_uri: &'a str,
     accepted_expires: u32,
     now: Instant,
     next_refresh_at: Option<Instant>,
     metadata: RegistrationResponseMetadata,
+}
+
+fn record_registration_success_state(
+    session: &mut SessionState,
+    input: RegistrationSuccessStateInput<'_>,
 ) -> RegistrationPostCommitEffect {
+    let RegistrationSuccessStateInput {
+        registrar_uri,
+        from_uri,
+        contact_uri,
+        accepted_expires,
+        now,
+        next_refresh_at,
+        metadata,
+    } = input;
     session.is_registered = true;
     session.registration_expires = Some(accepted_expires);
     session.registration_accepted_expires = Some(accepted_expires);
@@ -2281,13 +2303,15 @@ impl DialogAdapter {
 
         record_registration_success_state(
             session,
-            registrar_uri,
-            from_uri,
-            contact_uri,
-            accepted_expires,
-            now,
-            next_refresh_at,
-            metadata,
+            RegistrationSuccessStateInput {
+                registrar_uri,
+                from_uri,
+                contact_uri,
+                accepted_expires,
+                now,
+                next_refresh_at,
+                metadata,
+            },
         )
     }
 
@@ -3718,9 +3742,11 @@ impl DialogAdapter {
             RetainedDialogAuthMode::Request,
             "BYE",
             &request_uri,
-            &next_hop,
+            RetainedDialogAuthRoute {
+                next_hop: &next_hop,
+                transport: &transport,
+            },
             None,
-            &transport,
         )?;
         opts.extra_headers.extend(headers);
 
@@ -5433,12 +5459,11 @@ impl DialogAdapter {
             subscription_id: None,
             extra_headers: self.auto_emit_extra_headers.clone(),
         });
-        let lease = self.outbound_request_tracker.prepare(
-            &handle,
-            TrackedInDialogOptions::Notify(Arc::clone(&options)),
-        )?;
+        let lease = self
+            .outbound_request_tracker
+            .prepare(handle, TrackedInDialogOptions::Notify(Arc::clone(&options)))?;
         let transaction_id = self
-            .send_notify_with_options_lane_owned(&session, (*options).clone())
+            .send_notify_with_options_lane_owned(session, (*options).clone())
             .await
             .map_err(|error| redacted_dialog_operation_error("REFER NOTIFY", error))?;
         self.outbound_request_tracker
@@ -5547,7 +5572,7 @@ impl DialogAdapter {
                         DataMessageAttemptState::AcquiredExact {
                             handle,
                             _guard: guard,
-                            session,
+                            session: Box::new(session),
                         }
                     }
                     DataMessageStateLane::AlreadyOwned(session) => {
@@ -5565,10 +5590,7 @@ impl DialogAdapter {
                                     .to_string(),
                             )
                         })?;
-                        DataMessageAttemptState::AlreadyOwned {
-                            handle,
-                            session: &mut **session,
-                        }
+                        DataMessageAttemptState::AlreadyOwned { handle, session }
                     }
                 };
                 let dispatch_lane = self.data_message_dispatch_lanes.lane(dialog_id);
@@ -5698,9 +5720,11 @@ impl DialogAdapter {
                         },
                         "MESSAGE",
                         &request_uri,
-                        &next_hop_text,
+                        RetainedDialogAuthRoute {
+                            next_hop: &next_hop_text,
+                            transport: &transport,
+                        },
                         Some(request.body.as_ref()),
-                        &transport,
                     )?;
                     request.headers.extend(headers);
                 }
@@ -6048,7 +6072,7 @@ mod tests {
         .expect("first observation publication stalled")
         .expect("first observation task panicked");
         tokio::time::timeout(Duration::from_secs(1), async {
-            while observer.len() == 0 {
+            while observer.is_empty() {
                 tokio::task::yield_now().await;
             }
         })
@@ -6084,17 +6108,19 @@ mod tests {
 
         let effect = record_registration_success_state(
             &mut session,
-            "sip:registrar.example.test",
-            "sip:alice@example.test",
-            "sip:alice@192.0.2.10:5060",
-            600,
-            now,
-            None,
-            RegistrationResponseMetadata {
-                service_route: Some(vec!["sip:edge.example.test;lr".into()]),
-                pub_gruu: Some("sip:alice@example.test;gr=public".into()),
-                temp_gruu: Some("sip:opaque@example.test;gr=temp".into()),
-                transport_route: None,
+            RegistrationSuccessStateInput {
+                registrar_uri: "sip:registrar.example.test",
+                from_uri: "sip:alice@example.test",
+                contact_uri: "sip:alice@192.0.2.10:5060",
+                accepted_expires: 600,
+                now,
+                next_refresh_at: None,
+                metadata: RegistrationResponseMetadata {
+                    service_route: Some(vec!["sip:edge.example.test;lr".into()]),
+                    pub_gruu: Some("sip:alice@example.test;gr=public".into()),
+                    temp_gruu: Some("sip:opaque@example.test;gr=temp".into()),
+                    transport_route: None,
+                },
             },
         );
 
@@ -6255,6 +6281,39 @@ mod tests {
                 .as_ref()
                 .map(crate::types::DialogId::as_uuid),
             Some(&dialog_id.0)
+        );
+
+        store
+            .registry()
+            .map_dialog_exact(
+                handle.key(),
+                handle.slot_revision(),
+                dialog_id.clone().into(),
+            )
+            .expect("install initial exact registry dialog");
+        assert!(store
+            .registry()
+            .clear_dialog_handle_retained(&handle, dialog_id.clone().into())
+            .expect("retire initial exact registry dialog"));
+        store
+            .registry()
+            .map_dialog_exact(
+                handle.key(),
+                handle.slot_revision(),
+                replacement.clone().into(),
+            )
+            .expect("install registry-proven redirect replacement");
+        publish_initial_invite_dialog_exact(&store, &handle, &replacement)
+            .expect("adopt registry-proven redirect replacement");
+        assert_eq!(
+            store
+                .get_session_snapshot(&session_id)
+                .await
+                .expect("read registry-proven replacement")
+                .dialog_id
+                .as_ref()
+                .map(crate::types::DialogId::as_uuid),
+            Some(&replacement.0)
         );
     }
 
@@ -7302,9 +7361,11 @@ mod tests {
             RetainedDialogAuthMode::Request,
             "BYE",
             REQUEST_URI,
-            REQUEST_URI,
+            RetainedDialogAuthRoute {
+                next_hop: REQUEST_URI,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             None,
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("pure BYE retained auth");
         assert_eq!(headers.len(), 1);
@@ -7345,9 +7406,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            REQUEST_URI,
+            RetainedDialogAuthRoute {
+                next_hop: REQUEST_URI,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"fresh-message"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("install initial MESSAGE protection space");
         assert_eq!(session.invite_authorization_credentials.len(), 1);
@@ -7372,9 +7435,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            REQUEST_URI,
+            RetainedDialogAuthRoute {
+                next_hop: REQUEST_URI,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"fresh-message"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("refresh MESSAGE protection space once");
         assert_eq!(
@@ -7405,9 +7470,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            REQUEST_URI,
+            RetainedDialogAuthRoute {
+                next_hop: REQUEST_URI,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"fresh-message"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect_err("a second stale refresh must fail");
         assert!(matches!(error, SessionError::AuthError(_)));
@@ -7441,9 +7508,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            PROXY_TARGET,
+            RetainedDialogAuthRoute {
+                next_hop: PROXY_TARGET,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"origin-and-proxy"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("install origin protection space");
 
@@ -7459,9 +7528,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            PROXY_TARGET,
+            RetainedDialogAuthRoute {
+                next_hop: PROXY_TARGET,
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"origin-and-proxy"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("install independent proxy protection space");
         assert_eq!(headers.len(), 2);
@@ -7485,9 +7556,11 @@ mod tests {
             },
             "MESSAGE",
             REQUEST_URI,
-            "sip:other-proxy.example.test;lr",
+            RetainedDialogAuthRoute {
+                next_hop: "sip:other-proxy.example.test;lr",
+                transport: &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
+            },
             Some(b"origin-and-proxy"),
-            &crate::auth::SipTransportSecurityContext::from_transport_name("UDP"),
         )
         .expect("reauthor exact changed next hop");
         assert_eq!(changed_hop_headers.len(), 1);
@@ -7533,9 +7606,11 @@ mod tests {
                 },
                 "MESSAGE",
                 REQUEST_URI,
-                REQUEST_URI,
+                RetainedDialogAuthRoute {
+                    next_hop: REQUEST_URI,
+                    transport: &transport,
+                },
                 Some(BODY),
-                &transport,
             )
             .expect("advance retained Digest nonce count");
             let (_, value) = typed_auth_value(&headers[0]);
@@ -7786,7 +7861,7 @@ mod tests {
             .expect("create exact retained-auth session");
         store
             .update_session_with(&session_id, |session| {
-                session.dialog_id = Some(dialog_id.clone());
+                session.dialog_id = Some(dialog_id);
                 session.dialog_established = true;
                 session.call_state = crate::types::CallState::Active;
                 session.remote_uri = Some("sip:peer@example.test".to_string());

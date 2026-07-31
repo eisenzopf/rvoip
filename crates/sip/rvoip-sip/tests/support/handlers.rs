@@ -22,16 +22,16 @@ impl CallHandler for AutoAccept {
     }
 
     async fn on_info_received(&self, request: IncomingRequest) {
-        let status = request
-            .raw_request()
-            .is_some_and(|request| {
-                request
-                    .body()
-                    .windows(12)
-                    .any(|part| part == b"Response=488")
-            })
-            .then_some(488)
-            .unwrap_or(200);
+        let status = if request.raw_request().is_some_and(|request| {
+            request
+                .body()
+                .windows(12)
+                .any(|part| part == b"Response=488")
+        }) {
+            488
+        } else {
+            200
+        };
         if status == 200 {
             request
                 .respond(status)

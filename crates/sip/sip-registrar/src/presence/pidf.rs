@@ -25,6 +25,12 @@ fn decode_text(e: &BytesText) -> Result<String> {
 /// PIDF (Presence Information Data Format) generator and parser
 pub struct PidfGenerator;
 
+impl Default for PidfGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PidfGenerator {
     pub fn new() -> Self {
         Self
@@ -171,7 +177,7 @@ impl PidfGenerator {
             .map_err(|e| RegistrarError::PidfError(e.to_string()))?;
 
         let xml = writer.into_inner().into_inner();
-        Ok(String::from_utf8(xml).map_err(|e| RegistrarError::PidfError(e.to_string()))?)
+        String::from_utf8(xml).map_err(|e| RegistrarError::PidfError(e.to_string()))
     }
 
     /// Parse PIDF XML document into presence state
@@ -202,15 +208,11 @@ impl PidfGenerator {
                     match e.name().as_ref() {
                         b"presence" => {
                             // Extract entity attribute
-                            for attr in e.attributes() {
-                                if let Ok(attr) = attr {
-                                    if attr.key.as_ref() == b"entity" {
-                                        let entity = String::from_utf8_lossy(&attr.value);
-                                        presence.user_id = entity
-                                            .strip_prefix("sip:")
-                                            .unwrap_or(&entity)
-                                            .to_string();
-                                    }
+                            for attr in e.attributes().flatten() {
+                                if attr.key.as_ref() == b"entity" {
+                                    let entity = String::from_utf8_lossy(&attr.value);
+                                    presence.user_id =
+                                        entity.strip_prefix("sip:").unwrap_or(&entity).to_string();
                                 }
                             }
                         }
@@ -250,10 +252,9 @@ impl PidfGenerator {
                         ),
                     });
                 }
-                Ok(Event::End(ref e)) => match e.name().as_ref() {
-                    b"dm:activities" => in_activities = false,
-                    _ => {}
-                },
+                Ok(Event::End(ref e)) if e.name().as_ref() == b"dm:activities" => {
+                    in_activities = false;
+                }
                 Ok(Event::Eof) => break,
                 Err(e) => return Err(RegistrarError::PidfError(e.to_string())),
                 _ => {}

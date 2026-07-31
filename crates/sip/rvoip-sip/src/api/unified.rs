@@ -263,7 +263,7 @@ impl Drop for AbortOutboundDispatchTaskOnDrop {
         let abort = self
             .stage_claim
             .as_ref()
-            .map_or(true, |claim| claim.cancel_before_claim());
+            .is_none_or(|claim| claim.cancel_before_claim());
         if abort {
             self.handle.abort();
         }
@@ -7420,12 +7420,8 @@ pub(crate) async fn release_exact_local_resources(
     let dialog_result = dialog_adapter.cleanup_session_exact(&handle).await;
     let media_result = media_adapter.cleanup_session_exact(&handle).await;
     helpers.cleanup_session(handle.session_id()).await;
-    if let Err(error) = dialog_result {
-        return Err(error);
-    }
-    if let Err(error) = media_result {
-        return Err(error);
-    }
+    dialog_result?;
+    media_result?;
     let removal = match session_store.remove_quiesced_session_exact(&handle) {
         Ok(()) => Ok(()),
         Err(_)
@@ -9303,10 +9299,7 @@ impl UnifiedCoordinator {
             .state_machine
             .store
             .with_session(id, |session| {
-                (
-                    Some(session.call_state.clone()),
-                    session.media_security.clone(),
-                )
+                (Some(session.call_state), session.media_security.clone())
             })
             .unwrap_or((None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
@@ -9330,7 +9323,7 @@ impl UnifiedCoordinator {
             .store
             .get_session_snapshot_exact(handle)
             .ok();
-        let state = current.as_ref().map(|session| session.call_state.clone());
+        let state = current.as_ref().map(|session| session.call_state);
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
@@ -9623,7 +9616,7 @@ impl UnifiedCoordinator {
             .store
             .get_session_snapshot_exact(handle)
             .ok()
-            .map(|session| session.call_state.clone());
+            .map(|session| session.call_state);
         // Fence the per-session retained transaction before dispatch. A BYE
         // send can complete and retain its exact transaction, then lose the
         // final state-store revision race to a synchronous peer response. In
@@ -9766,7 +9759,7 @@ impl UnifiedCoordinator {
             .with_session(session_id, |session| {
                 (
                     session.role,
-                    session.call_state.clone(),
+                    session.call_state,
                     session.lifecycle_handle.clone(),
                     session.entered_state_at,
                 )
@@ -9894,7 +9887,7 @@ impl UnifiedCoordinator {
             .store
             .with_session(session_id, |session| {
                 (
-                    session.call_state.clone(),
+                    session.call_state,
                     session.lifecycle_handle.clone(),
                     session.entered_state_at,
                 )

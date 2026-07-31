@@ -688,25 +688,12 @@ impl std::fmt::Debug for CallLifecycleSnapshot {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ActiveLifecycleEntry {
     progress: VecDeque<CallProgressInfo>,
     answered: Option<CallAnsweredInfo>,
     media_security: Option<MediaSecurityState>,
     latest_transfer_outcome: Option<Box<TransferOutcome>>,
-}
-
-impl Default for ActiveLifecycleEntry {
-    fn default() -> Self {
-        Self {
-            // Most calls publish no provisional history to this observer
-            // index. Allocate the bounded progress ring only on first use.
-            progress: VecDeque::new(),
-            answered: None,
-            media_security: None,
-            latest_transfer_outcome: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1493,6 +1480,13 @@ impl LifecycleIndex {
 
         snapshot
     }
+
+    fn has_terminal_exact(&self, lifecycle_handle: &SessionRegistryHandle) -> bool {
+        let exact_key = ExactTerminalClaimKey::from(lifecycle_handle);
+        self.exact_entries
+            .get(&exact_key)
+            .is_some_and(|entry| matches!(entry.value(), LifecycleEntry::Terminal(_)))
+    }
 }
 
 fn prune_due_terminal_entries_from(
@@ -2185,6 +2179,10 @@ impl SessionEventPublisher {
         self.exact_terminal_claims.claim(handle)
     }
 
+    pub(crate) fn has_exact_terminal_fact(&self, handle: &SessionRegistryHandle) -> bool {
+        self.lifecycle.has_terminal_exact(handle)
+    }
+
     pub(crate) fn publish(&self, event: Event) {
         self.lifecycle.record_event(&event);
         let _ = self.offer_to_control_owner(&event, None);
@@ -2524,7 +2522,7 @@ mod tests {
         let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
         let publisher = publisher.with_control_sink(control_tx, Arc::new(AtomicBool::new(true)));
 
-        let result = tokio::time::timeout(
+        tokio::time::timeout(
             Duration::from_millis(100),
             publisher.publish_control_now(Event::CallProgress {
                 call_id: SessionId::from_string("saturated-control-event"),
@@ -2536,7 +2534,6 @@ mod tests {
         .await
         .expect("control admission waited for queue capacity")
         .expect("private control event was coupled to observation saturation");
-        let _ = result;
         assert!(matches!(
             control_rx.try_recv().expect("retained queue filler"),
             SessionControlEvent {
