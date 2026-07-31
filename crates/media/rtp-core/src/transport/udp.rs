@@ -370,6 +370,11 @@ pub struct UdpRtpTransport {
     /// replacement so it cannot overwrite a later re-key.
     srtp_context_generation: Arc<AtomicU64>,
 
+    /// Serializes SRTP context replacement and rollback. The guard protects
+    /// only CPU-local validation and pointer swaps and is never held across
+    /// network I/O or an `.await` point.
+    srtp_context_update: Arc<parking_lot::Mutex<()>>,
+
     /// Makes allocator release idempotent across explicit close and Drop.
     allocator_release_started: AtomicBool,
 
@@ -564,6 +569,7 @@ impl UdpRtpTransport {
             active: Arc::new(AtomicBool::new(false)),
             secure_media_required: Arc::new(AtomicBool::new(false)),
             srtp_context_generation: Arc::new(AtomicU64::new(0)),
+            srtp_context_update: Arc::new(parking_lot::Mutex::new(())),
             allocator_release_started: AtomicBool::new(false),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
@@ -1124,21 +1130,39 @@ impl UdpRtpTransport {
         send: crate::srtp::SrtpContext,
         recv: crate::srtp::SrtpContext,
     ) -> Result<SrtpContextRollback> {
+        let _update_guard = self.srtp_context_update.lock();
         // Latch before inspecting caller-provided contexts. A rejected
         // installation must fail closed even when its error is ignored; the
         // exact rollback token may restore the previous policy only after a
         // fully validated pair has actually been installed.
         let previous_secure_media_required =
             self.secure_media_required.swap(true, Ordering::AcqRel);
-        send.validate_for_secure_transport()?;
-        recv.validate_for_secure_transport()?;
+        if let Err(error) = send
+            .validate_for_secure_transport()
+            .and_then(|()| recv.validate_for_secure_transport())
+        {
+            // A rejected secure-media installation is itself a newer policy
+            // decision. Retire any earlier rollback token so it cannot later
+            // reopen the plaintext path by restoring an older latch value.
+            let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
+            self.srtp_context_generation
+                .store(current_generation.saturating_add(1), Ordering::Release);
+            return Err(error);
+        }
         let (previous_send, previous_recv, installed_generation) = {
             let mut send_guard = self.srtp_send.lock();
             let mut recv_guard = self.srtp_recv.lock();
             let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
-            current_generation.checked_add(2).ok_or_else(|| {
-                Error::InvalidState("SRTP context generation exhausted".to_string())
-            })?;
+            if current_generation.checked_add(2).is_none() {
+                // As with validation failure, an exhausted replacement must
+                // invalidate older rollback authority while remaining
+                // permanently fail closed.
+                self.srtp_context_generation
+                    .store(current_generation.saturating_add(1), Ordering::Release);
+                return Err(Error::InvalidState(
+                    "SRTP context generation exhausted".to_string(),
+                ));
+            }
             let installed_generation = current_generation + 1;
             let previous_send = std::mem::replace(&mut *send_guard, Some(send));
             let previous_recv = std::mem::replace(&mut *recv_guard, Some(recv));
@@ -1164,6 +1188,7 @@ impl UdpRtpTransport {
     /// A later replacement invalidates the token instead of allowing stale
     /// rollback to overwrite newer keys.
     pub async fn rollback_srtp_contexts(&self, rollback: SrtpContextRollback) -> Result<()> {
+        let _update_guard = self.srtp_context_update.lock();
         let mut send_guard = self.srtp_send.lock();
         let mut recv_guard = self.srtp_recv.lock();
         if self.srtp_context_generation.load(Ordering::Acquire) != rollback.installed_generation {
@@ -2330,6 +2355,33 @@ mod tests {
         assert!(transport.srtp_enabled().await);
 
         transport.rollback_srtp_contexts(current).await.unwrap();
+        assert!(transport.srtp_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn rejected_srtp_replacement_retires_earlier_plaintext_rollback_authority() {
+        let transport = make_srtp_rollback_transport("srtp-rejected-replacement").await;
+        let (send, recv) = make_srtp_ctx_pair();
+        let plaintext_rollback = transport.replace_srtp_contexts(send, recv).await.unwrap();
+
+        let (mut disabled_send, mut disabled_recv) = make_srtp_ctx_pair();
+        disabled_send.set_enabled(false);
+        disabled_recv.set_enabled(false);
+        let error = match transport
+            .replace_srtp_contexts(disabled_send, disabled_recv)
+            .await
+        {
+            Ok(_) => panic!("disabled contexts must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::InvalidState(_)));
+
+        let rollback_error = transport
+            .rollback_srtp_contexts(plaintext_rollback)
+            .await
+            .expect_err("a rejected replacement must retire older rollback authority");
+        assert!(matches!(rollback_error, Error::InvalidState(_)));
+        assert!(transport.secure_media_required.load(Ordering::Acquire));
         assert!(transport.srtp_enabled().await);
     }
 
