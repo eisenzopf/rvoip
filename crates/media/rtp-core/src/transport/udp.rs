@@ -1124,9 +1124,15 @@ impl UdpRtpTransport {
         send: crate::srtp::SrtpContext,
         recv: crate::srtp::SrtpContext,
     ) -> Result<SrtpContextRollback> {
+        // Latch before inspecting caller-provided contexts. A rejected
+        // installation must fail closed even when its error is ignored; the
+        // exact rollback token may restore the previous policy only after a
+        // fully validated pair has actually been installed.
+        let previous_secure_media_required =
+            self.secure_media_required.swap(true, Ordering::AcqRel);
         send.validate_for_secure_transport()?;
         recv.validate_for_secure_transport()?;
-        let (previous_send, previous_recv, previous_secure_media_required, installed_generation) = {
+        let (previous_send, previous_recv, installed_generation) = {
             let mut send_guard = self.srtp_send.lock();
             let mut recv_guard = self.srtp_recv.lock();
             let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
@@ -1134,18 +1140,11 @@ impl UdpRtpTransport {
                 Error::InvalidState("SRTP context generation exhausted".to_string())
             })?;
             let installed_generation = current_generation + 1;
-            let previous_secure_media_required = self.secure_media_required.load(Ordering::Acquire);
             let previous_send = std::mem::replace(&mut *send_guard, Some(send));
             let previous_recv = std::mem::replace(&mut *recv_guard, Some(recv));
             self.srtp_context_generation
                 .store(installed_generation, Ordering::Release);
-            self.secure_media_required.store(true, Ordering::Release);
-            (
-                previous_send,
-                previous_recv,
-                previous_secure_media_required,
-                installed_generation,
-            )
+            (previous_send, previous_recv, installed_generation)
         };
         if srtp_diagnostics_enabled() {
             info!(
