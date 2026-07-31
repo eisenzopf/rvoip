@@ -12,6 +12,8 @@
 //! 4. Both REFERs carry the same `Refer-To:` (method-shaped header
 //!    survives the retry via the stash).
 
+mod support;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +32,8 @@ use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+
+use support::attach_pcmu_sdp_answer;
 
 const UAS_PORT: u16 = 35260;
 const UAC_PORT: u16 = 35261;
@@ -87,6 +91,7 @@ async fn refer_extras_survive_401_driven_auth_retry() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut resp, UAS_PORT + 1_000);
                     let _ = sock_task
                         .send_to(&Message::Response(resp).to_bytes(), from)
                         .await;

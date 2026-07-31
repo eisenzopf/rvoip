@@ -18,6 +18,7 @@ pub mod handlers;
 pub mod invariants;
 pub mod registrar;
 pub mod ringing_uas;
+pub mod sdp;
 pub mod traces;
 
 pub use auth_uas::{boot_auth_uas, AuthUas, CapturedAuthRequest, ChallengeReply};
@@ -34,6 +35,7 @@ pub use invariants::{
 };
 pub use registrar::{boot_mock_registrar, CapturedRegister, MockRegistrar, RegistrarReply};
 pub use ringing_uas::{boot_ringing_uas, CapturedRequest, RingingUas};
+pub use sdp::attach_pcmu_sdp_answer;
 pub use traces::{
     assert_header_on_wire, receiver_config, wait_for_inbound_method, SMOKE_HEADER_NAME,
     SMOKE_HEADER_VALUE,
