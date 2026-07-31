@@ -36,6 +36,14 @@ fn wire_header_values<'a>(raw_message: &'a str, expected_name: &str) -> Vec<&'a 
         .collect()
 }
 
+fn wire_body(raw_message: &str) -> &str {
+    raw_message
+        .split_once("\r\n\r\n")
+        .or_else(|| raw_message.split_once("\n\n"))
+        .map(|(_, body)| body)
+        .unwrap_or_default()
+}
+
 fn assert_verbatim_packet(trace: &rvoip_sip::SipTrace) {
     assert!(
         !trace.redacted,
@@ -135,6 +143,186 @@ async fn in_dialog_update_smoke() {
     call.teardown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sdp_update_offer_answer_commits_and_releases_its_exact_transaction() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::events::Event;
+    use rvoip_sip::SessionError;
+
+    use support_for_section_10::establish_call;
+
+    const HOLD_OFFER: &str = "v=0\r\n\
+o=alice 700 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 19000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendonly\r\n";
+    const RESUME_OFFER: &str = "v=0\r\n\
+o=alice 700 2 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 19000 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=sendrecv\r\n";
+
+    let mut call = establish_call(18920, 18930).await;
+    call.alice
+        .update(&call.call_id)
+        .with_sdp(HOLD_OFFER)
+        .send()
+        .await
+        .expect("send SDP-bearing UPDATE offer");
+
+    let hold_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = hold_deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "bob never committed the UPDATE hold offer"
+        );
+        match tokio::time::timeout(remaining, call.bob_events.next()).await {
+            Ok(Some(Event::RemoteCallOnHold { .. })) => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => panic!("bob never committed the UPDATE hold offer"),
+        }
+    }
+
+    let retry_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match call
+            .alice
+            .update(&call.call_id)
+            .with_sdp(RESUME_OFFER)
+            .send()
+            .await
+        {
+            Ok(()) => break,
+            Err(SessionError::Conflict { .. }) if tokio::time::Instant::now() < retry_deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => panic!("second SDP-bearing UPDATE failed: {error}"),
+        }
+    }
+
+    let resume_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = resume_deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "bob never committed the UPDATE resume offer"
+        );
+        match tokio::time::timeout(remaining, call.bob_events.next()).await {
+            Ok(Some(Event::RemoteCallResumed { .. })) => break,
+            Ok(Some(_)) => continue,
+            Ok(None) | Err(_) => panic!("bob never committed the UPDATE resume offer"),
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(20), call.alice_events.next()).await
+    {
+        assert!(
+            !matches!(event, Event::RenegotiationFailed { .. }),
+            "valid UPDATE offer/answer unexpectedly failed: {event:?}"
+        );
+    }
+
+    call.teardown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offerless_initial_invite_answers_the_200_offer_in_ack() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::events::Event;
+    use rvoip_sip::CallState;
+
+    use support_for_section_10::{
+        boot_callback_receiver, boot_unified_caller, wait_for_call_answered,
+        wait_for_inbound_method,
+    };
+
+    let bob = boot_callback_receiver(18970, "bob-delayed-offer").await;
+    let mut bob_trace_events = bob.coord.events().await.expect("bob trace events");
+    let mut bob_state_events = bob.coord.events().await.expect("bob state events");
+    let alice = boot_unified_caller(18960, "alice-delayed-offer").await;
+    let mut alice_events = alice.events().await.expect("alice events");
+
+    let call_id = alice
+        .invite(
+            Some("sip:alice@127.0.0.1:18960".to_string()),
+            "sip:bob@127.0.0.1:18970",
+        )
+        .without_sdp()
+        .send()
+        .await
+        .expect("send offerless INVITE");
+
+    let bob_call_id = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(Event::IncomingCall { call_id, sdp, .. }) = bob_state_events.next().await {
+                assert!(sdp.is_none(), "offerless INVITE exposed an SDP offer");
+                break call_id;
+            }
+        }
+    })
+    .await
+    .expect("bob did not publish the incoming offerless call");
+
+    assert!(
+        wait_for_call_answered(&mut alice_events, &call_id, Duration::from_secs(10)).await,
+        "alice did not commit the delayed-offer answer"
+    );
+
+    let invite = wait_for_inbound_method(&mut bob_trace_events, "INVITE", Duration::from_secs(10))
+        .await
+        .expect("bob did not observe the initial INVITE");
+    assert_verbatim_packet(&invite);
+    assert!(
+        wire_body(&invite.raw_message).is_empty(),
+        "initial INVITE unexpectedly carried an SDP offer:\n{}",
+        invite.raw_message
+    );
+
+    let ack = wait_for_inbound_method(&mut bob_trace_events, "ACK", Duration::from_secs(10))
+        .await
+        .expect("bob did not observe the delayed-offer ACK");
+    assert_verbatim_packet(&ack);
+    assert_eq!(
+        wire_header_values(&ack.raw_message, "Content-Type"),
+        vec!["application/sdp"],
+        "delayed-offer ACK must identify its SDP answer"
+    );
+    let ack_body = wire_body(&ack.raw_message);
+    assert!(
+        ack_body.lines().next() == Some("v=0"),
+        "delayed-offer ACK did not carry an SDP answer:\n{}",
+        ack.raw_message
+    );
+
+    let both_active = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if alice.get_state(&call_id).await.ok() == Some(CallState::Active)
+                && bob.coord.get_state(&bob_call_id).await.ok() == Some(CallState::Active)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(both_active.is_ok(), "both endpoints did not commit Active");
+
+    let _ = alice.bye(&call_id).send().await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    bob.shutdown().await;
+}
+
 /// §10 #9 — re-INVITE with extras. Drives `coord.reinvite(&session)`
 /// (equivalently `session.reinvite()`) against an established call
 /// and asserts the staged `X-Test: smoke` header reaches the wire on
@@ -191,6 +379,28 @@ m=audio 17000 RTP/AVP 0\r\n";
             "re-INVITE must carry exactly one staged smoke header; wire =\n{}",
             trace.raw_message,
         );
+
+        // Let the exact 200/ACK exchange commit before teardown, then prove
+        // the established call survived without a negotiation failure.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            call.alice
+                .get_state(&call.call_id)
+                .await
+                .expect("re-INVITE completion state"),
+            rvoip_sip::CallState::Active
+        );
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(20), call.alice_events.next()).await
+        {
+            assert!(
+                !matches!(
+                    event,
+                    rvoip_sip::api::events::Event::RenegotiationFailed { .. }
+                ),
+                "valid re-INVITE unexpectedly failed: {event:?}"
+            );
+        }
 
         call.teardown().await;
     });

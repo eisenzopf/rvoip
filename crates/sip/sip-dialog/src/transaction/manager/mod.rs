@@ -225,6 +225,35 @@ use crate::transaction::{
     TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct DelayedOfferAckAnswerKey {
+    transaction_id: TransactionKey,
+    remote_tag: Arc<str>,
+}
+
+impl DelayedOfferAckAnswerKey {
+    fn from_response(transaction_id: &TransactionKey, response: &Response) -> Result<Self> {
+        if !response.status().is_success()
+            || TransactionKey::from_response(response).as_ref() != Some(transaction_id)
+        {
+            return Err(Error::Other(
+                "delayed-offer ACK requires the exact successful INVITE response".into(),
+            ));
+        }
+        let remote_tag = response
+            .to()
+            .and_then(|to| to.tag())
+            .filter(|tag| !tag.is_empty())
+            .ok_or_else(|| {
+                Error::Other("delayed-offer ACK response has no remote dialog tag".into())
+            })?;
+        Ok(Self {
+            transaction_id: transaction_id.clone(),
+            remote_tag: Arc::from(remote_tag),
+        })
+    }
+}
+
 /// Internal first-write classification for one exact CANCEL generation.
 /// Composition failures are immediately safe to retry. A route-preparation
 /// failure is safe after the returned retired generation's terminal event has
@@ -800,6 +829,7 @@ struct RetainedClientDeadlineContext {
     retired_client_deadlines: std::sync::Weak<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
     retired_client_transaction_capacity: Arc<AtomicUsize>,
     retired_client_transaction_count: std::sync::Weak<AtomicUsize>,
+    delayed_offer_ack_answers: std::sync::Weak<DashMap<DelayedOfferAckAnswerKey, Arc<str>>>,
 }
 
 struct RetainedClientDeadlineBatch {
@@ -819,12 +849,14 @@ fn process_retained_client_deadline_batch(
         Some(transaction_destinations),
         Some(retired_client_deadlines),
         Some(retired_client_transaction_count),
+        Some(delayed_offer_ack_answers),
     ) = (
         context.client_completions.upgrade(),
         context.client_completion_deadlines.upgrade(),
         context.transaction_destinations.upgrade(),
         context.retired_client_deadlines.upgrade(),
         context.retired_client_transaction_count.upgrade(),
+        context.delayed_offer_ack_answers.upgrade(),
     )
     else {
         return RetainedClientDeadlineBatch {
@@ -882,6 +914,8 @@ fn process_retained_client_deadline_batch(
             })
             .is_some()
         {
+            delayed_offer_ack_answers
+                .retain(|key, _| &key.transaction_id != deadline.transaction_id.as_ref());
             let _ = retired_client_transaction_count.fetch_update(
                 Ordering::AcqRel,
                 Ordering::Acquire,
@@ -1946,6 +1980,8 @@ pub struct TransactionManager {
     /// retransmitted 2xx responses and retain the request template needed to
     /// ACK them without keeping the transaction runner alive.
     transaction_destinations: Arc<DashMap<Arc<TransactionKey>, ClientResponseRouteState>>,
+    /// Exact SDP answer used for delayed-offer ACK retransmissions.
+    delayed_offer_ack_answers: Arc<DashMap<DelayedOfferAckAnswerKey, Arc<str>>>,
     retired_client_transaction_capacity: Arc<AtomicUsize>,
     retired_client_transaction_count: Arc<AtomicUsize>,
     retired_client_deadlines: Arc<std::sync::Mutex<RetiredClientDeadlineScheduler>>,
@@ -2639,6 +2675,7 @@ impl TransactionManager {
             retired_client_transaction_count: Arc::downgrade(
                 &self.retired_client_transaction_count,
             ),
+            delayed_offer_ack_answers: Arc::downgrade(&self.delayed_offer_ack_answers),
         }
     }
 
@@ -3131,6 +3168,32 @@ impl TransactionManager {
             pending_inbound_timing: self.pending_inbound_timing.len(),
             pending_inbound_principals: self.pending_inbound_principals.len(),
         }
+    }
+
+    /// Count active response routes that no live or compact transaction owns.
+    ///
+    /// Compact client tombstones intentionally retain their authenticated
+    /// response route through the applicable RFC timer. Keep those bounded
+    /// protocol records visible in [`Self::retention_counts`], but do not
+    /// classify them as leaks in post-call release gates.
+    pub fn orphaned_transaction_destination_count(&self) -> usize {
+        self.transaction_destinations
+            .iter()
+            .filter(|entry| {
+                let transaction_id = entry.key();
+                entry.value().is_active()
+                    && !self
+                        .client_transactions
+                        .contains_key(transaction_id.as_ref())
+                    && !self
+                        .server_transactions
+                        .contains_key(transaction_id.as_ref())
+                    && !self
+                        .compact_non_invite_tombstones
+                        .get(transaction_id.as_ref())
+                        .is_some_and(|compact| compact.is_client())
+            })
+            .count()
     }
 
     /// Number of unexpired INVITE client tombstones retained for authenticated
@@ -3852,6 +3915,7 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
+            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4053,6 +4117,7 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
+            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4507,6 +4572,7 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
+            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4688,6 +4754,7 @@ impl TransactionManager {
             lifecycle_scheduler: Some(lifecycle_scheduler),
             compact_non_invite_tombstones,
             transaction_destinations,
+            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -4834,6 +4901,7 @@ impl TransactionManager {
             timer_settings,
             running,
             transaction_destinations,
+            delayed_offer_ack_answers: Arc::new(DashMap::new()),
             retired_client_transaction_capacity: Arc::new(AtomicUsize::new(
                 retired_client_transaction_capacity(index_capacity),
             )),
@@ -6552,6 +6620,7 @@ impl TransactionManager {
             scheduler.clear();
         }
         self.transaction_destinations.clear();
+        self.delayed_offer_ack_answers.clear();
         self.compact_non_invite_tombstones.clear();
         self.retired_client_deadlines
             .lock()
@@ -7418,12 +7487,83 @@ impl TransactionManager {
             .admission_lifecycle
             .try_enter_existing()
             .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        let answer_key = DelayedOfferAckAnswerKey::from_response(invite_tx_id, response)?;
+        let cached_answer = self
+            .delayed_offer_ack_answers
+            .get(&answer_key)
+            .map(|entry| Arc::clone(entry.value()));
         tokio::select! {
             biased;
             _ = self.operation_cancellation.cancelled() => {
                 Err(Error::Other("transaction manager stopped ACK send".into()))
             }
-            result = self.send_ack_for_2xx_within_operation(invite_tx_id, response) => result,
+            result = self.send_ack_for_2xx_within_operation(
+                invite_tx_id,
+                response,
+                cached_answer.as_deref(),
+            ) => result,
+        }
+    }
+
+    /// Send the SDP answer in the ACK for an offerless INVITE whose 2xx
+    /// response supplied the offer (RFC 3261 section 13.2.2.4).
+    pub async fn send_ack_for_2xx_with_sdp(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+        sdp_answer: &str,
+    ) -> Result<()> {
+        if sdp_answer.trim().is_empty() {
+            return Err(Error::Other(
+                "delayed-offer ACK requires a non-empty SDP answer".into(),
+            ));
+        }
+        let _operation = self
+            .admission_lifecycle
+            .try_enter_existing()
+            .ok_or_else(|| Error::Other("transaction manager is stopping".into()))?;
+        let answer_key = DelayedOfferAckAnswerKey::from_response(invite_tx_id, response)?;
+        let prepared = tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                return Err(Error::Other("transaction manager stopped ACK send".into()));
+            }
+            result = self.prepare_ack_for_2xx_within_operation(
+                invite_tx_id,
+                response,
+                Some(sdp_answer),
+            ) => result?,
+        };
+        let retained_answer: Arc<str> = Arc::from(sdp_answer);
+        match self.delayed_offer_ack_answers.entry(answer_key.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(Arc::clone(&retained_answer));
+            }
+            dashmap::mapref::entry::Entry::Occupied(entry)
+                if entry.get().as_ref() == sdp_answer => {}
+            dashmap::mapref::entry::Entry::Occupied(_) => {
+                return Err(Error::Other(
+                    "delayed-offer ACK answer changed for the same INVITE transaction".into(),
+                ));
+            }
+        }
+        // The retained INVITE response route owns the deadline that removes
+        // this cached answer. Revalidate after insertion so expiry racing the
+        // preparation cannot leave an answer without a cleanup owner.
+        if self.transaction_route(invite_tx_id).await.is_none() {
+            self.delayed_offer_ack_answers
+                .remove_if(&answer_key, |_, answer| answer.as_ref() == sdp_answer);
+            return Err(Error::transaction_not_found(
+                invite_tx_id.clone(),
+                "delayed-offer ACK route expired before send",
+            ));
+        }
+        tokio::select! {
+            biased;
+            _ = self.operation_cancellation.cancelled() => {
+                Err(Error::Other("transaction manager stopped ACK send".into()))
+            }
+            result = self.send_prepared_ack_for_2xx_within_operation(prepared) => result,
         }
     }
 
@@ -7431,9 +7571,45 @@ impl TransactionManager {
         &self,
         invite_tx_id: &TransactionKey,
         response: &Response,
+        sdp_answer: Option<&str>,
     ) -> Result<()> {
-        // Create the ACK request
-        let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
+        let prepared = self
+            .prepare_ack_for_2xx_within_operation(invite_tx_id, response, sdp_answer)
+            .await?;
+        self.send_prepared_ack_for_2xx_within_operation(prepared)
+            .await
+    }
+
+    async fn prepare_ack_for_2xx_within_operation(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+        sdp_answer: Option<&str>,
+    ) -> Result<(Request, TransportRoute)> {
+        if !response.status().is_success()
+            || TransactionKey::from_response(response).as_ref() != Some(invite_tx_id)
+        {
+            return Err(Error::Other(
+                "ACK requires the exact successful INVITE response".into(),
+            ));
+        }
+
+        let mut ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
+        if let Some(sdp_answer) = sdp_answer {
+            ack_request.headers.retain(|header| {
+                !matches!(
+                    header,
+                    TypedHeader::ContentLength(_) | TypedHeader::ContentType(_)
+                )
+            });
+            ack_request.headers.push(TypedHeader::ContentType(
+                rvoip_sip_core::types::ContentType::from_type_subtype("application", "sdp"),
+            ));
+            ack_request.headers.push(TypedHeader::ContentLength(
+                rvoip_sip_core::types::ContentLength::new(sdp_answer.len() as u32),
+            ));
+            ack_request.body = bytes::Bytes::copy_from_slice(sdp_answer.as_bytes());
+        }
         let original_route = self.transaction_route(invite_tx_id).await.ok_or_else(|| {
             Error::transaction_not_found(invite_tx_id.clone(), "ACK route lookup failed")
         })?;
@@ -7479,6 +7655,13 @@ impl TransactionManager {
         // preserving the authenticated transport/authority/flow selected by
         // the original INVITE whenever its route remains the next hop.
         rvoip_sip_core::validation::validate_wire_request(&ack_request)?;
+        Ok((ack_request, ack_route))
+    }
+
+    async fn send_prepared_ack_for_2xx_within_operation(
+        &self,
+        (ack_request, ack_route): (Request, TransportRoute),
+    ) -> Result<()> {
         self.transport
             .send_message_via(Message::Request(ack_request), ack_route)
             .await

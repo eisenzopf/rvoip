@@ -18,6 +18,7 @@ pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
         Guard::IsSubscribed => matches!(session.call_state, CallState::Subscribed),
         Guard::HasActiveSubscription => matches!(session.call_state, CallState::Subscribed),
         Guard::HasPendingReinvite => session.pending_reinvite.is_some(),
+        Guard::HasPendingOfferAnswer => session.pending_offer_answer.is_some(),
         Guard::Custom(name) => {
             // Custom guards can be implemented here
             tracing::warn!("Custom guard '{}' not implemented", name);

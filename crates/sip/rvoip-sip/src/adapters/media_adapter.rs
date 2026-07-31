@@ -653,6 +653,41 @@ pub struct NegotiatedConfig {
     pub remote_direction: crate::types::MediaDirection,
 }
 
+/// Validated offer/answer result waiting for its SIP commit boundary.
+#[derive(Debug, Clone)]
+struct StagedMediaNegotiation {
+    config: NegotiatedConfig,
+    stable_local_direction: crate::types::MediaDirection,
+    srtp_negotiated: bool,
+}
+
+/// Exact key for pre-commit media artifacts. Production always uses the
+/// generation-qualified registry handle; the raw-ID variant exists only for
+/// isolated unit tests that exercise lane-owned helpers without a registry.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum MediaNegotiationKey {
+    Exact(SessionRegistryHandle),
+    #[cfg(test)]
+    Unit(SessionId),
+}
+
+/// Reversible lower-media application held across one SIP response or ACK
+/// write. Dropping the embedded SRTP token commits its context replacement.
+pub(crate) struct PreparedMediaNegotiation {
+    session_id: SessionId,
+    negotiation_key: MediaNegotiationKey,
+    remote_addr: SocketAddr,
+    previous_media_security: Option<MediaSecurityState>,
+    lower: Option<PreparedLowerMediaNegotiation>,
+}
+
+struct PreparedLowerMediaNegotiation {
+    exact_media: ExactMediaSession,
+    previous_config: MediaConfig,
+    srtp_rollback: Option<rvoip_rtp_core::transport::SrtpContextRollback>,
+    stable_local_direction: crate::types::MediaDirection,
+}
+
 #[derive(Clone)]
 struct MediaSessionBinding {
     handle: SessionRegistryHandle,
@@ -967,12 +1002,16 @@ pub struct MediaAdapter {
     /// UAC-side state held between `generate_sdp_offer` and
     /// `negotiate_sdp_as_uac`. The offerer-role `SrtpNegotiator`
     /// holds our locally-generated keys keyed by tag.
-    pending_srtp_offerers: Arc<DashMap<SessionId, SrtpNegotiator>>,
+    pending_srtp_offerers: Arc<DashMap<MediaNegotiationKey, SrtpNegotiator>>,
 
     /// Negotiated SRTP context pairs keyed by session. Phase 2B.2
     /// will read these out and hand them to media-core's
     /// `start_secure_media`.
-    pub(crate) negotiated_srtp: Arc<DashMap<SessionId, SrtpPair>>,
+    negotiated_srtp: Arc<DashMap<MediaNegotiationKey, SrtpPair>>,
+
+    /// SDP results that passed validation but have not crossed their exact
+    /// SIP offer/answer commit boundary.
+    staged_media_negotiations: Arc<DashMap<MediaNegotiationKey, StagedMediaNegotiation>>,
 
     /// Global event coordinator for publishing RFC 4733 DTMF events
     /// onto the rvoip-sip API event bus. Populated at boot via
@@ -1030,9 +1069,41 @@ pub struct MediaAdapter {
     media_create_allocated: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     resume_media_create: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
+    fail_media_commit_after_srtp_swap: Arc<AtomicBool>,
+    #[cfg(test)]
+    fail_media_rollback: Arc<AtomicBool>,
 }
 
 impl MediaAdapter {
+    fn media_negotiation_key(session: &SessionState) -> Result<MediaNegotiationKey> {
+        if let Some(handle) = session.lifecycle_handle.clone() {
+            return Ok(MediaNegotiationKey::Exact(handle));
+        }
+        #[cfg(test)]
+        let missing_exact_authority = Ok(MediaNegotiationKey::Unit(session.session_id.clone()));
+        #[cfg(not(test))]
+        let missing_exact_authority = Err(SessionError::InvalidTransition(
+            "media negotiation requires exact session authority".to_string(),
+        ));
+        missing_exact_authority
+    }
+
+    fn exact_media_negotiation_key(handle: &SessionRegistryHandle) -> MediaNegotiationKey {
+        MediaNegotiationKey::Exact(handle.clone())
+    }
+
+    pub(crate) fn discard_pending_srtp_offer_for_session(&self, session: &SessionState) {
+        if let Ok(key) = Self::media_negotiation_key(session) {
+            self.pending_srtp_offerers.remove(&key);
+        }
+    }
+
+    fn discard_pending_srtp_offer_exact(&self, handle: &SessionRegistryHandle) {
+        self.pending_srtp_offerers
+            .remove(&Self::exact_media_negotiation_key(handle));
+    }
+
     /// Create a new media adapter (no SRTP — equivalent to the
     /// pre-Step-2B behaviour).
     pub fn new(
@@ -1073,6 +1144,7 @@ impl MediaAdapter {
             ],
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
+            staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
             public_rtp_addr: std::sync::RwLock::new(None),
@@ -1086,6 +1158,10 @@ impl MediaAdapter {
             media_create_allocated: Arc::new(tokio::sync::Notify::new()),
             #[cfg(test)]
             resume_media_create: Arc::new(tokio::sync::Notify::new()),
+            #[cfg(test)]
+            fail_media_commit_after_srtp_swap: Arc::new(AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_media_rollback: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1546,9 +1622,19 @@ impl MediaAdapter {
         let (lane, snapshot, mut session) =
             self.lock_and_load_exact_media_session(session_id).await?;
         let previous_security = session.media_security.clone();
-        let result = self
+        let result = match self
             .negotiate_sdp_as_uac_lane_owned(&mut session, remote_sdp)
-            .await;
+            .await
+        {
+            Ok(config) => self
+                .commit_staged_media_negotiation_lane_owned(&mut session)
+                .await
+                .map(|()| config),
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            self.discard_staged_media_negotiation_for_session(&session);
+        }
         let security_changed = result.is_ok() && session.media_security != previous_security;
         let security_observation = security_changed
             .then(|| {
@@ -1578,6 +1664,7 @@ impl MediaAdapter {
         remote_sdp: &str,
     ) -> Result<NegotiatedConfig> {
         let session_id = session.session_id.clone();
+        let negotiation_key = Self::media_negotiation_key(session)?;
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let parsed_answer = SdpSession::from_str(remote_sdp)
@@ -1610,12 +1697,13 @@ impl MediaAdapter {
         // failure-with-487 hook today; if `srtp_required` and the
         // answer can't satisfy SRTP, we surface `SDPNegotiationFailed`
         // which the executor turns into terminal `CallFailed`.
-        if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(&session_id) {
+        let mut negotiated_srtp_pair = None;
+        if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(&negotiation_key) {
             // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
             let attrs = Self::extract_audio_crypto(&parsed_answer);
             if let Some(chosen) = attrs.first() {
                 let pair = offerer_state.accept_answer(chosen)?;
-                self.negotiated_srtp.insert(session_id.clone(), pair);
+                negotiated_srtp_pair = Some(pair);
                 tracing::info!(
                     "SDES answer accepted for session {}: tag {} suite {:?}",
                     session_id.0,
@@ -1642,77 +1730,22 @@ impl MediaAdapter {
             }
         }
 
-        // Update media session with remote address. SRTP contexts (if
-        // negotiated in 2B.1) must be installed *between* updating the
-        // remote address and starting the audio transmitter — the
-        // transmitter spawns a send loop and we don't want any
-        // plaintext packets going out before the encrypt-side
-        // SrtpContext is in place.
+        // Validate the exact lower owner while leaving address, codec,
+        // direction and SRTP contexts at their last stable values. The answer
+        // has not crossed its ACK/response commit boundary yet.
         let signaling_only_port = self.signaling_only_local_port();
-        let exact_media = if signaling_only_port.is_some() {
-            None
-        } else {
-            Some(self.lane_owned_media(session)?)
-        };
-        if let Some(exact_media) = exact_media {
-            let dialog_id = &exact_media.dialog_id;
-            let remote_addr = SocketAddr::new(remote_ip, remote_port);
-
-            self.apply_negotiated_media_config(
-                dialog_id,
-                remote_addr,
-                &negotiated_codec,
-                payload_type,
-                clock_rate,
-                channels,
-            )
-            .await?;
-
-            // RFC 4568 SDES: install per-direction contexts before the
-            // first wire packet flows.
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
-                let suite = pair.suite;
-                self.controller
-                    .install_srtp_contexts(dialog_id, pair.send_ctx, pair.recv_ctx)
-                    .await
-                    .map_err(|e| {
-                        SessionError::MediaError(format!("Failed to install SRTP contexts: {}", e))
-                    })?;
-                tracing::info!(
-                    "🔒 SRTP contexts installed for session {} (suite {:?})",
-                    session_id.0,
-                    suite
-                );
-                Self::record_media_security_negotiated_lane_owned(session, suite, true);
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "srtp_contexts_installed session={} role=uac suite={:?}",
-                        session_id.0, suite
-                    ));
-                }
-            }
-
-            // Establish media flow (this starts audio transmission)
-            self.controller
-                .establish_media_flow(dialog_id, remote_addr)
+        if signaling_only_port.is_none() {
+            let exact_media = self.lane_owned_media(session)?;
+            if self
+                .controller
+                .get_session_info(&exact_media.dialog_id)
                 .await
-                .map_err(|e| {
-                    SessionError::MediaError(format!("Failed to establish media flow: {}", e))
-                })?;
-
-            tracing::info!(
-                "✅ Updated RTP remote address to {} for session {}",
-                remote_addr,
-                session_id.0
-            );
-            if !self.media_is_still_exact(&exact_media) {
+                .is_none()
+                || !self.media_is_still_exact(&exact_media)
+            {
                 return Err(SessionError::InvalidTransition(
-                    "media resource changed during UAC negotiation".to_string(),
+                    "media resource changed during UAC negotiation validation".to_string(),
                 ));
-            }
-        } else if signaling_only_port.is_some() {
-            if let Some((_, pair)) = self.negotiated_srtp.remove(&session_id) {
-                Self::record_media_security_negotiated_lane_owned(session, pair.suite, false);
             }
         }
 
@@ -1733,9 +1766,66 @@ impl MediaAdapter {
                 .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
+        let srtp_negotiated = negotiated_srtp_pair.is_some();
+        if let Some(pair) = negotiated_srtp_pair {
+            self.negotiated_srtp.insert(negotiation_key.clone(), pair);
+        }
+        self.staged_media_negotiations.insert(
+            negotiation_key,
+            StagedMediaNegotiation {
+                config: config.clone(),
+                stable_local_direction: session.local_media_direction,
+                srtp_negotiated,
+            },
+        );
+
         // Event publishing will be handled by SessionCrossCrateEventHandler
 
         Ok(config)
+    }
+
+    /// Validate a locally supplied offer before an in-dialog request reaches
+    /// the wire. Codec agreement is still determined by the remote answer.
+    pub(crate) fn validate_local_sdp_offer(&self, local_sdp: &str) -> Result<()> {
+        let parsed_offer = SdpSession::from_str(local_sdp)
+            .map_err(|_| bounded_sdp_failure("local-offer", "syntax"))?;
+        self.parse_sdp_connection(local_sdp)?;
+        if !parsed_offer
+            .media_descriptions
+            .iter()
+            .any(|media| media.media == "audio" && !media.formats.is_empty())
+        {
+            return Err(SessionError::SDPNegotiationFailed(
+                "local SDP offer has no usable audio media description".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate an inbound re-INVITE/UPDATE offer without mutating media or
+    /// session state, allowing malformed offers to receive an exact 488.
+    pub(crate) fn validate_inbound_sdp_offer(&self, remote_sdp: &str) -> Result<()> {
+        let parsed_offer = SdpSession::from_str(remote_sdp)
+            .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
+        self.parse_sdp_connection(remote_sdp)?;
+
+        let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
+        if offered_crypto.is_empty() && self.srtp_required {
+            return Err(SessionError::SDPNegotiationFailed(
+                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
+            ));
+        }
+        if !offered_crypto.is_empty() && !self.offer_srtp {
+            return Ok(());
+        }
+        compute_answer_formats(
+            &parsed_offer,
+            &self.effective_offered_formats(),
+            self.strict_codec_matching,
+            self.offer_srtp,
+            self.srtp_required,
+        )?;
+        Ok(())
     }
 
     /// Generate SDP answer and negotiate (for UAS)
@@ -1755,9 +1845,19 @@ impl MediaAdapter {
             session.sdp_origin_version,
         );
         let previous_security = session.media_security.clone();
-        let result = self
+        let result = match self
             .negotiate_sdp_as_uas_lane_owned(&mut session, remote_sdp)
-            .await;
+            .await
+        {
+            Ok((answer, config)) => self
+                .commit_staged_media_negotiation_lane_owned(&mut session)
+                .await
+                .map(|()| (answer, config)),
+            Err(error) => Err(error),
+        };
+        if result.is_err() {
+            self.discard_staged_media_negotiation_for_session(&session);
+        }
         let state_changed = result.is_ok()
             && (previous_origin
                 != (
@@ -1765,7 +1865,7 @@ impl MediaAdapter {
                     session.sdp_origin_version,
                 )
                 || session.media_security != previous_security);
-        let security_observation = (session.media_security != previous_security)
+        let security_observation = (result.is_ok() && session.media_security != previous_security)
             .then(|| {
                 session
                     .lifecycle_handle
@@ -1789,6 +1889,8 @@ impl MediaAdapter {
         remote_sdp: &str,
     ) -> Result<(String, NegotiatedConfig)> {
         let session_id = session.session_id.clone();
+        let negotiation_key = Self::media_negotiation_key(session)?;
+        let stable_local_direction = session.local_media_direction;
         // Parse remote SDP — typed parse for both connection extraction
         // and SDES handling.
         let parsed_offer = SdpSession::from_str(remote_sdp)
@@ -1815,7 +1917,7 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, pending_srtp_pair, reject_with_port_zero) =
+        let (answer_attr, negotiated_srtp_pair, reject_with_port_zero) =
             if !offered_crypto.is_empty() && self.offer_srtp {
                 // Both sides want SRTP — negotiate.
                 let answerer = SrtpNegotiator::new_answerer();
@@ -1884,6 +1986,14 @@ impl MediaAdapter {
                 local_direction: crate::types::MediaDirection::Inactive,
                 remote_direction: crate::types::MediaDirection::Inactive,
             };
+            self.staged_media_negotiations.insert(
+                negotiation_key,
+                StagedMediaNegotiation {
+                    config: config.clone(),
+                    stable_local_direction,
+                    srtp_negotiated: false,
+                },
+            );
             return Ok((sdp_answer, config));
         }
 
@@ -1915,79 +2025,25 @@ impl MediaAdapter {
         let offered_direction = audio_direction(&parsed_offer);
         let answer_direction = answer_direction_for_offer(&offered_direction);
 
-        // Update media session with remote address. SRTP contexts must
-        // be installed BEFORE establish_media_flow starts the audio
-        // transmitter — see `negotiate_sdp_as_uac` for the same
-        // ordering rationale.
+        // Validate the exact lower owner without mutating it. The generated
+        // answer is still pre-wire state and must be retryable after a
+        // definite zero-wire response failure.
         let exact_media = if signaling_only_port.is_some() {
             None
         } else {
             Some(self.lane_owned_media(session)?)
         };
         if let Some(exact_media) = exact_media {
-            let dialog_id = &exact_media.dialog_id;
-            let remote_addr = SocketAddr::new(remote_ip, remote_port);
-
-            self.apply_negotiated_media_config(
-                dialog_id,
-                remote_addr,
-                &negotiated_codec,
-                negotiated_payload_type,
-                clock_rate,
-                channels,
-            )
-            .await?;
-
-            let negotiated_suite = if let Some(pair) = pending_srtp_pair {
-                let suite = pair.suite;
-                self.controller
-                    .install_srtp_contexts(dialog_id, pair.send_ctx, pair.recv_ctx)
-                    .await
-                    .map_err(|e| {
-                        SessionError::MediaError(format!(
-                            "Failed to install SRTP contexts (UAS): {}",
-                            e
-                        ))
-                    })?;
-                tracing::info!(
-                    "🔒 SRTP contexts installed for session {} (UAS, suite {:?})",
-                    session_id.0,
-                    suite
-                );
-                if srtp_diagnostics {
-                    emit_srtp_diag(format!(
-                        "srtp_contexts_installed session={} role=uas suite={:?}",
-                        session_id.0, suite
-                    ));
-                }
-                Some(suite)
-            } else {
-                None
-            };
-
-            self.controller
-                .establish_media_flow(dialog_id, remote_addr)
+            if self
+                .controller
+                .get_session_info(&exact_media.dialog_id)
                 .await
-                .map_err(|e| {
-                    SessionError::MediaError(format!("Failed to establish media flow: {}", e))
-                })?;
-
-            tracing::info!(
-                "✅ Updated RTP remote address to {} for session {} (UAS)",
-                remote_addr,
-                session_id.0
-            );
-            if !self.media_is_still_exact(&exact_media) {
+                .is_none()
+                || !self.media_is_still_exact(&exact_media)
+            {
                 return Err(SessionError::InvalidTransition(
-                    "media resource changed during UAS negotiation".to_string(),
+                    "media resource changed during UAS negotiation validation".to_string(),
                 ));
-            }
-            if let Some(suite) = negotiated_suite {
-                Self::record_media_security_negotiated_lane_owned(session, suite, true);
-            }
-        } else if signaling_only_port.is_some() {
-            if let Some(pair) = pending_srtp_pair {
-                Self::record_media_security_negotiated_lane_owned(session, pair.suite, false);
             }
         }
 
@@ -2084,11 +2140,362 @@ impl MediaAdapter {
                 .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
+        let srtp_negotiated = negotiated_srtp_pair.is_some();
+        if let Some(pair) = negotiated_srtp_pair {
+            self.negotiated_srtp.insert(negotiation_key.clone(), pair);
+        }
+        self.staged_media_negotiations.insert(
+            negotiation_key,
+            StagedMediaNegotiation {
+                config: config.clone(),
+                stable_local_direction,
+                srtp_negotiated,
+            },
+        );
+
         // Event publishing will be handled by SessionCrossCrateEventHandler
 
         // Media flow is already represented by MediaStreamStarted above
 
         Ok((sdp_answer, config))
+    }
+
+    /// Drop every pre-commit media artifact for an offer/answer exchange.
+    pub(crate) fn discard_staged_media_negotiation_for_session(&self, session: &SessionState) {
+        if let Ok(key) = Self::media_negotiation_key(session) {
+            self.staged_media_negotiations.remove(&key);
+            self.negotiated_srtp.remove(&key);
+        }
+    }
+
+    fn discard_staged_media_negotiation_exact(&self, handle: &SessionRegistryHandle) {
+        let key = Self::exact_media_negotiation_key(handle);
+        self.staged_media_negotiations.remove(&key);
+        self.negotiated_srtp.remove(&key);
+    }
+
+    pub(crate) fn has_staged_media_negotiation(&self, session: &SessionState) -> bool {
+        Self::media_negotiation_key(session)
+            .is_ok_and(|key| self.staged_media_negotiations.contains_key(&key))
+    }
+
+    /// Apply one validated negotiation while retaining exact rollback
+    /// authority until its SIP response or ACK crosses the wire boundary.
+    pub(crate) async fn prepare_staged_media_negotiation_lane_owned(
+        &self,
+        session: &mut SessionState,
+    ) -> Result<PreparedMediaNegotiation> {
+        let session_id = session.session_id.clone();
+        let negotiation_key = Self::media_negotiation_key(session)?;
+        let staged = self
+            .staged_media_negotiations
+            .get(&negotiation_key)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| {
+                SessionError::InvalidTransition(
+                    "no validated media negotiation is staged for commit".to_string(),
+                )
+            })?;
+        let previous_media_security = session.media_security.clone();
+
+        if previous_media_security.is_some() && !staged.srtp_negotiated {
+            return Err(SessionError::SDPNegotiationFailed(
+                "an established secure media session cannot be downgraded to plaintext".to_string(),
+            ));
+        }
+
+        if self.signaling_only_local_port().is_some() {
+            if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
+                Self::record_media_security_negotiated_lane_owned(session, pair.suite, false);
+            }
+            return Ok(PreparedMediaNegotiation {
+                session_id,
+                negotiation_key,
+                remote_addr: staged.config.remote_addr,
+                previous_media_security,
+                lower: None,
+            });
+        }
+
+        let exact_media = self.lane_owned_media(session)?;
+        let dialog_id = exact_media.dialog_id.clone();
+        let previous_config = self
+            .controller
+            .get_session_info(&dialog_id)
+            .await
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for dialog {dialog_id}"))
+            })?
+            .config;
+        if !self.media_is_still_exact(&exact_media) {
+            return Err(SessionError::InvalidTransition(
+                "media resource changed before negotiated media commit".to_string(),
+            ));
+        }
+
+        let remote_addr = staged.config.remote_addr;
+        let mut lower = PreparedLowerMediaNegotiation {
+            exact_media,
+            previous_config,
+            srtp_rollback: None,
+            stable_local_direction: staged.stable_local_direction,
+        };
+        let apply_result = async {
+            self.apply_negotiated_media_config(
+                &dialog_id,
+                remote_addr,
+                &staged.config.codec,
+                staged.config.payload_type,
+                staged.config.clock_rate,
+                staged.config.channels,
+            )
+            .await?;
+
+            if let Some((_, pair)) = self.negotiated_srtp.remove(&negotiation_key) {
+                let suite = pair.suite;
+                lower.srtp_rollback = Some(
+                    self.controller
+                        .prepare_srtp_context_swap(&dialog_id, pair.send_ctx, pair.recv_ctx)
+                        .await
+                        .map_err(|error| {
+                            SessionError::MediaError(format!(
+                                "Failed to install SRTP contexts: {error}"
+                            ))
+                        })?,
+                );
+                Self::record_media_security_negotiated_lane_owned(session, suite, true);
+                if srtp_diagnostics_enabled() {
+                    emit_srtp_diag(format!(
+                        "srtp_contexts_installed session={} role=commit suite={suite:?}",
+                        session_id.0
+                    ));
+                }
+            }
+
+            #[cfg(test)]
+            if lower.srtp_rollback.is_some()
+                && self
+                    .fail_media_commit_after_srtp_swap
+                    .swap(false, Ordering::AcqRel)
+            {
+                return Err(SessionError::MediaError(
+                    "injected failure after SRTP context replacement".to_string(),
+                ));
+            }
+
+            self.controller
+                .establish_media_flow(&dialog_id, remote_addr)
+                .await
+                .map_err(|error| {
+                    SessionError::MediaError(format!(
+                        "Failed to establish negotiated media flow: {error}"
+                    ))
+                })?;
+            let media_direction = match staged.config.local_direction {
+                crate::types::MediaDirection::SendRecv => {
+                    rvoip_media_core::types::MediaDirection::SendRecv
+                }
+                crate::types::MediaDirection::SendOnly => {
+                    rvoip_media_core::types::MediaDirection::SendOnly
+                }
+                crate::types::MediaDirection::RecvOnly => {
+                    rvoip_media_core::types::MediaDirection::RecvOnly
+                }
+                crate::types::MediaDirection::Inactive => {
+                    rvoip_media_core::types::MediaDirection::Inactive
+                }
+            };
+            self.controller
+                .set_media_direction(&dialog_id, media_direction)
+                .await
+                .map_err(|error| {
+                    SessionError::MediaError(format!(
+                        "Failed to apply negotiated media direction: {error}"
+                    ))
+                })?;
+            if !self.media_is_still_exact(&lower.exact_media) {
+                return Err(SessionError::InvalidTransition(
+                    "media resource changed during negotiated media commit".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        .await;
+
+        let prepared = PreparedMediaNegotiation {
+            session_id,
+            negotiation_key,
+            remote_addr,
+            previous_media_security,
+            lower: Some(lower),
+        };
+        if let Err(error) = apply_result {
+            return match self
+                .rollback_prepared_media_negotiation_lane_owned(session, prepared)
+                .await
+            {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(rollback_error),
+            };
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) async fn finalize_prepared_media_negotiation_lane_owned(
+        &self,
+        session: &mut SessionState,
+        prepared: PreparedMediaNegotiation,
+    ) -> Result<()> {
+        if prepared.session_id != session.session_id {
+            return Err(SessionError::InvalidTransition(
+                "prepared media negotiation belongs to another session".to_string(),
+            ));
+        }
+        let current_key = Self::media_negotiation_key(session)?;
+        if current_key != prepared.negotiation_key {
+            self.staged_media_negotiations
+                .remove(&prepared.negotiation_key);
+            self.negotiated_srtp.remove(&prepared.negotiation_key);
+            if let Some(lower) = prepared.lower.as_ref() {
+                let _ = lower.exact_media._resource.release_lower_once().await;
+            }
+            return Err(SessionError::InvalidTransition(
+                "prepared media negotiation belongs to a stale session generation".to_string(),
+            ));
+        }
+        if prepared
+            .lower
+            .as_ref()
+            .is_some_and(|lower| !self.media_is_still_exact(&lower.exact_media))
+        {
+            if let Some(lower) = prepared.lower.as_ref() {
+                let _ = lower.exact_media._resource.release_lower_once().await;
+            }
+            session.media_session_id = None;
+            session.media_session_ready = false;
+            session.media_security = None;
+            self.staged_media_negotiations
+                .remove(&prepared.negotiation_key);
+            self.negotiated_srtp.remove(&prepared.negotiation_key);
+            return Err(SessionError::InvalidTransition(
+                "media resource changed before negotiated media finalization".to_string(),
+            ));
+        }
+        self.staged_media_negotiations
+            .remove(&prepared.negotiation_key);
+        self.negotiated_srtp.remove(&prepared.negotiation_key);
+        tracing::info!(
+            "Committed negotiated media for session {} at {}",
+            session.session_id.0,
+            prepared.remote_addr
+        );
+        Ok(())
+    }
+
+    pub(crate) async fn rollback_prepared_media_negotiation_lane_owned(
+        &self,
+        session: &mut SessionState,
+        mut prepared: PreparedMediaNegotiation,
+    ) -> Result<()> {
+        if prepared.session_id != session.session_id {
+            return Err(SessionError::InvalidTransition(
+                "prepared media rollback belongs to another session".to_string(),
+            ));
+        }
+        let same_generation = Self::media_negotiation_key(session)? == prepared.negotiation_key;
+        self.staged_media_negotiations
+            .remove(&prepared.negotiation_key);
+        self.negotiated_srtp.remove(&prepared.negotiation_key);
+
+        let Some(mut lower) = prepared.lower.take() else {
+            if same_generation {
+                session.media_security = prepared.previous_media_security;
+                return Ok(());
+            }
+            return Err(SessionError::InvalidTransition(
+                "prepared media rollback retired a stale session generation".to_string(),
+            ));
+        };
+        let dialog_id = lower.exact_media.dialog_id.clone();
+        let mut rollback_failures = Vec::new();
+        if let Some(rollback) = lower.srtp_rollback.take() {
+            if self
+                .controller
+                .rollback_srtp_context_swap(&dialog_id, rollback)
+                .await
+                .is_err()
+            {
+                rollback_failures.push("srtp");
+            }
+        }
+        if self
+            .controller
+            .update_media(dialog_id.clone(), lower.previous_config)
+            .await
+            .is_err()
+        {
+            rollback_failures.push("configuration");
+        }
+        let stable_direction = match lower.stable_local_direction {
+            crate::types::MediaDirection::SendRecv => {
+                rvoip_media_core::types::MediaDirection::SendRecv
+            }
+            crate::types::MediaDirection::SendOnly => {
+                rvoip_media_core::types::MediaDirection::SendOnly
+            }
+            crate::types::MediaDirection::RecvOnly => {
+                rvoip_media_core::types::MediaDirection::RecvOnly
+            }
+            crate::types::MediaDirection::Inactive => {
+                rvoip_media_core::types::MediaDirection::Inactive
+            }
+        };
+        if self
+            .controller
+            .set_media_direction(&dialog_id, stable_direction)
+            .await
+            .is_err()
+        {
+            rollback_failures.push("direction");
+        }
+        if !self.media_is_still_exact(&lower.exact_media) {
+            rollback_failures.push("ownership");
+        }
+        #[cfg(test)]
+        if self.fail_media_rollback.swap(false, Ordering::AcqRel) {
+            rollback_failures.push("injected");
+        }
+
+        if rollback_failures.is_empty() {
+            if same_generation {
+                session.media_security = prepared.previous_media_security;
+                return Ok(());
+            }
+            return Err(SessionError::InvalidTransition(
+                "prepared media rollback retired a stale session generation".to_string(),
+            ));
+        }
+        let _ = lower.exact_media._resource.release_lower_once().await;
+        if same_generation {
+            session.media_session_id = None;
+            session.media_session_ready = false;
+            session.media_security = None;
+        }
+        Err(SessionError::MediaError(format!(
+            "negotiated media rollback failed at {}; media was quarantined",
+            rollback_failures.join(",")
+        )))
+    }
+
+    pub(crate) async fn commit_staged_media_negotiation_lane_owned(
+        &self,
+        session: &mut SessionState,
+    ) -> Result<()> {
+        let prepared = self
+            .prepare_staged_media_negotiation_lane_owned(session)
+            .await?;
+        self.finalize_prepared_media_negotiation_lane_owned(session, prepared)
+            .await
     }
 
     fn record_media_security_negotiated_lane_owned(
@@ -2811,6 +3218,7 @@ impl MediaAdapter {
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
         let session_id = session.session_id.clone();
+        let negotiation_key = Self::media_negotiation_key(session)?;
         if self.signaling_only_local_port().is_some() {
             return self
                 .generate_signaling_only_sdp_offer_lane_owned(session, direction)
@@ -2860,7 +3268,7 @@ impl MediaAdapter {
         let (transport, crypto_attrs) = if self.offer_srtp {
             let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
             self.pending_srtp_offerers
-                .insert(session_id.clone(), negotiator);
+                .insert(negotiation_key, negotiator);
             ("RTP/SAVP", attrs)
         } else {
             ("RTP/AVP", Vec::new())
@@ -3161,6 +3569,9 @@ impl MediaAdapter {
                 media_id
             ))
         })?;
+        if !exact._resource.core_media_allocated {
+            return Ok(());
+        }
         let media_direction = match direction {
             crate::types::MediaDirection::SendRecv => {
                 rvoip_media_core::types::MediaDirection::SendRecv
@@ -3457,6 +3868,8 @@ impl MediaAdapter {
         }
 
         let session_id = handle.session_id();
+        self.discard_pending_srtp_offer_exact(handle);
+        self.discard_staged_media_negotiation_exact(handle);
         let retained_binding = self
             .media_resources
             .get(session_id)
@@ -3595,6 +4008,8 @@ impl MediaAdapter {
                 ))
             })?;
         let session_id = handle.session_id();
+        self.discard_pending_srtp_offer_exact(handle);
+        self.discard_staged_media_negotiation_exact(handle);
         let managed_resource = self
             .media_resources
             .get(session_id)
@@ -3725,6 +4140,7 @@ impl MediaAdapter {
         direction: crate::types::MediaDirection,
     ) -> Result<String> {
         let session_id = session.session_id.clone();
+        let negotiation_key = Self::media_negotiation_key(session)?;
         let (origin_session_id, origin_version) = advance_sdp_origin(session);
         let origin_version = origin_version.to_string();
         let advertised_ip = self
@@ -3740,7 +4156,7 @@ impl MediaAdapter {
         let (transport, crypto_attrs) = if self.offer_srtp {
             let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
             self.pending_srtp_offerers
-                .insert(session_id.clone(), negotiator);
+                .insert(negotiation_key, negotiator);
             ("RTP/SAVP", attrs)
         } else {
             ("RTP/AVP", Vec::new())
@@ -3966,6 +4382,7 @@ impl Clone for MediaAdapter {
             srtp_offered_suites: self.srtp_offered_suites.clone(),
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
+            staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
@@ -3979,6 +4396,10 @@ impl Clone for MediaAdapter {
             media_create_allocated: self.media_create_allocated.clone(),
             #[cfg(test)]
             resume_media_create: self.resume_media_create.clone(),
+            #[cfg(test)]
+            fail_media_commit_after_srtp_swap: self.fail_media_commit_after_srtp_swap.clone(),
+            #[cfg(test)]
+            fail_media_rollback: self.fail_media_rollback.clone(),
         }
     }
 }
@@ -5033,7 +5454,7 @@ a=fmtp:101 0-15\r\n";
             .await
             .is_err());
         assert!(session.media_security.is_none());
-        assert!(!adapter.negotiated_srtp.contains_key(&session_id));
+        assert!(adapter.negotiated_srtp.is_empty());
     }
 
     /// Sprint 3.5 — strict mode + zero overlap returns
@@ -5843,6 +6264,447 @@ a=fmtp:101 0-15\r\n";
             .remove_session_exact(&generation_b)
             .await
             .expect("cleanup generation B");
+    }
+
+    #[tokio::test]
+    async fn stale_media_negotiation_cleanup_cannot_cross_session_generation_reuse() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("exact-negotiation-reuse".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation A");
+        let generation_a = store
+            .lifecycle_handle(&session_id)
+            .expect("generation A handle");
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(store.authority().elapse_reuse_horizon_for_test(&session_id));
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&session_id)
+            .expect("generation B handle");
+
+        let adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            store,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_400,
+            16_500,
+        );
+        let staged = StagedMediaNegotiation {
+            config: NegotiatedConfig {
+                local_addr: "127.0.0.1:16400".parse().unwrap(),
+                remote_addr: "127.0.0.1:16402".parse().unwrap(),
+                codec: "PCMU".to_string(),
+                payload_type: 0,
+                clock_rate: 8_000,
+                channels: 1,
+                local_direction: crate::types::MediaDirection::SendRecv,
+                remote_direction: crate::types::MediaDirection::SendRecv,
+            },
+            stable_local_direction: crate::types::MediaDirection::SendRecv,
+            srtp_negotiated: false,
+        };
+        adapter.staged_media_negotiations.insert(
+            MediaNegotiationKey::Exact(generation_a.clone()),
+            staged.clone(),
+        );
+        adapter
+            .staged_media_negotiations
+            .insert(MediaNegotiationKey::Exact(generation_b.clone()), staged);
+
+        adapter.discard_staged_media_negotiation_exact(&generation_a);
+
+        assert!(!adapter
+            .staged_media_negotiations
+            .contains_key(&MediaNegotiationKey::Exact(generation_a)));
+        assert!(adapter
+            .staged_media_negotiations
+            .contains_key(&MediaNegotiationKey::Exact(generation_b)));
+    }
+
+    #[tokio::test]
+    async fn stale_prepared_media_finalization_cannot_cross_session_generation_reuse() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("exact-prepared-negotiation-reuse".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation A");
+        let generation_a = store
+            .lifecycle_handle(&session_id)
+            .expect("generation A handle");
+        store
+            .remove_session_exact(&generation_a)
+            .await
+            .expect("retire generation A");
+        assert!(store.authority().elapse_reuse_horizon_for_test(&session_id));
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create generation B");
+        let generation_b = store
+            .lifecycle_handle(&session_id)
+            .expect("generation B handle");
+
+        let mut adapter = MediaAdapter::new(
+            Arc::new(MediaSessionController::new()),
+            store,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_400,
+            16_500,
+        );
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        let staged = StagedMediaNegotiation {
+            config: NegotiatedConfig {
+                local_addr: "127.0.0.1:16400".parse().unwrap(),
+                remote_addr: "127.0.0.1:16402".parse().unwrap(),
+                codec: "PCMU".to_string(),
+                payload_type: 0,
+                clock_rate: 8_000,
+                channels: 1,
+                local_direction: crate::types::MediaDirection::SendRecv,
+                remote_direction: crate::types::MediaDirection::SendRecv,
+            },
+            stable_local_direction: crate::types::MediaDirection::SendRecv,
+            srtp_negotiated: false,
+        };
+        adapter.staged_media_negotiations.insert(
+            MediaNegotiationKey::Exact(generation_a.clone()),
+            staged.clone(),
+        );
+        adapter
+            .staged_media_negotiations
+            .insert(MediaNegotiationKey::Exact(generation_b.clone()), staged);
+        let mut working = SessionState::new(session_id, Role::UAC);
+        working.lifecycle_handle = Some(generation_a.clone());
+        let prepared = adapter
+            .prepare_staged_media_negotiation_lane_owned(&mut working)
+            .await
+            .expect("prepare generation A");
+
+        working.lifecycle_handle = Some(generation_b.clone());
+        adapter
+            .finalize_prepared_media_negotiation_lane_owned(&mut working, prepared)
+            .await
+            .expect_err("stale prepared authority must fail closed");
+
+        assert!(!adapter
+            .staged_media_negotiations
+            .contains_key(&MediaNegotiationKey::Exact(generation_a)));
+        assert!(adapter
+            .staged_media_negotiations
+            .contains_key(&MediaNegotiationKey::Exact(generation_b)));
+    }
+
+    #[tokio::test]
+    async fn failed_commit_after_srtp_swap_restores_stable_media() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("post-srtp-swap-rollback".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create exact session");
+        let adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_400,
+            16_500,
+        );
+        let dialog_id = adapter
+            .create_session(&session_id)
+            .await
+            .expect("create managed media");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact lifecycle handle");
+        let mut working = store
+            .get_session_exact(&handle)
+            .await
+            .expect("load exact session");
+        working.media_session_id = Some(dialog_id.clone());
+        working.media_session_ready = true;
+        working.local_media_direction = crate::types::MediaDirection::SendRecv;
+
+        let before = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("stable lower media");
+        let make_context = |key_byte, salt_byte| {
+            SrtpContext::new(
+                SRTP_AES128_CM_SHA1_80,
+                SrtpCryptoKey::new(vec![key_byte; 16], vec![salt_byte; 14]),
+            )
+            .expect("test SRTP context")
+        };
+        let key = MediaNegotiationKey::Exact(handle.clone());
+        adapter.negotiated_srtp.insert(
+            key.clone(),
+            SrtpPair {
+                send_ctx: make_context(0x11, 0x22),
+                recv_ctx: make_context(0x33, 0x44),
+                suite: CryptoSuite::AesCm128HmacSha1_80,
+            },
+        );
+        adapter.staged_media_negotiations.insert(
+            key,
+            StagedMediaNegotiation {
+                config: NegotiatedConfig {
+                    local_addr: before.config.local_addr,
+                    remote_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 35_000),
+                    codec: "PCMA".to_string(),
+                    payload_type: 8,
+                    clock_rate: 8_000,
+                    channels: 1,
+                    local_direction: crate::types::MediaDirection::Inactive,
+                    remote_direction: crate::types::MediaDirection::SendRecv,
+                },
+                stable_local_direction: crate::types::MediaDirection::SendRecv,
+                srtp_negotiated: true,
+            },
+        );
+        adapter
+            .fail_media_commit_after_srtp_swap
+            .store(true, Ordering::Release);
+
+        let error = adapter
+            .commit_staged_media_negotiation_lane_owned(&mut working)
+            .await
+            .expect_err("post-swap failure must abort the media commit");
+        assert!(matches!(
+            &error,
+            SessionError::MediaError(detail)
+                if detail == "injected failure after SRTP context replacement"
+        ));
+        assert_eq!(working.media_security, None);
+
+        let after = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("restored lower media");
+        assert_eq!(after.config.local_addr, before.config.local_addr);
+        assert_eq!(after.config.remote_addr, before.config.remote_addr);
+        assert_eq!(after.config.preferred_codec, before.config.preferred_codec);
+        assert_eq!(after.config.parameters, before.config.parameters);
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup managed media");
+    }
+
+    #[tokio::test]
+    async fn failed_public_uas_commit_does_not_publish_advanced_sdp_origin() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("failed-public-uas-origin-rollback".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create exact UAS session");
+        let mut adapter = MediaAdapter::new(
+            controller,
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            17_200,
+            17_300,
+        );
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start exact media");
+
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("capture exact UAS lifetime");
+        let before = store
+            .get_session_exact(&handle)
+            .await
+            .expect("load stable UAS state");
+        let (_, offered_crypto) = SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80])
+            .expect("build SRTP offer");
+        let mut offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35_010, "RTP/SAVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000");
+        for crypto in offered_crypto {
+            offer = offer.crypto_attribute(crypto);
+        }
+        let offer = offer
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("build SRTP SDP offer")
+            .to_string();
+
+        adapter
+            .fail_media_commit_after_srtp_swap
+            .store(true, Ordering::Release);
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer)
+            .await
+            .expect_err("injected media commit failure must reject the answer");
+
+        let after = store
+            .get_session_exact(&handle)
+            .await
+            .expect("reload stable UAS state");
+        assert_eq!(after.sdp_origin_session_id, before.sdp_origin_session_id);
+        assert_eq!(after.sdp_origin_version, before.sdp_origin_version);
+        assert_eq!(after.media_security, before.media_security);
+        assert!(adapter.staged_media_negotiations.is_empty());
+        assert!(adapter.negotiated_srtp.is_empty());
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup managed media");
+    }
+
+    #[tokio::test]
+    async fn failed_prepared_media_rollback_quarantines_exact_allocation() {
+        use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("failed-media-rollback-quarantine".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create exact session");
+        let adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16_600,
+            16_700,
+        );
+        let dialog_id = adapter
+            .create_session(&session_id)
+            .await
+            .expect("create managed media");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact lifecycle handle");
+        let mut working = store
+            .get_session_exact(&handle)
+            .await
+            .expect("load exact session");
+        working.media_session_id = Some(dialog_id.clone());
+        working.media_session_ready = true;
+        working.local_media_direction = crate::types::MediaDirection::SendRecv;
+        working.media_security = Some(MediaSecurityState {
+            keying: MediaSecurityKeying::Sdes,
+            suite: CryptoSuite::AesCm128HmacSha1_80,
+            profile: MediaSecurityProfile::RtpSavp,
+            contexts_installed: true,
+        });
+
+        let make_context = |key_byte, salt_byte| {
+            SrtpContext::new(
+                SRTP_AES128_CM_SHA1_80,
+                SrtpCryptoKey::new(vec![key_byte; 16], vec![salt_byte; 14]),
+            )
+            .expect("test SRTP context")
+        };
+        controller
+            .install_srtp_contexts(
+                &dialog_id,
+                make_context(0x01, 0x02),
+                make_context(0x03, 0x04),
+            )
+            .await
+            .expect("install stable SRTP contexts");
+        let before = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("stable lower media");
+        let key = MediaNegotiationKey::Exact(handle);
+        adapter.negotiated_srtp.insert(
+            key.clone(),
+            SrtpPair {
+                send_ctx: make_context(0x11, 0x12),
+                recv_ctx: make_context(0x13, 0x14),
+                suite: CryptoSuite::AesCm128HmacSha1_80,
+            },
+        );
+        adapter.staged_media_negotiations.insert(
+            key,
+            StagedMediaNegotiation {
+                config: NegotiatedConfig {
+                    local_addr: before.config.local_addr,
+                    remote_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 35_200),
+                    codec: "PCMA".to_string(),
+                    payload_type: 8,
+                    clock_rate: 8_000,
+                    channels: 1,
+                    local_direction: crate::types::MediaDirection::Inactive,
+                    remote_direction: crate::types::MediaDirection::SendRecv,
+                },
+                stable_local_direction: crate::types::MediaDirection::SendRecv,
+                srtp_negotiated: true,
+            },
+        );
+
+        let prepared = adapter
+            .prepare_staged_media_negotiation_lane_owned(&mut working)
+            .await
+            .expect("reversibly apply new media");
+        adapter.fail_media_rollback.store(true, Ordering::Release);
+        let error = adapter
+            .rollback_prepared_media_negotiation_lane_owned(&mut working, prepared)
+            .await
+            .expect_err("rollback failure must quarantine media");
+        assert!(matches!(
+            error,
+            SessionError::MediaError(detail)
+                if detail.contains("media was quarantined") && detail.contains("injected")
+        ));
+        assert_eq!(working.media_session_id, None);
+        assert!(!working.media_session_ready);
+        assert_eq!(working.media_security, None);
+        assert!(
+            controller.get_session_info(&dialog_id).await.is_none(),
+            "the failed rollback must release the exact lower allocation"
+        );
     }
 
     #[tokio::test]

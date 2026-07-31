@@ -14,7 +14,7 @@ fn reserve_loopback_port() -> u16 {
 }
 
 async fn wait_for_state(call: &SessionHandle, expected: CallState) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    let wait = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
             if matches!(call.state().await, Ok(state) if state == expected) {
                 break;
@@ -22,8 +22,13 @@ async fn wait_for_state(call: &SessionHandle, expected: CallState) {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
-    .await
-    .unwrap_or_else(|_| panic!("call did not reach {expected:?}"));
+    .await;
+    if wait.is_err() {
+        panic!(
+            "call did not reach {expected:?}; last state: {:?}",
+            call.state().await
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

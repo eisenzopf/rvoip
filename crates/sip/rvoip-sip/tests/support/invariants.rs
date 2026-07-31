@@ -200,7 +200,6 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
         "/transaction_manager/server_invite_dialog_keys_by_tx",
         "/transaction_manager/invite_2xx_response_cache",
         "/transaction_manager/invite_2xx_response_due_queue",
-        "/transaction_manager/transaction_destinations",
         "/transaction_manager/subscriber_to_transactions",
         "/transaction_manager/transaction_to_subscribers",
         "/transaction_manager/event_subscribers",
@@ -248,12 +247,17 @@ fn endpoint_retained_total(snapshot: &Value) -> u64 {
 
     let live_lifecycle_entries = metric(snapshot, "/lifecycle/entries")
         .saturating_sub(metric(snapshot, "/lifecycle/terminal_entries"));
+    let orphaned_transaction_destinations = snapshot
+        .pointer("/transaction_manager/orphaned_transaction_destinations")
+        .and_then(Value::as_u64)
+        .expect("perf snapshot exposes orphaned transaction destinations");
 
     POINTERS
         .iter()
         .map(|pointer| metric(snapshot, pointer))
         .sum::<u64>()
         + live_lifecycle_entries
+        + orphaned_transaction_destinations
 }
 
 fn endpoint_global_retained_total(snapshot: &Value) -> u64 {

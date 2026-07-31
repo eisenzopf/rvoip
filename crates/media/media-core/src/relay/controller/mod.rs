@@ -1022,7 +1022,7 @@ impl MediaSessionController {
 
         // RtpSession exposes its transport via a typed accessor; we
         // need the UdpRtpTransport concrete type to reach
-        // `set_srtp_contexts`. Downcast once — the only transport
+        // the reversible SRTP context API. Downcast once — the only transport
         // type media-core constructs is UDP, so this is the
         // architecturally-correct narrowing.
         let session_guard = session_arc.lock().await;
@@ -1035,12 +1035,69 @@ impl MediaSessionController {
                     "install_srtp_contexts: RTP session is not a UdpRtpTransport".to_string(),
                 )
             })?;
-        udp_transport
-            .set_srtp_contexts(send_ctx, recv_ctx)
+        let _rollback = udp_transport
+            .replace_srtp_contexts(send_ctx, recv_ctx)
             .await
             .map_err(|error| Error::config(format!("failed to install SRTP contexts: {error}")))?;
         info!("Installed SDES-SRTP contexts on dialog {}", dialog_id);
         Ok(())
+    }
+
+    /// Prepare a reversible directional SRTP replacement for one exact RTP
+    /// session. Dropping the returned token commits the new contexts.
+    pub async fn prepare_srtp_context_swap(
+        &self,
+        dialog_id: &DialogId,
+        send_ctx: rvoip_rtp_core::srtp::SrtpContext,
+        recv_ctx: rvoip_rtp_core::srtp::SrtpContext,
+    ) -> Result<rvoip_rtp_core::transport::SrtpContextRollback> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rvoip_rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "prepare_srtp_context_swap: RTP session is not a UdpRtpTransport".to_string(),
+                )
+            })?;
+        udp_transport
+            .replace_srtp_contexts(send_ctx, recv_ctx)
+            .await
+            .map_err(|error| Error::config(format!("failed to replace SRTP contexts: {error}")))
+    }
+
+    /// Restore a prepared SRTP replacement if its SIP commit reaches a
+    /// definite zero-wire failure.
+    pub async fn rollback_srtp_context_swap(
+        &self,
+        dialog_id: &DialogId,
+        rollback: rvoip_rtp_core::transport::SrtpContextRollback,
+    ) -> Result<()> {
+        let session_arc = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|entry| entry.value().session.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let session_guard = session_arc.lock().await;
+        let transport = session_guard.transport();
+        let udp_transport = transport
+            .as_any()
+            .downcast_ref::<rvoip_rtp_core::transport::UdpRtpTransport>()
+            .ok_or_else(|| {
+                Error::config(
+                    "rollback_srtp_context_swap: RTP session is not a UdpRtpTransport".to_string(),
+                )
+            })?;
+        udp_transport
+            .rollback_srtp_contexts(rollback)
+            .await
+            .map_err(|error| Error::config(format!("failed to restore SRTP contexts: {error}")))
     }
 
     fn cleanup_per_dialog_side_state(&self, dialog_id: &DialogId) {

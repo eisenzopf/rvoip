@@ -6468,8 +6468,17 @@ impl DialogManager {
             .await;
         }
 
-        // Handle specific successful response types
         let session_id_for_diag = self.get_session_id(dialog_id);
+        // SDP-bearing INVITE 2xx responses owned by session-core are ACKed
+        // only after that layer validates and applies the exact answer (or
+        // creates the delayed-offer ACK answer). Bodyless refresh responses
+        // and standalone dialog users retain automatic ACK behavior.
+        let deferred_session_ack = session_id_for_diag.is_some()
+            && transaction_id.method() == &rvoip_sip_core::Method::Invite
+            && response.status().is_success()
+            && !response.body().is_empty();
+
+        // Handle specific successful response types
         match response.status_code() {
             status if (200..300).contains(&status) => {
                 // Every 2xx to INVITE is ACKed by the UAC core (RFC 3261
@@ -6479,41 +6488,42 @@ impl DialogManager {
                     if let Some(session_id) = session_id_for_diag.as_deref() {
                         crate::diagnostics::record_call_timing_uac_invite_2xx_response(session_id);
                     }
-                    info!(
-                        status,
-                        dialog=%dialog_id,
-                        "Received successful INVITE response; sending automatic ACK"
-                    );
+                    info!(status, dialog=%dialog_id, deferred_session_ack, "Received successful INVITE response");
 
-                    // Send ACK using transaction-core's send_ack_for_2xx method
-                    crate::diagnostics::record_uac_invite_2xx_ack_attempt();
-                    if let Some(session_id) = session_id_for_diag.as_deref() {
-                        crate::diagnostics::record_call_timing_uac_ack_attempt(session_id);
-                    }
-                    match self
-                        .transaction_manager
-                        .send_ack_for_2xx(transaction_id, &response)
-                        .await
-                    {
-                        Ok(_) => {
-                            crate::diagnostics::record_uac_invite_2xx_ack_success();
-                            if let Some(session_id) = session_id_for_diag.as_deref() {
-                                crate::diagnostics::record_call_timing_uac_ack_success(session_id);
-                            }
-                            info!(status, "Successfully sent automatic ACK for INVITE 2xx");
+                    if !deferred_session_ack {
+                        crate::diagnostics::record_uac_invite_2xx_ack_attempt();
+                        if let Some(session_id) = session_id_for_diag.as_deref() {
+                            crate::diagnostics::record_call_timing_uac_ack_attempt(session_id);
                         }
-                        Err(e) => {
-                            crate::diagnostics::record_uac_invite_2xx_ack_failure();
-                            if let Some(session_id) = session_id_for_diag.as_deref() {
-                                crate::diagnostics::record_call_timing_uac_ack_failure(session_id);
+                        match self
+                            .transaction_manager
+                            .send_ack_for_2xx(transaction_id, &response)
+                            .await
+                        {
+                            Ok(_) => {
+                                crate::diagnostics::record_uac_invite_2xx_ack_success();
+                                if let Some(session_id) = session_id_for_diag.as_deref() {
+                                    crate::diagnostics::record_call_timing_uac_ack_success(
+                                        session_id,
+                                    );
+                                }
+                                info!(status, "Successfully sent automatic ACK for INVITE 2xx");
                             }
-                            warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), status, "Failed to send automatic ACK for INVITE 2xx");
-                            return Err(crate::errors::DialogError::TransactionError {
-                                message: safe_operation_failure(
-                                    "automatic_invite_2xx_ack",
-                                    "transaction_error",
-                                ),
-                            });
+                            Err(e) => {
+                                crate::diagnostics::record_uac_invite_2xx_ack_failure();
+                                if let Some(session_id) = session_id_for_diag.as_deref() {
+                                    crate::diagnostics::record_call_timing_uac_ack_failure(
+                                        session_id,
+                                    );
+                                }
+                                warn!(error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), status, "Failed to send automatic ACK for INVITE 2xx");
+                                return Err(crate::errors::DialogError::TransactionError {
+                                    message: safe_operation_failure(
+                                        "automatic_invite_2xx_ack",
+                                        "transaction_error",
+                                    ),
+                                });
+                            }
                         }
                     }
                 }
@@ -6548,6 +6558,15 @@ impl DialogManager {
                 request_uri: None,
             })
             .await?;
+        }
+
+        if deferred_session_ack {
+            crate::diagnostics::record_uac_invite_2xx_ack_attempt();
+            crate::diagnostics::record_uac_invite_2xx_ack_success();
+            if let Some(session_id) = session_id_for_diag.as_deref() {
+                crate::diagnostics::record_call_timing_uac_ack_attempt(session_id);
+                crate::diagnostics::record_call_timing_uac_ack_success(session_id);
+            }
         }
 
         // Commit immediately after the mandatory ACK write and acknowledged

@@ -202,6 +202,17 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Send the initial INVITE without an SDP offer.
+    ///
+    /// If the successful response contains an SDP offer, the coordinator
+    /// generates its answer and carries it in ACK as required by RFC 3261.
+    pub fn without_sdp(mut self) -> Self {
+        // `None` means "use the generated offer" at dispatch, so retain an
+        // explicit empty snapshot to represent delayed offer.
+        self.sdp = Some(String::new());
+        self
+    }
+
     /// Attach Digest credentials for UAC 401/407 retry.
     pub fn with_credentials(mut self, creds: Credentials) -> Self {
         self.credentials = Some(creds);

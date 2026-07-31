@@ -68,6 +68,7 @@ fn every_yaml_event_is_manifested_or_marked_internal() {
         "AcceptCall",
         "AuthRequired",
         "CancelCall",
+        "ConfirmedNegotiationFailure",
         "Dialog180Ringing",
         "Dialog183SessionProgress",
         "Dialog200OK",

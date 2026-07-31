@@ -6,6 +6,8 @@
 //! `Action::SendRequestWithAuth` routes correctly when
 //! `pending_auth_method = "INFO"`.
 
+mod support;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +26,8 @@ use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+
+use support::attach_pcmu_sdp_answer;
 
 const UAS_PORT: u16 = 35280;
 const UAC_PORT: u16 = 35281;
@@ -81,6 +85,7 @@ async fn info_extras_survive_401_driven_auth_retry() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut resp, UAS_PORT + 1_000);
                     let _ = sock_task
                         .send_to(&Message::Response(resp).to_bytes(), from)
                         .await;
@@ -254,6 +259,7 @@ async fn info_407_retry_uses_proxy_authorization() {
                             format!("<sip:bob@127.0.0.1:{PROXY_UAS_PORT}>").into_bytes(),
                         ),
                     ));
+                    attach_pcmu_sdp_answer(&mut resp, PROXY_UAS_PORT + 1_000);
                     let _ = sock_task
                         .send_to(&Message::Response(resp).to_bytes(), from)
                         .await;
@@ -406,6 +412,7 @@ async fn info_401_without_challenge_releases_exact_request_slot() {
                             format!("<sip:bob@127.0.0.1:{TERMINAL_UAS_PORT}>").into_bytes(),
                         ),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, TERMINAL_UAS_PORT + 1_000);
                     Some(response)
                 }
                 Method::Ack => None,

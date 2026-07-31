@@ -154,6 +154,7 @@ pub(crate) enum DeferredTrackedRequestEvent {
         transaction_id: String,
         method: String,
         outcome: rvoip_infra_common::events::cross_crate::OutboundRequestOutcome,
+        response_sdp: Option<String>,
     },
 }
 
@@ -947,6 +948,7 @@ mod tests {
                 rvoip_infra_common::events::cross_crate::OutboundRequestOutcome::FinalResponse {
                     status_code: 200,
                 },
+            response_sdp: None,
         }
     }
 

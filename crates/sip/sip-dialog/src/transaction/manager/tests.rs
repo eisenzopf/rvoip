@@ -3125,6 +3125,94 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn delayed_offer_2xx_retransmission_reuses_exact_sdp_ack() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let tx_id = manager
+            .create_client_transaction(invite_request.clone(), destination)
+            .await?;
+        manager.send_request(&tx_id).await?;
+
+        let mut response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let contact_uri = Uri::from_str("sip:bob@192.168.1.2:5060").unwrap();
+        let contact = Contact::new_params(vec![ContactParamInfo {
+            address: Address::new_with_display_name("Bob", contact_uri),
+        }]);
+        response = response.with_header(TypedHeader::Contact(contact));
+        let answer = concat!(
+            "v=0\r\n",
+            "o=- 1 1 IN IP4 127.0.0.1\r\n",
+            "s=delayed-answer\r\n",
+            "c=IN IP4 127.0.0.1\r\n",
+            "t=0 0\r\n",
+            "m=audio 40000 RTP/AVP 0\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n"
+        );
+
+        manager
+            .send_ack_for_2xx_with_sdp(&tx_id, &response, answer)
+            .await?;
+        manager.send_ack_for_2xx(&tx_id, &response).await?;
+        assert!(manager
+            .send_ack_for_2xx_with_sdp(&tx_id, &response, "v=0\r\ns=different\r\n")
+            .await
+            .is_err());
+
+        let sent = transport.get_sent_messages().await;
+        assert_eq!(sent.len(), 3, "INVITE plus two answer-bearing ACKs");
+        for (message, _) in &sent[1..] {
+            let Message::Request(ack) = message else {
+                panic!("expected ACK request");
+            };
+            assert_eq!(ack.method(), Method::Ack);
+            assert_eq!(ack.body(), answer.as_bytes());
+            assert!(matches!(
+                ack.header(&HeaderName::ContentType),
+                Some(TypedHeader::ContentType(content_type))
+                    if content_type.to_string().eq_ignore_ascii_case("application/sdp")
+            ));
+        }
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_delayed_offer_ack_cannot_leave_an_unretired_answer() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(10)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let unknown_transaction = TransactionKey::from_response(&response)
+            .expect("response identifies a syntactically valid client INVITE transaction");
+        assert!(!manager.transaction_exists(&unknown_transaction).await);
+
+        assert!(manager
+            .send_ack_for_2xx_with_sdp(
+                &unknown_transaction,
+                &response,
+                "v=0\r\ns=unowned-answer\r\n",
+            )
+            .await
+            .is_err());
+        assert!(
+            manager.delayed_offer_ack_answers.is_empty(),
+            "an answer without a retained transaction route has no cleanup owner"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
     /// Test the get_transaction_request utility function
     #[tokio::test]
     async fn test_get_transaction_request() -> Result<()> {
@@ -3323,6 +3411,12 @@ mod tests {
             !manager.client_transactions.contains_key(&tx_id),
             "the heavy client transaction must be released after Timer M handoff"
         );
+        assert_eq!(manager.retention_counts().transaction_destinations, 1);
+        assert_eq!(
+            manager.orphaned_transaction_destination_count(),
+            0,
+            "the compact Timer M generation owns its authenticated response route"
+        );
 
         while event_rx.try_recv().is_ok() {}
         transport_tx
@@ -3405,6 +3499,34 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphaned_transaction_destination_count_reports_unowned_active_routes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(4);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(4)).await?;
+        let transaction_id = Arc::new(TransactionKey::new(
+            "z9hG4bK.unowned-route".into(),
+            Method::Options,
+            false,
+        ));
+        let route = TransportRoute::new("192.0.2.201:5060".parse().unwrap())
+            .with_transport_type(TransportType::Udp);
+        manager.transaction_destinations.insert(
+            Arc::clone(&transaction_id),
+            ClientResponseRouteState::active(route, usize::MAX),
+        );
+
+        assert_eq!(manager.retention_counts().transaction_destinations, 1);
+        assert_eq!(manager.orphaned_transaction_destination_count(), 1);
+
+        manager
+            .transaction_destinations
+            .remove(transaction_id.as_ref());
+        manager.shutdown().await;
         Ok(())
     }
 

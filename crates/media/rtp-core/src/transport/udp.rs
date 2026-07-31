@@ -305,6 +305,15 @@ impl Drop for PortAllocationCancellationGuard {
     }
 }
 
+/// Move-only authority to restore the exact SRTP state replaced by one
+/// successful context installation. Dropping it commits the replacement.
+pub struct SrtpContextRollback {
+    previous_send: Option<crate::srtp::SrtpContext>,
+    previous_recv: Option<crate::srtp::SrtpContext>,
+    previous_secure_media_required: bool,
+    installed_generation: u64,
+}
+
 pub struct UdpRtpTransport {
     /// RTP socket
     rtp_socket: Arc<UdpSocket>,
@@ -356,6 +365,15 @@ pub struct UdpRtpTransport {
     /// Irreversible secure-media policy latch. Once set, every RTP and RTCP
     /// operation must pass through an installed SRTP/SRTCP context.
     secure_media_required: Arc<AtomicBool>,
+
+    /// Fences the move-only rollback token returned by a prepared context
+    /// replacement so it cannot overwrite a later re-key.
+    srtp_context_generation: Arc<AtomicU64>,
+
+    /// Serializes SRTP context replacement and rollback. The guard protects
+    /// only CPU-local validation and pointer swaps and is never held across
+    /// network I/O or an `.await` point.
+    srtp_context_update: Arc<parking_lot::Mutex<()>>,
 
     /// Makes allocator release idempotent across explicit close and Drop.
     allocator_release_started: AtomicBool,
@@ -550,6 +568,8 @@ impl UdpRtpTransport {
             receiver_tasks: Arc::new(Mutex::new(Vec::with_capacity(2))),
             active: Arc::new(AtomicBool::new(false)),
             secure_media_required: Arc::new(AtomicBool::new(false)),
+            srtp_context_generation: Arc::new(AtomicU64::new(0)),
+            srtp_context_update: Arc::new(parking_lot::Mutex::new(())),
             allocator_release_started: AtomicBool::new(false),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
@@ -1098,17 +1118,94 @@ impl UdpRtpTransport {
         send: crate::srtp::SrtpContext,
         recv: crate::srtp::SrtpContext,
     ) -> Result<()> {
-        self.secure_media_required.store(true, Ordering::Release);
-        send.validate_for_secure_transport()?;
-        recv.validate_for_secure_transport()?;
-        *self.srtp_send.lock() = Some(send);
-        *self.srtp_recv.lock() = Some(recv);
+        let _rollback = self.replace_srtp_contexts(send, recv).await?;
+        Ok(())
+    }
+
+    /// Install a validated directional pair and return move-only authority to
+    /// restore the immediately preceding pair. This is used across a SIP
+    /// zero-wire commit boundary; dropping the token commits the replacement.
+    pub async fn replace_srtp_contexts(
+        &self,
+        send: crate::srtp::SrtpContext,
+        recv: crate::srtp::SrtpContext,
+    ) -> Result<SrtpContextRollback> {
+        let _update_guard = self.srtp_context_update.lock();
+        // Latch before inspecting caller-provided contexts. A rejected
+        // installation must fail closed even when its error is ignored; the
+        // exact rollback token may restore the previous policy only after a
+        // fully validated pair has actually been installed.
+        let previous_secure_media_required =
+            self.secure_media_required.swap(true, Ordering::AcqRel);
+        if let Err(error) = send
+            .validate_for_secure_transport()
+            .and_then(|()| recv.validate_for_secure_transport())
+        {
+            // A rejected secure-media installation is itself a newer policy
+            // decision. Retire any earlier rollback token so it cannot later
+            // reopen the plaintext path by restoring an older latch value.
+            let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
+            self.srtp_context_generation
+                .store(current_generation.saturating_add(1), Ordering::Release);
+            return Err(error);
+        }
+        let (previous_send, previous_recv, installed_generation) = {
+            let mut send_guard = self.srtp_send.lock();
+            let mut recv_guard = self.srtp_recv.lock();
+            let current_generation = self.srtp_context_generation.load(Ordering::Acquire);
+            if current_generation.checked_add(2).is_none() {
+                // As with validation failure, an exhausted replacement must
+                // invalidate older rollback authority while remaining
+                // permanently fail closed.
+                self.srtp_context_generation
+                    .store(current_generation.saturating_add(1), Ordering::Release);
+                return Err(Error::InvalidState(
+                    "SRTP context generation exhausted".to_string(),
+                ));
+            }
+            let installed_generation = current_generation + 1;
+            let previous_send = std::mem::replace(&mut *send_guard, Some(send));
+            let previous_recv = std::mem::replace(&mut *recv_guard, Some(recv));
+            self.srtp_context_generation
+                .store(installed_generation, Ordering::Release);
+            (previous_send, previous_recv, installed_generation)
+        };
         if srtp_diagnostics_enabled() {
             info!(
                 "SRTP_DIAG contexts_installed local={:?}",
                 self.rtp_socket.local_addr().ok()
             );
         }
+        Ok(SrtpContextRollback {
+            previous_send,
+            previous_recv,
+            previous_secure_media_required,
+            installed_generation,
+        })
+    }
+
+    /// Consume an exact replacement token and restore its former contexts.
+    /// A later replacement invalidates the token instead of allowing stale
+    /// rollback to overwrite newer keys.
+    pub async fn rollback_srtp_contexts(&self, rollback: SrtpContextRollback) -> Result<()> {
+        let _update_guard = self.srtp_context_update.lock();
+        let mut send_guard = self.srtp_send.lock();
+        let mut recv_guard = self.srtp_recv.lock();
+        if self.srtp_context_generation.load(Ordering::Acquire) != rollback.installed_generation {
+            return Err(Error::InvalidState(
+                "SRTP rollback token was superseded by a later context replacement".to_string(),
+            ));
+        }
+        let retired_generation = rollback
+            .installed_generation
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidState("SRTP context generation exhausted".to_string()))?;
+        *send_guard = rollback.previous_send;
+        *recv_guard = rollback.previous_recv;
+        self.srtp_context_generation
+            .store(retired_generation, Ordering::Release);
+        self.secure_media_required
+            .store(rollback.previous_secure_media_required, Ordering::Release);
         Ok(())
     }
 
@@ -2207,6 +2304,103 @@ mod tests {
 
     fn test_receiver_report(ssrc: u32) -> RtcpPacket {
         RtcpPacket::ReceiverReport(crate::packet::rtcp::RtcpReceiverReport::new(ssrc))
+    }
+
+    async fn make_srtp_rollback_transport(session_id: &str) -> UdpRtpTransport {
+        UdpRtpTransport::new(RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: false,
+            rtcp_mux: true,
+            session_id: Some(session_id.to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn exact_srtp_replacement_token_restores_plaintext_state() {
+        let transport = make_srtp_rollback_transport("srtp-exact-rollback").await;
+        assert!(!transport.srtp_enabled().await);
+
+        let (send, recv) = make_srtp_ctx_pair();
+        let rollback = transport.replace_srtp_contexts(send, recv).await.unwrap();
+        assert!(transport.srtp_enabled().await);
+
+        transport.rollback_srtp_contexts(rollback).await.unwrap();
+        assert!(!transport.srtp_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn stale_srtp_replacement_token_cannot_overwrite_newer_keys() {
+        let transport = make_srtp_rollback_transport("srtp-stale-rollback").await;
+        let (send_a, recv_a) = make_srtp_ctx_pair();
+        let stale = transport
+            .replace_srtp_contexts(send_a, recv_a)
+            .await
+            .unwrap();
+        let (send_b, recv_b) = make_aes256_srtp_ctx_pair();
+        let current = transport
+            .replace_srtp_contexts(send_b, recv_b)
+            .await
+            .unwrap();
+
+        let error = transport
+            .rollback_srtp_contexts(stale)
+            .await
+            .expect_err("a superseded rollback token must be rejected");
+        assert!(matches!(error, Error::InvalidState(_)));
+        assert!(transport.srtp_enabled().await);
+
+        transport.rollback_srtp_contexts(current).await.unwrap();
+        assert!(transport.srtp_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn rejected_srtp_replacement_retires_earlier_plaintext_rollback_authority() {
+        let transport = make_srtp_rollback_transport("srtp-rejected-replacement").await;
+        let (send, recv) = make_srtp_ctx_pair();
+        let plaintext_rollback = transport.replace_srtp_contexts(send, recv).await.unwrap();
+
+        let (mut disabled_send, mut disabled_recv) = make_srtp_ctx_pair();
+        disabled_send.set_enabled(false);
+        disabled_recv.set_enabled(false);
+        let error = match transport
+            .replace_srtp_contexts(disabled_send, disabled_recv)
+            .await
+        {
+            Ok(_) => panic!("disabled contexts must be rejected"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::InvalidState(_)));
+
+        let rollback_error = transport
+            .rollback_srtp_contexts(plaintext_rollback)
+            .await
+            .expect_err("a rejected replacement must retire older rollback authority");
+        assert!(matches!(rollback_error, Error::InvalidState(_)));
+        assert!(transport.secure_media_required.load(Ordering::Acquire));
+        assert!(transport.srtp_enabled().await);
+    }
+
+    #[tokio::test]
+    async fn exhausted_srtp_context_generation_fails_without_mutating_security_state() {
+        let transport = make_srtp_rollback_transport("srtp-generation-exhaustion").await;
+        transport
+            .srtp_context_generation
+            .store(u64::MAX - 1, Ordering::Release);
+        let (send, recv) = make_srtp_ctx_pair();
+
+        let error = match transport.replace_srtp_contexts(send, recv).await {
+            Ok(_) => panic!("generation exhaustion must fail closed"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, Error::InvalidState(_)));
+        assert!(!transport.srtp_enabled().await);
+        assert!(transport.srtp_send.lock().is_none());
+        assert!(transport.srtp_recv.lock().is_none());
     }
 
     #[tokio::test]

@@ -3361,6 +3361,54 @@ impl DialogAdapter {
         )))
     }
 
+    pub(crate) async fn send_delayed_offer_ack_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        transaction_id: &TransactionKey,
+        response: &Response,
+        sdp_answer: &str,
+    ) -> Result<()> {
+        self.store
+            .get_session_snapshot_exact(handle)
+            .map_err(|_| SessionError::SessionNotFound(handle.session_id().0.clone()))?;
+        self.dialog_api
+            .send_delayed_offer_ack_for_session_transaction(
+                &handle.session_id().0,
+                transaction_id,
+                response,
+                sdp_answer,
+            )
+            .await
+            .map_err(|_| {
+                SessionError::DialogError(
+                    "Delayed-offer ACK failed exact validation or transport write".to_string(),
+                )
+            })
+    }
+
+    pub(crate) async fn send_invite_2xx_ack_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        transaction_id: &TransactionKey,
+        response: &Response,
+    ) -> Result<()> {
+        self.store
+            .get_session_snapshot_exact(handle)
+            .map_err(|_| SessionError::SessionNotFound(handle.session_id().0.clone()))?;
+        self.dialog_api
+            .send_invite_2xx_ack_for_session_transaction(
+                &handle.session_id().0,
+                transaction_id,
+                response,
+            )
+            .await
+            .map_err(|_| {
+                SessionError::DialogError(
+                    "INVITE 2xx ACK failed exact validation or transport write".to_string(),
+                )
+            })
+    }
+
     /// Compatibility facade for a default established-call BYE.
     pub async fn send_bye_session(&self, session_id: &SessionId) -> Result<()> {
         self.send_bye_with_options(session_id, ByeRequestOptions::default())

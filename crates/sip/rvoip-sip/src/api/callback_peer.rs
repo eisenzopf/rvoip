@@ -2578,7 +2578,8 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::IncomingCallAuthenticated { .. }
                 | Event::CallProgressDetailed(_)
                 | Event::CallEstablishedDetailed(_)
-                | Event::CallFailedDetailed(_) => {}
+                | Event::CallFailedDetailed(_)
+                | Event::RenegotiationFailed { .. } => {}
                 // SIP_API_DESIGN_2 Phase E: typed mid-dialog inbound
                 // events. Rehydrate the coordinator hook on the
                 // IncomingRequest before forwarding to the handler so

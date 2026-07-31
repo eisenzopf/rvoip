@@ -26,7 +26,8 @@ use crate::session_registry::{PendingInboundBundle, SessionRegistry, SessionRegi
 use crate::session_store::SessionStateSnapshot;
 use crate::state_machine::executor::{
     AuthRequiredProcessOutcome, AuthRequiredStateInput, InboundResponseStateInput,
-    ReferNotifyInput, ReferNotifyOutcome, SessionRefreshStateInput, TransferRequestStateInput,
+    Invite2xxAckStateInput, ReferNotifyInput, ReferNotifyOutcome, SessionRefreshStateInput,
+    TransferRequestStateInput,
 };
 use crate::state_machine::{
     ProcessEventResult, StateMachine as StateMachineExecutor, StateMachineHelpers,
@@ -770,6 +771,20 @@ async fn process_event_with_remote_sdp_exact_on_fresh_task(
     join_state_machine_task(task).await
 }
 
+async fn process_invite_2xx_answer_exact_on_fresh_task(
+    state_machine: Arc<StateMachineExecutor>,
+    handle: SessionRegistryHandle,
+    remote_sdp: Option<String>,
+    ack: Invite2xxAckStateInput,
+) -> StateMachineProcessResult {
+    let task = AbortStateMachineTaskOnDrop::new(tokio::spawn(async move {
+        state_machine
+            .process_invite_2xx_answer_exact(&handle, remote_sdp, ack)
+            .await
+    }));
+    join_state_machine_task(task).await
+}
+
 async fn process_auth_required_on_fresh_task(
     state_machine: Arc<StateMachineExecutor>,
     handle: SessionRegistryHandle,
@@ -833,6 +848,117 @@ fn outbound_request_outcome_label(outcome: OutboundRequestOutcome) -> &'static s
         OutboundRequestOutcome::FinalResponse { .. } => "final-response",
         OutboundRequestOutcome::Timeout => "timeout",
         OutboundRequestOutcome::TransportFailure => "transport-failure",
+    }
+}
+
+fn reinvite_completion_failure(
+    outcome: OutboundRequestOutcome,
+) -> Option<(EventType, &'static str)> {
+    match outcome {
+        OutboundRequestOutcome::FinalResponse { status_code }
+            if (200..300).contains(&status_code) || status_code == 491 =>
+        {
+            None
+        }
+        OutboundRequestOutcome::FinalResponse { status_code } if status_code < 500 => Some((
+            EventType::Dialog4xxFailure(status_code),
+            "re-INVITE was rejected",
+        )),
+        OutboundRequestOutcome::FinalResponse { status_code } if status_code < 600 => Some((
+            EventType::Dialog5xxFailure(status_code),
+            "re-INVITE failed with a server error",
+        )),
+        OutboundRequestOutcome::FinalResponse { status_code } => Some((
+            EventType::Dialog6xxFailure(status_code),
+            "re-INVITE failed globally",
+        )),
+        OutboundRequestOutcome::Timeout => {
+            Some((EventType::DialogTimeout, "re-INVITE transaction timed out"))
+        }
+        OutboundRequestOutcome::TransportFailure => {
+            Some((EventType::DialogTimeout, "re-INVITE transport failed"))
+        }
+    }
+}
+
+fn update_completion_transition(
+    outcome: OutboundRequestOutcome,
+) -> (EventType, Option<&'static str>) {
+    match outcome {
+        OutboundRequestOutcome::FinalResponse { status_code }
+            if (200..300).contains(&status_code) =>
+        {
+            (EventType::Dialog200OK, None)
+        }
+        OutboundRequestOutcome::FinalResponse { status_code } if status_code < 500 => (
+            EventType::Dialog4xxFailure(status_code),
+            Some("UPDATE was rejected"),
+        ),
+        OutboundRequestOutcome::FinalResponse { status_code } if status_code < 600 => (
+            EventType::Dialog5xxFailure(status_code),
+            Some("UPDATE failed with a server error"),
+        ),
+        OutboundRequestOutcome::FinalResponse { status_code } => (
+            EventType::Dialog6xxFailure(status_code),
+            Some("UPDATE failed globally"),
+        ),
+        OutboundRequestOutcome::Timeout => (
+            EventType::DialogTimeout,
+            Some("UPDATE transaction timed out"),
+        ),
+        OutboundRequestOutcome::TransportFailure => {
+            (EventType::DialogTimeout, Some("UPDATE transport failed"))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingOfferTransactionCorrelation {
+    NoPendingOffer,
+    OtherMethod,
+    Exact,
+    Mismatched,
+}
+
+fn correlate_pending_offer_transaction(
+    pending_method: Option<&rvoip_sip_core::Method>,
+    pending_transaction: Option<&rvoip_sip_dialog::transaction::TransactionKey>,
+    method: &rvoip_sip_core::Method,
+    transaction: Option<&rvoip_sip_dialog::transaction::TransactionKey>,
+) -> PendingOfferTransactionCorrelation {
+    let Some(pending_method) = pending_method else {
+        return PendingOfferTransactionCorrelation::NoPendingOffer;
+    };
+    if pending_method != method {
+        return PendingOfferTransactionCorrelation::OtherMethod;
+    }
+    if pending_transaction == transaction && transaction.is_some() {
+        PendingOfferTransactionCorrelation::Exact
+    } else {
+        PendingOfferTransactionCorrelation::Mismatched
+    }
+}
+
+fn invite_success_is_retransmission(
+    dialog_established: bool,
+    correlation: PendingOfferTransactionCorrelation,
+) -> bool {
+    dialog_established && correlation == PendingOfferTransactionCorrelation::NoPendingOffer
+}
+
+fn initial_invite_used_delayed_offer(snapshot: &SessionStateSnapshot) -> bool {
+    snapshot.role == Role::UAC
+        && snapshot
+            .pending_invite_options
+            .as_ref()
+            .and_then(|options| options.sdp.as_deref())
+            .is_some_and(|sdp| sdp.trim().is_empty())
+}
+
+fn response_from_bytes(raw_response: Option<&bytes::Bytes>) -> Option<rvoip_sip_core::Response> {
+    match rvoip_sip_core::parse_message(raw_response?.as_ref()).ok()? {
+        rvoip_sip_core::Message::Response(response) => Some(response),
+        rvoip_sip_core::Message::Request(_) => None,
     }
 }
 
@@ -1890,6 +2016,7 @@ impl SessionCrossCrateEventHandler {
                 transaction_id,
                 method,
                 outcome,
+                response_sdp,
             } => {
                 let session_id = handle.session_id().clone();
                 self.handle_outbound_request_completed_parts(
@@ -1897,6 +2024,7 @@ impl SessionCrossCrateEventHandler {
                     &transaction_id,
                     &method,
                     outcome,
+                    response_sdp,
                     handle,
                     true,
                 )
@@ -2063,12 +2191,14 @@ impl SessionCrossCrateEventHandler {
                 transaction_id,
                 method,
                 outcome,
+                response_sdp,
             } => {
                 self.handle_outbound_request_completed_parts(
                     SessionId(session_id.clone()),
                     transaction_id,
                     method,
                     *outcome,
+                    response_sdp.clone(),
                     exact_handle.cloned().ok_or_else(|| {
                         anyhow::anyhow!(
                             "OutboundRequestCompleted ingress lost exact session authority"
@@ -2198,11 +2328,11 @@ impl SessionCrossCrateEventHandler {
                 )
                 .await
             }
-            DialogToSessionEvent::AckReceived { session_id, .. } => {
-                self.handle_ack_received_session(require_dialog_event_handle(
-                    exact_handle,
-                    session_id,
-                )?)
+            DialogToSessionEvent::AckReceived { session_id, sdp } => {
+                self.handle_ack_received_session(
+                    require_dialog_event_handle(exact_handle, session_id)?,
+                    sdp.clone(),
+                )
                 .await
             }
             DialogToSessionEvent::RegistrationSuccess { session_id } => {
@@ -3979,6 +4109,86 @@ impl SessionCrossCrateEventHandler {
             }
         };
 
+        let parsed_response = response_from_bytes(raw_response.as_ref());
+        let response_transaction = parsed_response
+            .as_ref()
+            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
+        let pending_offer = initial_snapshot.pending_offer_answer.as_ref();
+        let pending_correlation = correlate_pending_offer_transaction(
+            pending_offer.map(|pending| &pending.method),
+            pending_offer.and_then(|pending| pending.transaction_id.as_ref()),
+            &rvoip_sip_core::Method::Invite,
+            response_transaction.as_ref(),
+        );
+        if invite_success_is_retransmission(
+            initial_snapshot.dialog_established,
+            pending_correlation,
+        ) {
+            if let (Some(response), Some(transaction_id)) =
+                (parsed_response.as_ref(), response_transaction.as_ref())
+            {
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
+            }
+            debug!(
+                session_id = %session_id,
+                "ACKed and ignored retransmitted INVITE 2xx after offer/answer commit"
+            );
+            return Ok(());
+        }
+        match pending_correlation {
+            PendingOfferTransactionCorrelation::OtherMethod => {
+                if let (Some(response), Some(transaction_id)) =
+                    (parsed_response.as_ref(), response_transaction.as_ref())
+                {
+                    if !response.body().is_empty() {
+                        self.dialog_adapter
+                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                            .await?;
+                    }
+                }
+                warn!(
+                    session_id = %session_id,
+                    "Ignoring an INVITE success while another method owns the pending offer"
+                );
+                return Ok(());
+            }
+            PendingOfferTransactionCorrelation::Mismatched => {
+                if let (Some(response), Some(transaction_id)) =
+                    (parsed_response.as_ref(), response_transaction.as_ref())
+                {
+                    if !response.body().is_empty() {
+                        self.dialog_adapter
+                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                            .await?;
+                    }
+                }
+                warn!(
+                    session_id = %session_id,
+                    "Ignoring a re-INVITE answer that does not own the pending offer transaction"
+                );
+                return Ok(());
+            }
+            PendingOfferTransactionCorrelation::Exact => {
+                if let Some(transaction) = response_transaction.as_ref() {
+                    if self
+                        .dialog_adapter
+                        .outbound_request_tracker
+                        .complete_if_matches(handle, TrackedInDialogMethod::Reinvite, transaction)
+                    {
+                        self.clear_tracked_request_auth_state(
+                            handle,
+                            TrackedInDialogMethod::Reinvite,
+                            transaction,
+                        )
+                        .await;
+                    }
+                }
+            }
+            PendingOfferTransactionCorrelation::NoPendingOffer => {}
+        }
+
         if initial_snapshot.session_refresh_phase
             == crate::session_store::state::SessionRefreshPhase::ReinviteInFlight
         {
@@ -3996,22 +4206,148 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
-        let result = match process_event_with_remote_sdp_exact_on_fresh_task(
-            Arc::clone(&self.state_machine),
-            handle.clone(),
-            EventType::Dialog200OK,
-            sdp_answer.clone(),
-        )
-        .await
+        let mid_dialog_offer = pending_correlation == PendingOfferTransactionCorrelation::Exact;
+        if mid_dialog_offer && sdp_answer.as_deref().is_none_or(str::is_empty) {
+            if let (Some(response), Some(transaction_id)) =
+                (parsed_response.as_ref(), response_transaction.as_ref())
+            {
+                if !response.body().is_empty() {
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
+                }
+            }
+            self.app_event_publisher.publish_exact(
+                handle,
+                crate::api::events::Event::RenegotiationFailed {
+                    call_id: session_id.clone(),
+                    method: "INVITE".to_string(),
+                    reason: "successful response contained no SDP answer".to_string(),
+                },
+            );
+            self.terminate_confirmed_negotiation(
+                handle,
+                "acknowledged re-INVITE contained no SDP answer",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let delayed_offer = initial_invite_used_delayed_offer(&initial_snapshot);
+
+        let ack_input = parsed_response
+            .clone()
+            .zip(response_transaction.clone())
+            .filter(|(response, _)| !response.body().is_empty())
+            .map(|(response, transaction_id)| {
+                Invite2xxAckStateInput::new(transaction_id, response)
+            });
+        if delayed_offer
+            && (sdp_answer
+                .as_deref()
+                .is_none_or(|sdp| sdp.trim().is_empty())
+                || ack_input.is_none())
         {
+            if let (Some(response), Some(transaction_id)) =
+                (parsed_response.as_ref(), response_transaction.as_ref())
+            {
+                if !response.body().is_empty() {
+                    self.dialog_adapter
+                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                        .await?;
+                }
+            }
+            self.app_event_publisher.publish_exact(
+                handle,
+                crate::api::events::Event::RenegotiationFailed {
+                    call_id: session_id.clone(),
+                    method: "INVITE".to_string(),
+                    reason: "offerless INVITE received no usable 200 OK SDP offer".to_string(),
+                },
+            );
+            self.fail_initial_invite_negotiation(
+                handle,
+                "offerless INVITE received no usable 200 OK SDP offer",
+            )
+            .await?;
+            return Ok(());
+        }
+        let process_result = if let Some(ack) = ack_input {
+            process_invite_2xx_answer_exact_on_fresh_task(
+                Arc::clone(&self.state_machine),
+                handle.clone(),
+                sdp_answer.clone(),
+                ack,
+            )
+            .await
+        } else {
+            process_event_with_remote_sdp_exact_on_fresh_task(
+                Arc::clone(&self.state_machine),
+                handle.clone(),
+                EventType::Dialog200OK,
+                sdp_answer.clone(),
+            )
+            .await
+        };
+        let result = match process_result {
             Ok(result) => result,
             Err(e) => {
                 error!("Failed to process CallEstablished as Dialog200OK: {}", e);
-                return Err(SessionError::InvalidTransition(format!(
-                    "Dialog200OK lifecycle transition failed for session {} role {:?} state {:?}: {}",
-                    session_id, initial_snapshot.role, initial_snapshot.call_state, e
-                ))
-                .into());
+                if matches!(
+                    e.downcast_ref::<SessionError>(),
+                    Some(SessionError::DialogError(_))
+                ) {
+                    // Leave the exact response pending so its retransmission
+                    // retries the same bodyless or cached answer-bearing ACK.
+                    return Err(SessionError::InvalidTransition(format!(
+                        "INVITE 2xx ACK write failed for session {}: {e}",
+                        session_id
+                    ))
+                    .into());
+                }
+                if let (Some(response), Some(transaction_id)) =
+                    (parsed_response.as_ref(), response_transaction.as_ref())
+                {
+                    if !response.body().is_empty() {
+                        self.dialog_adapter
+                            .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                            .await?;
+                    }
+                }
+                if mid_dialog_offer || delayed_offer {
+                    self.app_event_publisher.publish_exact(
+                        handle,
+                        crate::api::events::Event::RenegotiationFailed {
+                            call_id: session_id.clone(),
+                            method: "INVITE".to_string(),
+                            reason: if delayed_offer {
+                                "invalid SDP offer or failed answer-bearing ACK".to_string()
+                            } else {
+                                "invalid or unacceptable SDP answer".to_string()
+                            },
+                        },
+                    );
+                    if delayed_offer {
+                        self.fail_initial_invite_negotiation(
+                            handle,
+                            "delayed-offer SDP negotiation or media commit failed",
+                        )
+                        .await?;
+                    } else {
+                        self.terminate_confirmed_negotiation(
+                            handle,
+                            "acknowledged re-INVITE answer could not be applied",
+                        )
+                        .await?;
+                    }
+                    return Ok(());
+                }
+                self.fail_initial_invite_negotiation(
+                    handle,
+                    "successful initial INVITE response had missing, invalid, or unusable SDP",
+                )
+                .await?;
+                return Ok(());
             }
         };
         match committed_dialog_200(&session_id, initial_snapshot.role, &result)? {
@@ -4037,6 +4373,38 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
+        Ok(())
+    }
+
+    async fn fail_initial_invite_negotiation(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: &str,
+    ) -> Result<()> {
+        self.app_event_publisher.publish_exact(
+            handle,
+            crate::api::events::Event::CallFailed {
+                call_id: handle.session_id().clone(),
+                status_code: 488,
+                reason: reason.to_string(),
+            },
+        );
+        self.terminate_confirmed_negotiation(handle, reason).await
+    }
+
+    async fn terminate_confirmed_negotiation(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: &str,
+    ) -> Result<()> {
+        self.state_machine
+            .process_event_exact(handle, EventType::ConfirmedNegotiationFailure)
+            .await
+            .map_err(|error| {
+                SessionError::InvalidTransition(format!(
+                    "failed to terminate confirmed dialog after negotiation failure ({reason}): {error}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -4232,6 +4600,45 @@ impl SessionCrossCrateEventHandler {
                             "stale RFC 4028 authentication failure was suppressed"
                         );
                     }
+                } else if matches!(
+                    tracked_method,
+                    TrackedInDialogMethod::Update | TrackedInDialogMethod::Reinvite
+                ) {
+                    let pending_matches = self
+                        .state_machine
+                        .store
+                        .get_session_snapshot_exact(&handle)
+                        .ok()
+                        .is_some_and(|snapshot| {
+                            let pending = snapshot.pending_offer_answer.as_ref();
+                            correlate_pending_offer_transaction(
+                                pending.map(|offer| &offer.method),
+                                pending.and_then(|offer| offer.transaction_id.as_ref()),
+                                &tracked_method.as_sip_method(),
+                                Some(transaction),
+                            ) == PendingOfferTransactionCorrelation::Exact
+                        });
+                    if pending_matches {
+                        self.state_machine
+                            .process_event_exact(&handle, EventType::Dialog4xxFailure(status))
+                            .await
+                            .map_err(|error| {
+                                SessionError::InvalidTransition(format!(
+                                    "failed to roll back an authenticated session modification: {error}"
+                                ))
+                            })?;
+                        self.app_event_publisher.publish_exact(
+                            &handle,
+                            crate::api::events::Event::RenegotiationFailed {
+                                call_id: session_id.clone(),
+                                method: tracked_method.as_sip_method().to_string(),
+                                reason: format!(
+                                    "authentication failed (class={})",
+                                    failure_class.label()
+                                ),
+                            },
+                        );
+                    }
                 }
             }
         }
@@ -4244,6 +4651,7 @@ impl SessionCrossCrateEventHandler {
         transaction_id: &str,
         method: &str,
         outcome: OutboundRequestOutcome,
+        response_sdp: Option<String>,
         handle: SessionRegistryHandle,
         exact_replay: bool,
     ) -> Result<()> {
@@ -4288,6 +4696,7 @@ impl SessionCrossCrateEventHandler {
                 transaction_id: transaction_id.to_string(),
                 method: method.to_string(),
                 outcome,
+                response_sdp: response_sdp.clone(),
             };
             match self
                 .dialog_adapter
@@ -4321,6 +4730,37 @@ impl SessionCrossCrateEventHandler {
                 .dialog_adapter
                 .outbound_request_tracker
                 .is_session_timer_reinvite(&handle, &transaction);
+        let pending_offer_correlation = self
+            .state_machine
+            .store
+            .get_session_snapshot_exact(&handle)
+            .ok()
+            .map(|snapshot| {
+                let pending = snapshot.pending_offer_answer.as_ref();
+                correlate_pending_offer_transaction(
+                    pending.map(|offer| &offer.method),
+                    pending.and_then(|offer| offer.transaction_id.as_ref()),
+                    &tracked_method.as_sip_method(),
+                    Some(&transaction),
+                )
+            })
+            .unwrap_or(PendingOfferTransactionCorrelation::NoPendingOffer);
+        if pending_offer_correlation == PendingOfferTransactionCorrelation::Mismatched {
+            if self
+                .dialog_adapter
+                .outbound_request_tracker
+                .complete_if_matches(&handle, tracked_method, &transaction)
+            {
+                self.clear_tracked_request_auth_state(&handle, tracked_method, &transaction)
+                    .await;
+            }
+            warn!(
+                session_id = %session_id,
+                method = safe_auth_method_label(method),
+                "Ignoring an answer that does not own the pending offer transaction"
+            );
+            return Ok(());
+        }
         if !self
             .dialog_adapter
             .outbound_request_tracker
@@ -4403,6 +4843,61 @@ impl SessionCrossCrateEventHandler {
                         "stale RFC 4028 completion was suppressed"
                     );
                 }
+            }
+        } else if tracked_method == TrackedInDialogMethod::Update
+            && pending_offer_correlation == PendingOfferTransactionCorrelation::Exact
+        {
+            let (mut completion_event, mut failure_reason) = update_completion_transition(outcome);
+            let successful_response = matches!(completion_event, EventType::Dialog200OK);
+            let remote_answer = if successful_response {
+                match response_sdp.filter(|sdp| !sdp.trim().is_empty()) {
+                    Some(answer) => Some(answer),
+                    None => {
+                        completion_event = EventType::Dialog4xxFailure(488);
+                        failure_reason = Some("successful UPDATE response contained no SDP answer");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Some(answer) = remote_answer {
+                self.state_machine
+                    .process_event_with_remote_sdp_exact(&handle, completion_event, Some(answer))
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            } else {
+                self.state_machine
+                    .process_event_exact(&handle, completion_event)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            }
+            if let Some(reason) = failure_reason {
+                self.app_event_publisher.publish_exact(
+                    &handle,
+                    crate::api::events::Event::RenegotiationFailed {
+                        call_id: session_id.clone(),
+                        method: "UPDATE".to_string(),
+                        reason: reason.to_string(),
+                    },
+                );
+            }
+        } else if tracked_method == TrackedInDialogMethod::Reinvite
+            && pending_offer_correlation == PendingOfferTransactionCorrelation::Exact
+        {
+            if let Some((failure_event, reason)) = reinvite_completion_failure(outcome) {
+                self.state_machine
+                    .process_event_exact(&handle, failure_event)
+                    .await
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                self.app_event_publisher.publish_exact(
+                    &handle,
+                    crate::api::events::Event::RenegotiationFailed {
+                        call_id: session_id,
+                        method: "INVITE".to_string(),
+                        reason: reason.to_string(),
+                    },
+                );
             }
         }
         Ok(())
@@ -4519,6 +5014,29 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         };
 
+        let response_transaction = response_from_bytes(raw_response.as_ref())
+            .as_ref()
+            .and_then(rvoip_sip_dialog::transaction::TransactionKey::from_response);
+        let pending_offer = initial_snapshot.pending_offer_answer.as_ref();
+        let pending_correlation = correlate_pending_offer_transaction(
+            pending_offer.map(|pending| &pending.method),
+            pending_offer.and_then(|pending| pending.transaction_id.as_ref()),
+            &rvoip_sip_core::Method::Invite,
+            response_transaction.as_ref(),
+        );
+        if matches!(
+            pending_correlation,
+            PendingOfferTransactionCorrelation::OtherMethod
+                | PendingOfferTransactionCorrelation::Mismatched
+        ) {
+            warn!(
+                session_id = %session_id,
+                status,
+                "Ignoring an INVITE failure that does not own the pending offer transaction"
+            );
+            return Ok(());
+        }
+
         if initial_snapshot.session_refresh_phase
             == crate::session_store::state::SessionRefreshPhase::ReinviteInFlight
         {
@@ -4581,6 +5099,16 @@ impl SessionCrossCrateEventHandler {
                     "session {} in-dialog request failed with {}; committed a non-terminal YAML rollback and retained the call",
                     session_id, status
                 );
+                if pending_correlation == PendingOfferTransactionCorrelation::Exact {
+                    self.app_event_publisher.publish_exact(
+                        handle,
+                        crate::api::events::Event::RenegotiationFailed {
+                            call_id: session_id.clone(),
+                            method: "INVITE".to_string(),
+                            reason: format!("re-INVITE failed with SIP status {status}"),
+                        },
+                    );
+                }
                 return Ok(());
             }
             CommittedCallFailure::Cancelled => {
@@ -5265,6 +5793,31 @@ impl SessionCrossCrateEventHandler {
             })?;
         let previous_remote_direction = Some(snapshot.remote_media_direction);
         let has_sdp = sdp.is_some();
+        if let Some(offer) = sdp.as_deref() {
+            if let Err(error) = self.media_adapter.validate_inbound_sdp_offer(offer) {
+                let mut response_input = Some(inbound_response);
+                let terminal = crate::state_machine::actions::send_exact_inbound_final_response(
+                    handle.session_id(),
+                    response_input.as_mut(),
+                    &self.dialog_adapter,
+                    488,
+                    None,
+                    None,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                warn!(
+                    session_id = %handle.session_id(),
+                    method = %method,
+                    error_class = %error,
+                    "Rejected invalid inbound session-modification offer"
+                );
+                if let Some(error) = terminal.terminal_error {
+                    return Err(anyhow::anyhow!(error.to_string()));
+                }
+                return Ok(());
+            }
+        }
         let event = if method.eq_ignore_ascii_case("UPDATE") {
             EventType::UpdateReceived { sdp }
         } else {
@@ -5294,7 +5847,7 @@ impl SessionCrossCrateEventHandler {
                 "Inbound re-INVITE/UPDATE response reached a terminal wire disposition"
             );
         }
-        if method.eq_ignore_ascii_case("INVITE") && has_sdp {
+        if has_sdp {
             self.apply_inbound_reinvite_media_direction(handle, previous_remote_direction)
                 .await;
         }
@@ -5546,7 +6099,11 @@ impl SessionCrossCrateEventHandler {
         processing_ack.map_err(anyhow::Error::msg)
     }
 
-    async fn handle_ack_received_session(&self, handle: &SessionRegistryHandle) -> Result<()> {
+    async fn handle_ack_received_session(
+        &self,
+        handle: &SessionRegistryHandle,
+        sdp_answer: Option<String>,
+    ) -> Result<()> {
         let session_id = handle.session_id();
         if self
             .state_machine
@@ -5562,15 +6119,45 @@ impl SessionCrossCrateEventHandler {
         }
 
         rvoip_sip_dialog::diagnostics::record_ack_event_delivered();
-        if let Err(error) = self
+        let delayed_offer_answer = !self
             .state_machine
-            .process_event_exact(handle, EventType::DialogACK)
-            .await
-        {
+            .store
+            .get_session_snapshot_exact(handle)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            .sdp_negotiated;
+        let process_result = if delayed_offer_answer {
+            self.state_machine
+                .process_event_with_remote_sdp_exact(handle, EventType::DialogACK, sdp_answer)
+                .await
+        } else {
+            self.state_machine
+                .process_event_exact(handle, EventType::DialogACK)
+                .await
+        };
+        if let Err(error) = process_result {
             error!(
                 "Failed to process DialogACK event after AckReceived: {}",
                 error
             );
+            if delayed_offer_answer {
+                self.app_event_publisher.publish_exact(
+                    handle,
+                    crate::api::events::Event::RenegotiationFailed {
+                        call_id: session_id.clone(),
+                        method: "ACK".to_string(),
+                        reason: "missing, invalid, or unacceptable ACK SDP answer".to_string(),
+                    },
+                );
+            }
+            self.terminate_confirmed_negotiation(
+                handle,
+                if delayed_offer_answer {
+                    "ACK carried a missing, invalid, or unusable SDP answer"
+                } else {
+                    "confirmed UAS dialog could not activate negotiated media"
+                },
+            )
+            .await?;
         } else if let Some(coordinator) = self.coordinator.get().and_then(|w| w.upgrade()) {
             coordinator
                 .schedule_active_call_media_timeout_if_current(session_id)
@@ -6503,6 +7090,22 @@ mod tests {
             );
         }
         assert!(stale_dialog_dispatch_result("bye_received").is_ok());
+    }
+
+    #[test]
+    fn committed_invite_2xx_retransmission_always_sends_ack() {
+        let source = include_str!("session_event_handler.rs");
+        let retransmission = source
+            .split("if invite_success_is_retransmission(")
+            .nth(1)
+            .and_then(|tail| tail.split("match pending_correlation").next())
+            .expect("committed INVITE 2xx retransmission branch");
+
+        assert!(retransmission.contains("send_invite_2xx_ack_exact"));
+        assert!(
+            !retransmission.contains("body().is_empty()"),
+            "a bodyless INVITE 2xx retransmission still requires ACK"
+        );
     }
 
     #[test]
@@ -7545,6 +8148,7 @@ mod tests {
             transaction_id: transaction.to_string(),
             method: "INFO".to_string(),
             outcome: rvoip_infra_common::events::cross_crate::OutboundRequestOutcome::Timeout,
+            response_sdp: None,
         };
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
@@ -7579,6 +8183,7 @@ mod tests {
             transaction_id: transaction.to_string(),
             method: "INFO".to_string(),
             outcome: rvoip_infra_common::events::cross_crate::OutboundRequestOutcome::Timeout,
+            response_sdp: None,
         };
         let mut replay = tracker.take_deferred_replay_receiver().unwrap();
         assert_eq!(
