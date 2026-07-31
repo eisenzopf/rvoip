@@ -213,19 +213,16 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
                 }
                 RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
                     log::info!("RTC data channel event: {:?}", dc_event);
-                    match dc_event {
-                        RTCDataChannelEvent::OnOpen(channel_id) => {
-                            let dc = rtc_pc
-                                .data_channel(channel_id)
-                                .expect("data channel should exist");
-                            log::info!(
-                                "RTC data channel opened: {} (id: {})",
-                                dc.label(),
-                                channel_id
-                            );
-                            data_channel_opened = true;
-                        }
-                        _ => {}
+                    if let RTCDataChannelEvent::OnOpen(channel_id) = dc_event {
+                        let dc = rtc_pc
+                            .data_channel(channel_id)
+                            .expect("data channel should exist");
+                        log::info!(
+                            "RTC data channel opened: {} (id: {})",
+                            dc.label(),
+                            channel_id
+                        );
+                        data_channel_opened = true;
                     }
                 }
                 _ => {}

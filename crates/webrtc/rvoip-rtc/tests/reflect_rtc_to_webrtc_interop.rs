@@ -89,7 +89,6 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
             rtcp_feedback: vec![],
         },
         payload_type: 96,
-        ..Default::default()
     };
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;

@@ -185,10 +185,10 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         // Process offer peer events
         while let Some(event) = runner.offer_pc.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Connected {
-                        offer_connected = true;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
+                    RTCPeerConnectionState::Connected,
+                ) => {
+                    offer_connected = true;
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
                     offer_dc_id = Some(channel_id);
@@ -215,10 +215,10 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         // Process answer peer events
         while let Some(event) = runner.answer_pc.poll_event() {
             match event {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(state) => {
-                    if state == RTCPeerConnectionState::Connected {
-                        answer_connected = true;
-                    }
+                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(
+                    RTCPeerConnectionState::Connected,
+                ) => {
+                    answer_connected = true;
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
                     _answer_dc_id = Some(channel_id);
@@ -235,12 +235,14 @@ async fn test_data_channel_statistics_collection() -> Result<()> {
         }
 
         // Send messages from offer once connected
-        if offer_connected && offer_dc_id.is_some() && offer_messages_sent < messages_to_send {
-            if let Some(mut dc) = runner.offer_pc.data_channel(offer_dc_id.unwrap()) {
-                let msg = "x".repeat(message_size);
-                dc.send_text(msg)?;
-                offer_messages_sent += 1;
-            }
+        if offer_connected
+            && offer_dc_id.is_some()
+            && offer_messages_sent < messages_to_send
+            && let Some(mut dc) = runner.offer_pc.data_channel(offer_dc_id.unwrap())
+        {
+            let msg = "x".repeat(message_size);
+            dc.send_text(msg)?;
+            offer_messages_sent += 1;
         }
 
         // Check if test is complete

@@ -253,14 +253,13 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                 }
                 Ok(Command::SendMessage(msg)) => {
                     log::info!("RTC: Sending message: {}", msg);
-                    if let Some(channel_id) = dc_id {
-                        if let Some(mut dc) = rtc_pc.data_channel(channel_id) {
-                            if let Err(e) = dc.send_text(msg) {
-                                resp_tx
-                                    .send(Response::Error(format!("Failed to send message: {}", e)))
-                                    .ok();
-                            }
-                        }
+                    if let Some(channel_id) = dc_id
+                        && let Some(mut dc) = rtc_pc.data_channel(channel_id)
+                        && let Err(e) = dc.send_text(msg)
+                    {
+                        resp_tx
+                            .send(Response::Error(format!("Failed to send message: {}", e)))
+                            .ok();
                     }
                 }
                 Ok(Command::RestartIce) => {
@@ -453,14 +452,13 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                             resp_tx.send(Response::Connected).ok();
                         }
                     }
-                    RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                        RTCDataChannelEvent::OnOpen(data_channel_id) => {
-                            log::info!("RTC: Data channel {} opened", data_channel_id);
-                            dc_id = Some(data_channel_id);
-                            resp_tx.send(Response::DataChannelOpen).ok();
-                        }
-                        _ => {}
-                    },
+                    RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(
+                        data_channel_id,
+                    )) => {
+                        log::info!("RTC: Data channel {} opened", data_channel_id);
+                        dc_id = Some(data_channel_id);
+                        resp_tx.send(Response::DataChannelOpen).ok();
+                    }
                     _ => {}
                 }
             }
@@ -571,11 +569,11 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     // Wait for message to be received
     let deadline = Instant::now() + DEFAULT_TIMEOUT_DURATION;
     loop {
-        if let Some(msg) = webrtc_message_received.lock().await.as_ref() {
-            if msg == TEST_MESSAGE {
-                log::info!("Initial message received: {}", msg);
-                break;
-            }
+        if let Some(msg) = webrtc_message_received.lock().await.as_ref()
+            && msg == TEST_MESSAGE
+        {
+            log::info!("Initial message received: {}", msg);
+            break;
         }
         if Instant::now() > deadline {
             anyhow::bail!("Timeout waiting for initial message");
@@ -660,11 +658,11 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
     // Wait for message to be received
     let deadline = Instant::now() + DEFAULT_TIMEOUT_DURATION;
     loop {
-        if let Some(msg) = webrtc_message_received.lock().await.as_ref() {
-            if msg == TEST_MESSAGE_AFTER_RESTART {
-                log::info!("Message received after ICE restart: {}", msg);
-                break;
-            }
+        if let Some(msg) = webrtc_message_received.lock().await.as_ref()
+            && msg == TEST_MESSAGE_AFTER_RESTART
+        {
+            log::info!("Message received after ICE restart: {}", msg);
+            break;
         }
         if Instant::now() > deadline {
             anyhow::bail!("Timeout waiting for message after ICE restart");

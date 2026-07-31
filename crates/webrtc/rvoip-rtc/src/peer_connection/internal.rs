@@ -987,12 +987,11 @@ where
                                 }
                             }
                         }
-                        RTCSdpType::Answer => {
+                        RTCSdpType::Answer
                             if m.attribute(transceiver.direction().to_string().as_str())
-                                .is_none()
-                            {
-                                return true;
-                            }
+                                .is_none() =>
+                        {
+                            return true;
                         }
                         _ => {}
                     };

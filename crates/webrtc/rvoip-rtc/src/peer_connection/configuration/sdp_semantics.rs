@@ -130,12 +130,12 @@ mod test {
     fn extract_ssrc_list(md: &MediaDescription) -> Vec<String> {
         let mut ssrcs = HashSet::new();
         for attr in &md.attributes {
-            if attr.key == ATTR_KEY_SSRC {
-                if let Some(value) = &attr.value {
-                    let fields: Vec<&str> = value.split_whitespace().collect();
-                    if let Some(ssrc) = fields.first() {
-                        ssrcs.insert(*ssrc);
-                    }
+            if attr.key == ATTR_KEY_SSRC
+                && let Some(value) = &attr.value
+            {
+                let fields: Vec<&str> = value.split_whitespace().collect();
+                if let Some(ssrc) = fields.first() {
+                    ssrcs.insert(*ssrc);
                 }
             }
         }

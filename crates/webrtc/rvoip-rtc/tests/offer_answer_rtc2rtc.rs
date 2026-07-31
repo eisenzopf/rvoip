@@ -215,13 +215,10 @@ async fn test_offer_answer_rtc_to_rtc() -> Result<()> {
                         offer_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                    RTCDataChannelEvent::OnOpen(channel_id) => {
-                        log::info!("Offer data channel {} opened", channel_id);
-                        offer_dc_id = Some(channel_id);
-                    }
-                    _ => {}
-                },
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
+                    log::info!("Offer data channel {} opened", channel_id);
+                    offer_dc_id = Some(channel_id);
+                }
                 _ => {}
             }
         }
@@ -272,12 +269,9 @@ async fn test_offer_answer_rtc_to_rtc() -> Result<()> {
                         answer_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(dc_event) => match dc_event {
-                    RTCDataChannelEvent::OnOpen(channel_id) => {
-                        log::info!("Answer data channel {} opened", channel_id);
-                    }
-                    _ => {}
-                },
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
+                    log::info!("Answer data channel {} opened", channel_id);
+                }
                 _ => {}
             }
         }
@@ -293,30 +287,30 @@ async fn test_offer_answer_rtc_to_rtc() -> Result<()> {
                     msgs.push(msg_str.clone());
 
                     // Echo back
-                    if !echo_sent {
-                        if let Some(mut dc) = answer_pc.data_channel(channel_id) {
-                            log::info!("Answer echoing: '{}'", ECHO_MESSAGE);
-                            dc.send_text(ECHO_MESSAGE.to_string())?;
-                            echo_sent = true;
-                        }
+                    if !echo_sent && let Some(mut dc) = answer_pc.data_channel(channel_id) {
+                        log::info!("Answer echoing: '{}'", ECHO_MESSAGE);
+                        dc.send_text(ECHO_MESSAGE.to_string())?;
+                        echo_sent = true;
                     }
                 }
             }
         }
 
         // Send test message from offer once connected
-        if offer_connected && offer_dc_id.is_some() && !message_sent {
-            if let Some(mut dc) = offer_pc.data_channel(offer_dc_id.unwrap()) {
-                log::info!("Offer sending message: '{}'", TEST_MESSAGE);
-                dc.send_text(TEST_MESSAGE.to_string())?;
-                message_sent = true;
-            }
+        if offer_connected
+            && offer_dc_id.is_some()
+            && !message_sent
+            && let Some(mut dc) = offer_pc.data_channel(offer_dc_id.unwrap())
+        {
+            log::info!("Offer sending message: '{}'", TEST_MESSAGE);
+            dc.send_text(TEST_MESSAGE.to_string())?;
+            message_sent = true;
         }
 
         // Check if test is complete
         let offer_msgs = offer_received_messages.lock().await;
         let answer_msgs = answer_received_messages.lock().await;
-        if offer_msgs.len() >= 1 && answer_msgs.len() >= 1 {
+        if !offer_msgs.is_empty() && !answer_msgs.is_empty() {
             log::info!("Test complete - both peers received messages");
             break;
         }
