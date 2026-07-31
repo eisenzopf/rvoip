@@ -3066,6 +3066,7 @@ mod tests {
             transaction_id: TRANSACTION_SECRET.to_string(),
             method: METHOD_SECRET.to_string(),
             outcome: OutboundRequestOutcome::FinalResponse { status_code: 486 },
+            response_sdp: None,
         };
 
         let rendered = format!("{event:?}");

@@ -1635,7 +1635,7 @@ impl MediaAdapter {
         if result.is_err() {
             self.discard_staged_media_negotiation_for_session(&session);
         }
-        let security_changed = session.media_security != previous_security;
+        let security_changed = result.is_ok() && session.media_security != previous_security;
         let security_observation = security_changed
             .then(|| {
                 session
@@ -1858,13 +1858,14 @@ impl MediaAdapter {
         if result.is_err() {
             self.discard_staged_media_negotiation_for_session(&session);
         }
-        let state_changed = previous_origin
-            != (
-                session.sdp_origin_session_id.clone(),
-                session.sdp_origin_version,
-            )
-            || session.media_security != previous_security;
-        let security_observation = (session.media_security != previous_security)
+        let state_changed = result.is_ok()
+            && (previous_origin
+                != (
+                    session.sdp_origin_session_id.clone(),
+                    session.sdp_origin_version,
+                )
+                || session.media_security != previous_security);
+        let security_observation = (result.is_ok() && session.media_security != previous_security)
             .then(|| {
                 session
                     .lifecycle_handle
@@ -6509,6 +6510,83 @@ a=fmtp:101 0-15\r\n";
         assert_eq!(after.config.remote_addr, before.config.remote_addr);
         assert_eq!(after.config.preferred_codec, before.config.preferred_codec);
         assert_eq!(after.config.parameters, before.config.parameters);
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup managed media");
+    }
+
+    #[tokio::test]
+    async fn failed_public_uas_commit_does_not_publish_advanced_sdp_origin() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("failed-public-uas-origin-rollback".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create exact UAS session");
+        let mut adapter = MediaAdapter::new(
+            controller,
+            Arc::clone(&store),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            17_200,
+            17_300,
+        );
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start exact media");
+
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("capture exact UAS lifetime");
+        let before = store
+            .get_session_exact(&handle)
+            .await
+            .expect("load stable UAS state");
+        let (_, offered_crypto) = SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80])
+            .expect("build SRTP offer");
+        let mut offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35_010, "RTP/SAVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000");
+        for crypto in offered_crypto {
+            offer = offer.crypto_attribute(crypto);
+        }
+        let offer = offer
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("build SRTP SDP offer")
+            .to_string();
+
+        adapter
+            .fail_media_commit_after_srtp_swap
+            .store(true, Ordering::Release);
+        adapter
+            .negotiate_sdp_as_uas(&session_id, &offer)
+            .await
+            .expect_err("injected media commit failure must reject the answer");
+
+        let after = store
+            .get_session_exact(&handle)
+            .await
+            .expect("reload stable UAS state");
+        assert_eq!(after.sdp_origin_session_id, before.sdp_origin_session_id);
+        assert_eq!(after.sdp_origin_version, before.sdp_origin_version);
+        assert_eq!(after.media_security, before.media_security);
+        assert!(adapter.staged_media_negotiations.is_empty());
+        assert!(adapter.negotiated_srtp.is_empty());
 
         adapter
             .cleanup_session(&session_id)

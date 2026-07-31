@@ -4127,11 +4127,9 @@ impl SessionCrossCrateEventHandler {
             if let (Some(response), Some(transaction_id)) =
                 (parsed_response.as_ref(), response_transaction.as_ref())
             {
-                if !response.body().is_empty() {
-                    self.dialog_adapter
-                        .send_invite_2xx_ack_exact(handle, transaction_id, response)
-                        .await?;
-                }
+                self.dialog_adapter
+                    .send_invite_2xx_ack_exact(handle, transaction_id, response)
+                    .await?;
             }
             debug!(
                 session_id = %session_id,
@@ -7092,6 +7090,22 @@ mod tests {
             );
         }
         assert!(stale_dialog_dispatch_result("bye_received").is_ok());
+    }
+
+    #[test]
+    fn committed_invite_2xx_retransmission_always_sends_ack() {
+        let source = include_str!("session_event_handler.rs");
+        let retransmission = source
+            .split("if invite_success_is_retransmission(")
+            .nth(1)
+            .and_then(|tail| tail.split("match pending_correlation").next())
+            .expect("committed INVITE 2xx retransmission branch");
+
+        assert!(retransmission.contains("send_invite_2xx_ack_exact"));
+        assert!(
+            !retransmission.contains("body().is_empty()"),
+            "a bodyless INVITE 2xx retransmission still requires ACK"
+        );
     }
 
     #[test]
