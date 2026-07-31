@@ -7894,8 +7894,10 @@ mod outbound_flow_handler_tests {
         )
         .to("Bob", "sip:bob@example.com", Some("bob-delivery-fence"))
         .contact("sip:bob@127.0.0.1:5094", None)
-        .body(bytes::Bytes::from_static(b"v=0\r\n"))
         .build();
+        // Keep this lower-layer retry fixture bodyless so sip-dialog owns the
+        // automatic ACK. SDP-bearing session responses deliberately defer ACK
+        // authority until rvoip-sip validates and applies the answer.
         let success_event = || TransactionEvent::SuccessResponse {
             transaction_id: transaction_id.clone(),
             response: response.clone(),

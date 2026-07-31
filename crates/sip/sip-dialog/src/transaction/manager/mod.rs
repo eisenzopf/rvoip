@@ -3170,6 +3170,32 @@ impl TransactionManager {
         }
     }
 
+    /// Count active response routes that no live or compact transaction owns.
+    ///
+    /// Compact client tombstones intentionally retain their authenticated
+    /// response route through the applicable RFC timer. Keep those bounded
+    /// protocol records visible in [`Self::retention_counts`], but do not
+    /// classify them as leaks in post-call release gates.
+    pub fn orphaned_transaction_destination_count(&self) -> usize {
+        self.transaction_destinations
+            .iter()
+            .filter(|entry| {
+                let transaction_id = entry.key();
+                entry.value().is_active()
+                    && !self
+                        .client_transactions
+                        .contains_key(transaction_id.as_ref())
+                    && !self
+                        .server_transactions
+                        .contains_key(transaction_id.as_ref())
+                    && !self
+                        .compact_non_invite_tombstones
+                        .get(transaction_id.as_ref())
+                        .is_some_and(|compact| compact.is_client())
+            })
+            .count()
+    }
+
     /// Number of unexpired INVITE client tombstones retained for authenticated
     /// late-2xx handling. Kept separate from `TransactionManagerRetentionCounts`
     /// so adding this diagnostic does not break downstream exhaustive struct
