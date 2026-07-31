@@ -63,8 +63,9 @@ runtime.
   support remains available, but codec factories and negotiation report it as
   unsupported until a complete codec exists.
 - The standalone WebRTC stack is Tokio-only; Smol and async-std runtime support
-  and dependencies are removed. CI checks default, all-feature, and
-  no-default-feature graphs for alternate runtime dependencies.
+  and dependencies are removed. CI exercises default, all-feature, and
+  no-default-feature configurations and scans the complete all-features graph
+  for forbidden alternate runtime dependencies.
 - The confirmed Chromium SDP regression is corrected for codec-specific audio
   selection, primary SSRC handling, and empty simulcast output.
 

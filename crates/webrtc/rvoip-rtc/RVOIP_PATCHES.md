@@ -25,12 +25,12 @@ Applied fixes:
    carries an exact negotiated MID and payload type, without requiring a RID.
    This preserves the primary coding and gives RFC 4733's separately-clocked
    telephone-event SSRC one deterministic RFC 8843 BUNDLE binding.
-4. The BridgeFu exact-Chromium candidate originated in
+4. The BridgeFu exact-Chromium working-tree candidate was based on
    `eisenzopf/rtc@1e5b7d4be6d94850694f2519f4c235d16c871d53`
-   (`patch-id 478b7da63ea6d195f446a9abce4c56e62129a86e`). The reviewed
-   rvoip integration is the six-file RTC subset
-   (`patch-id 04f06567b162464eaf4185bfa3f5d037bec603a7`); unrelated
-   `rvoip-webrtc` DTMF changes are not part of it. The integration
+   (working-tree `patch-id 478b7da63ea6d195f446a9abce4c56e62129a86e`).
+   The reviewed six-file RTC subset was extracted from historical rvoip commit
+   `ace18056` (`patch-id 04f06567b162464eaf4185bfa3f5d037bec603a7`).
+   Unrelated `rvoip-webrtc` DTMF changes are not part of it. The integration
    distinguishes codec-specific audio bindings from RID simulcast, advertises
    only the primary audio SSRC, never emits an empty `a=simulcast` attribute,
    selects supplemental payload types by complete codec identity, groups

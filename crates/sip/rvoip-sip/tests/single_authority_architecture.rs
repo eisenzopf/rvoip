@@ -1276,7 +1276,8 @@ fn typed_dialog_ingress_and_in_dialog_tracker_are_generation_fenced() {
         &handler,
         "async fn publish_and_release_session",
     ));
-    assert!(terminal.contains("get_session_snapshot_exact(&handle)"));
+    assert!(terminal.contains("has_exact_terminal_fact(&handle)"));
+    assert!(!terminal.contains("get_session_snapshot_exact("));
     assert!(!terminal.contains("lifecycle_handle("));
 
     let flow = compact(function_source(

@@ -2,8 +2,6 @@
 
 ## Unreleased
 
-No changes yet.
-
 ## 0.3.5 — 2026-07-30
 
 This coordinated 44-crate patch release hardens security and media state,
