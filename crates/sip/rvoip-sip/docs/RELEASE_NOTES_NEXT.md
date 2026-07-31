@@ -82,6 +82,12 @@ runtime.
 - AES-GCM, end-to-end SIP DTLS-SRTP, MIKEY, ZRTP, and G.722 codec negotiation
   remain explicit non-claims. The new ICE/NAT architecture and unrelated
   WebRTC additions from PR #35 are not part of this repair release.
+- General-user 10,000 CPS full-media capability is not claimed. The strict SIP
+  beta envelope remains bounded by its recorded 2,000-CPS real-media profile,
+  exact host configuration, peer matrix, workloads, and soak durations.
+- Browser/WebRTC edge qualification remains separate from the SIP beta claim;
+  the exact Chromium repair tests do not broaden that claim to untested
+  browsers, ICE/TURN deployments, or network topologies.
 
 ## Qualification
 
