@@ -123,10 +123,25 @@ pub(crate) enum CodecMatch {
     Exact = 2,
 }
 
+fn codec_identity_matches(needle: &RTCRtpCodec, candidate: &RTCRtpCodec) -> bool {
+    needle.mime_type.eq_ignore_ascii_case(&candidate.mime_type)
+        // A zero value is retained as an unspecified/wildcard value for
+        // callers constructed from SDP forms that omit an optional field.
+        && (needle.clock_rate == 0
+            || candidate.clock_rate == 0
+            || needle.clock_rate == candidate.clock_rate)
+        && (needle.channels == 0
+            || candidate.channels == 0
+            || needle.channels == candidate.channels)
+}
+
 /// Performs fuzzy search for a codec in a list of available codecs.
 ///
-/// First attempts an exact match on both MIME type and format parameters,
-/// then falls back to matching only the MIME type.
+/// First attempts an exact match on codec identity (MIME type, clock rate,
+/// and channel count) plus format parameters, then falls back to codec
+/// identity without requiring matching format parameters. A zero clock rate
+/// or channel count is treated as unspecified for compatibility with SDP
+/// forms that omit the optional value.
 ///
 /// # Parameters
 ///
@@ -144,17 +159,22 @@ pub(crate) fn codec_parameters_fuzzy_search(
 
     //TODO: add unicode case-folding equal support
 
-    // First attempt to match on mime_type + sdpfmtp_line
+    // First attempt to match codec identity + sdpfmtp_line.
     for c in haystack {
+        if !codec_identity_matches(needle_rtp_codec, &c.rtp_codec) {
+            continue;
+        }
         let cfmpt = fmtp::parse(&c.rtp_codec.mime_type, &c.rtp_codec.sdp_fmtp_line);
         if needle_fmtp.match_fmtp(&*cfmpt) {
             return (c.clone(), CodecMatch::Exact);
         }
     }
 
-    // Fallback to just mime_type
+    // Fallback keeps the codec identity constraints but permits an fmtp
+    // mismatch. In particular, it must not collapse separate RTP clock rates
+    // for codecs such as telephone-event into the first registered payload.
     for c in haystack {
-        if c.rtp_codec.mime_type.to_uppercase() == needle_rtp_codec.mime_type.to_uppercase() {
+        if codec_identity_matches(needle_rtp_codec, &c.rtp_codec) {
             return (c.clone(), CodecMatch::Partial);
         }
     }
@@ -264,4 +284,104 @@ pub(crate) fn rtcp_feedback_intersection(
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn codec(
+        payload_type: PayloadType,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+        fmtp: &str,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn telephone_event_match_respects_clock_rate() {
+        let haystack = [
+            codec(101, MIME_TYPE_TELEPHONE_EVENT, 8_000, 1, "0-15"),
+            codec(110, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15"),
+        ];
+        let needle = codec(0, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15");
+
+        let (matched, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::Exact);
+        assert_eq!(matched.payload_type, 110);
+    }
+
+    #[test]
+    fn partial_match_still_rejects_a_different_clock_rate() {
+        let haystack = [codec(101, MIME_TYPE_TELEPHONE_EVENT, 8_000, 1, "0-16")];
+        let needle = codec(0, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15");
+
+        let (_, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::None);
+    }
+
+    #[test]
+    fn codec_match_respects_audio_channel_count() {
+        let haystack = [
+            codec(109, MIME_TYPE_OPUS, 48_000, 1, "minptime=10"),
+            codec(111, MIME_TYPE_OPUS, 48_000, 2, "minptime=10"),
+        ];
+        let needle = codec(0, MIME_TYPE_OPUS, 48_000, 2, "minptime=10");
+
+        let (matched, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::Exact);
+        assert_eq!(matched.payload_type, 111);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    fn codec(
+        payload_type: PayloadType,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+        fmtp: &str,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn telephone_event_match_respects_clock_rate() {
+        let haystack = [
+            codec(101, MIME_TYPE_TELEPHONE_EVENT, 8_000, 1, "0-15"),
+            codec(110, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15"),
+        ];
+        let needle = codec(0, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15");
+
+        let (matched, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::Exact);
+        assert_eq!(matched.payload_type, 110);
+    }
 }

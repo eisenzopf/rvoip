@@ -19,14 +19,13 @@
 ---
 
 > [!IMPORTANT]
-> **Unified `0.3.4` release.** All 44 publishable workspace crates ship on the
-> same version. This release uses an explicit owner-approved carry-forward
-> qualification: the `0.3.4` full beta suite, four-peer interoperability
-> matrix, and long soaks were **not rerun**. Current evidence consists of the
-> complete workspace verification and one clean, revision-bound canonical
-> 65,000-call real-media run. The immutable `0.3.2` owner-approved exception is
-> retained as historical background and is not relabeled as a `0.3.4` beta
-> pass. The SIP product is the release-gated beta surface. WebRTC,
+> **Unified `0.3.5` release train.** All 44 publishable workspace crates ship on
+> the same version. Publication requires a fresh, strict full-beta run bound to
+> the exact release source: no skipped gates, no carry-forward qualification,
+> and passing workspace, security, four-peer interoperability, performance,
+> resiliency, and long-soak evidence. The generated beta report is authoritative
+> for the exact tested versions and results. The SIP product is the
+> release-gated beta surface. WebRTC,
 > UCTP, MoQ, the cross-transport APIs, Amazon Connect, and extension crates are
 > available today as developer-preview surfaces unless their own documentation
 > states a narrower qualification. Available does not mean API-stable or
@@ -117,7 +116,7 @@ Add the SIP product:
 
 ```toml
 [dependencies]
-rvoip-sip = "0.3.4"
+rvoip-sip = "0.3.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -222,7 +221,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.3.4`. They are first-class workspace
+All 14 extension crates ship at `0.3.5`. They are first-class workspace
 capabilities, but remain optional so protocol crates depend on provider
 contracts rather than deployment-specific services.
 
@@ -244,22 +243,22 @@ The supporting contracts live in
 The facade exposes the conversation-model extensions together:
 
 ```toml
-rvoip = { version = "0.3.4", features = ["voip-3"] }
+rvoip = { version = "0.3.5", features = ["voip-3"] }
 ```
 
 `voip-3` enables SIP, WebRTC, UCTP, vCon, the identity provider surface, and
 the AI harness. Vapi and STIR/SHAKEN have separate facade features:
 
 ```toml
-rvoip = { version = "0.3.4", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip = { version = "0.3.5", features = ["sip", "vapi", "sip-stir-shaken"] }
 ```
 
 Deployment-specific extensions are direct dependencies:
 
 ```toml
-rvoip-keycloak = "0.3.4"
-rvoip-redis = "0.3.4"
-rvoip-audit = "0.3.4"
+rvoip-keycloak = "0.3.5"
+rvoip-redis = "0.3.5"
+rvoip-audit = "0.3.5"
 ```
 
 The facade's `full` feature does **not** enable every workspace extension,
@@ -336,14 +335,12 @@ product's implementation:
   unified release identity, source compatibility notes, and attestation
   provenance.
 
-The `0.3.4` release receipt uses
-`rvoip-release-carry-forward-attestation-v1`. It records
-`beta_suite: NOT-RERUN`, inherits only the unchanged `0.3.2`
-`OWNER-APPROVED-EXCEPTION` background, and requires both current workspace
-verification and one clean canonical 2,000-CPS/65,000-call PASS bound to the
-exact release commit and source fingerprint. This is deliberately narrower
-than a full beta rerun and does not establish a new universal proxy-conformance
-or interoperability claim.
+The `0.3.5` release requires a fresh strict full-beta report bound to one clean,
+unchanged release source fingerprint. The gate admits no skipped checks and
+includes the workspace, SIP/media, public API, security, PBX, SIPp, strict-UA,
+proxy interoperability, performance, resiliency, and long-soak scopes. The
+historical `0.3.4` carry-forward receipt remains immutable release history; it
+does not qualify `0.3.5`.
 
 ### SIP interoperability attestation
 
@@ -352,7 +349,7 @@ independently managed peers below. The report generator binds every row to the
 tested source tree, exact peer identity and configuration, selected matrix,
 and hashed evidence; it refuses to produce a strict release-candidate report
 if a required peer is missing, skipped, ambiguous, unpinned, or failing. This
-four-peer matrix was not rerun for the `0.3.4` carry-forward release.
+four-peer matrix is mandatory for the `0.3.5` strict release gate.
 
 | Peer | Attested boundary | Required release evidence |
 | --- | --- | --- |

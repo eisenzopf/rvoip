@@ -28,8 +28,8 @@ failure rather than a skip.
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.4` proxy release gate. |
-| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.4` proxy release gate. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.3.5` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.3.5` proxy release gate. |
 
 ## Current Automation Status
 
@@ -132,7 +132,7 @@ Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
 configuration, packet capture, logs, exact version/image provenance, teardown,
 and restoration of any process that was running before the gate.
 
-| Scenario | Required for `0.3.4` |
+| Scenario | Required for `0.3.5` |
 |----------|----------------------|
 | UDP, TCP, and TLS/SIPS forwarding | Yes |
 | Matched and unmatched CANCEL | Yes |
@@ -165,7 +165,7 @@ Each interop run should store:
 ## Release-Gate Policy
 
 - A failure in SIPp, Asterisk, FreeSWITCH, Kamailio, or OpenSIPS blocks the
-  `0.3.4` proxy release candidate.
+  `0.3.5` proxy release candidate.
 - The proxy matrix must contain exactly both pinned peers, both adjacency
   orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
   per-row core scenario set are validated independently while generating the

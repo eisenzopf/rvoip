@@ -31,7 +31,6 @@ use axum::{
     Router,
 };
 use chromiumoxide::browser::{Browser, BrowserConfig};
-use chromiumoxide::cdp::browser_protocol::page::EventLoadEventFired;
 use futures::StreamExt;
 use rvoip_webrtc::{WebRtcConfig, WebRtcServerBuilder};
 use tokio::net::TcpListener;
@@ -139,17 +138,14 @@ async fn headless_chromium_whip_publish_round_trip() {
     };
     let page_url =
         format!("http://{static_addr}/whip-publish.html?whip=http://{whip}/whip/browser-test");
-    let page = browser.new_page(&page_url).await.expect("open page");
-
-    // Wait for the load event.
-    let mut load_events = page
-        .event_listener::<EventLoadEventFired>()
-        .await
-        .expect("subscribe load");
-    tokio::time::timeout(Duration::from_secs(10), load_events.next())
+    // Subscribe/navigation ordering inside `new_page(url)` can let the load
+    // event fire before a separate listener is registered. Start from a blank
+    // target and use `goto`, whose completion is tied to that navigation.
+    let page = browser.new_page("about:blank").await.expect("open page");
+    tokio::time::timeout(Duration::from_secs(10), page.goto(&page_url))
         .await
         .expect("page load timeout")
-        .expect("page load stream closed");
+        .expect("page navigation failed");
 
     // 4. Click the Start button; the page handles getUserMedia + WHIP POST.
     page.find_element("#start")

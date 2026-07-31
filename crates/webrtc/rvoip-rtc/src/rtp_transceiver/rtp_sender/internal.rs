@@ -406,3 +406,123 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RTCRtpSenderInternal;
+    use crate::media_stream::track::MediaStreamTrack;
+    use crate::peer_connection::configuration::media_engine::{
+        MIME_TYPE_OPUS, MIME_TYPE_TELEPHONE_EVENT, MediaEngine,
+    };
+    use crate::rtp_transceiver::rtp_sender::{
+        RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
+        RtpCodecKind,
+    };
+    use interceptor::{Interceptor, NoopInterceptor, StreamInfo, TaggedPacket, interceptor};
+    use shared::error::Error;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Interceptor)]
+    struct RecordingInterceptor<P: Interceptor> {
+        #[next]
+        inner: P,
+        bound_local: Arc<Mutex<Vec<StreamInfo>>>,
+    }
+
+    #[interceptor]
+    impl<P: Interceptor> RecordingInterceptor<P> {
+        #[overrides]
+        fn bind_local_stream(&mut self, info: &StreamInfo) {
+            self.bound_local
+                .lock()
+                .expect("recording interceptor mutex")
+                .push(info.clone());
+            self.inner.bind_local_stream(info);
+        }
+    }
+
+    fn codec(mime_type: &str, clock_rate: u32, channels: u16) -> RTCRtpCodec {
+        RTCRtpCodec {
+            mime_type: mime_type.to_owned(),
+            clock_rate,
+            channels,
+            sdp_fmtp_line: if mime_type.eq_ignore_ascii_case(MIME_TYPE_TELEPHONE_EVENT) {
+                "0-15".to_owned()
+            } else {
+                "minptime=10;useinbandfec=1".to_owned()
+            },
+            rtcp_feedback: vec![],
+        }
+    }
+
+    fn encoding(ssrc: u32, codec: RTCRtpCodec) -> RTCRtpEncodingParameters {
+        RTCRtpEncodingParameters {
+            rtp_coding_parameters: RTCRtpCodingParameters {
+                ssrc: Some(ssrc),
+                ..Default::default()
+            },
+            codec,
+            ..Default::default()
+        }
+    }
+
+    fn codec_parameters(payload_type: u8, codec: RTCRtpCodec) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: codec,
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn one_audio_sender_binds_primary_and_telephone_event_encodings_by_codec_identity() {
+        let opus_ssrc = 0x0102_0304;
+        let dtmf_ssrc = 0x0506_0708;
+        let opus = codec(MIME_TYPE_OPUS, 48_000, 2);
+        let telephone_event_48khz = codec(MIME_TYPE_TELEPHONE_EVENT, 48_000, 1);
+        let codings = vec![
+            encoding(opus_ssrc, opus.clone()),
+            encoding(dtmf_ssrc, telephone_event_48khz.clone()),
+        ];
+        let track = MediaStreamTrack::new(
+            "stream".to_owned(),
+            "track".to_owned(),
+            "audio".to_owned(),
+            RtpCodecKind::Audio,
+            codings.clone(),
+        );
+        let mut sender = RTCRtpSenderInternal::<RecordingInterceptor<NoopInterceptor>>::new(
+            RtpCodecKind::Audio,
+            track,
+            vec![],
+            codings,
+        );
+        sender.set_codec_preferences(vec![
+            codec_parameters(111, opus),
+            codec_parameters(101, codec(MIME_TYPE_TELEPHONE_EVENT, 8_000, 1)),
+            codec_parameters(110, telephone_event_48khz),
+        ]);
+
+        let bound_local = Arc::new(Mutex::new(Vec::new()));
+        let mut interceptor = RecordingInterceptor {
+            inner: NoopInterceptor::new(),
+            bound_local: Arc::clone(&bound_local),
+        };
+        sender.interceptor_local_streams_op(&MediaEngine::default(), &mut interceptor, true);
+
+        let bound = bound_local.lock().expect("bound stream records");
+        assert_eq!(bound.len(), 2, "both SSRC encodings must bind");
+        let opus_info = bound
+            .iter()
+            .find(|info| info.ssrc == opus_ssrc)
+            .expect("Opus stream binding");
+        assert_eq!(opus_info.payload_type, 111);
+        assert_eq!(opus_info.mime_type, MIME_TYPE_OPUS);
+        let dtmf_info = bound
+            .iter()
+            .find(|info| info.ssrc == dtmf_ssrc)
+            .expect("telephone-event stream binding");
+        assert_eq!(dtmf_info.payload_type, 110);
+        assert_eq!(dtmf_info.clock_rate, 48_000);
+        assert_eq!(dtmf_info.mime_type, MIME_TYPE_TELEPHONE_EVENT);
+    }
+}

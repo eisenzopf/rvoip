@@ -25,6 +25,20 @@ Applied fixes:
    carries an exact negotiated MID and payload type, without requiring a RID.
    This preserves the primary coding and gives RFC 4733's separately-clocked
    telephone-event SSRC one deterministic RFC 8843 BUNDLE binding.
+4. The BridgeFu exact-Chromium working-tree candidate was based on
+   `eisenzopf/rtc@1e5b7d4be6d94850694f2519f4c235d16c871d53`
+   (working-tree `patch-id 478b7da63ea6d195f446a9abce4c56e62129a86e`).
+   The reviewed six-file RTC subset was extracted from historical rvoip commit
+   `ace18056` (`patch-id 04f06567b162464eaf4185bfa3f5d037bec603a7`).
+   Unrelated `rvoip-webrtc` DTMF changes are not part of it. The integration
+   distinguishes codec-specific audio bindings from RID simulcast, advertises
+   only the primary audio SSRC, never emits an empty `a=simulcast` attribute,
+   selects supplemental payload types by complete codec identity, groups
+   declared SSRCs onto one receiver track, and admits an un-signaled
+   supplemental SSRC only through an authoritative MID/payload binding or a
+   uniquely negotiated audio payload type. The authoritative-MID path remains
+   media-kind neutral, and the established sole-video/no-extension fallback is
+   preserved.
 
 The offer fix is applied inside `generate_matched_sdp`, where offer media
 sections are owned. The supplemental-SSRC fix is applied at the receive
@@ -33,5 +47,5 @@ SDP or add a parallel renegotiation/signaling path.
 
 Original authorship belongs to Rain Liu and the WebRTC.rs contributors. rvoip
 changes are documented above and in the retained source history. Remove this
-fork only after one immutable upstream release or commit contains all three
-behaviors and passes the full rvoip beta gate.
+fork only after one immutable upstream release or commit contains all
+documented behaviors and passes the full rvoip beta gate.
