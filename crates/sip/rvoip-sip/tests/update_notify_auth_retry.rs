@@ -4,6 +4,8 @@
 //! must be answered with `Proxy-Authorization`. The retry must preserve the
 //! method-shaped options staged by the public builders.
 
+mod support;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +26,8 @@ use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+
+use support::attach_pcmu_sdp_answer;
 
 const REALM: &str = "testrealm";
 const TRACE_HEADER_NAME: &str = "X-Trace";
@@ -396,6 +400,7 @@ async fn spawn_raw_auth_uas(
                     HeaderName::Contact,
                     HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{port}>").into_bytes()),
                 ));
+                attach_pcmu_sdp_answer(&mut resp, port + 1_000);
                 let _ = sock_task
                     .send_to(&Message::Response(resp).to_bytes(), from)
                     .await;

@@ -3411,6 +3411,12 @@ mod tests {
             !manager.client_transactions.contains_key(&tx_id),
             "the heavy client transaction must be released after Timer M handoff"
         );
+        assert_eq!(manager.retention_counts().transaction_destinations, 1);
+        assert_eq!(
+            manager.orphaned_transaction_destination_count(),
+            0,
+            "the compact Timer M generation owns its authenticated response route"
+        );
 
         while event_rx.try_recv().is_ok() {}
         transport_tx
@@ -3493,6 +3499,34 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn orphaned_transaction_destination_count_reports_unowned_active_routes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(4);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport, transport_rx, Some(4)).await?;
+        let transaction_id = Arc::new(TransactionKey::new(
+            "z9hG4bK.unowned-route".into(),
+            Method::Options,
+            false,
+        ));
+        let route = TransportRoute::new("192.0.2.201:5060".parse().unwrap())
+            .with_transport_type(TransportType::Udp);
+        manager.transaction_destinations.insert(
+            Arc::clone(&transaction_id),
+            ClientResponseRouteState::active(route, usize::MAX),
+        );
+
+        assert_eq!(manager.retention_counts().transaction_destinations, 1);
+        assert_eq!(manager.orphaned_transaction_destination_count(), 1);
+
+        manager
+            .transaction_destinations
+            .remove(transaction_id.as_ref());
+        manager.shutdown().await;
         Ok(())
     }
 

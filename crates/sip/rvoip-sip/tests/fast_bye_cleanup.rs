@@ -4,6 +4,8 @@
 //! Cleanup is driven by the exact outbound-transaction completion, which
 //! commits the YAML terminal transition before one retained exact release.
 
+mod support;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +21,8 @@ use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 use serial_test::serial;
 use tokio::net::UdpSocket;
 use tokio::sync::oneshot;
+
+use support::attach_pcmu_sdp_answer;
 
 const CALLER_PORT: u16 = 17_602;
 const CONCURRENT_CALLER_PORT: u16 = 17_603;
@@ -100,6 +104,7 @@ async fn fast_bye_200_keeps_hangup_successful_and_cleans_media_once() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send INVITE 200");
@@ -299,6 +304,7 @@ async fn bye_481_after_peer_termination_is_graceful_and_cleans_exactly_once() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send peer-terminated INVITE 200");
@@ -416,6 +422,7 @@ async fn cancelled_bye_builder_reclaims_wait_owner_and_transaction_receipt() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send INVITE 200");
@@ -545,6 +552,7 @@ async fn delayed_non_2xx_bye_uses_timer_f_and_returns_only_after_exact_cleanup()
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send delayed-failure INVITE 200");
@@ -687,6 +695,7 @@ async fn aborted_hangup_waiter_does_not_duplicate_exact_bye() {
                         HeaderName::Contact,
                         HeaderValue::Raw(format!("<sip:callee@127.0.0.1:{uas_port}>").into_bytes()),
                     ));
+                    attach_pcmu_sdp_answer(&mut response, uas_port + 1_000);
                     uas.send_to(&Message::Response(response).to_bytes(), peer)
                         .await
                         .expect("send concurrent INVITE 200");
