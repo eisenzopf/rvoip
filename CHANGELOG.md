@@ -4,6 +4,43 @@
 
 No changes yet.
 
+## 0.3.5 — 2026-07-30
+
+This coordinated 44-crate patch release hardens security and media state,
+completes transactional SIP renegotiation, exposes symmetric-RTP NAT policy on
+the high-level APIs, and makes Tokio the sole WebRTC runtime.
+
+### Security and media
+
+- Fail closed for placeholder AES-GCM profiles and unsupported DTLS
+  construction; incomplete profiles cannot be advertised or negotiated.
+- Correct RTP padding and RFC 8285 extensions, RTCP LSR/compound parsing, and
+  loss/jitter accounting across rollover, gaps, duplicates, and reordering.
+- Separate inbound/outbound and per-SSRC SRTP/SRTCP state, authenticate before
+  committing replay state, and cover the result with RFC vectors and pinned
+  libSRTP interoperability.
+- Generate directional SDES answer keys and accept safely unpadded AES-256 key
+  material in compatible mode with secret-safe diagnostics (issue #46).
+
+### SIP, codecs, and WebRTC
+
+- Make hold/resume, re-INVITE, UPDATE, delayed offers, authentication retries,
+  retransmissions, rollback, and media application transactional and
+  exact-generation owned.
+- Expose `SipNatConfig` and `SymmetricRtpPolicy` through `EndpointBuilder` and
+  `StreamPeerBuilder` (issue #50).
+- Use the real Opus backend, make codec names ASCII case-insensitive, and stop
+  advertising unavailable Opus or G.722 implementations.
+- Remove Smol/async-std runtime support from WebRTC and correct the confirmed
+  Chromium audio/SSRC/simulcast SDP regression.
+- Preserve bounded, sharded, keyed/no-scan SIP lifecycle paths and make the
+  registrar and coordinated workspace pass strict release linting.
+
+### Qualification
+
+`0.3.5` requires a fresh, source-bound strict full-beta PASS. Historical
+`0.3.2` exception and `0.3.4` carry-forward evidence do not qualify it.
+
 ## 0.3.4 — 2026-07-29
 
 This coordinated 44-crate patch release adds exact inbound-admission terminal

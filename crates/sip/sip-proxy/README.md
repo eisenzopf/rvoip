@@ -12,12 +12,13 @@ and Via handling consumed by the
 
 ## Status
 
-**Partial RFC 3261 stateful-proxy implementation.** Published `0.3.3`
-does not carry a bounded proxy-conformance claim. The coordinated
-`0.3.4` candidate adds support for
+**Bounded RFC 3261 transaction-stateful proxy profile, updated by RFC 4320 and
+RFC 6026.** The coordinated `0.3.5` candidate includes
 transaction-stateful forwarding, parallel/sequential forking, Via and
 Max-Forwards processing, response aggregation, CANCEL propagation, and
-Timer C. Those features do not yet constitute a qualified RFC profile.
+Timer C. The claim is limited to the behaviors and real-peer matrix named in
+the conformance documents and becomes releasable only when the strict beta
+gate passes.
 
 The applicable normative behavior, known gaps, and executable evidence
 required for a bounded claim are tracked in
@@ -35,7 +36,7 @@ you want the raw transaction-layer primitives:
 
 ```toml
 [dependencies]
-rvoip-sip-proxy = "0.3.4"
+rvoip-sip-proxy = "0.3.5"
 ```
 
 ## License

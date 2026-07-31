@@ -1395,17 +1395,18 @@ class BetaAttestationTests(unittest.TestCase):
         release_notes = (
             WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
         ).read_text(encoding="utf-8")
-        self.assertEqual(self.workspace_version, "0.3.4")
+        self.assertEqual(self.workspace_version, "0.3.5")
         self.assertRegex(
             crate_manifest,
             r"(?m)^version\.workspace\s*=\s*true(?:\s*(?:#.*)?)?$",
         )
         marker = f"Current candidate and runtime crate version: `{self.workspace_version}`"
         self.assertIn(marker, checklist)
-        self.assertIn("0.3.4 Release Candidate Notes", release_notes)
-        self.assertIn("current crates.io release\n> remains `0.3.3`", (
-            WORKSPACE_ROOT / "README.md"
-        ).read_text(encoding="utf-8"))
+        self.assertIn("0.3.5 Release Candidate Notes", release_notes)
+        self.assertIn(
+            "**Unified `0.3.5` release train.**",
+            (WORKSPACE_ROOT / "README.md").read_text(encoding="utf-8"),
+        )
 
 
 if __name__ == "__main__":

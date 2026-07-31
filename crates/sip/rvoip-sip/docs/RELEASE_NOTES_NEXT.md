@@ -1,121 +1,95 @@
-# rvoip 0.3.4 Release Notes
+# rvoip 0.3.5 Release Candidate Notes
 
-Date: 2026-07-29
+Date: 2026-07-30
 
-These notes describe the coordinated `0.3.4` release. The project owner
-approved a transparent carry-forward qualification rather than a new strict
-full-beta run. The release does not represent inherited evidence as current
-evidence.
+These notes describe the coordinated 44-crate `0.3.5` release candidate.
+Publication requires a fresh strict full-beta qualification bound to the exact
+clean release source. No `0.3.4` carry-forward evidence qualifies this release.
 
 ## Headline
 
-All 44 publishable crates move together to `0.3.4`. The release adds an exact
-inbound-admission terminal signal, completes the RFC 6026 INVITE transaction
-updates used by the SIP stack, and introduces a bounded RFC 3261
-transaction-stateful proxy profile updated by RFC 4320 and RFC 6026.
+`0.3.5` is a security, media-correctness, and SIP-lifecycle release. It makes
+incomplete security features fail closed, repairs RTP/RTCP and SRTP/SRTCP
+state, replaces simulated codec behavior, completes transactional SIP
+renegotiation, closes issues #46 and #50, and makes Tokio the sole WebRTC
+runtime.
 
-## Added
+## Security and media correctness
 
-- `InboundAdmissionTermination` and exact-generation `watch` receivers notify
-  applications of cancellation, remote end, or failure without polling or a
-  global event subscription.
-- Private INVITE client/server Accepted lifecycles retain matching 2xx traffic
-  through Timer M and Timer L while preserving the public transaction enum.
-- Timer M/L retention now uses compact records in the existing sharded
-  lifecycle indexes and one manager-owned deadline scheduler. Active runners,
-  timer factories, transports, and 128-slot command queues are released at the
-  Accepted handoff; due work is generation-protected and capped at 1,024
-  records per batch.
-- Accepted M/L records and teardown J/K records use independent lazy bounded
-  capacity lanes, so an accepted INVITE cannot consume the only slot required
-  to process its own BYE.
-- Stateful proxy response contexts support matched and unmatched CANCEL,
-  cancellation latching, forked and late 2xx responses, ACK ownership,
-  response aggregation, Timer C, strict/loose routing, SIPS, and exact response
-  flow handling.
-- The strict beta tooling now makes Kamailio and OpenSIPS mandatory
-  real-process interoperability peers in both adjacency orders over UDP, TCP,
-  and verified TLS. That matrix was not rerun for this carry-forward release.
-- The beta report generator records revision-bound Asterisk, FreeSWITCH,
-  Kamailio, and OpenSIPS attestations and fails closed on missing or skipped
-  required rows.
+- Placeholder AEAD AES-GCM SRTP profiles retain their public identities but
+  cannot be configured, advertised, selected, or negotiated. DTLS construction
+  returns a typed unsupported-feature error instead of panicking.
+- RTP padding and RFC 8285 one-byte/two-byte header extensions now serialize
+  and parse with strict length, padding, reserved-ID, and alignment handling.
+- RTP loss and jitter tracking handles sequence rollover, duplicates, gaps, and
+  reordered packets without corrupting the timing reference. RTCP LSR uses the
+  complete middle 32 bits of the NTP timestamp, and compound RTCP ingress
+  preserves well-formed unknown packet types while rejecting malformed input.
+- SRTP maintains independent local outbound and remote inbound keys and
+  per-SSRC rollover/replay state. Incoming packets are authenticated before
+  replay state commits. SRTCP uses monotonic per-SSRC indexes and derives each
+  IV from the real SSRC and index. RFC vectors, rollover/reordering, replay,
+  multi-SSRC, failed-authentication, and pinned libSRTP interoperability are
+  covered.
+- Low-level SDES answers generate fresh directional key material. AES-256 SDES
+  accepts safely unpadded key material in compatible mode, keeps strict mode
+  canonical, validates decoded lengths, and emits secret-safe negotiation and
+  authentication diagnostics. This closes issue #46.
 
-## Fixed
+## SIP signaling and lifecycle
 
-- Renamed workspace dependencies, including the WebRTC and MOQT package
-  aliases, are updated and validated during coordinated release preparation.
-- Transactionless ACK transport metadata is bounded and eligible for exact
-  cleanup after the protocol retention horizon.
-- Transaction timer callback and state transition delivery is atomic and
-  schedule-generation protected, eliminating the channel-saturation race that
-  could strand an otherwise expired transaction.
-- Stateless protocol-retention overload responses now inherit the configured
-  server `Retry-After` policy across already-running transaction-manager
-  worker clones.
-- Server Timer L absorbs retransmitted INVITEs without driving cached 2xx
-  replay, while later TU-supplied 2xx responses and matching ACK delivery
-  remain available through the compact retained indexes.
-- Client Timer M forwards every matching or additional 2xx without owning its
-  ACK; proxy routes expire at M and endpoint routes promote in place to the
-  existing compact late-2xx compatibility horizon.
-- Via `received`/`rport`, packed Via popping, body preservation, route-set
-  processing, and RFC 3263 failover paths have dedicated packet-level tests.
-- The existing SCIM, vCon, Vapi, WebRTC, MOQT, and extension behavior from
-  `0.3.2` and `0.3.3` remains part of the coordinated workspace.
+- Signaling-only and media-enabled hold/resume share transactional stable-state
+  handling. Repeated hold and resume operations are idempotent.
+- Re-INVITE, UPDATE, delayed-offer INVITE/200/ACK, authentication retry,
+  retransmission, rollback, and media application paths use exact transaction
+  and CSeq ownership. Invalid or incomplete negotiation cannot corrupt the
+  established dialog.
+- Failed 2xx SDP negotiation is ACKed, terminates exactly once, and produces an
+  application-visible negotiation failure without exposing key material.
+- `EndpointBuilder`, `StreamPeer`, and `StreamPeerBuilder` now accept
+  `SipNatConfig` and `SymmetricRtpPolicy`, allowing high-level applications to
+  tune symmetric-RTP rebinding for real NAT deployments. This closes issue
+  #50.
+- BYE, redirect, admission, and retry cleanup retains one terminal fact,
+  exact-generation ownership, bounded retention, and keyed/no-scan hot paths.
+  Registrar and SIP crates pass the strict release lint policy.
 
-## Proxy Claim Boundary
+## Codecs and WebRTC
 
-The implementation is described as a bounded “RFC 3261
-transaction-stateful proxy profile, updated by RFC 4320 and RFC 6026.” The
-`0.3.4` carry-forward qualification makes no new universal proxy-conformance
-claim and does not claim a fresh peer-interoperability matrix.
+- Audio/video codec-name classification is ASCII case-insensitive. Opus uses
+  the real codec backend through the canonical codec-core implementation;
+  `opus-sim` remains only as a deprecated alias to that backend.
+- Feature-disabled builds do not advertise Opus. G.722 low-level RTP payload
+  support remains available, but codec factories and negotiation report it as
+  unsupported until a complete codec exists.
+- The standalone WebRTC stack is Tokio-only; Smol and async-std runtime support
+  and dependencies are removed. CI checks default, all-feature, and
+  no-default-feature graphs for alternate runtime dependencies.
+- The confirmed Chromium SDP regression is corrected for codec-specific audio
+  selection, primary SSRC handling, and empty simulcast output.
 
-- Recursive 3xx Contact processing is not part of the claimed profile.
-- Loop detection is disabled unless it can distinguish loops from spirals.
-- Asymmetric Record-Route rewriting is outside the claim unless separately
-  qualified.
-- The claim does not cover every SIP extension, topology, or peer version.
+## Architecture and compatibility
 
-## Compatibility
+- SIP signaling changes preserve the sharded, exact-key, generation-protected,
+  bounded-retention architecture in
+  [`SIGNALING_PERFORMANCE_ARCHITECTURE.md`](SIGNALING_PERFORMANCE_ARCHITECTURE.md).
+  They do not introduce per-transaction sleeper tasks, unbounded histories, or
+  global hot-path scans.
+- Public compatibility is compared with the documented `0.3.4` baseline.
+  Typed unsupported errors replace behavior that previously panicked or
+  implied unavailable security/codec support.
+- AES-GCM, end-to-end SIP DTLS-SRTP, MIKEY, ZRTP, and G.722 codec negotiation
+  remain explicit non-claims. The new ICE/NAT architecture and unrelated
+  WebRTC additions from PR #35 are not part of this repair release.
 
-- Public source compatibility is compared against `v0.3.3`.
-- RFC 6026 Accepted state remains private protocol state so exhaustive matches
-  over the public `TransactionState` remain compatible.
-- The admission terminal APIs are additive.
-- Stateful proxy wire behavior changes are externally observable but ship as
-  `0.3.4` by owner decision within the pre-1.0 release train.
+## Qualification
 
-## Limitations and non-claims
+The release candidate must pass the one-command full beta gate from a clean,
+committed `0.3.5` source tree. Required evidence includes three fresh canonical
+2,000-CPS runs; workspace, public-API, security, parser, PBX, SIPp, strict-UA,
+Kamailio, and OpenSIPS gates; full-media performance and resiliency matrices;
+and both one-hour monolithic and split soaks. The generated report package and
+its source fingerprint are verified before crates.io publication.
 
-- General-user 10,000 CPS full-media capability is not claimed. The supported
-  beta envelope remains bounded by the revision-specific 2,000-CPS real-media
-  evidence and its documented runtime profile.
-- Browser/WebRTC edge behavior remains outside the SIP beta claim; component
-  availability does not imply qualified browser, ICE/TURN, or DTLS-SRTP
-  interoperability.
-- The proxy claim remains limited to the explicitly tested profile below.
-
-## Carry-forward qualification
-
-The exact release commit is qualified under
-`rvoip-release-carry-forward-attestation-v1` with this recorded disposition:
-
-- `beta_suite: NOT-RERUN`;
-- `inherited_beta_background: 0.3.2 OWNER-APPROVED-EXCEPTION`;
-- `current_workspace_verification: PASS`;
-- `current_canonical_2k: PASS`; and
-- `disposition: OWNER-APPROVED-CARRY-FORWARD`.
-
-One clean canonical 2,000-CPS/65,000-call real-media pass is bound to the exact
-`0.3.4` commit, tree, source fingerprint, report, persisted acceptance result,
-performance audit, and executable hash. The release verifier separately runs
-the current workspace compile, library, target, integration, example, and
-doctest checks plus all 44 package-manifest checks.
-
-The full `0.3.4` beta gate, Asterisk/FreeSWITCH/Kamailio/OpenSIPS matrix, SIPp
-ladder, and long soaks were not rerun. The immutable `0.3.2` exception remains
-historical background with strict status `NON-RC`; it is not a `0.3.4` PASS.
-
-Historical `0.3.2` disposition and evidence remain unchanged in
-[`BETA_RELEASE_EXCEPTION.md`](BETA_RELEASE_EXCEPTION.md) and its immutable
-release archive.
+Historical `0.3.2` exception and `0.3.4` carry-forward attestations remain
+unchanged release history. They are not presented as current `0.3.5` evidence.

@@ -30,7 +30,7 @@ BARESIP_MODULE_PATH="$HOMEBREW_PREFIX/lib/baresip/modules"
 export PATH="$HOMEBREW_PREFIX/opt/docker/bin:$HOMEBREW_PREFIX/opt/docker-compose/bin:$HOMEBREW_PREFIX/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export DOCKER_CLI_PLUGIN_EXTRA_DIRS="$HOMEBREW_PREFIX/lib/docker/cli-plugins"
 
-EXPECTED_RELEASE_VERSION="0.3.4"
+EXPECTED_RELEASE_VERSION="0.3.5"
 EXPECTED_PUBLIC_API_VERSION="cargo-public-api 0.52.0"
 EXPECTED_NIGHTLY_VERSION="rustc 1.97.0-nightly (e22c616e4 2026-04-19)"
 COLIMA_CPUS=8
