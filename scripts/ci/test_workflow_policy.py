@@ -35,6 +35,29 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("cargo-fuzz@0.13.2", specialty)
         self.assertGreaterEqual(specialty.count("matrix.gate == 'release-tooling'"), 2)
 
+    def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
+        workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-pilot-startup.sh").read_text()
+
+        self.assertIn("workspace-parallel", workflow)
+        self.assertIn("--boot-disk-auto-delete", workflow)
+        self.assertIn("Delete shard worker and attached disk", workflow)
+        self.assertIn("Sweep workers left by interrupted shard controllers", workflow)
+        self.assertIn("parallel GCP workers remain after cleanup", workflow)
+        self.assertIn("if: always() && steps.worker.outputs.name != ''", workflow)
+        self.assertIn("expected_shards", workflow)
+        self.assertIn("expected_packages", workflow)
+        self.assertIn("publishing_attempted == false", workflow)
+        self.assertIn('"publishing_attempted": False', startup)
+        for profile in (
+            "workspace-policy",
+            "workspace-shard-test",
+            "workspace-shard-clippy",
+            "workspace-doctest",
+            "workspace-security-timing",
+        ):
+            self.assertIn(profile, startup)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ on:
         options:
           - smoke
           - workspace
+          - workspace-parallel
 
 permissions:
   contents: read
@@ -21,8 +22,110 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  plan-parallel:
+    name: Plan parallel GCP workspace
+    if: inputs.profile == 'workspace-parallel'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      candidate: ${{ steps.matrix.outputs.candidate }}
+      worker_count: ${{ steps.matrix.outputs.worker_count }}
+      expected_shards: ${{ steps.matrix.outputs.expected_shards }}
+      expected_packages: ${{ steps.matrix.outputs.expected_packages }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Build duration-balanced workspace matrix
+        id: matrix
+        run: |
+          python3 scripts/ci/pr_plan.py \
+            --base HEAD \
+            --head HEAD \
+            --candidate HEAD \
+            --changed-file Cargo.toml \
+            --output target/gcp-workspace-plan.json
+          python3 - "$GITHUB_OUTPUT" <<'PY'
+          import base64
+          import json
+          import sys
+          from pathlib import Path
+
+          plan = json.loads(Path("target/gcp-workspace-plan.json").read_text())
+          include = []
+          for job in plan["shard_jobs"]:
+              check = job["check"]
+              include.append(
+                  {
+                      "id": job["id"],
+                      "profile": f"workspace-shard-{check}",
+                      "packages_b64": base64.b64encode(
+                          job["packages_csv"].encode()
+                      ).decode(),
+                      "machine_type": (
+                          "n2-standard-8" if check == "test" else "n2-standard-4"
+                      ),
+                  }
+              )
+          include.extend(
+              [
+                  {
+                      "id": "policy",
+                      "profile": "workspace-policy",
+                      "packages_b64": "",
+                      "machine_type": "n2-standard-4",
+                  },
+                  {
+                      "id": "doctest",
+                      "profile": "workspace-doctest",
+                      "packages_b64": "",
+                      "machine_type": "n2-standard-4",
+                  },
+                  {
+                      "id": "security-timing",
+                      "profile": "workspace-security-timing",
+                      "packages_b64": "",
+                      "machine_type": "n2-standard-4",
+                  },
+              ]
+          )
+          compact = json.dumps({"include": include}, separators=(",", ":"))
+          expected_shards = json.dumps(
+              sorted(item["id"] for item in include), separators=(",", ":")
+          )
+          expected_packages = json.dumps(
+              sorted(plan["selected_crates"]), separators=(",", ":")
+          )
+          with Path(sys.argv[1]).open("a") as output:
+              output.write(f"matrix={compact}\n")
+              output.write(f"candidate={plan['candidate_sha']}\n")
+              output.write(f"worker_count={len(include)}\n")
+              output.write(f"expected_shards={expected_shards}\n")
+              output.write(f"expected_packages={expected_packages}\n")
+          PY
+
+      - name: Summarize parallel allocation
+        run: |
+          {
+            echo "## Parallel GCP workspace plan"
+            echo
+            echo "- Candidate: \`${{ steps.matrix.outputs.candidate }}\`"
+            echo "- Ephemeral workers: $(jq '.include | length' <<< '${{ steps.matrix.outputs.matrix }}')"
+            echo "- Test workers: n2-standard-8"
+            echo "- Clippy, doctest, policy, and timing workers: n2-standard-4"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   qualify:
     name: Ephemeral GCP qualification
+    if: inputs.profile != 'workspace-parallel'
     runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
@@ -137,3 +240,310 @@ jobs:
             --arg candidate "$GITHUB_SHA" \
             '.candidate_sha == $candidate and .status == "PASS" and .publishing_attempted == false' \
             result.json
+
+  qualify-parallel:
+    name: GCP workspace / ${{ matrix.id }}
+    if: inputs.profile == 'workspace-parallel'
+    needs: plan-parallel
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-parallel.outputs.matrix) }}
+    steps:
+      - name: Check out controller definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Create ephemeral shard worker
+        id: worker
+        env:
+          CANDIDATE: ${{ needs.plan-parallel.outputs.candidate }}
+          PROFILE: ${{ matrix.profile }}
+          SHARD_ID: ${{ matrix.id }}
+          PACKAGES_B64: ${{ matrix.packages_b64 }}
+          MACHINE_TYPE: ${{ matrix.machine_type }}
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
+          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          worker="rvoip-ws-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD_ID}"
+          prefix="pilot/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/workspace/${SHARD_ID}"
+          echo "name=$worker" >> "$GITHUB_OUTPUT"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          gcloud compute instances create "$worker" \
+            --project "$PROJECT" \
+            --zone "$ZONE" \
+            --machine-type "$MACHINE_TYPE" \
+            --network "$NETWORK" \
+            --subnet "$SUBNET" \
+            --image-family ubuntu-2404-lts-amd64 \
+            --image-project ubuntu-os-cloud \
+            --boot-disk-type pd-balanced \
+            --boot-disk-size 100GB \
+            --boot-disk-auto-delete \
+            --service-account "$RUNNER_SERVICE_ACCOUNT" \
+            --scopes cloud-platform \
+            --shielded-secure-boot \
+            --shielded-vtpm \
+            --shielded-integrity-monitoring \
+            --labels rvoip-role=workspace-shard,managed-by=github-actions \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-profile=${PROFILE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-shard-id=${SHARD_ID},rvoip-packages-b64=${PACKAGES_B64}" \
+            --metadata-from-file startup-script=infra/release-runners/gcp-pilot-startup.sh
+
+      - name: Wait for immutable shard result
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          WORKER: ${{ steps.worker.outputs.name }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 180); do
+            if gcloud storage cat "gs://${BUCKET}/${PREFIX}/result.json" > result.json 2>/dev/null; then
+              exit 0
+            fi
+            state="$(gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" --format='value(status)' 2>/dev/null || true)"
+            if [[ "$state" == TERMINATED ]]; then
+              echo "worker terminated without uploading a result" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "workspace shard exceeded its 90-minute evidence deadline" >&2
+          exit 1
+
+      - name: Download shard evidence
+        if: always() && steps.worker.outputs.prefix != ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+        run: |
+          gcloud storage cp "gs://${BUCKET}/${PREFIX}/qualification.log" qualification.log
+          gcloud storage cp "gs://${BUCKET}/${PREFIX}/command-receipt.json" command-receipt.json || true
+
+      - name: Delete shard worker and attached disk
+        if: always() && steps.worker.outputs.name != ''
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          WORKER: ${{ steps.worker.outputs.name }}
+        run: >-
+          gcloud compute instances delete "$WORKER"
+          --project "$PROJECT"
+          --zone "$ZONE"
+          --quiet
+
+      - name: Upload shard controller evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gcp-workspace-${{ matrix.id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            result.json
+            qualification.log
+            command-receipt.json
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Require passing exact-candidate shard receipt
+        if: always()
+        env:
+          CANDIDATE: ${{ needs.plan-parallel.outputs.candidate }}
+          PROFILE: ${{ matrix.profile }}
+          SHARD_ID: ${{ matrix.id }}
+        run: |
+          test -f result.json
+          jq -e \
+            --arg candidate "$CANDIDATE" \
+            --arg profile "$PROFILE" \
+            --arg shard "$SHARD_ID" \
+            '.candidate_sha == $candidate
+             and .profile == $profile
+             and .shard_id == $shard
+             and .status == "PASS"
+             and .publishing_attempted == false' \
+            result.json
+
+  cleanup-parallel:
+    name: Delete every parallel GCP worker
+    if: always() && inputs.profile == 'workspace-parallel'
+    needs: [plan-parallel, qualify-parallel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Sweep workers left by interrupted shard controllers
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          RUN_PREFIX: rvoip-ws-${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          set -euo pipefail
+          instances="$({
+            gcloud compute instances list \
+              --project "$PROJECT" \
+              --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" \
+              --format='csv[no-heading](name,zone.basename())'
+          } || true)"
+          while IFS=, read -r worker zone; do
+            test -n "$worker" || continue
+            gcloud compute instances delete "$worker" \
+              --project "$PROJECT" \
+              --zone "$zone" \
+              --quiet
+          done <<< "$instances"
+
+          remaining="$(gcloud compute instances list \
+            --project "$PROJECT" \
+            --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" \
+            --format='value(name)')"
+          test -z "$remaining" || {
+            echo "parallel GCP workers remain after cleanup: $remaining" >&2
+            exit 1
+          }
+
+  parallel-gate:
+    name: Parallel GCP workspace
+    if: always() && inputs.profile == 'workspace-parallel'
+    needs: [plan-parallel, qualify-parallel, cleanup-parallel]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download every shard receipt
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: gcp-workspace-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/gcp-workspace-evidence
+
+      - name: Reconcile exact-candidate workspace evidence
+        if: always()
+        env:
+          CANDIDATE: ${{ needs.plan-parallel.outputs.candidate }}
+          EXPECTED_COUNT: ${{ needs.plan-parallel.outputs.worker_count }}
+          EXPECTED_SHARDS: ${{ needs.plan-parallel.outputs.expected_shards }}
+          EXPECTED_PACKAGES: ${{ needs.plan-parallel.outputs.expected_packages }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          candidate = os.environ["CANDIDATE"]
+          expected = int(os.environ["EXPECTED_COUNT"])
+          expected_shards = json.loads(os.environ["EXPECTED_SHARDS"])
+          expected_packages = json.loads(os.environ["EXPECTED_PACKAGES"])
+          receipts = [
+              json.loads(path.read_text())
+              for path in sorted(
+                  Path("target/gcp-workspace-evidence").glob("**/result.json")
+              )
+          ]
+          errors = []
+          if len(receipts) != expected:
+              errors.append(f"expected {expected} shard receipts, found {len(receipts)}")
+          shard_ids = [receipt.get("shard_id") for receipt in receipts]
+          if len(set(shard_ids)) != len(shard_ids):
+              errors.append("duplicate shard ids in workspace evidence")
+          present_shard_ids = sorted(value for value in shard_ids if value)
+          if present_shard_ids != expected_shards:
+              errors.append(
+                  f"shard id mismatch: expected {expected_shards}, got {present_shard_ids}"
+              )
+          for receipt in receipts:
+              shard = receipt.get("shard_id") or "<missing>"
+              if receipt.get("candidate_sha") != candidate:
+                  errors.append(f"{shard}: candidate mismatch")
+              if receipt.get("status") != "PASS":
+                  errors.append(f"{shard}: status is not PASS")
+              if receipt.get("publishing_attempted") is not False:
+                  errors.append(f"{shard}: publishing was not proven disabled")
+          for profile in ("workspace-shard-test", "workspace-shard-clippy"):
+              package_lists = [
+                  receipt.get("packages", [])
+                  for receipt in receipts
+                  if receipt.get("profile") == profile
+              ]
+              packages = [package for values in package_lists for package in values]
+              if len(packages) != len(set(packages)):
+                  errors.append(f"{profile}: a package appears in more than one shard")
+              if sorted(packages) != expected_packages:
+                  errors.append(
+                      f"{profile}: expected all {len(expected_packages)} workspace "
+                      f"packages exactly once, got {len(packages)}"
+                  )
+          aggregate = {
+              "schema": "rvoip-gcp-workspace-aggregate-v1",
+              "candidate_sha": candidate,
+              "status": "PASS" if not errors else "FAIL",
+              "publishing_attempted": False,
+              "expected_shard_count": expected,
+              "expected_shard_ids": expected_shards,
+              "expected_packages": expected_packages,
+              "received_shards": len(receipts),
+              "shard_ids": present_shard_ids,
+              "errors": errors,
+              "receipts": receipts,
+          }
+          output = Path("target/gcp-workspace-aggregate.json")
+          output.write_text(json.dumps(aggregate, indent=2, sort_keys=True) + "\n")
+          if errors:
+              raise SystemExit("\n".join(errors))
+          PY
+
+      - name: Require planner and every ephemeral shard
+        if: always()
+        env:
+          PLAN_RESULT: ${{ needs.plan-parallel.result }}
+          SHARD_RESULT: ${{ needs.qualify-parallel.result }}
+          CLEANUP_RESULT: ${{ needs.cleanup-parallel.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$SHARD_RESULT" = success
+          test "$CLEANUP_RESULT" = success
+          {
+            echo "## Parallel GCP workspace"
+            echo
+            echo "- Candidate: \`${{ needs.plan-parallel.outputs.candidate }}\`"
+            echo "- Planner: \`$PLAN_RESULT\`"
+            echo "- All ephemeral shards: \`$SHARD_RESULT\`"
+            echo "- Cleanup verification: \`$CLEANUP_RESULT\`"
+            echo "- Publishing: \`disabled\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aggregate non-publishing receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gcp-workspace-aggregate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/gcp-workspace-aggregate.json
+          retention-days: 30
+          if-no-files-found: error
