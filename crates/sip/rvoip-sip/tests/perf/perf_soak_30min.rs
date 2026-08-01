@@ -2497,6 +2497,64 @@ mod tests {
     }
 
     #[test]
+    fn active_tail_gate_ignores_one_bounded_allocator_step() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = (0..=120)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 100.0 + if t_secs >= 360.0 { 16.0 } else { 0.0 },
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect();
+        resources.sample_interval_estimate_secs = 5.0;
+        let endpoint = support::soak::rss_endpoint_median_growth_mb_per_hr(&resources.samples)
+            .expect("endpoint diagnostic");
+
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            600.0,
+            600.0,
+            0.0,
+            support::soak::RssGatePolicy::ActiveTail600,
+        );
+
+        assert!(rss.active_tail_window_complete);
+        assert_eq!(rss.active_tail_estimator, "median_60s_ols_windows");
+        assert!(rss.active_tail_growth_mb_per_hr.abs() < 0.000_001);
+        assert!(endpoint.growth_mb_per_hr > 15.0);
+        assert!(rss.active_tail_endpoint_separation_secs > 500.0);
+    }
+
+    #[test]
+    fn active_tail_gate_still_rejects_continuous_growth() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = (0..=120)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 100.0 + 15.01 * t_secs / 3600.0,
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect();
+        resources.sample_interval_estimate_secs = 5.0;
+
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            600.0,
+            600.0,
+            0.0,
+            support::soak::RssGatePolicy::ActiveTail600,
+        );
+
+        assert!((rss.active_tail_growth_mb_per_hr - 15.01).abs() < 0.000_001);
+    }
+
+    #[test]
     fn cycling_hold_duration_stays_inside_configured_range() {
         for slot in 0..64 {
             for cycle in 0..64 {
