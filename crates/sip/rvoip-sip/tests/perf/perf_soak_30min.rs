@@ -1552,6 +1552,9 @@ fn read_positive_usize_env(name: &str) -> Option<usize> {
 struct RetentionSampler {
     stop_tx: tokio::sync::watch::Sender<bool>,
     task: JoinHandle<RetentionSeries>,
+    alice: Arc<UnifiedCoordinator>,
+    bob: Arc<UnifiedCoordinator>,
+    started: std::time::Instant,
 }
 
 struct RetentionSeries {
@@ -1571,12 +1574,16 @@ impl RetentionSampler {
         periodic_limit: Option<Duration>,
     ) -> Self {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let started = std::time::Instant::now();
+        let sampled_alice = Arc::clone(&alice);
+        let sampled_bob = Arc::clone(&bob);
         let task = tokio::spawn(async move {
-            let started = std::time::Instant::now();
             let mut series = RetentionSeries::new(retention_samples_path());
             let mut writer = series.open_writer();
             loop {
-                let sample = capture_retention_sample("periodic", started, &alice, &bob).await;
+                let sample =
+                    capture_retention_sample("periodic", started, &sampled_alice, &sampled_bob)
+                        .await;
                 series.record(sample, &mut writer);
                 if let Some(limit) = periodic_limit {
                     let remaining = limit.saturating_sub(started.elapsed());
@@ -1594,21 +1601,37 @@ impl RetentionSampler {
                     }
                 }
             }
-            let sample = capture_retention_sample("after_drain", started, &alice, &bob).await;
-            series.record(sample, &mut writer);
             writer
                 .flush()
                 .expect("flush monolithic retention diagnostics JSONL");
             series
         });
-        Self { stop_tx, task }
+        Self {
+            stop_tx,
+            task,
+            alice,
+            bob,
+            started,
+        }
     }
 
     async fn stop(self) -> RetentionSeries {
         let _ = self.stop_tx.send(true);
-        self.task
+        let mut series = self
+            .task
             .await
-            .unwrap_or_else(|_| RetentionSeries::new(retention_samples_path()))
+            .unwrap_or_else(|_| RetentionSeries::new(retention_samples_path()));
+        let sample =
+            capture_retention_sample("after_drain", self.started, &self.alice, &self.bob).await;
+        let mut writer = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&series.samples_path)
+                .expect("open monolithic retention diagnostics JSONL for final sample"),
+        );
+        series.record(sample, &mut writer);
+        series
     }
 }
 
@@ -2123,20 +2146,22 @@ fn rss_active_tail_metrics(
         _ => 0.0,
     };
     let endpoint = support::soak::rss_endpoint_median_growth_mb_per_hr(&selected);
+    let theil_sen = support::soak::rss_theil_sen_growth_mb_per_hr(&selected);
     let complete = active_secs >= LONG_SOAK_ACTIVE_RSS_WINDOW_SECS
         && actual_secs >= LONG_SOAK_MIN_ACTIVE_RSS_COVERAGE_SECS
         && selected.len() >= LONG_SOAK_MIN_ACTIVE_RSS_SAMPLES
+        && theil_sen.is_some()
         && endpoint.is_some();
     ActiveTailRssMetrics {
-        growth_mb_per_hr: endpoint.as_ref().map_or_else(
+        growth_mb_per_hr: theil_sen.map_or_else(
             || rss_growth_mb_per_min(&selected) * 60.0,
-            |estimate| estimate.growth_mb_per_hr,
+            |estimate| estimate,
         ),
         sample_count: selected.len(),
         window_secs: actual_secs,
         complete,
-        estimator: if endpoint.is_some() {
-            "median_first_last_sixth_capped_60s"
+        estimator: if theil_sen.is_some() && endpoint.is_some() {
+            "theil_sen_pairwise_slopes"
         } else {
             "unavailable_ols_diagnostic_only"
         },
@@ -2357,7 +2382,7 @@ mod tests {
         assert!(metrics.complete);
         assert_eq!(metrics.sample_count, 121);
         assert_eq!(metrics.window_secs, 600.0);
-        assert_eq!(metrics.estimator, "median_first_last_sixth_capped_60s");
+        assert_eq!(metrics.estimator, "theil_sen_pairwise_slopes");
         assert!((metrics.growth_mb_per_hr - 36.0).abs() < 0.000_001);
 
         assert!(!rss_active_tail_metrics(&samples, 599.0, 5.0).complete);
@@ -2394,6 +2419,35 @@ mod tests {
             endpoint_gap_metrics.estimator,
             "unavailable_ols_diagnostic_only"
         );
+    }
+
+    #[test]
+    fn active_tail_estimator_rejects_allocator_noise_but_detects_growth() {
+        let noise = [0.0, 4.5, -3.0, 2.0, -1.5, 3.5, -4.0, 1.0];
+        let noisy_flat = (0..=120)
+            .map(|index| ResourceSample {
+                t_secs: index as f64 * 5.0,
+                rss_mb: 220.0 + noise[index % noise.len()],
+                cpu_pct: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let flat = rss_active_tail_metrics(&noisy_flat, 600.0, 5.0);
+        assert!(flat.complete);
+        assert!(flat.growth_mb_per_hr.abs() < 1.0);
+
+        let continuous_growth = (0..=120)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 220.0 + t_secs * 20.0 / 3600.0,
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+        let growth = rss_active_tail_metrics(&continuous_growth, 600.0, 5.0);
+        assert!(growth.complete);
+        assert!((growth.growth_mb_per_hr - 20.0).abs() < 0.000_001);
     }
 
     #[test]
@@ -2522,7 +2576,7 @@ mod tests {
         );
 
         assert!(rss.active_tail_window_complete);
-        assert_eq!(rss.active_tail_estimator, "median_60s_ols_windows");
+        assert_eq!(rss.active_tail_estimator, "theil_sen_pairwise_slopes");
         assert!(rss.active_tail_growth_mb_per_hr.abs() < 0.000_001);
         assert!(endpoint.growth_mb_per_hr > 15.0);
         assert!(rss.active_tail_endpoint_separation_secs > 500.0);
