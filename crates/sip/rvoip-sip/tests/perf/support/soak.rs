@@ -2193,10 +2193,9 @@ pub fn rss_result_metrics(
         .cloned()
         .collect();
     let active_tail_endpoint = rss_endpoint_median_growth_mb_per_hr(&active_tail_samples);
-    let active_tail_growth_mb_per_hr = active_tail_endpoint.as_ref().map_or_else(
-        || rss_growth_mb_per_min(&active_tail_samples) * 60.0,
-        |estimate| estimate.growth_mb_per_hr,
-    );
+    let active_tail_window_median = rss_median_window_growth_mb_per_hr(&active_tail_samples, 60.0);
+    let active_tail_growth_mb_per_hr = active_tail_window_median
+        .unwrap_or_else(|| rss_growth_mb_per_min(&active_tail_samples) * 60.0);
     let active_tail_window_secs = match (active_tail_samples.first(), active_tail_samples.last()) {
         (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
         _ => 0.0,
@@ -2204,7 +2203,7 @@ pub fn rss_result_metrics(
     let active_tail_window_complete = active_load_end_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS
         && active_tail_window_secs >= LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS
         && active_tail_samples.len() >= LONG_SOAK_MIN_ACTIVE_SAMPLES
-        && active_tail_endpoint.is_some();
+        && active_tail_window_median.is_some();
     let post_drain_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
@@ -2256,8 +2255,8 @@ pub fn rss_result_metrics(
         active_tail_sample_count: active_tail_samples.len(),
         active_tail_window_secs,
         active_tail_window_complete,
-        active_tail_estimator: if active_tail_endpoint.is_some() {
-            "median_first_last_sixth_capped_60s"
+        active_tail_estimator: if active_tail_window_median.is_some() {
+            "median_60s_ols_windows"
         } else {
             "unavailable_ols_diagnostic_only"
         },
@@ -2280,6 +2279,40 @@ pub fn rss_result_metrics(
         gate_window,
         windows,
     }
+}
+
+/// Robust sustained RSS rate for a powered active-load window.
+///
+/// A bounded allocator/high-water step can permanently move the RSS level and
+/// therefore fool an endpoint delta into projecting that one step across an
+/// hour. The median of minute-scale slopes rejects isolated level changes but
+/// still measures continuous growth in every powered interval.
+pub fn rss_median_window_growth_mb_per_hr(
+    samples: &[ResourceSample],
+    window_secs: f64,
+) -> Option<f64> {
+    const MIN_POWERED_WINDOWS: usize = 8;
+
+    if samples.len() < 2 || window_secs <= 0.0 {
+        return None;
+    }
+    let first_t = samples.first()?.t_secs;
+    let last_t = samples.last()?.t_secs;
+    let mut rates = Vec::new();
+    let mut start = first_t;
+    while start < last_t {
+        let end = (start + window_secs).min(last_t);
+        let window = samples
+            .iter()
+            .filter(|sample| sample.t_secs >= start && sample.t_secs <= end)
+            .cloned()
+            .collect::<Vec<_>>();
+        if window.len() >= 2 {
+            rates.push(rss_growth_mb_per_min(&window) * 60.0);
+        }
+        start += window_secs;
+    }
+    (rates.len() >= MIN_POWERED_WINDOWS).then(|| median_f64(rates))
 }
 
 /// Robust retained-RSS rate across the first and last minute of a selected
