@@ -2181,6 +2181,8 @@
         "fuzz",
         "run",
         "sip_message",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2210,7 +2212,7 @@
         75
       ],
       "timeout_minutes": 7,
-      "working_directory": "crates/sip/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2227,6 +2229,8 @@
         "fuzz",
         "run",
         "uri",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2256,7 +2260,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/sip/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2273,6 +2277,8 @@
         "fuzz",
         "run",
         "header",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2302,7 +2308,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/sip/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2319,6 +2325,8 @@
         "fuzz",
         "run",
         "sdp",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2348,7 +2356,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/sip/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2365,6 +2373,8 @@
         "fuzz",
         "run",
         "rtp_packet",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2394,7 +2404,7 @@
         75
       ],
       "timeout_minutes": 7,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2411,6 +2421,8 @@
         "fuzz",
         "run",
         "rtcp_packet",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2440,7 +2452,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2457,6 +2469,8 @@
         "fuzz",
         "run",
         "srtp_unprotect",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2486,7 +2500,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2503,6 +2517,8 @@
         "fuzz",
         "run",
         "dtls_record",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2532,7 +2548,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2549,6 +2565,8 @@
         "fuzz",
         "run",
         "stun_response",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2578,7 +2596,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
@@ -2595,6 +2613,8 @@
         "fuzz",
         "run",
         "g711_unpack",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2624,7 +2644,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "crates/media/fuzz"
+      "working_directory": "."
     },
     {
       "affected_crates": [],
