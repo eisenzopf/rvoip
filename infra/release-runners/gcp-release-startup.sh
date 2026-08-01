@@ -56,7 +56,8 @@ finish() {
         cd "$WORKSPACE/target/perf-results"
         find . -type f \
           \( -name '*.json' -o -name '*.md' -o -name '*.tsv' \
-             -o -name '*.csv' -o -name '*.log' -o -name '*.txt' \) \
+             -o -name '*.csv' -o -name '*.jsonl' -o -name '*.log' \
+             -o -name '*.txt' \) \
           -exec cp --parents -t "$EVIDENCE/_perf-results/$SHARD_ID" {} +
       )
     fi

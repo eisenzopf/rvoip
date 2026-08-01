@@ -216,6 +216,79 @@ class GateFrameworkTests(unittest.TestCase):
         second = {"command": ["true"], "id": "a"}
         self.assertEqual(gates.definition_digest(first), gates.definition_digest(second))
 
+    def test_unrelated_catalog_changes_do_not_invalidate_a_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / "scripts/release/gates.py"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("runner-v1\n")
+            gate = {
+                "id": "gate-a",
+                "resource_class": "github-standard",
+                "affected_paths": [],
+                "affected_crates": [],
+                "dependencies": [],
+                "command": ["true"],
+            }
+            definitions = {"gate-a": gate}
+            first = gates.input_record(
+                root=root,
+                gate=gate,
+                environment_id="environment-v1",
+                files=["scripts/release/gates.py"],
+                package_roots={},
+                package_dependencies={},
+                gate_definitions=definitions,
+            )
+            unrelated = {**definitions, "gate-b": {"id": "gate-b", "command": ["false"]}}
+            second = gates.input_record(
+                root=root,
+                gate=gate,
+                environment_id="environment-v1",
+                files=["scripts/release/gates.py"],
+                package_roots={},
+                package_dependencies={},
+                gate_definitions=unrelated,
+            )
+            self.assertEqual(first, second)
+
+    def test_gcp_gate_digest_includes_ephemeral_worker_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / "scripts/release/gates.py"
+            startup = root / "infra/release-runners/gcp-release-startup.sh"
+            runner.parent.mkdir(parents=True)
+            startup.parent.mkdir(parents=True)
+            runner.write_text("runner-v1\n")
+            startup.write_text("startup-v1\n")
+            gate = {
+                "id": "gate-a",
+                "resource_class": "gcp-performance",
+                "affected_paths": [],
+                "affected_crates": [],
+                "dependencies": [],
+                "command": ["true"],
+            }
+            definitions = {"gate-a": gate}
+
+            def record() -> dict:
+                return gates.input_record(
+                    root=root,
+                    gate=gate,
+                    environment_id="environment-v1",
+                    files=[
+                        "scripts/release/gates.py",
+                        "infra/release-runners/gcp-release-startup.sh",
+                    ],
+                    package_roots={},
+                    package_dependencies={},
+                    gate_definitions=definitions,
+                )
+
+            first = record()
+            startup.write_text("startup-v2\n")
+            self.assertNotEqual(first["input_sha256"], record()["input_sha256"])
+
     def test_exact_reuse_rejects_failure_drift_and_always_fresh(self) -> None:
         gate = {"always_fresh": False}
         inputs = {

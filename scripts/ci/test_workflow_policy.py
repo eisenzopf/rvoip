@@ -85,6 +85,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]', startup)
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
         self.assertIn("command -v tshark >/dev/null", startup)
+        self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
 

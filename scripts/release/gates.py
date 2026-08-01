@@ -262,7 +262,6 @@ def input_record(
     root: Path,
     gate: dict[str, Any],
     environment_id: str,
-    catalog_sha256: str,
     files: list[str],
     package_roots: dict[str, str],
     package_dependencies: dict[str, set[str]],
@@ -278,17 +277,17 @@ def input_record(
             "Cargo.lock",
             "rust-toolchain.toml",
             "scripts/release/gates.py",
-            "scripts/release/**",
             "scripts/ci/**",
             ".config/**",
             ".github/workflows/**",
             "deny.toml",
         }
     )
+    if gate["resource_class"].startswith("gcp-"):
+        patterns.add("infra/release-runners/gcp-release-startup.sh")
     selected = [path for path in files if matches(path, patterns)]
     file_hashes = {path: file_sha256(root / path) for path in selected}
     payload = {
-        "catalog_sha256": catalog_sha256,
         "gate_definition_sha256": definition_digest(gate),
         "environment_sha256": environment_digest(gate_environment_id(environment_id, gate)),
         "files": file_hashes,
@@ -309,13 +308,11 @@ def all_input_records(
     files = tracked_files(root)
     roots, dependencies = workspace_graph(root)
     by_id = gate_map(catalog)
-    catalog_sha256 = sha256_bytes(canonical_bytes(catalog))
     return {
         gate_id: input_record(
             root=root,
             gate=by_id[gate_id],
             environment_id=environment_id,
-            catalog_sha256=catalog_sha256,
             files=files,
             package_roots=roots,
             package_dependencies=dependencies,
