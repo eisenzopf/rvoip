@@ -1189,6 +1189,28 @@ class ScenarioEvidenceTests(unittest.TestCase):
         self.assertEqual(observed["declared_bytes"], len(body))
         self.assertEqual(observed["observed_bytes"], len(body))
 
+    def test_read_messages_accepts_supported_sipp_heading_shapes(self) -> None:
+        wire = (
+            "UDP message received [123] bytes :\n\n"
+            "OPTIONS sip:probe@example.test SIP/2.0\r\n"
+            "CSeq: 1 OPTIONS\r\n\r\n"
+            "--------------------\n"
+            "UDP message sent (98 bytes):\n\n"
+            "SIP/2.0 200 OK\r\n"
+            "CSeq: 1 OPTIONS\r\n\r\n"
+            "--------------------\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "messages.log"
+            path.write_text(wire)
+            messages = scenario_evidence.read_messages(path)
+
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0].direction, "received")
+        self.assertTrue(messages[0].start_line.startswith("OPTIONS "))
+        self.assertEqual(messages[1].direction, "sent")
+        self.assertTrue(messages[1].start_line.startswith("SIP/2.0 200 "))
+
     def test_every_udp_advanced_contract_passes_exact_wire_fixture(self) -> None:
         for scenario in sorted(scenario_evidence.UDP_ADVANCED_SCENARIOS):
             with (

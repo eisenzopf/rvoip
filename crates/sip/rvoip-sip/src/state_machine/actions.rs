@@ -2172,6 +2172,7 @@ pub(crate) async fn execute_action(
             // extras OR an outbound proxy is configured (E4 — that path
             // injects the pre-loaded Route header at the adapter layer).
             let use_extra_path = !extras.is_empty() || dialog_adapter.outbound_proxy_uri.is_some();
+            session.initial_invite_offer_sdp = session.local_sdp.clone();
             if !use_extra_path {
                 dialog_adapter
                     .send_invite_with_details(
@@ -2361,28 +2362,34 @@ pub(crate) async fn execute_action(
                 "Following 3xx redirect"
             );
 
-            let (invite_opts, apply_global_proxy) = if let Some(snapshot) =
+            let (invite_opts, apply_global_proxy, exact_offer_sdp) = if let Some(snapshot) =
                 session.pending_invite_options.as_ref()
             {
                 let mut redirected = (**snapshot).clone();
                 redirected.to = next_target.clone();
                 redirected.precomputed_auth = None;
                 let sdp = authoritative_invite_sdp(Some(&redirected), session.local_sdp.as_deref());
-                let (options, suppress_global_proxy) =
-                    materialize_invite_options(&redirected, session.pai_uri.as_deref(), sdp)?;
+                let (options, suppress_global_proxy) = materialize_invite_options(
+                    &redirected,
+                    session.pai_uri.as_deref(),
+                    sdp.clone(),
+                )?;
                 session.pending_invite_options = Some(Arc::new(redirected));
-                (options, !suppress_global_proxy)
+                (options, !suppress_global_proxy, sdp)
             } else {
+                let sdp = session.local_sdp.clone();
                 (
                     rvoip_sip_dialog::api::unified::InviteRequestOptions {
                         from_uri: from,
                         to_uri: next_target,
-                        sdp: session.local_sdp.clone(),
+                        sdp: sdp.clone(),
                         ..Default::default()
                     },
                     true,
+                    sdp,
                 )
             };
+            session.initial_invite_offer_sdp = exact_offer_sdp;
 
             dialog_adapter
                 .send_invite_with_options(&session.session_id, invite_opts, apply_global_proxy)
@@ -3486,10 +3493,9 @@ pub(crate) async fn execute_action(
                 // The builder-supplied body snapshot is the wire authority. SDP
                 // generation may also populate `session.local_sdp`, but an
                 // auth-int retry must hash and retransmit the exact original bytes.
-                let body_owned = authoritative_invite_sdp(
-                    invite_snapshot.as_ref(),
-                    session.local_sdp.as_deref(),
-                );
+                let body_owned = session.initial_invite_offer_sdp.clone().or_else(|| {
+                    authoritative_invite_sdp(invite_snapshot.as_ref(), session.local_sdp.as_deref())
+                });
                 let body_bytes = body_owned.as_deref().map(|s| s.as_bytes());
                 let transport_context =
                     session.pending_auth_transport.clone().unwrap_or_else(|| {
@@ -4192,7 +4198,9 @@ pub(crate) async fn execute_action(
                 .pending_invite_options
                 .as_ref()
                 .map(|snapshot| (**snapshot).clone());
-            let body = authoritative_invite_sdp(snapshot.as_ref(), session.local_sdp.as_deref());
+            let body = session.initial_invite_offer_sdp.clone().or_else(|| {
+                authoritative_invite_sdp(snapshot.as_ref(), session.local_sdp.as_deref())
+            });
             let proxy_target =
                 invite_proxy_protection_target(snapshot.as_ref(), dialog_adapter, &request_uri);
             let mut authorization_headers =
@@ -4958,6 +4966,7 @@ pub(crate) async fn execute_action(
                 // preceding `GenerateLocalSDP` action.
                 let sdp_for_wire =
                     authoritative_invite_sdp(Some(&snapshot), session.local_sdp.as_deref());
+                session.initial_invite_offer_sdp = sdp_for_wire.clone();
 
                 // `with_topology_hiding(true)` is a no-op on the fresh-INVITE
                 // build path (Via/Contact are stamped from scratch); the flag
@@ -5018,6 +5027,7 @@ pub(crate) async fn execute_action(
         // ──────────────────────────────────────────────────────────────
         Action::ClearPendingINVITEOptions => {
             session.pending_invite_options = None;
+            session.initial_invite_offer_sdp = None;
             // Keep the credentials negotiated by the successful initial
             // INVITE for method-specific requests in this exact dialog. BYE,
             // MESSAGE, and other listener-authenticated requests cannot reuse

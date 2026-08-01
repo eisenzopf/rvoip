@@ -31,8 +31,74 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+#[cfg(not(target_os = "linux"))]
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
+
+#[cfg(target_os = "linux")]
+fn linux_proc_constants() -> Option<(u64, u64)> {
+    const AT_PAGESZ: usize = 6;
+    const AT_CLKTCK: usize = 17;
+    let bytes = std::fs::read("/proc/self/auxv").ok()?;
+    let word = std::mem::size_of::<usize>();
+    let mut page_size = None;
+    let mut clock_ticks = None;
+    for pair in bytes.chunks_exact(word * 2) {
+        let (key, value) = pair.split_at(word);
+        let key = usize::from_ne_bytes(key.try_into().ok()?);
+        let value = usize::from_ne_bytes(value.try_into().ok()?);
+        match key {
+            AT_PAGESZ => page_size = Some(value as u64),
+            AT_CLKTCK => clock_ticks = Some(value as u64),
+            0 => break,
+            _ => {}
+        }
+    }
+    Some((page_size?, clock_ticks?))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_sample(
+    started: Instant,
+    page_size: u64,
+    clock_ticks: u64,
+    previous_cpu: &mut Option<(u64, f64)>,
+) -> Option<ResourceSample> {
+    // Reading procfs avoids sysinfo's process-table refresh allocations from
+    // becoming part of the in-process RSS curve being measured.
+    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let resident_pages = statm.split_whitespace().nth(1)?.parse::<u64>().ok()?;
+
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let mut fields = fields.split_whitespace();
+    // fields starts at proc(5) field 3 (`state`); utime/stime are 14/15.
+    let total_ticks = fields.nth(11)?.parse::<u64>().ok()? + fields.next()?.parse::<u64>().ok()?;
+    let t_secs = started.elapsed().as_secs_f64();
+    let cpu_pct = if clock_ticks > 0 {
+        previous_cpu
+            .map(|(prior_ticks, prior_secs)| {
+                let elapsed = t_secs - prior_secs;
+                if elapsed > 0.0 {
+                    ((total_ticks.saturating_sub(prior_ticks) as f64
+                        / clock_ticks as f64
+                        / elapsed)
+                        * 100.0) as f32
+                } else {
+                    0.0
+                }
+            })
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    *previous_cpu = Some((total_ticks, t_secs));
+    Some(ResourceSample {
+        t_secs,
+        rss_mb: resident_pages as f64 * page_size as f64 / (1024.0 * 1024.0),
+        cpu_pct,
+    })
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ResourceSample {
@@ -205,11 +271,18 @@ impl ResourceSampler {
         let samples_task = Arc::clone(&samples);
         let stop_task = Arc::clone(&stop);
         let started = Instant::now();
+        #[cfg(not(target_os = "linux"))]
         let pid = Pid::from_u32(std::process::id());
         let task_samples_path = samples_path.clone();
 
         let task = tokio::spawn(async move {
+            #[cfg(not(target_os = "linux"))]
             let mut sys = System::new();
+            #[cfg(target_os = "linux")]
+            let mut previous_cpu = None;
+            #[cfg(target_os = "linux")]
+            let (page_size, clock_ticks) =
+                linux_proc_constants().expect("read Linux procfs sampling constants");
             let mut writer = task_samples_path.map(|path| {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).expect("create resource sample dir");
@@ -217,24 +290,25 @@ impl ResourceSampler {
                 BufWriter::new(File::create(path).expect("create resource sample JSONL"))
             });
             loop {
-                // Refresh CPU + memory for our PID. sysinfo's cpu_usage
-                // is "delta since last refresh of this process", so the
-                // first reading after `new()` is essentially 0; we
-                // still record it (it gets averaged out by subsequent
-                // samples).
-                sys.refresh_processes_specifics(
-                    ProcessesToUpdate::Some(&[pid]),
-                    ProcessRefreshKind::new().with_memory().with_cpu(),
-                );
-                if let Some(proc_) = sys.process(pid) {
-                    let rss_mb = proc_.memory() as f64 / (1024.0 * 1024.0);
-                    let cpu_pct = proc_.cpu_usage();
-                    let t_secs = started.elapsed().as_secs_f64();
-                    let sample = ResourceSample {
-                        t_secs,
-                        rss_mb,
-                        cpu_pct,
-                    };
+                // Refresh CPU + memory for our PID. Both backends report the
+                // first CPU reading as 0 because there is no preceding sample;
+                // it is retained and excluded from the final CPU average.
+                #[cfg(target_os = "linux")]
+                let sample =
+                    linux_process_sample(started, page_size, clock_ticks, &mut previous_cpu);
+                #[cfg(not(target_os = "linux"))]
+                let sample = {
+                    sys.refresh_processes_specifics(
+                        ProcessesToUpdate::Some(&[pid]),
+                        ProcessRefreshKind::new().with_memory().with_cpu(),
+                    );
+                    sys.process(pid).map(|proc_| ResourceSample {
+                        t_secs: started.elapsed().as_secs_f64(),
+                        rss_mb: proc_.memory() as f64 / (1024.0 * 1024.0),
+                        cpu_pct: proc_.cpu_usage(),
+                    })
+                };
+                if let Some(sample) = sample {
                     samples_task
                         .lock()
                         .expect("sampler lock")
@@ -566,6 +640,24 @@ fn linear_slope_mb_per_sec(samples: &[ResourceSample]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_sampler_reads_current_process_without_process_table_refresh() {
+        let started = Instant::now();
+        let mut previous_cpu = None;
+        let (page_size, clock_ticks) = linux_proc_constants().expect("procfs constants");
+        let first = linux_process_sample(started, page_size, clock_ticks, &mut previous_cpu)
+            .expect("first procfs sample");
+        std::thread::sleep(Duration::from_millis(2));
+        let second = linux_process_sample(started, page_size, clock_ticks, &mut previous_cpu)
+            .expect("second procfs sample");
+
+        assert!(first.rss_mb > 0.0);
+        assert!(second.rss_mb > 0.0);
+        assert!(second.t_secs >= first.t_secs);
+        assert!(second.cpu_pct.is_finite());
+    }
 
     fn sample(t_secs: f64, rss_mb: f64) -> ResourceSample {
         ResourceSample {
