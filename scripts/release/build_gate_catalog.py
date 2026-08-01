@@ -178,6 +178,12 @@ def insert_locked(argv: list[str]) -> list[str]:
         cargo = argv.index("cargo")
     except ValueError:
         return argv
+    subcommand = cargo + 1
+    if subcommand < len(argv) and argv[subcommand].startswith("+"):
+        subcommand += 1
+    if subcommand < len(argv) and argv[subcommand] == "fmt":
+        # `cargo fmt` is a rustfmt proxy and does not accept Cargo's --locked.
+        return argv
     if "--locked" not in argv and cargo + 1 < len(argv):
         return argv[: cargo + 2] + ["--locked"] + argv[cargo + 2 :]
     return argv

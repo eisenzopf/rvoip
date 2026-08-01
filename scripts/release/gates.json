@@ -80,7 +80,6 @@
       "command": [
         "cargo",
         "fmt",
-        "--locked",
         "--all",
         "--",
         "--check"

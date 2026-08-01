@@ -194,6 +194,17 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertNotIn("warnings", gate["command"])
 
+    def test_format_gate_does_not_receive_unsupported_locked_flag(self) -> None:
+        gate = next(
+            gate for gate in self.catalog["gates"] if gate["id"] == "build.format"
+        )
+        self.assertEqual(gate["command"][:2], ["cargo", "fmt"])
+        self.assertNotIn("--locked", gate["command"])
+        self.assertEqual(
+            builder.insert_locked(["cargo", "+1.91.0", "fmt", "--all"]),
+            ["cargo", "+1.91.0", "fmt", "--all"],
+        )
+
     def test_gcp_gates_allow_for_cold_release_builds(self) -> None:
         for gate in self.catalog["gates"]:
             if gate["resource_class"].startswith("gcp-"):
