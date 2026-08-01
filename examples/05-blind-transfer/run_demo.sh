@@ -3,6 +3,7 @@
 # up talking to Charlie. Exits 0 on success.
 set -euo pipefail
 cd "$(dirname "$0")"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-../target}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 export ALICE_PORT=5060 BOB_PORT=5061 CHARLIE_PORT=5062
@@ -13,12 +14,12 @@ mkdir -p logs
 echo -e "${GREEN}Building…${NC}"; cargo build --release --quiet
 
 echo -e "${CYAN}[charlie]${NC} :$CHARLIE_PORT  ${CYAN}[bob]${NC} :$BOB_PORT"
-./target/release/charlie > logs/charlie.log 2>&1 & PIDS+=($!)
-./target/release/bob     > logs/bob.log     2>&1 & PIDS+=($!)
+"$CARGO_TARGET_DIR/release/charlie" > logs/charlie.log 2>&1 & PIDS+=($!)
+"$CARGO_TARGET_DIR/release/bob"     > logs/bob.log     2>&1 & PIDS+=($!)
 for _ in {1..20}; do lsof -iUDP:$BOB_PORT -n >/dev/null 2>&1 && lsof -iUDP:$CHARLIE_PORT -n >/dev/null 2>&1 && break; sleep 0.25; done
 
 echo -e "${CYAN}[alice]${NC} :$ALICE_PORT calling Bob"
-./target/release/alice > logs/alice.log 2>&1 & DRIVER=$!; PIDS+=($DRIVER)
+"$CARGO_TARGET_DIR/release/alice" > logs/alice.log 2>&1 & DRIVER=$!; PIDS+=($DRIVER)
 wait "$DRIVER"; RC=$?
 sleep 1
 

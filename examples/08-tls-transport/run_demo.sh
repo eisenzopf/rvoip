@@ -9,6 +9,7 @@
 # Production deployments use real certs and omit the `dev-insecure-tls` feature.
 set -euo pipefail
 cd "$(dirname "$0")"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-../target}"
 
 GREEN='\033[0;32m'; CYAN='\033[0;36m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -57,10 +58,10 @@ run_pass() {
   : > "$SERVER_LOG"
   echo ""
   echo -e "${color}▶ TLS pass: ${label}${NC}"
-  ./target/release/server > "$SERVER_LOG" 2>&1 &
+  "$CARGO_TARGET_DIR/release/server" > "$SERVER_LOG" 2>&1 &
   local server_pid=$!
   sleep 2
-  TLS_INSECURE="$insecure" ./target/release/client 2>&1 | sed "s/^/  [client] /"
+  TLS_INSECURE="$insecure" "$CARGO_TARGET_DIR/release/client" 2>&1 | sed "s/^/  [client] /"
   local client_exit=${PIPESTATUS[0]}
   sleep 1
   kill -INT "$server_pid" 2>/dev/null || true

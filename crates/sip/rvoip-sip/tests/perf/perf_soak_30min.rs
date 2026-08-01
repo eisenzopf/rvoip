@@ -385,7 +385,10 @@ async fn perf_soak_30min() {
     let started = std::time::Instant::now();
     let active_deadline = started + total;
 
-    let sampler = ResourceSampler::start(Duration::from_secs(5));
+    let sampler = ResourceSampler::start_with_output(
+        Duration::from_secs(5),
+        support::soak::diagnostic_sample_path("monolithic", "resource"),
+    );
     let retention_sampler = RetentionSampler::start(
         Arc::clone(&alice),
         Arc::clone(&bob.coordinator),
