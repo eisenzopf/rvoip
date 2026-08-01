@@ -278,7 +278,14 @@ async fn run_invite_extras_auth_retry(uas_port: u16, uac_port: u16, fail_bye_bef
                             _ => None,
                         };
                         if let Some(label) = label {
-                            trace_sequence.push(label);
+                            // The fixture deliberately retransmits the final
+                            // 200 and separately requires the UAC to ACK both
+                            // copies. A legal duplicate 2xx must not turn the
+                            // semantic auth sequence into a timing-dependent
+                            // fifth step.
+                            if label != "200" || trace_sequence.last() != Some(&"200") {
+                                trace_sequence.push(label);
+                            }
                         }
                     }
                     Some(_) => {}
