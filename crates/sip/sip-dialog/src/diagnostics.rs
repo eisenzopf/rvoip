@@ -42,6 +42,9 @@ const MAX_TRANSACTION_DISPATCH_DIAG_WORKERS: usize = 64;
 const MAX_CALL_TIMING_TRACE_ENTRIES: usize = 20_000;
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static ENABLED_TEST_THREAD: LazyLock<Mutex<Option<std::thread::ThreadId>>> =
+    LazyLock::new(|| Mutex::new(None));
 static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 static DIALOG_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 static CALL_TIMING_TRACE_STORE: LazyLock<CallTimingTraceStore> =
@@ -843,10 +846,21 @@ impl CallTimingTraceStore {
 }
 
 pub fn enabled() -> bool {
-    match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
-        2 => true,
-        _ => false,
+    if ENABLED_OVERRIDE.load(Ordering::Relaxed) != 2 {
+        return false;
     }
+
+    #[cfg(test)]
+    {
+        return ENABLED_TEST_THREAD
+            .lock()
+            .expect("diagnostic test thread lock")
+            .as_ref()
+            .is_none_or(|owner| *owner == std::thread::current().id());
+    }
+
+    #[cfg(not(test))]
+    true
 }
 
 pub fn set_enabled(enabled: bool) {
@@ -879,6 +893,9 @@ pub fn set_dialog_timing_enabled(enabled: bool) {
 
 #[cfg(test)]
 fn set_enabled_for_tests(enabled: bool) {
+    *ENABLED_TEST_THREAD
+        .lock()
+        .expect("diagnostic test thread lock") = enabled.then(|| std::thread::current().id());
     set_enabled(enabled);
 }
 
@@ -2588,6 +2605,15 @@ mod tests {
         set_transaction_timing_enabled_for_tests(true);
         set_dialog_timing_enabled_for_tests(true);
         reset();
+
+        std::thread::spawn(record_duplicate_invite_existing_transaction)
+            .join()
+            .expect("parallel diagnostic probe");
+        assert_eq!(
+            snapshot().duplicate_invite_existing_transaction,
+            0,
+            "another test thread must not contaminate exact diagnostic counts"
+        );
 
         record_duplicate_invite_existing_transaction();
         record_duplicate_invite_cache_hit();
