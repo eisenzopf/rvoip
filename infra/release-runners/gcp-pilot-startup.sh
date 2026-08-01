@@ -29,6 +29,11 @@ PACKAGES=""
 if [[ -n "$PACKAGES_B64" ]]; then
   PACKAGES="$(printf '%s' "$PACKAGES_B64" | base64 --decode)"
 fi
+TARGETS_B64="$(metadata_optional rvoip-targets-b64)"
+TARGETS=""
+if [[ -n "$TARGETS_B64" ]]; then
+  TARGETS="$(printf '%s' "$TARGETS_B64" | base64 --decode)"
+fi
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 START_SECONDS="$(date +%s)"
 WORKSPACE=/opt/rvoip
@@ -63,11 +68,11 @@ finish() {
   if [[ -f "$COMMAND_RECEIPT" ]]; then
     receipt_sha="$(sha256sum "$COMMAND_RECEIPT" | awk '{print $1}')"
   fi
-  python3 - "$RESULT" "$CANDIDATE" "$PROFILE" "$RUN_ID" "$STARTED_AT" "$ended_at" "$duration" "$exit_code" "$rust_version" "$SHARD_ID" "$PACKAGES" "$receipt_sha" <<'PY'
+  python3 - "$RESULT" "$CANDIDATE" "$PROFILE" "$RUN_ID" "$STARTED_AT" "$ended_at" "$duration" "$exit_code" "$rust_version" "$SHARD_ID" "$PACKAGES" "$TARGETS" "$receipt_sha" <<'PY'
 import json
 import sys
 
-path, candidate, profile, run_id, started, ended, duration, code, rust, shard_id, packages, receipt_sha = sys.argv[1:]
+path, candidate, profile, run_id, started, ended, duration, code, rust, shard_id, packages, targets, receipt_sha = sys.argv[1:]
 payload = {
     "schema": "rvoip-gcp-qualification-pilot-v1",
     "candidate_sha": candidate,
@@ -81,6 +86,7 @@ payload = {
     "rustc": rust,
     "shard_id": shard_id or None,
     "packages": [value for value in packages.split(",") if value],
+    "targets": [value for value in targets.split(",") if value],
     "command_receipt_sha256": receipt_sha or None,
     "publishing_attempted": False,
 }
@@ -171,6 +177,21 @@ elif [[ "$PROFILE" == workspace-shard-test || "$PROFILE" == workspace-shard-clip
   python3 scripts/ci/run_checks.py "$kind" \
     --name "$SHARD_ID" \
     --packages "$PACKAGES" \
+    --output "$COMMAND_RECEIPT"
+elif [[ "$PROFILE" == workspace-sip-core ]]; then
+  python3 scripts/ci/run_checks.py sip-core \
+    --name "$SHARD_ID" \
+    --packages rvoip-sip \
+    --output "$COMMAND_RECEIPT"
+elif [[ "$PROFILE" == workspace-sip-integration ]]; then
+  [[ -n "$TARGETS" ]] || {
+    echo "SIP integration shard is missing its target selection" >&2
+    exit 2
+  }
+  python3 scripts/ci/run_checks.py sip-integration \
+    --name "$SHARD_ID" \
+    --packages rvoip-sip \
+    --targets "$TARGETS" \
     --output "$COMMAND_RECEIPT"
 elif [[ "$PROFILE" == workspace-doctest ]]; then
   python3 scripts/ci/run_checks.py doctest \

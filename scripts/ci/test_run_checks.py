@@ -27,6 +27,30 @@ class RunChecksTests(unittest.TestCase):
         self.assertEqual(len(clippy), 1)
         self.assertEqual(clippy[0][0][0:2], ["cargo", "clippy"])
 
+    def test_sip_core_and_integration_commands_are_independent(self) -> None:
+        core = run_checks.sip_core_commands()
+        integration = run_checks.sip_integration_commands("beta,alpha")
+        self.assertIn("--lib", core[0][0])
+        self.assertNotIn("--tests", core[0][0])
+        self.assertEqual(
+            integration[0][0],
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "rvoip-sip",
+                "--test",
+                "alpha",
+                "--test",
+                "beta",
+            ],
+        )
+
+    def test_sip_target_arguments_reject_shell_metacharacters(self) -> None:
+        with self.assertRaises(run_checks.CheckError):
+            run_checks.sip_integration_commands("safe; touch compromised")
+
     def test_example_smoke_preserves_the_hardware_free_matrix(self) -> None:
         commands = run_checks.specialty_commands("examples-smoke", Path("/workspace"))
         self.assertEqual(len(commands), 10)

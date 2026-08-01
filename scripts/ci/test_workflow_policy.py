@@ -53,8 +53,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("if: always() && steps.worker.outputs.name != ''", workflow)
         self.assertIn("expected_shards", workflow)
         self.assertIn("expected_packages", workflow)
-        self.assertIn('heavy_sip_test = check == "test" and "rvoip-sip"', workflow)
-        self.assertIn('"disk_size_gb": 200 if heavy_sip_test else 80', workflow)
+        self.assertIn("expected_sip_targets", workflow)
+        self.assertIn("a SIP integration target appears in more than one shard", workflow)
+        self.assertIn("sip_test_partitions.py", workflow)
+        self.assertIn('"id": "sip-core"', workflow)
+        self.assertIn('f"sip-integration-{index}"', workflow)
+        self.assertIn('"disk_size_gb": 200', workflow)
         self.assertIn("publishing_attempted == false", workflow)
         self.assertIn('"publishing_attempted": False', startup)
         for profile in (
@@ -63,6 +67,8 @@ class WorkflowPolicyTests(unittest.TestCase):
             "workspace-shard-clippy",
             "workspace-doctest",
             "workspace-security-timing",
+            "workspace-sip-core",
+            "workspace-sip-integration",
         ):
             self.assertIn(profile, startup)
 
