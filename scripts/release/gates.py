@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -110,7 +111,7 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
         raise GateError(f"duplicate gate ids: {duplicates}")
     by_id = gate_map(catalog)
     for gate in gates:
-        if gate.get("executor") not in {"argv", "builtin", "legacy-group"}:
+        if gate.get("executor") not in {"argv", "builtin", "legacy-group", "aggregate"}:
             raise GateError(f"gate {gate['id']} has unsupported executor")
         if gate["executor"] == "argv" and not isinstance(gate.get("command"), list):
             raise GateError(f"gate {gate['id']} lacks argv command")
@@ -125,6 +126,16 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
         missing = sorted(set(selected) - set(by_id))
         if missing:
             raise GateError(f"profile {profile} references unknown gates: {missing}")
+        selected_ids = set(selected)
+        dependency_gaps = {
+            gate_id: sorted(set(by_id[gate_id].get("dependencies", [])) - selected_ids)
+            for gate_id in selected
+            if set(by_id[gate_id].get("dependencies", [])) - selected_ids
+        }
+        if dependency_gaps:
+            raise GateError(
+                f"profile {profile} omits gate dependencies: {dependency_gaps}"
+            )
     coverage = catalog.get("remote_release_legacy_coverage")
     if not isinstance(coverage, dict):
         raise GateError("catalog must declare remote-release legacy coverage")
@@ -404,7 +415,11 @@ def balance_gates(gates: list[dict[str, Any]], count: int) -> list[list[dict[str
 
 
 def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    runnable = [by_id[item["id"]] for item in plan_gates if item["decision"] == "RUN"]
+    runnable = [
+        by_id[item["id"]]
+        for item in plan_gates
+        if item["decision"] == "RUN" and by_id[item["id"]]["executor"] != "aggregate"
+    ]
     groups: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
     for gate in runnable:
         groups[gate["resource_class"]].append(gate)
@@ -413,8 +428,8 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         "github-standard": 6,
         "github-nightly": 5,
         "github-evidence": 1,
-        "gcp-performance": 8,
-        "gcp-performance-soak": 4,
+        "gcp-performance": 7,
+        "gcp-performance-soak": 9,
         # Interoperability gates share one stateful peer lab. Keep their
         # lifecycle dependency chain in one shard so start/matrix/stop/restore
         # operations cannot race across ephemeral jobs.
@@ -435,6 +450,13 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     "resource_class": resource,
                     "runs_on": runs_on,
                     "hosted": not resource.startswith("gcp-"),
+                    "machine_type": (
+                        "n2-standard-4"
+                        if resource in {"gcp-interop", "gcp-performance-soak"}
+                        else "n2-standard-8"
+                    ),
+                    "disk_type": "pd-standard",
+                    "disk_size_gb": 200,
                     "gates": gate_ids,
                     "gates_csv": ",".join(gate_ids),
                     "needs_nightly": any(
@@ -444,6 +466,9 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     "needs_cargo_deny": any(
                         gate["id"] in {"security.remote-advisories", "security.advisory-audit"}
                         for gate in shard
+                    ),
+                    "needs_chromium": any(
+                        gate["id"] == "interop.browser-dtmf" for gate in shard
                     ),
                     "estimated_seconds": sum(int(gate.get("estimated_seconds", 1)) for gate in shard),
                 }
@@ -516,6 +541,8 @@ def create_plan(
                 "id": gate_id,
                 "decision": "RUN",
                 "reason": reason,
+                "executor": gate["executor"],
+                "dependencies": gate.get("dependencies", []),
                 **{key: inputs[gate_id][key] for key in ("gate_definition_sha256", "environment_sha256", "input_sha256")},
             }
         else:
@@ -523,6 +550,8 @@ def create_plan(
                 "id": gate_id,
                 "decision": "REUSE",
                 "reason": "exact definition, input, and environment digest match",
+                "executor": gate["executor"],
+                "dependencies": gate.get("dependencies", []),
                 **{key: inputs[gate_id][key] for key in ("gate_definition_sha256", "environment_sha256", "input_sha256")},
                 "reuse_receipt": {key: value for key, value in reuse.items() if not key.startswith("_")},
                 "reuse_receipt_sha256": reuse["_sha256"],
@@ -549,9 +578,15 @@ def create_plan(
 
 
 def write_github_output(path: Path, plan: dict[str, Any]) -> None:
+    hosted = [item for item in plan["matrix"] if item["hosted"]]
+    gcp = [item for item in plan["matrix"] if not item["hosted"]]
     values = {
         "matrix": json.dumps({"include": plan["matrix"]}, separators=(",", ":")),
+        "hosted_matrix": json.dumps({"include": hosted}, separators=(",", ":")),
+        "gcp_matrix": json.dumps({"include": gcp}, separators=(",", ":")),
         "shard_count": str(len(plan["matrix"])),
+        "hosted_shard_count": str(len(hosted)),
+        "gcp_shard_count": str(len(gcp)),
         "run_count": str(sum(item["decision"] == "RUN" for item in plan["gates"])),
         "reuse_count": str(sum(item["decision"] == "REUSE" for item in plan["gates"])),
         "candidate_sha": plan["candidate_sha"],
@@ -667,6 +702,10 @@ def execute_gate(
     final_code = 1
     for attempt in range(1, max_attempts + 1):
         attempt_start = time.monotonic()
+        if gate["executor"] == "aggregate":
+            raise GateError(
+                f"aggregate gate {gate['id']} must run during evidence collection"
+            )
         if gate["executor"] == "builtin":
             final_code, output = clean_source(root)
             with log_path.open("a") as handle:
@@ -790,19 +829,88 @@ def validate_log(evidence_root: Path, receipt: dict[str, Any]) -> bool:
     return False
 
 
+def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: Path) -> dict[str, Any]:
+    manifests = sorted(evidence_root.rglob("perf-regression-baseline/manifest.json"))
+    if len(manifests) != 1:
+        raise GateError(
+            "performance regression reconciliation requires exactly one packaged baseline manifest"
+        )
+    manifest = manifests[0]
+    baseline = manifest.parent / "perf-results"
+    payload = load_json(manifest, "packaged performance baseline")
+    comparison_paths = payload.get("comparison_paths")
+    if not isinstance(comparison_paths, list) or not comparison_paths:
+        raise GateError("packaged performance baseline has no comparison paths")
+    current = artifact / "current-performance"
+    current.mkdir(parents=True, exist_ok=True)
+    selected = {}
+    for value in comparison_paths:
+        if not isinstance(value, str) or Path(value).is_absolute() or ".." in Path(value).parts:
+            raise GateError(f"unsafe performance comparison path: {value!r}")
+        matches = sorted(
+            path
+            for path in (evidence_root / "_perf-results").rglob(Path(value).name)
+            if path.as_posix().endswith("/" + value)
+        )
+        if len(matches) != 1:
+            raise GateError(
+                f"performance comparison path {value} has {len(matches)} exact-candidate results"
+            )
+        destination = current / value
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(matches[0], destination)
+        selected[value] = file_sha256(destination)
+    report = artifact / "perf-audit.md"
+    completed = run(
+        [
+            "python3",
+            "crates/sip/rvoip-sip/scripts/perf_audit.py",
+            "--baseline",
+            str(baseline),
+            "--baseline-manifest",
+            str(manifest),
+            "--current",
+            str(current),
+            "--out",
+            str(report),
+            "--tolerance-pct",
+            "15",
+            "--latency-tolerance-pct",
+            "25",
+            "--fail-on-regression",
+        ],
+        root=root,
+        check=False,
+    )
+    if completed.returncode:
+        raise GateError(
+            "performance regression audit failed:\n"
+            + ((completed.stdout or "") + (completed.stderr or "")).strip()
+        )
+    return {
+        "baseline_manifest_sha256": file_sha256(manifest),
+        "selected_results": selected,
+        "report_sha256": file_sha256(report),
+    }
+
+
 def collect(
     *,
     plan: dict[str, Any],
     evidence_root: Path,
     output: Path,
+    root: Path | None = None,
 ) -> int:
     if plan.get("schema") != PLAN_SCHEMA:
         raise GateError("unsupported or missing release gate plan")
     receipts = receipt_index(evidence_root)
     failures = []
     accepted = []
+    accepted_ids: set[str] = set()
     for item in plan["gates"]:
         gate_id = item["id"]
+        if item.get("executor") == "aggregate" and item["decision"] == "RUN":
+            continue
         if item["decision"] == "REUSE":
             receipt = item.get("reuse_receipt", {})
             if sha256_bytes(canonical_bytes(receipt)) != item.get("reuse_receipt_sha256"):
@@ -847,6 +955,90 @@ def collect(
                 "input_sha256": item["input_sha256"],
             }
         )
+        accepted_ids.add(gate_id)
+
+    plan_by_id = {item["id"]: item for item in plan["gates"]}
+    aggregate_ids = [
+        item["id"]
+        for item in plan["gates"]
+        if item.get("executor") == "aggregate" and item["decision"] == "RUN"
+    ]
+    aggregate_definitions = {
+        gate_id: {"dependencies": plan_by_id[gate_id].get("dependencies", [])}
+        for gate_id in aggregate_ids
+    }
+    for gate_id in dependency_order(aggregate_ids, aggregate_definitions):
+        item = plan_by_id[gate_id]
+        missing = sorted(
+            dependency
+            for dependency in item.get("dependencies", [])
+            if dependency not in accepted_ids
+        )
+        if missing:
+            failures.append(
+                f"{gate_id}: cannot aggregate until dependencies pass: {', '.join(missing)}"
+            )
+            continue
+        if root is not None and git(root, "rev-parse", "HEAD") != plan["candidate_sha"]:
+            failures.append(f"{gate_id}: collector checkout does not match candidate")
+            continue
+        artifact = evidence_root / f"collect-{re.sub(r'[^A-Za-z0-9_.-]', '-', gate_id)}"
+        artifact.mkdir(parents=True, exist_ok=True)
+        log = artifact / "command.log"
+        specialized = None
+        if gate_id == "report.regression-audit":
+            if root is None:
+                failures.append(f"{gate_id}: collector workspace is unavailable")
+                continue
+            try:
+                specialized = reconcile_performance_regression(root, evidence_root, artifact)
+            except GateError as error:
+                failures.append(f"{gate_id}: {error}")
+                continue
+        reconciliation = {
+            "gate_id": gate_id,
+            "candidate_sha": plan["candidate_sha"],
+            "dependencies": item.get("dependencies", []),
+            "accepted_dependency_receipts": sorted(
+                row["receipt_sha256"]
+                for row in accepted
+                if row["gate_id"] in set(item.get("dependencies", []))
+            ),
+            "source_tree": git(root, "rev-parse", "HEAD^{tree}") if root is not None else None,
+            "specialized_evidence": specialized,
+        }
+        log.write_bytes(canonical_bytes(reconciliation))
+        receipt = {
+            "schema": RECEIPT_SCHEMA,
+            "gate_id": gate_id,
+            "candidate_sha": plan["candidate_sha"],
+            "status": "PASS",
+            "gate_definition_sha256": item["gate_definition_sha256"],
+            "input_sha256": item["input_sha256"],
+            "environment_id": plan["environment_id"],
+            "environment_sha256": item["environment_sha256"],
+            "started_at": utc_now(),
+            "ended_at": utc_now(),
+            "duration_seconds": 0,
+            "attempts": [{"attempt": 1, "argv": ["aggregate", gate_id], "exit_code": 0, "duration_seconds": 0}],
+            "log": {
+                "path": log.relative_to(evidence_root).as_posix(),
+                "sha256": file_sha256(log),
+                "bytes": log.stat().st_size,
+            },
+        }
+        receipt_path = artifact / "receipt.json"
+        receipt_path.write_bytes(canonical_bytes(receipt))
+        accepted.append(
+            {
+                "gate_id": gate_id,
+                "source": "fresh",
+                "receipt_candidate_sha": plan["candidate_sha"],
+                "receipt_sha256": file_sha256(receipt_path),
+                "input_sha256": item["input_sha256"],
+            }
+        )
+        accepted_ids.add(gate_id)
     aggregate = {
         "schema": AGGREGATE_SCHEMA,
         "generated_at": utc_now(),
@@ -952,7 +1144,7 @@ def main(argv: list[str] | None = None) -> int:
         plan = load_json(args.plan if args.plan.is_absolute() else root / args.plan, "gate plan")
         evidence = args.evidence if args.evidence.is_absolute() else root / args.evidence
         output = args.output if args.output.is_absolute() else root / args.output
-        return collect(plan=plan, evidence_root=evidence, output=output)
+        return collect(plan=plan, evidence_root=evidence, output=output, root=root)
     except (GateError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"release gates: FAIL: {error}", file=sys.stderr)
         return 2

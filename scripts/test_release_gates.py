@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
@@ -53,6 +54,19 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(generated, self.catalog)
 
+    def test_every_profile_is_dependency_closed(self) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        for profile, selected in self.catalog["profiles"].items():
+            selected_ids = set(selected)
+            with self.subTest(profile=profile):
+                self.assertFalse(
+                    {
+                        gate_id: set(by_id[gate_id]["dependencies"]) - selected_ids
+                        for gate_id in selected
+                        if set(by_id[gate_id]["dependencies"]) - selected_ids
+                    }
+                )
+
     def test_fuzz_gates_select_their_fuzz_crate_explicitly(self) -> None:
         fuzz_gates = [
             gate
@@ -98,8 +112,45 @@ class GateFrameworkTests(unittest.TestCase):
         soak_shards = [
             shard for shard in matrix if shard["resource_class"] == "gcp-performance-soak"
         ]
-        self.assertEqual(len(soak_shards), 3)
+        self.assertEqual(len(soak_shards), 2)
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in soak_shards))
+        self.assertNotIn(
+            "perf.media-burst-matrix",
+            {gate for shard in soak_shards for gate in shard["gates"]},
+        )
+
+    def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
+        scenario_ids = {
+            gate["id"]
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("perf.media-burst.")
+        }
+        self.assertEqual(len(scenario_ids), 7)
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in scenario_ids],
+            by_id,
+        )
+        self.assertEqual(len(matrix), 7)
+        self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
+        self.assertTrue(all(shard["machine_type"] == "n2-standard-4" for shard in matrix))
+        aggregate = by_id["perf.media-burst-matrix"]
+        self.assertEqual(aggregate["executor"], "aggregate")
+        self.assertEqual(set(aggregate["dependencies"]), scenario_ids)
+
+    def test_remote_release_requires_bridgefu_chromium_dtmf_regression(self) -> None:
+        gate_id = "interop.browser-dtmf"
+        self.assertIn(gate_id, self.catalog["profiles"]["remote-release"])
+        gate = next(gate for gate in self.catalog["gates"] if gate["id"] == gate_id)
+        self.assertIn("browser_interop", gate["command"])
+        self.assertIn("--include-ignored", gate["command"])
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"}],
+            {item["id"]: item for item in self.catalog["gates"]},
+        )
+        self.assertEqual(len(matrix), 1)
+        self.assertTrue(matrix[0]["hosted"])
+        self.assertTrue(matrix[0]["needs_chromium"])
 
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
@@ -231,6 +282,118 @@ class GateFrameworkTests(unittest.TestCase):
             )
             self.assertEqual(status, 124)
             self.assertIn("exceeded catalogued timeout", log.read_text())
+
+    def test_github_outputs_split_hosted_and_ephemeral_gcp_matrices(self) -> None:
+        plan = {
+            "matrix": [
+                {"id": "hosted", "hosted": True},
+                {"id": "gcp", "hosted": False},
+            ],
+            "gates": [{"decision": "RUN"}, {"decision": "REUSE"}],
+            "candidate_sha": "c" * 40,
+            "environment_id": "test",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "github-output"
+            gates.write_github_output(output, plan)
+            values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+        self.assertEqual(json.loads(values["hosted_matrix"])["include"], [plan["matrix"][0]])
+        self.assertEqual(json.loads(values["gcp_matrix"])["include"], [plan["matrix"][1]])
+        self.assertEqual(values["hosted_shard_count"], "1")
+        self.assertEqual(values["gcp_shard_count"], "1")
+
+    def test_collector_materializes_aggregate_only_after_dependencies_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dependency_dir = root / "dependency"
+            dependency_dir.mkdir()
+            log = dependency_dir / "command.log"
+            log.write_text("pass\n")
+            dependency = {
+                "schema": gates.RECEIPT_SCHEMA,
+                "gate_id": "gate.dependency",
+                "candidate_sha": "c" * 40,
+                "status": "PASS",
+                "gate_definition_sha256": "d" * 64,
+                "input_sha256": "i" * 64,
+                "environment_sha256": "e" * 64,
+                "log": {
+                    "path": "dependency/command.log",
+                    "sha256": gates.file_sha256(log),
+                    "bytes": log.stat().st_size,
+                },
+            }
+            (dependency_dir / "receipt.json").write_bytes(
+                gates.canonical_bytes(dependency)
+            )
+            plan = {
+                "schema": gates.PLAN_SCHEMA,
+                "candidate_sha": "c" * 40,
+                "profile": "test",
+                "catalog_sha256": "x" * 64,
+                "environment_id": "test",
+                "gates": [
+                    {
+                        "id": "gate.dependency",
+                        "decision": "RUN",
+                        "executor": "argv",
+                        "dependencies": [],
+                        "gate_definition_sha256": "d" * 64,
+                        "input_sha256": "i" * 64,
+                        "environment_sha256": "e" * 64,
+                    },
+                    {
+                        "id": "gate.aggregate",
+                        "decision": "RUN",
+                        "executor": "aggregate",
+                        "dependencies": ["gate.dependency"],
+                        "gate_definition_sha256": "a" * 64,
+                        "input_sha256": "b" * 64,
+                        "environment_sha256": "e" * 64,
+                    },
+                ],
+            }
+            output = root / "aggregate.json"
+            self.assertEqual(
+                gates.collect(plan=plan, evidence_root=root, output=output), 0
+            )
+            result = json.loads(output.read_text())
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["gate_count"], 2)
+            self.assertTrue((root / "collect-gate.aggregate/receipt.json").is_file())
+
+            (dependency_dir / "receipt.json").unlink()
+            self.assertEqual(
+                gates.collect(plan=plan, evidence_root=root, output=output), 1
+            )
+
+    def test_performance_reconciliation_runs_real_baseline_audit(self) -> None:
+        baseline_root = (
+            ROOT / "crates/sip/rvoip-sip/perf-baselines/20260706T181609Z"
+        )
+        manifest = json.loads((baseline_root / "manifest.json").read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / "evidence"
+            packaged = evidence / "baseline-gate/perf-regression-baseline"
+            packaged.mkdir(parents=True)
+            shutil.copy2(baseline_root / "manifest.json", packaged / "manifest.json")
+            for relative in manifest["comparison_paths"]:
+                source = baseline_root / relative
+                baseline_target = packaged / "perf-results" / relative
+                current_target = evidence / "_perf-results/shard" / relative
+                baseline_target.parent.mkdir(parents=True, exist_ok=True)
+                current_target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, baseline_target)
+                shutil.copy2(source, current_target)
+            artifact = evidence / "collect-report.regression-audit"
+            artifact.mkdir()
+            result = gates.reconcile_performance_regression(
+                ROOT, evidence, artifact
+            )
+            self.assertTrue((artifact / "perf-audit.md").is_file())
+            self.assertEqual(
+                set(result["selected_results"]), set(manifest["comparison_paths"])
+            )
 
 
 if __name__ == "__main__":
