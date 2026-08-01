@@ -95,7 +95,7 @@ EOF
 }
 
 freeswitch_up() {
-  down rvoip-release-freeswitch
+  down rvoip-freeswitch
   local build="$STATE/freeswitch"
   rm -rf "$build"
   cp -R "$PBX_SNAPSHOT/freeswitch" "$build"
@@ -125,13 +125,13 @@ for line in path.read_text().splitlines():
 path.write_text("\n".join(lines) + "\n")
 PY
   docker build --build-arg MAKE_JOBS="$(nproc)" -t rvoip-release-freeswitch "$build"
-  docker run -d --name rvoip-release-freeswitch --network host \
+  docker run -d --name rvoip-freeswitch --network host \
     -e FS_DEFAULT_PASSWORD=1234 \
     -e FS_EVENT_SOCKET_PASSWORD=ClueCon \
     -e FS_EXTERNAL_SIP_IP=127.0.0.1 \
     -e FS_EXTERNAL_RTP_IP=127.0.0.1 \
     rvoip-release-freeswitch >/dev/null
-  wait_udp_port rvoip-release-freeswitch 5062
+  wait_udp_port rvoip-freeswitch 5062
   cat > "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env" <<'EOF'
 FREESWITCH_ADDR=127.0.0.1:5060
 FREESWITCH_IP=127.0.0.1
@@ -186,7 +186,7 @@ case "$ACTION" in
   asterisk-up) asterisk_up ;;
   asterisk-down|restore-asterisk-down) down rvoip-release-asterisk ;;
   freeswitch-up) freeswitch_up ;;
-  freeswitch-down|restore-freeswitch-down) down rvoip-release-freeswitch ;;
+  freeswitch-down|restore-freeswitch-down) down rvoip-freeswitch ;;
   sipp-start) sipp_start ;;
   sipp-stop) sipp_stop ;;
   *) echo "unknown interop lifecycle action: $ACTION" >&2; exit 2 ;;
