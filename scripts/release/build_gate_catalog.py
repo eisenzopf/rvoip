@@ -331,6 +331,11 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         executor = "builtin"
     duration = int(record.get("duration_seconds", 0))
     timeout_minutes = max(5, math.ceil(duration / 60 * 2) + 5)
+    if record["kind"] == "cargo":
+        # Historical durations measure the command after a warm local build.
+        # Release shards can begin cold, so leave enough time to compile and
+        # then execute the required test instead of timing out mid-build.
+        timeout_minutes = max(timeout_minutes, 20)
     if resource_class(record).startswith("gcp-"):
         # GCP workers start without a warm target directory. Preserve enough
         # headroom for the first release build as well as the measured gate.
@@ -562,7 +567,12 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             "interop.remote-proxies",
             "Kamailio and OpenSIPS proxy matrix",
             executor="argv",
-            command=["bash", "crates/sip/sip-proxy/tests/interop/scripts/beta_gate.sh"],
+            command=[
+                "env",
+                "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
+                "bash",
+                "crates/sip/sip-proxy/tests/interop/scripts/beta_gate.sh",
+            ],
             resource="gcp-interop",
             dependencies=["source.remote-clean"],
             paths=["crates/sip/sip-proxy/**", "crates/sip/sip-transport/**", "crates/sip/sip-core/**"],

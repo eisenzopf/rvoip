@@ -13,7 +13,7 @@ use rvoip_sip::api::unified::{AudioSource, Config, UnifiedCoordinator};
 use serde_json::{json, Value};
 use tokio::task::{JoinHandle, JoinSet};
 
-use super::{LatencyHistogram, ResourceSample, ResourceSummary};
+use super::{LatencyHistogram, ResourceSample, ResourceSampler, ResourceSummary};
 
 pub const DEFAULT_PERF_APP_EVENT_CHANNEL_CAPACITY: usize =
     Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY;
@@ -27,6 +27,7 @@ pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
 pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
 pub const BURST_RSS_DIAGNOSTIC_SETTLE_SECS: usize = 5;
 pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
+pub const BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS: u64 = 5;
 pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
     MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
 /// Full endpoint-retention snapshots walk and serialize every owned runtime
@@ -97,6 +98,25 @@ pub fn resource_sampling_diagnostics(role: &str, in_process_enabled: bool) -> se
         "disable_env": DISABLE_IN_PROCESS_RESOURCE_SAMPLER_ENV,
         "external_diagnostics_dir": std::env::var(EXTERNAL_RESOURCE_DIAGNOSTICS_DIR_ENV).ok(),
     })
+}
+
+/// Measure RSS after teardown and exact structural-retention capture have
+/// completed. A new baseline keeps allocator page activity from those
+/// operations out of the authoritative quiescent-runtime slope.
+pub async fn sample_settled_rss_window(
+    role: &str,
+    minimum_window_secs: f64,
+) -> (ResourceSummary, Duration) {
+    let minimum_window_secs = minimum_window_secs.ceil().max(1.0) as u64;
+    let observation = Duration::from_secs(
+        minimum_window_secs.saturating_add(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
+    );
+    let sampler = ResourceSampler::start_with_output(
+        Duration::from_secs(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
+        diagnostic_sample_path(role, "settled_resource"),
+    );
+    tokio::time::sleep(observation).await;
+    (sampler.stop().await, observation)
 }
 
 pub fn media_receive_diagnostics() -> serde_json::Value {
@@ -2141,10 +2161,13 @@ pub enum RssGatePolicy {
     /// Long-soak authority: qualify the final ten minutes under load and fail
     /// separately if that complete window was not captured.
     ActiveTail600,
-    /// Short/burst authority: require the full scenario-specific post-drain
-    /// coverage, then qualify its settled final 60 seconds. The full-window
-    /// slope remains diagnostic so bounded cleanup settling stays visible.
+    /// Compatibility policy for short monolithic soak invocations whose RSS
+    /// series includes both active load and the declared post-drain period.
     PostDrainOrTail,
+    /// Short/burst authority: require a complete observation captured after
+    /// teardown and structural retention checks, then qualify its final 60
+    /// seconds as quiescent runtime behavior.
+    SettledTail60,
 }
 
 pub fn rss_result_metrics(
@@ -2214,6 +2237,10 @@ pub fn rss_result_metrics(
             (sustained_growth_mb_per_hr, "post_drain_tail_60s")
         }
         RssGatePolicy::PostDrainOrTail => (sustained_growth_mb_per_hr, "tail"),
+        RssGatePolicy::SettledTail60 if post_drain_samples.len() >= 2 => {
+            (sustained_growth_mb_per_hr, "settled_tail_60s")
+        }
+        RssGatePolicy::SettledTail60 => (sustained_growth_mb_per_hr, "settled_tail_incomplete"),
     };
     let windows = rss_window_summaries(
         &resources.samples,

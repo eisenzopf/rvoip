@@ -2431,9 +2431,9 @@ mod tests {
             640.0,
             640.0,
             40.0,
-            support::soak::RssGatePolicy::PostDrainOrTail,
+            support::soak::RssGatePolicy::SettledTail60,
         );
-        assert_eq!(rss.gate_window, "post_drain_tail_60s");
+        assert_eq!(rss.gate_window, "settled_tail_60s");
         assert!(rss.gate_growth_mb_per_hr.abs() < 0.000_001);
         assert!(rss.post_drain_growth_mb_per_hr > 0.0);
         assert!(rss.active_tail_growth_mb_per_hr > 30.0);
@@ -2459,10 +2459,10 @@ mod tests {
             550.0,
             550.0,
             130.0,
-            support::soak::RssGatePolicy::PostDrainOrTail,
+            support::soak::RssGatePolicy::SettledTail60,
         );
 
-        assert_eq!(rss.gate_window, "post_drain_tail_60s");
+        assert_eq!(rss.gate_window, "settled_tail_60s");
         assert!((rss.gate_growth_mb_per_hr - 10.01).abs() < 0.000_001);
         assert!(rss.gate_growth_mb_per_hr > 10.0);
     }
