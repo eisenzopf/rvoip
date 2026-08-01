@@ -53,6 +53,45 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(generated, self.catalog)
 
+    def test_fuzz_gates_run_from_their_fuzz_crate(self) -> None:
+        fuzz_gates = [
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("security.fuzz-")
+        ]
+        self.assertEqual(len(fuzz_gates), 10)
+        for gate in fuzz_gates:
+            with self.subTest(gate=gate["id"]):
+                self.assertIn(
+                    gate["working_directory"],
+                    {"crates/sip/fuzz", "crates/media/fuzz"},
+                )
+                self.assertNotIn("--manifest-path", gate["command"])
+
+    def test_multi_hour_performance_gates_are_isolated_from_perf_batch(self) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        soak_ids = {
+            "perf.monolithic-soak",
+            "perf.media-burst-matrix",
+            "perf.soak-candidate",
+        }
+        self.assertEqual(
+            {by_id[gate_id]["resource_class"] for gate_id in soak_ids},
+            {"gcp-performance-soak"},
+        )
+        matrix = gates.matrix_for(
+            [
+                {"id": gate_id, "decision": "RUN"}
+                for gate_id in sorted(soak_ids | {"perf.resiliency-all"})
+            ],
+            by_id,
+        )
+        soak_shards = [
+            shard for shard in matrix if shard["resource_class"] == "gcp-performance-soak"
+        ]
+        self.assertEqual(len(soak_shards), 3)
+        self.assertTrue(all(len(shard["gates"]) == 1 for shard in soak_shards))
+
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
         second = {"command": ["true"], "id": "a"}
