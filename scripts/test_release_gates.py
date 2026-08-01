@@ -53,7 +53,7 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(generated, self.catalog)
 
-    def test_fuzz_gates_run_from_their_fuzz_crate(self) -> None:
+    def test_fuzz_gates_select_their_fuzz_crate_explicitly(self) -> None:
         fuzz_gates = [
             gate
             for gate in self.catalog["gates"]
@@ -62,11 +62,15 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(len(fuzz_gates), 10)
         for gate in fuzz_gates:
             with self.subTest(gate=gate["id"]):
-                self.assertIn(
-                    gate["working_directory"],
-                    {"crates/sip/fuzz", "crates/media/fuzz"},
-                )
                 self.assertNotIn("--manifest-path", gate["command"])
+                index = gate["command"].index("--fuzz-dir")
+                self.assertIn(
+                    gate["command"][index + 1],
+                    {
+                        "{workspace}/crates/sip/fuzz",
+                        "{workspace}/crates/media/fuzz",
+                    },
+                )
 
     def test_multi_hour_performance_gates_are_isolated_from_perf_batch(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
