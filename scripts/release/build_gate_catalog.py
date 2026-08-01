@@ -108,10 +108,6 @@ for _suffix, _target in FUZZ_TARGETS.items():
         "fuzz",
         "run",
         _target,
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml"
-        if _suffix in {"sip-message", "uri", "header", "sdp"}
-        else "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10",
@@ -250,6 +246,14 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
 def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages: list[str]) -> dict[str, Any]:
     command = normalized_command(record)
     executor = "argv" if command else "legacy-group"
+    working_directory = "."
+    if record["id"].startswith("security.fuzz-"):
+        suffix = record["id"].removeprefix("security.fuzz-")
+        working_directory = (
+            "crates/sip/fuzz"
+            if suffix in {"sip-message", "uri", "header", "sdp"}
+            else "crates/media/fuzz"
+        )
     if record["id"] == "source.clean-start":
         # The remote runner can verify this directly without invoking the
         # macOS-only beta wrapper.
@@ -263,7 +267,7 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         "executor": executor,
         "command": command,
         "display_command": record.get("sanitized_argv"),
-        "working_directory": ".",
+        "working_directory": working_directory,
         "dependencies": dependencies(record, records),
         "resource_class": resource_class(record),
         "timeout_minutes": max(5, math.ceil(duration / 60 * 2) + 5),

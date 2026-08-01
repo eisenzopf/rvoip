@@ -2181,8 +2181,6 @@
         "fuzz",
         "run",
         "sip_message",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2212,7 +2210,7 @@
         75
       ],
       "timeout_minutes": 7,
-      "working_directory": "."
+      "working_directory": "crates/sip/fuzz"
     },
     {
       "affected_crates": [],
@@ -2229,8 +2227,6 @@
         "fuzz",
         "run",
         "uri",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2260,7 +2256,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/sip/fuzz"
     },
     {
       "affected_crates": [],
@@ -2277,8 +2273,6 @@
         "fuzz",
         "run",
         "header",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2308,7 +2302,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/sip/fuzz"
     },
     {
       "affected_crates": [],
@@ -2325,8 +2319,6 @@
         "fuzz",
         "run",
         "sdp",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2356,7 +2348,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/sip/fuzz"
     },
     {
       "affected_crates": [],
@@ -2373,8 +2365,6 @@
         "fuzz",
         "run",
         "rtp_packet",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2404,7 +2394,7 @@
         75
       ],
       "timeout_minutes": 7,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
@@ -2421,8 +2411,6 @@
         "fuzz",
         "run",
         "rtcp_packet",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2452,7 +2440,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
@@ -2469,8 +2457,6 @@
         "fuzz",
         "run",
         "srtp_unprotect",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2500,7 +2486,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
@@ -2517,8 +2503,6 @@
         "fuzz",
         "run",
         "dtls_record",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2548,7 +2532,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
@@ -2565,8 +2549,6 @@
         "fuzz",
         "run",
         "stun_response",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2596,7 +2578,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
@@ -2613,8 +2595,6 @@
         "fuzz",
         "run",
         "g711_unpack",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -2644,7 +2624,7 @@
         75
       ],
       "timeout_minutes": 6,
-      "working_directory": "."
+      "working_directory": "crates/media/fuzz"
     },
     {
       "affected_crates": [],
