@@ -16,7 +16,7 @@ use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::respond::AuthScheme;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
-use rvoip_sip::{SipTraceConfig, SipTraceDirection};
+use rvoip_sip::{SessionError, SipTraceConfig, SipTraceDirection};
 
 fn cfg(name: &str, port: u16) -> Config {
     let mut c = Config::local(name, port);
@@ -132,11 +132,16 @@ async fn assert_call_reached_terminal(
     coordinator: &std::sync::Arc<UnifiedCoordinator>,
     id: &CallId,
 ) {
-    coordinator
+    match coordinator
         .session(id)
         .wait_for_end(Some(Duration::from_secs(8)))
         .await
-        .expect("overload-rejected caller call must reach a terminal state");
+    {
+        Ok(_) | Err(SessionError::SessionNotFound(_)) => {}
+        Err(error) => panic!(
+            "overload-rejected caller call must reach a terminal state or be fully removed: {error}"
+        ),
+    }
 }
 
 async fn wait_for_no_sessions(coordinator: &UnifiedCoordinator, timeout: Duration) -> bool {
