@@ -107,9 +107,10 @@ if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
   # Ubuntu packages the SIPp binary as `sip-tester`; `sipp` is not a package.
   # Keep these heavyweight, network-facing tools off performance-only workers.
   apt-get install -y --no-install-recommends \
-    baresip docker.io netcat-openbsd openssl sip-tester tshark
+    baresip docker-compose-v2 docker.io netcat-openbsd openssl sip-tester tshark
   command -v sipp >/dev/null
   command -v tshark >/dev/null
+  docker compose version >/dev/null
 elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]; then
   # This performance test otherwise treats a missing external SIPp binary as a
   # local-development skip. Release qualification must execute it, not skip it.

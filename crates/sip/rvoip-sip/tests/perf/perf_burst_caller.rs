@@ -25,14 +25,14 @@ use support::burst::{
     BURST_ALICE_MEDIA_END, BURST_ALICE_MEDIA_START, BURST_BOB_MEDIA_END, BURST_BOB_MEDIA_START,
 };
 use support::soak::{
-    admission_diagnostics, burst_retention_drain_wait, diagnostic_artifact_path,
-    diagnostic_sample_path, endpoint_global_retained_total, endpoint_metric,
-    endpoint_retained_total, endpoint_retention_summary, in_process_resource_sampler_enabled,
-    media_receive_diagnostics, media_setup_raw_diagnostics, media_setup_timing_diagnostics,
-    memory_diagnostic_interval, memory_diagnostic_summary, read_required_u16_env,
-    resource_sampling_diagnostics, round2, round4, sip_dialog_raw_diagnostics,
-    sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
-    MemoryDiagnosticSampler, RssGrowthGate, MIN_RETENTION_DRAIN_WAIT_SECS,
+    admission_diagnostics, burst_retention_drain_wait, capture_endpoint_retention_sample,
+    diagnostic_artifact_path, diagnostic_sample_path, endpoint_global_retained_total,
+    endpoint_metric, endpoint_retained_total, endpoint_retention_summary,
+    in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
+    media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
+    read_required_u16_env, resource_sampling_diagnostics, round2, round4,
+    sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile,
+    EndpointRetentionSampler, MemoryDiagnosticSampler, RssGrowthGate,
 };
 use support::{
     CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary,
@@ -396,15 +396,11 @@ async fn perf_burst_caller() {
     .await;
     let active_wall = started.elapsed();
 
-    let retention_snapshot_wait =
-        Duration::from_secs(MIN_RETENTION_DRAIN_WAIT_SECS.try_into().unwrap());
-    tokio::time::sleep(retention_snapshot_wait).await;
-    let retention_series = retention_sampler.stop().await;
-    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
-    // Keep captured diagnostics allocated but quiescent during the final RSS
-    // tail. This measures the runtime after SIP retention expiry without
-    // measuring periodic diagnostic JSON construction.
-    tokio::time::sleep(retention_drain_wait.saturating_sub(retention_snapshot_wait)).await;
+    let mut retention_series = retention_sampler.stop_periodic().await;
+    // Structural snapshots walk every owned runtime index and perturb the
+    // allocator. Keep the complete drain/RSS window quiet, then capture the
+    // exact final retention evidence after process sampling has stopped.
+    tokio::time::sleep(retention_drain_wait).await;
     // End process sampling at the declared drain boundary. Retention capture
     // and report construction allocate diagnostic data and are not part of
     // the runtime-under-test RSS window.
@@ -417,6 +413,11 @@ async fn perf_burst_caller() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
+    let final_sample =
+        capture_endpoint_retention_sample("burst_caller", "after_drain", started, &clients[0].peer)
+            .await;
+    retention_series.record_sample("burst_caller", final_sample);
+    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
     let retained_after_drain = final_retention_all.retained_total;
     let rss = support::soak::rss_result_metrics(
         &resources,

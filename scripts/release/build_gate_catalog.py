@@ -237,7 +237,12 @@ def affected_paths(record: dict[str, Any], command: list[str] | None) -> list[st
             "crates/foundation/**",
         ]
     if gate_id.startswith("interop."):
-        return ["crates/sip/**", "crates/media/**"]
+        return [
+            "crates/sip/**",
+            "crates/media/**",
+            "infra/release-runners/interop-lifecycle.sh",
+            "infra/release-runners/pbx/**",
+        ]
     if gate_id.startswith("security."):
         return ["Cargo.lock", "deny.toml", "crates/**"]
     if gate_id.startswith("source.") or gate_id.startswith("report."):

@@ -2671,7 +2671,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2711,7 +2713,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2752,7 +2756,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2801,7 +2807,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2842,7 +2850,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2883,7 +2893,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2924,7 +2936,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -2973,7 +2987,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3014,7 +3030,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3055,7 +3073,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3098,7 +3118,9 @@
       ],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3144,7 +3166,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3185,7 +3209,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3231,7 +3257,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3272,7 +3300,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
@@ -3313,7 +3343,9 @@
       "affected_crates": [],
       "affected_paths": [
         "crates/sip/**",
-        "crates/media/**"
+        "crates/media/**",
+        "infra/release-runners/interop-lifecycle.sh",
+        "infra/release-runners/pbx/**"
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
