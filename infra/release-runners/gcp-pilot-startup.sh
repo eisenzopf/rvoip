@@ -108,6 +108,10 @@ if [[ "$PROFILE" == smoke ]]; then
   cargo check -p rvoip-rtc --all-targets --locked
 elif [[ "$PROFILE" == workspace ]]; then
   scripts/test_all.sh
+  cargo test -p rvoip-users-core \
+    --test security_timing_attack_tests \
+    --locked \
+    -- --ignored --test-threads=1 --nocapture
 else
   echo "unsupported fixed qualification profile: $PROFILE" >&2
   exit 2

@@ -32,6 +32,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  credential-timing:
+    name: Credential timing invariance
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: nightly-credential-timing
+      - name: Run timing-sensitive credential tests serially
+        run: >-
+          cargo test -p rvoip-users-core
+          --test security_timing_attack_tests
+          --locked
+          -- --ignored --test-threads=1 --nocapture
+
   interop:
     runs-on: ubuntu-latest
     timeout-minutes: 30

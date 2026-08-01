@@ -19,6 +19,7 @@ async fn setup_test_auth_service() -> (AuthenticationService, TempDir) {
 }
 
 #[tokio::test]
+#[ignore = "timing-sensitive: run serially in nightly and release qualification"]
 async fn test_constant_time_authentication() {
     let (auth_service, _temp_dir) = setup_test_auth_service().await;
 
@@ -113,6 +114,7 @@ async fn test_constant_time_authentication() {
 }
 
 #[tokio::test]
+#[ignore = "timing-sensitive: run serially in nightly and release qualification"]
 async fn test_password_length_timing_invariance() {
     let (auth_service, _temp_dir) = setup_test_auth_service().await;
 
@@ -181,6 +183,7 @@ async fn test_password_length_timing_invariance() {
 }
 
 #[tokio::test]
+#[ignore = "timing-sensitive: run serially in nightly and release qualification"]
 async fn test_user_enumeration_prevention() {
     let (auth_service, _temp_dir) = setup_test_auth_service().await;
 
