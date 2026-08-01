@@ -1,0 +1,20 @@
+[profile.ci]
+fail-fast = false
+status-level = "fail"
+final-status-level = "slow"
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci.junit]
+path = "target/nextest/junit.xml"
+store-success-output = false
+store-failure-output = true
+
+[test-groups]
+fixed-network-resource = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+# These targets contain examples or integration harnesses with documented
+# fixed loopback ports. Keep them serialized until the parity pilot proves
+# that process-per-test execution is safe or those ports become ephemeral.
+filter = 'binary(/(cross_transport_bridge|sip_only_orchestrator|orchestrator_bridge)/)'
+test-group = "fixed-network-resource"

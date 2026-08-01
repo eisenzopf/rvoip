@@ -1,0 +1,139 @@
+name: GCP qualification pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Non-publishing test scope
+        required: true
+        default: workspace
+        type: choice
+        options:
+          - smoke
+          - workspace
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: gcp-qualification-pilot
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Ephemeral GCP qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out controller definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Create one ephemeral worker
+        id: worker
+        env:
+          CANDIDATE: ${{ github.sha }}
+          PROFILE: ${{ inputs.profile }}
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
+          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          worker="rvoip-pilot-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          prefix="pilot/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "name=$worker" >> "$GITHUB_OUTPUT"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          gcloud compute instances create "$worker" \
+            --project "$PROJECT" \
+            --zone "$ZONE" \
+            --machine-type n2-standard-8 \
+            --network "$NETWORK" \
+            --subnet "$SUBNET" \
+            --image-family ubuntu-2404-lts-amd64 \
+            --image-project ubuntu-os-cloud \
+            --boot-disk-type pd-balanced \
+            --boot-disk-size 200GB \
+            --boot-disk-auto-delete \
+            --service-account "$RUNNER_SERVICE_ACCOUNT" \
+            --scopes cloud-platform \
+            --shielded-secure-boot \
+            --shielded-vtpm \
+            --shielded-integrity-monitoring \
+            --labels rvoip-role=qualification-pilot,managed-by=github-actions \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-profile=${PROFILE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET}" \
+            --metadata-from-file startup-script=infra/release-runners/gcp-pilot-startup.sh
+
+      - name: Wait for immutable result
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          WORKER: ${{ steps.worker.outputs.name }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 700); do
+            if gcloud storage cat "gs://${BUCKET}/${PREFIX}/result.json" > result.json 2>/dev/null; then
+              exit 0
+            fi
+            state="$(gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" --format='value(status)' 2>/dev/null || true)"
+            if [[ "$state" == TERMINATED ]]; then
+              echo "worker terminated without uploading a result" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "qualification exceeded the five-hour evidence deadline" >&2
+          exit 1
+
+      - name: Download qualification log
+        if: always() && steps.worker.outputs.prefix != ''
+        continue-on-error: true
+        env:
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+        run: gcloud storage cp "gs://${BUCKET}/${PREFIX}/qualification.log" qualification.log
+
+      - name: Delete worker and attached disk
+        if: always() && steps.worker.outputs.name != ''
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          WORKER: ${{ steps.worker.outputs.name }}
+        run: >-
+          gcloud compute instances delete "$WORKER"
+          --project "$PROJECT"
+          --zone "$ZONE"
+          --quiet
+
+      - name: Upload controller evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gcp-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            result.json
+            qualification.log
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Require a passing non-publishing receipt
+        if: always()
+        run: |
+          test -f result.json
+          jq -e \
+            --arg candidate "$GITHUB_SHA" \
+            '.candidate_sha == $candidate and .status == "PASS" and .publishing_attempted == false' \
+            result.json

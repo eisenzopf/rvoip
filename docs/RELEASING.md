@@ -11,43 +11,67 @@ remain experimental.
 
 ## Prepare
 
-Begin from a clean branch based on current `origin/main`:
+Use the **Prepare release PR** workflow with the next version, for example
+`0.3.6`. It checks out the current `main`, runs the unified preparation and
+release-tooling tests, and opens a draft release pull request. The release PR
+must pass the normal `PR Gate`; it is never pushed directly to `main`.
 
-```sh
-scripts/release.sh audit
-scripts/release.sh prepare --version X.Y.Z
-git diff
-git add Cargo.toml Cargo.lock crates
-git commit -m "release: unify workspace at X.Y.Z"
-git push origin HEAD:main
-```
-
-`prepare` rejects unstable SemVer strings, version downgrades, versions already
-present on crates.io, dirty trees, missing internal dependency versions, and a
-workspace inventory other than the expected 44 publishable packages. It
-updates package inheritance and the lockfile transactionally and runs the
-workspace all-target check.
+The underlying `scripts/release.sh prepare` command rejects unstable SemVer
+strings, version downgrades, versions already present on crates.io, dirty
+trees, missing internal dependency versions, and a workspace inventory other
+than the expected 44 publishable packages. It updates package inheritance and
+the lockfile transactionally.
 
 ## Verify
 
-Switch to `main` and require it to equal the current remote:
+After the preparation PR merges, run **Release qualification** for that exact
+`main` commit. Use `remote-core` for a hosted-runner dry run and
+`remote-release` for the complete release profile. The first candidate should
+set `first_candidate=true`; after a fix, provide the prior qualification run
+and the previous candidate SHA so exact matching evidence can be reused while
+failed and affected gates are rerun.
+
+The workflow produces a candidate-bound plan, per-gate receipts, and one
+aggregate qualification receipt. A gate can be reused only when its source,
+transitive workspace dependency closure, gate definition, toolchain/container,
+resource class, and thresholds have identical SHA-256 inputs. Unknown changes
+fail closed to a full run. The aggregate is signed as a release evidence
+artifact and is the only qualification input accepted by protected
+publication.
+
+The release verifier also checks the catalog's 108-gate coverage ledger. It
+rejects a publication aggregate while any legacy gate lacks a structured remote
+replacement, even if the selected remote profile itself passes. This prevents
+the migration from silently reducing release coverage; the existing beta
+wrapper remains available for that compatibility work.
+
+The local command remains available for diagnosis or emergency recovery, but
+it is not the normal release authority:
 
 ```sh
-git switch main
-git pull --ff-only origin main
+scripts/release.sh audit
 scripts/release.sh verify --version X.Y.Z \
-  --beta-report-root /path/to/the/verified/beta-report
+  --remote-qualification /path/to/aggregate.json
 ```
 
-Verification checks the tracked beta reporting attestation, workspace metadata,
-all targets, unit tests, integration/example targets, doctests, and the exact
-packaged file manifest for every crate. Before first publication, Cargo cannot
-build a dependent `.crate` archive until that crate's new internal dependency
-version is visible on crates.io, so verification hashes archives only where
-the target-version registry graph is already resolvable. Its receipt under
-`target/release-logs/X.Y.Z/verification.json` binds the exact Git commit,
-ordered 44-crate graph, all 44 file-manifest hashes, and every archive hash
-available before publication.
+Verification still validates the unified workspace metadata, exact 44-crate
+package inventory, package file manifests, and registry-resolvable archive
+hashes. Before first publication, Cargo cannot build a dependent `.crate`
+archive until that crate's new internal dependency version is visible on
+crates.io, so archive hashes are completed during the topological publication
+run.
+
+The `remote-core` profile uses GitHub-hosted runners. The complete
+`remote-release` profile also schedules performance, soak, and PBX/SIPp gates
+to ephemeral runners with the labels `self-hosted`, `rvoip-release`, and the
+resource class (`gcp-performance`, `gcp-performance-soak`, or `gcp-interop`).
+Those runners must be provisioned separately with workload identity and a
+single-job cleanup policy; they never receive the crates.io token. The
+`remote-release` workflow also requires the repository variable
+`RVOIP_GCP_RUNNERS_READY=true`, which should be set only after that fleet is
+verified. Until then, use `remote-core` for dry runs and retain the legacy beta
+wrapper for the unautomated specialty evidence rather than treating a queued
+job as a release result.
 
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.
@@ -127,9 +151,9 @@ it. The resulting receipt copies the ephemeral PostgreSQL environment so the
 targeted qualification cannot be mistaken for a test against an unspecified
 or persistent database.
 
-The four verification inputs `--beta-report-root`,
-`--beta-exception-attestation`, `--beta-carry-forward-attestation`, and
-`--targeted-delta-attestation` are mutually exclusive. A targeted receipt says
+The verification inputs `--beta-report-root`, `--beta-exception-attestation`,
+`--beta-carry-forward-attestation`, `--targeted-delta-attestation`, and
+`--remote-qualification` are mutually exclusive. A targeted receipt says
 `NOT-RERUN` for the beta, broad workspace tests, and doctests; it never
 relabels them as passing. Receipt schema v4 records the attestation hash,
 targeted commands, PostgreSQL evidence hash, and the manifest/compile/package
@@ -137,13 +161,21 @@ checks that did run.
 
 ## Publish
 
-The default is non-publishing:
+Use the protected **Publish protected release** workflow and provide the
+successful remote-release qualification run ID. Its default is a
+non-publishing dry run:
 
 ```sh
 scripts/release.sh publish --version X.Y.Z
 ```
 
-Review the dry-run log, authenticate Cargo, and then execute:
+The workflow resolves and verifies the signed aggregate, checks that it binds
+the current `main` commit and current gate catalog, and runs the complete
+topological package preflight. The crates.io token exists only in the
+approval-protected `release-publish` environment and is never available to PR,
+nightly, or performance runners.
+
+After environment approval, set `execute=true` in the workflow to publish:
 
 ```sh
 scripts/release.sh publish --version X.Y.Z --execute
@@ -160,15 +192,11 @@ An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;
 any mismatch fails closed.
 
-After all 44 versions are visible, create the annotated tag and GitHub release:
-
-```sh
-git tag -a vX.Y.Z -m "rvoip X.Y.Z"
-git push origin vX.Y.Z
-gh release create vX.Y.Z --target main --title "rvoip X.Y.Z" --notes-file NOTES.md
-```
-
-Do not create the tag or GitHub release for a partial crates.io publication.
+After all 44 versions are visible, the workflow creates the protected
+annotated tag and GitHub release with generated notes listing merged PRs by
+release-note label. It refuses to tag or release a partial crates.io
+publication. An interrupted publication is resumable; an existing version is
+skipped only when its registry checksum matches the locally verified archive.
 
 ## Deprecated Entrypoints
 

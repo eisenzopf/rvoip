@@ -1,0 +1,269 @@
+name: PR Gate
+
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: Plan affected checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      reason: ${{ steps.plan.outputs.reason }}
+      candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
+      shard_jobs: ${{ steps.plan.outputs.shard_jobs }}
+      shard_job_count: ${{ steps.plan.outputs.shard_job_count }}
+      shard_count: ${{ steps.plan.outputs.shard_count }}
+      specialty: ${{ steps.plan.outputs.specialty }}
+      specialty_count: ${{ steps.plan.outputs.specialty_count }}
+    steps:
+      - name: Check out candidate merge
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Calculate affected crates and gates
+        id: plan
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          base="${PR_BASE_SHA:-$(git merge-base origin/main HEAD)}"
+          head="${PR_HEAD_SHA:-HEAD}"
+          python3 scripts/ci/pr_plan.py \
+            --base "$base" \
+            --head "$head" \
+            --candidate HEAD \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Summarize selection
+        shell: bash
+        run: |
+          {
+            echo "## PR test selection"
+            echo
+            echo "- Mode: \`${{ steps.plan.outputs.mode }}\`"
+            echo "- Candidate: \`${{ steps.plan.outputs.candidate_sha }}\`"
+            echo "- Reason: ${{ steps.plan.outputs.reason }}"
+            echo "- Crate shards: ${{ steps.plan.outputs.shard_count }}"
+            echo "- Specialty gates: ${{ steps.plan.outputs.specialty_count }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable plan input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-evidence-plan
+          path: target/ci-plan/plan.json
+          retention-days: 14
+          if-no-files-found: error
+
+  policy:
+    name: Universal policy
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: rustfmt
+
+      - name: Formatting and CI policy tests
+        run: >-
+          python3 scripts/ci/run_checks.py policy
+          --name policy
+          --output target/ci-receipts/policy.json
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@b66acf5e9fe20f8aba065be86778a8a4c846f902 # v2
+        with:
+          command: check advisories bans sources
+
+      - name: Upload policy receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-evidence-policy
+          path: target/ci-receipts/policy.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  crate-tests:
+    name: Crate shard ${{ matrix.shard_id }} (${{ matrix.check }})
+    needs: plan
+    if: needs.plan.outputs.shard_job_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.shard_jobs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: clippy
+
+      - name: Restore content-addressed Rust cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: pr-shard-${{ matrix.shard_id }}-${{ matrix.check }}
+
+      - name: Install system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
+
+      - name: Run selected crate check
+        run: >-
+          python3 scripts/ci/run_checks.py shard-${{ matrix.check }}
+          --name shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          --packages '${{ matrix.packages_csv }}'
+          --output target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+
+      - name: Upload shard receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-evidence-shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          path: target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  specialty:
+    name: Specialty ${{ matrix.gate }}
+    needs: plan
+    if: needs.plan.outputs.specialty_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.specialty) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Restore content-addressed Rust cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: pr-specialty-${{ matrix.gate }}
+
+      - name: Set up Node.js for browser gate
+        if: matrix.gate == 'browser-smoke'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: tests/browser-smoke/package-lock.json
+
+      - name: Install common native dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake lsof
+
+      - name: Run selected specialty gate
+        run: >-
+          python3 scripts/ci/run_checks.py specialty
+          --name 'specialty-${{ matrix.gate }}'
+          --gate '${{ matrix.gate }}'
+          --output 'target/ci-receipts/specialty-${{ matrix.gate }}.json'
+
+      - name: Upload specialty receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-evidence-specialty-${{ matrix.gate }}
+          path: target/ci-receipts/specialty-${{ matrix.gate }}.json
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload browser diagnostics
+        if: failure() && matrix.gate == 'browser-smoke'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: browser-diagnostics
+          path: tests/browser-smoke/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+  pr-gate:
+    name: PR Gate
+    if: always()
+    needs: [plan, policy, crate-tests, specialty]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download all command evidence
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: pr-evidence-*
+          path: target/pr-evidence
+          merge-multiple: true
+
+      - name: Reconcile required results and receipts
+        run: |
+          python3 scripts/ci/aggregate_receipts.py \
+            --plan target/pr-evidence/plan.json \
+            --evidence target/pr-evidence \
+            --output target/pr-receipt/pr-receipt.json \
+            --job 'plan=${{ needs.plan.result }}' \
+            --job 'policy=${{ needs.policy.result }}' \
+            --job 'crate-tests=${{ needs.crate-tests.result }}' \
+            --job 'specialty=${{ needs.specialty.result }}'
+
+      - name: Publish receipt summary
+        if: always()
+        shell: bash
+        run: |
+          if test -f target/pr-receipt/pr-receipt.json; then
+            {
+              echo "## PR Gate receipt"
+              echo
+              echo "- Status: \`$(jq -r .status target/pr-receipt/pr-receipt.json)\`"
+              echo "- Mode: \`$(jq -r .plan.mode target/pr-receipt/pr-receipt.json)\`"
+              echo "- Selected crates: $(jq '.plan.selected_crates | length' target/pr-receipt/pr-receipt.json)"
+              echo "- Specialty gates: $(jq '.plan.specialty_gates | length' target/pr-receipt/pr-receipt.json)"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload final PR test receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr-test-receipt
+          path: target/pr-receipt/pr-receipt.json
+          retention-days: 14
+          if-no-files-found: warn

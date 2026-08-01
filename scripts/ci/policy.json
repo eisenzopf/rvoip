@@ -1,0 +1,120 @@
+{
+  "schema": "rvoip-ci-impact-policy-v1",
+  "max_shards": 6,
+  "target_shard_weight": 12,
+  "full_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain",
+    "rust-toolchain.toml",
+    ".cargo/**",
+    ".github/workflows/**",
+    "scripts/ci/**",
+    "scripts/test_all.sh",
+    "deny.toml"
+  ],
+  "known_policy_paths": [
+    ".github/CODEOWNERS",
+    ".github/dependabot.yml",
+    ".github/pull_request_template.md",
+    ".github/release.yml",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "README.md"
+  ],
+  "example_projects": [
+    "01-quickstart-p2p",
+    "02-softphone-audio",
+    "03-register-to-pbx",
+    "04-call-control",
+    "05-blind-transfer",
+    "06-attended-transfer",
+    "07-secure-call-srtp",
+    "08-tls-transport",
+    "09-ivr-server",
+    "10-call-center-b2bua",
+    "11-ai-harness-demo",
+    "12-customer-escalation-sip-webrtc",
+    "13-sip-to-amazon-connect",
+    "14-vapi-agent"
+  ],
+  "specialty_rules": [
+    {
+      "gate": "browser-smoke",
+      "patterns": [
+        "tests/browser-smoke/**",
+        "crates/uctp/rvoip-uctp/**",
+        "crates/uctp/rvoip-websocket/**",
+        "crates/uctp/rvoip-quic/**",
+        "crates/uctp/rvoip-webtransport/**"
+      ]
+    },
+    {
+      "gate": "examples",
+      "patterns": [
+        "examples/**",
+        "crates/rvoip/**",
+        "crates/sip/rvoip-sip/src/api/**"
+      ]
+    },
+    {
+      "gate": "examples-smoke",
+      "patterns": [
+        "examples/**"
+      ]
+    },
+    {
+      "gate": "release-tooling",
+      "patterns": [
+        "scripts/release.py",
+        "scripts/release.sh",
+        "scripts/release/**",
+        "scripts/release_*.py",
+        "scripts/test_release*.py",
+        "docs/RELEASING.md"
+      ]
+    },
+    {
+      "gate": "rtp-interop",
+      "patterns": [
+        "scripts/test_libsrtp_interop.sh",
+        "crates/media/rtp-core/src/security/**",
+        "crates/media/rtp-core/src/srtp/**",
+        "crates/media/rtp-core/tests/srtp_*.rs"
+      ]
+    },
+    {
+      "gate": "vcon-postgres",
+      "patterns": [
+        "crates/extensions/rvoip-vcon/**",
+        "crates/extensions/rvoip-vcon-postgres/**",
+        "crates/foundation/rvoip-core/src/vcon.rs",
+        "crates/foundation/rvoip-core/src/store/vcon_store.rs"
+      ]
+    },
+    {
+      "gate": "webrtc-runtime",
+      "patterns": [
+        "crates/webrtc/rvoip-rtc/**",
+        "crates/webrtc/rvoip-webrtc-stack/**",
+        "crates/webrtc/rvoip-webrtc/**"
+      ]
+    }
+  ],
+  "package_weights": {
+    "rvoip-sip": 14,
+    "rvoip-rtp-core": 12,
+    "rvoip-media-core": 10,
+    "rvoip-rtc": 10,
+    "rvoip-webrtc-stack": 9,
+    "rvoip-webrtc": 8,
+    "rvoip-core": 8,
+    "rvoip-codec-core": 7,
+    "rvoip-sip-dialog": 6,
+    "rvoip-sip-core": 5,
+    "rvoip-uctp": 5,
+    "rvoip-quic": 5
+  }
+}

@@ -1,0 +1,80 @@
+name: Prepare release PR
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Stable SemVer without a leading v (for example 0.3.6)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release-prepare
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare v${{ inputs.version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Establish local main branch
+        run: git checkout -B main origin/main
+
+      - name: Prepare all workspace versions
+        env:
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/release.py prepare --version "$VERSION"
+
+      - name: Validate release tooling
+        run: >-
+          python3 -m unittest
+          scripts/test_release.py
+          scripts/test_release_gates.py
+          scripts/test_release_carry_forward_attestation.py
+          scripts/test_release_exception_attestation.py
+
+      - name: Commit release preparation
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v$VERSION"
+          git switch -c "$branch"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add --all
+          git commit -m "Prepare v$VERSION"
+          git push --set-upstream origin "$branch"
+
+      - name: Open draft release pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          branch="release/v$VERSION"
+          body="Automated preparation of all 44 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --draft \
+            --title "Prepare v$VERSION" \
+            --body "$body"
+          # Pull requests opened with GITHUB_TOKEN do not recursively trigger
+          # workflows, so dispatch the same required gate explicitly.
+          gh workflow run pr-gate.yml --ref "$branch"

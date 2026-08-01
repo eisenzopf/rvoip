@@ -1,0 +1,134 @@
+name: Publish protected release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Qualified stable SemVer without a leading v
+        required: true
+        type: string
+      qualification_run_id:
+        description: Successful remote-release qualification run ID
+        required: true
+        type: string
+      execute:
+        description: Publish crates, tag, and create the GitHub release
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish v${{ inputs.version }}
+    environment: release-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out current main
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Restore release packaging cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: release-publish
+
+      - name: Install package build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+
+      - name: Establish exact local main
+        run: git checkout -B main origin/main
+
+      - name: Download signed qualification evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          gh run download "$QUALIFICATION_RUN_ID"
+          --repo "$REPOSITORY"
+          --name release-gate-evidence
+          --dir target/downloaded-qualification
+
+      - name: Resolve and preflight aggregate
+        shell: bash
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          aggregate="$(find target/downloaded-qualification -name aggregate.json -type f -print -quit)"
+          test -n "$aggregate" || {
+            echo "qualification aggregate is missing" >&2
+            exit 1
+          }
+          test "$(jq -r .schema "$aggregate")" = rvoip-release-qualification-v1
+          test "$(jq -r .status "$aggregate")" = PASS
+          test "$(jq -r .profile "$aggregate")" = remote-release
+          test "$(jq -r .candidate_sha "$aggregate")" = "$(git rev-parse HEAD)"
+          gh attestation verify "$aggregate" --repo "$REPOSITORY"
+          echo "REMOTE_QUALIFICATION=$aggregate" >> "$GITHUB_ENV"
+
+      - name: Fresh package and source verification
+        env:
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python3 scripts/release.py verify
+          --version "$VERSION"
+          --remote-qualification "$REMOTE_QUALIFICATION"
+
+      - name: Dry-run or execute resumable topological publication
+        shell: bash
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          args=(publish --version "$VERSION")
+          if test "$EXECUTE" = true; then
+            args+=(--execute)
+          fi
+          python3 scripts/release.py "${args[@]}"
+
+      - name: Attest published package archives
+        if: inputs.execute
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: target/package/*.crate
+
+      - name: Create immutable tag and generated GitHub release
+        if: inputs.execute
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          tag="v$VERSION"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git tag -a "$tag" -m "rvoip $VERSION"
+          git push origin "$tag"
+          gh release create "$tag" \
+            --repo "$REPOSITORY" \
+            --target "$(git rev-parse HEAD)" \
+            --title "rvoip $VERSION" \
+            --generate-notes \
+            --verify-tag

@@ -1,0 +1,11 @@
+gate: performance gate metrics report
+started_at_utc: 2026-07-29T08:48:26Z
+workspace: <workspace>
+command: write_performance_gate_metrics
+
++ write_performance_gate_metrics
+beta performance gate metrics: FAIL: one or more performance gate metrics failed
+
+ended_at_utc: 2026-07-29T08:48:26Z
+duration_seconds: 0
+exit_status: 1
