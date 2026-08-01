@@ -19,6 +19,14 @@ class RunChecksTests(unittest.TestCase):
         with self.assertRaises(run_checks.CheckError):
             run_checks.package_args("safe; touch compromised")
 
+    def test_shard_test_and_clippy_are_independent_commands(self) -> None:
+        tests = run_checks.shard_test_commands("alpha,beta")
+        clippy = run_checks.shard_clippy_commands("alpha,beta")
+        self.assertEqual(len(tests), 1)
+        self.assertEqual(tests[0][0][0:2], ["cargo", "test"])
+        self.assertEqual(len(clippy), 1)
+        self.assertEqual(clippy[0][0][0:2], ["cargo", "clippy"])
+
     def test_example_smoke_preserves_the_hardware_free_matrix(self) -> None:
         commands = run_checks.specialty_commands("examples-smoke", Path("/workspace"))
         self.assertEqual(len(commands), 10)

@@ -26,7 +26,8 @@ jobs:
       mode: ${{ steps.plan.outputs.mode }}
       reason: ${{ steps.plan.outputs.reason }}
       candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
-      shards: ${{ steps.plan.outputs.shards }}
+      shard_jobs: ${{ steps.plan.outputs.shard_jobs }}
+      shard_job_count: ${{ steps.plan.outputs.shard_job_count }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
       specialty: ${{ steps.plan.outputs.specialty }}
       specialty_count: ${{ steps.plan.outputs.specialty_count }}
@@ -112,14 +113,14 @@ jobs:
           if-no-files-found: warn
 
   crate-tests:
-    name: Crate shard ${{ matrix.id }}
+    name: Crate shard ${{ matrix.shard_id }} (${{ matrix.check }})
     needs: plan
-    if: needs.plan.outputs.shard_count != '0'
+    if: needs.plan.outputs.shard_job_count != '0'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.shards) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.shard_jobs) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -132,26 +133,26 @@ jobs:
       - name: Restore content-addressed Rust cache
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
         with:
-          shared-key: pr-shard-${{ matrix.id }}
+          shared-key: pr-shard-${{ matrix.shard_id }}-${{ matrix.check }}
 
       - name: Install system dependencies
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
 
-      - name: Test and lint selected crate closure
+      - name: Run selected crate check
         run: >-
-          python3 scripts/ci/run_checks.py shard
-          --name shard-${{ matrix.id }}
+          python3 scripts/ci/run_checks.py shard-${{ matrix.check }}
+          --name shard-${{ matrix.shard_id }}-${{ matrix.check }}
           --packages '${{ matrix.packages_csv }}'
-          --output target/ci-receipts/shard-${{ matrix.id }}.json
+          --output target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
 
       - name: Upload shard receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pr-evidence-shard-${{ matrix.id }}
-          path: target/ci-receipts/shard-${{ matrix.id }}.json
+          name: pr-evidence-shard-${{ matrix.shard_id }}-${{ matrix.check }}
+          path: target/ci-receipts/shard-${{ matrix.shard_id }}-${{ matrix.check }}.json
           retention-days: 14
           if-no-files-found: warn
 

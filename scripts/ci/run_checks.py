@@ -117,6 +117,35 @@ def shard_commands(packages_csv: str) -> list[tuple[list[str], Path | None, dict
     ]
 
 
+def shard_test_commands(
+    packages_csv: str,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    selected = package_args(packages_csv)
+    return [
+        (
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "--lib",
+                "--tests",
+                "--bins",
+                "--examples",
+                *selected,
+            ],
+            None,
+            None,
+        )
+    ]
+
+
+def shard_clippy_commands(
+    packages_csv: str,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    selected = package_args(packages_csv)
+    return [(["cargo", "clippy", "--locked", "--all-targets", *selected], None, None)]
+
+
 def specialty_commands(
     gate: str, root: Path
 ) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -361,7 +390,17 @@ def start_postgres(root: Path, records: list[dict[str, Any]]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=("policy", "shard", "specialty", "doctest"))
+    parser.add_argument(
+        "kind",
+        choices=(
+            "policy",
+            "shard",
+            "shard-test",
+            "shard-clippy",
+            "specialty",
+            "doctest",
+        ),
+    )
     parser.add_argument("--name", required=True)
     parser.add_argument("--packages", default="")
     parser.add_argument("--gate", default="")
@@ -376,6 +415,10 @@ def main(argv: list[str] | None = None) -> int:
             commands = policy_commands()
         elif args.kind == "shard":
             commands = shard_commands(args.packages)
+        elif args.kind == "shard-test":
+            commands = shard_test_commands(args.packages)
+        elif args.kind == "shard-clippy":
+            commands = shard_clippy_commands(args.packages)
         elif args.kind == "doctest":
             commands = [
                 (["cargo", "test", "--workspace", "--doc", "--locked"], None, None)

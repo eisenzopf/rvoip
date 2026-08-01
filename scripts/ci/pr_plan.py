@@ -271,6 +271,18 @@ def make_plan(
         reason = "changed crates plus transitive reverse dependencies"
 
     shards = make_shards(selected, policy)
+    shard_jobs = [
+        {
+            "id": f"{shard['id']}-{check}",
+            "shard_id": shard["id"],
+            "check": check,
+            "packages": shard["packages"],
+            "packages_csv": shard["packages_csv"],
+            "weight": shard["weight"],
+        }
+        for shard in shards
+        for check in ("test", "clippy")
+    ]
     candidate_sha = (
         run(["git", "rev-parse", f"{candidate}^{{commit}}"], root).strip()
         if candidate
@@ -291,17 +303,19 @@ def make_plan(
         "selected_crates": sorted(selected),
         "specialty_gates": specialty,
         "shards": shards,
+        "shard_jobs": shard_jobs,
     }
 
 
 def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
-    shards = {"include": plan["shards"]}
+    shard_jobs = {"include": plan["shard_jobs"]}
     specialty = {"include": [{"gate": gate} for gate in plan["specialty_gates"]]}
     values = {
         "mode": plan["mode"],
         "reason": plan["reason"],
         "candidate_sha": plan["candidate_sha"] or "",
-        "shards": json.dumps(shards, separators=(",", ":")),
+        "shard_jobs": json.dumps(shard_jobs, separators=(",", ":")),
+        "shard_job_count": str(len(plan["shard_jobs"])),
         "shard_count": str(len(plan["shards"])),
         "specialty": json.dumps(specialty, separators=(",", ":")),
         "specialty_count": str(len(plan["specialty_gates"])),

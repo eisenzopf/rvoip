@@ -87,6 +87,7 @@ class PlannerTests(unittest.TestCase):
         plan = self.plan("docs/guide.md", "crates/alpha/README.md")
         self.assertEqual(plan["mode"], "docs")
         self.assertEqual(plan["shards"], [])
+        self.assertEqual(plan["shard_jobs"], [])
 
     def test_root_lockfile_and_planner_changes_select_full_workspace(self) -> None:
         for path in ("Cargo.lock", "scripts/ci/policy.json"):
@@ -121,13 +122,28 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(sorted(flattened), ["alpha", "beta", "delta", "gamma"])
         self.assertLessEqual(len(first), 3)
 
+    def test_each_shard_has_parallel_test_and_clippy_jobs(self) -> None:
+        plan = self.plan("Cargo.lock")
+        expected = {
+            (shard["id"], check, shard["packages_csv"])
+            for shard in plan["shards"]
+            for check in ("test", "clippy")
+        }
+        actual = {
+            (job["shard_id"], job["check"], job["packages_csv"])
+            for job in plan["shard_jobs"]
+        }
+        self.assertEqual(actual, expected)
+
     def test_github_outputs_are_single_line_json(self) -> None:
         path = self.root / "github-output"
         plan = self.plan("crates/delta/src/lib.rs")
         pr_plan.write_github_outputs(path, plan)
         values = dict(line.split("=", 1) for line in path.read_text().splitlines())
         self.assertEqual(values["mode"], "targeted")
-        self.assertEqual(json.loads(values["shards"])["include"][0]["packages"], ["delta"])
+        jobs = json.loads(values["shard_jobs"])["include"]
+        self.assertEqual({job["check"] for job in jobs}, {"test", "clippy"})
+        self.assertTrue(all(job["packages"] == ["delta"] for job in jobs))
 
 
 if __name__ == "__main__":

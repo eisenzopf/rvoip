@@ -29,13 +29,14 @@ class AggregateTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def write_plan(self, *, shards=None, specialty=None) -> None:
+    def write_plan(self, *, shards=None, shard_jobs=None, specialty=None) -> None:
         self.plan.write_text(
             json.dumps(
                 {
                     "schema": "rvoip-pr-test-plan-v1",
                     "candidate_sha": "c" * 40,
                     "shards": shards or [],
+                    "shard_jobs": shard_jobs if shard_jobs is not None else [],
                     "specialty_gates": specialty or [],
                 }
             )
@@ -81,9 +82,16 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(json.loads(self.output.read_text())["status"], "PASS")
 
     def test_missing_or_failed_matrix_receipt_fails_gate(self) -> None:
-        self.write_plan(shards=[{"id": "1"}], specialty=["browser-smoke"])
+        self.write_plan(
+            shards=[{"id": "1"}],
+            shard_jobs=[
+                {"shard_id": "1", "check": "test"},
+                {"shard_id": "1", "check": "clippy"},
+            ],
+            specialty=["browser-smoke"],
+        )
         self.write_receipt("policy")
-        self.write_receipt("shard-1", "FAIL")
+        self.write_receipt("shard-1-test", "FAIL")
         self.assertEqual(
             self.invoke(
                 "plan=success",

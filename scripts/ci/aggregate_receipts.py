@@ -84,7 +84,11 @@ def main(argv: list[str] | None = None) -> int:
     if not isinstance(candidate_sha, str) or len(candidate_sha) != 40:
         failures.append("impact plan is missing a 40-character candidate SHA")
     expected = {"policy"}
-    expected.update(f"shard-{shard['id']}" for shard in plan.get("shards", []))
+    shard_jobs = plan.get("shard_jobs")
+    if shard_jobs is None:
+        expected.update(f"shard-{shard['id']}" for shard in plan.get("shards", []))
+    else:
+        expected.update(f"shard-{job['shard_id']}-{job['check']}" for job in shard_jobs)
     expected.update(f"specialty-{gate}" for gate in plan.get("specialty_gates", []))
     expected.update(args.required_receipt)
     missing = sorted(expected - set(by_name))
