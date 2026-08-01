@@ -26,6 +26,15 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("contents: write", text)
         self.assertNotIn("pull_request_target", text)
 
+    def test_main_release_tooling_installs_its_fuzz_toolchain(self) -> None:
+        text = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        specialty = text.split("\n  specialty:\n", maxsplit=1)[1].split(
+            "\n  main-gate:\n", maxsplit=1
+        )[0]
+        self.assertIn("Install nightly for release fuzz validation", specialty)
+        self.assertIn("cargo-fuzz@0.13.2", specialty)
+        self.assertGreaterEqual(specialty.count("matrix.gate == 'release-tooling'"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
