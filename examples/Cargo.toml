@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "01-quickstart-p2p",
+    "02-softphone-audio",
+    "03-register-to-pbx",
+    "04-call-control",
+    "05-blind-transfer",
+    "06-attended-transfer",
+    "07-secure-call-srtp",
+    "08-tls-transport",
+    "09-ivr-server",
+    "10-call-center-b2bua",
+    "11-ai-harness-demo",
+    "12-customer-escalation-sip-webrtc",
+    "13-sip-to-amazon-connect",
+    "14-vapi-agent",
+]
+resolver = "2"

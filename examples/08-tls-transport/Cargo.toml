@@ -5,8 +5,6 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
-[workspace]
-
 [dependencies]
 # `dev-insecure-tls` exposes `Config::tls_insecure_skip_verify` so the demo can
 # run against a self-signed dev cert. PRODUCTION builds must omit this feature

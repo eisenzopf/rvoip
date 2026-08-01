@@ -181,7 +181,7 @@ class GateFrameworkTests(unittest.TestCase):
                 self.assertIn("--locked", command)
                 manifest_index = command.index("--manifest-path") + 1
                 manifest = ROOT / command[manifest_index].replace("{workspace}/", "")
-                lockfile = manifest.with_name("Cargo.lock")
+                lockfile = ROOT / "examples/Cargo.lock"
                 self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
                 self.assertIn('rust-version = "1.91"', manifest.read_text())
 

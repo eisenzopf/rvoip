@@ -8,8 +8,6 @@ publish = false
 # Standalone project: this empty table detaches the example from the parent
 # rvoip workspace so `cargo build` here resolves against the example's own
 # lockfile while still pulling `rvoip-sip` by path from the live tree.
-[workspace]
-
 [dependencies]
 # version + path: builds against the LOCAL tree now (so the example always
 # reflects current code and breaks loudly on API drift) while recording the

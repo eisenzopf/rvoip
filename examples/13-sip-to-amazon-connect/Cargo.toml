@@ -5,8 +5,6 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
-[workspace]
-
 [features]
 default = []
 # Use the real Amazon Connect control plane (needs AWS creds + env vars).

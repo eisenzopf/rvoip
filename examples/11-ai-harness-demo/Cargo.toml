@@ -5,8 +5,6 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
-[workspace]
-
 [dependencies]
 async-trait = "0.1"
 bytes = "1"

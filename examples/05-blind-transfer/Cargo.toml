@@ -5,8 +5,6 @@ edition = "2021"
 rust-version = "1.91"
 publish = false
 
-[workspace]
-
 [dependencies]
 # Copying into your own project? Drop `path` and keep: rvoip-sip = "0.3.2"
 rvoip-sip = { version = "0.3.2", path = "../../crates/sip/rvoip-sip" }
