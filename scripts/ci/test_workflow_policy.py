@@ -72,6 +72,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         ):
             self.assertIn(profile, startup)
 
+    def test_release_workers_install_interop_tools_only_for_interop(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+
+        self.assertIn("RESOURCE_CLASS: ${{ matrix.resource_class }}", workflow)
+        self.assertIn("rvoip-resource-class=${RESOURCE_CLASS}", workflow)
+        self.assertIn('RESOURCE_CLASS="$(metadata rvoip-resource-class)"', startup)
+        self.assertIn('if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]', startup)
+        self.assertIn("sip-tester", startup)
+        self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
+
 
 if __name__ == "__main__":
     unittest.main()
