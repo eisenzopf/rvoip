@@ -39,7 +39,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.88-nextest-0.9.140
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.91-nextest-0.9.140
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -66,7 +66,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.88.0
+          toolchain: 1.91.0
 
       - name: Require candidate to belong to origin/main
         run: |
@@ -176,7 +176,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.88.0
+          toolchain: 1.91.0
           components: clippy,rustfmt
 
       - name: Install nightly for bounded fuzz gates

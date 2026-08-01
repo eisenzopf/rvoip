@@ -5,7 +5,7 @@
 
 **Rust-native real-time communications across SIP, WebRTC, QUIC, WebTransport, WebSocket, MoQ, voice AI, and enterprise integrations.**
 
-[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 [![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip)](https://crates.io/crates/rvoip)
 [![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip)](https://crates.io/crates/rvoip-sip)

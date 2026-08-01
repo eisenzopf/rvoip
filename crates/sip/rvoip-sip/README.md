@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg)](https://crates.io/crates/rvoip-sip)
 [![docs.rs](https://docs.rs/rvoip-sip/badge.svg)](https://docs.rs/rvoip-sip)
-[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
 [![GitHub issues](https://img.shields.io/github/issues/eisenzopf/rvoip.svg)](https://github.com/eisenzopf/rvoip/issues)
@@ -41,7 +41,7 @@ level without switching protocol stacks.
 ## Install
 
 `rvoip-sip` uses the workspace minimum supported Rust version. The current MSRV
-is **Rust 1.88**.
+is **Rust 1.91**.
 
 ```toml
 [dependencies]
@@ -54,7 +54,7 @@ For repository development:
 ```sh
 git clone https://github.com/eisenzopf/rvoip.git
 cd rvoip
-RUSTUP_TOOLCHAIN=1.88 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
 ```
 
 ## Quick start
@@ -252,7 +252,7 @@ narrower qualification.
 Local development checks:
 
 ```sh
-RUSTUP_TOOLCHAIN=1.88 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
 crates/sip/rvoip-sip/scripts/beta_gate.sh --local
 crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 ```
