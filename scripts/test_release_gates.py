@@ -168,6 +168,23 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertTrue(matrix[0]["hosted"])
         self.assertTrue(matrix[0]["needs_chromium"])
 
+    def test_locked_standalone_example_gates_have_reproducible_inputs(self) -> None:
+        example_gates = [
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("test.example-")
+        ]
+        self.assertEqual(len(example_gates), 13)
+        for gate in example_gates:
+            command = gate["command"]
+            with self.subTest(gate=gate["id"]):
+                self.assertIn("--locked", command)
+                manifest_index = command.index("--manifest-path") + 1
+                manifest = ROOT / command[manifest_index].replace("{workspace}/", "")
+                lockfile = manifest.with_name("Cargo.lock")
+                self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
+                self.assertIn('rust-version = "1.91"', manifest.read_text())
+
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
         second = {"command": ["true"], "id": "a"}

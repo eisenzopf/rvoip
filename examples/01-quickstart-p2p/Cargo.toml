@@ -2,6 +2,7 @@
 name = "rvoip-example-quickstart-p2p"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.91"
 publish = false
 
 # Standalone project: this empty table detaches the example from the parent
