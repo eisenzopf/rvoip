@@ -33,6 +33,10 @@ jobs:
       worker_count: ${{ steps.matrix.outputs.worker_count }}
       expected_shards: ${{ steps.matrix.outputs.expected_shards }}
       expected_packages: ${{ steps.matrix.outputs.expected_packages }}
+      required_vcpus: ${{ steps.matrix.outputs.required_vcpus }}
+      required_addresses: ${{ steps.matrix.outputs.required_addresses }}
+      required_balanced_disk_gb: ${{ steps.matrix.outputs.required_balanced_disk_gb }}
+      required_standard_disk_gb: ${{ steps.matrix.outputs.required_standard_disk_gb }}
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -73,6 +77,10 @@ jobs:
                       "machine_type": (
                           "n2-standard-8" if check == "test" else "n2-standard-4"
                       ),
+                      "disk_type": (
+                          "pd-balanced" if check == "test" else "pd-standard"
+                      ),
+                      "disk_size_gb": 80,
                   }
               )
           include.extend(
@@ -82,18 +90,24 @@ jobs:
                       "profile": "workspace-policy",
                       "packages_b64": "",
                       "machine_type": "n2-standard-4",
+                      "disk_type": "pd-standard",
+                      "disk_size_gb": 80,
                   },
                   {
                       "id": "doctest",
                       "profile": "workspace-doctest",
                       "packages_b64": "",
                       "machine_type": "n2-standard-4",
+                      "disk_type": "pd-standard",
+                      "disk_size_gb": 80,
                   },
                   {
                       "id": "security-timing",
                       "profile": "workspace-security-timing",
                       "packages_b64": "",
                       "machine_type": "n2-standard-4",
+                      "disk_type": "pd-standard",
+                      "disk_size_gb": 80,
                   },
               ]
           )
@@ -110,6 +124,18 @@ jobs:
               output.write(f"worker_count={len(include)}\n")
               output.write(f"expected_shards={expected_shards}\n")
               output.write(f"expected_packages={expected_packages}\n")
+              output.write(
+                  f"required_vcpus={sum(8 if item['machine_type'].endswith('-8') else 4 for item in include)}\n"
+              )
+              output.write(f"required_addresses={len(include)}\n")
+              output.write(
+                  "required_balanced_disk_gb="
+                  f"{sum(item['disk_size_gb'] for item in include if item['disk_type'] == 'pd-balanced')}\n"
+              )
+              output.write(
+                  "required_standard_disk_gb="
+                  f"{sum(item['disk_size_gb'] for item in include if item['disk_type'] == 'pd-standard')}\n"
+              )
           PY
 
       - name: Summarize parallel allocation
@@ -122,6 +148,100 @@ jobs:
             echo "- Test workers: n2-standard-8"
             echo "- Clippy, doctest, policy, and timing workers: n2-standard-4"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  preflight-parallel:
+    name: Verify parallel GCP capacity
+    if: inputs.profile == 'workspace-parallel'
+    needs: plan-parallel
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Require every quota before creating workers
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          REGION: ${{ vars.RVOIP_GCP_REGION }}
+          REQUIRED_VCPUS: ${{ needs.plan-parallel.outputs.required_vcpus }}
+          REQUIRED_ADDRESSES: ${{ needs.plan-parallel.outputs.required_addresses }}
+          REQUIRED_INSTANCES: ${{ needs.plan-parallel.outputs.worker_count }}
+          REQUIRED_BALANCED_DISK_GB: ${{ needs.plan-parallel.outputs.required_balanced_disk_gb }}
+          REQUIRED_STANDARD_DISK_GB: ${{ needs.plan-parallel.outputs.required_standard_disk_gb }}
+        run: |
+          set -euo pipefail
+          gcloud compute project-info describe \
+            --project "$PROJECT" \
+            --format=json > global-quotas.json
+          gcloud compute regions describe "$REGION" \
+            --project "$PROJECT" \
+            --format=json > regional-quotas.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          global_quotas = {
+              item["metric"]: item
+              for item in json.loads(Path("global-quotas.json").read_text())["quotas"]
+          }
+          regional_quotas = {
+              item["metric"]: item
+              for item in json.loads(Path("regional-quotas.json").read_text())["quotas"]
+          }
+          required = {
+              "CPUS_ALL_REGIONS": (global_quotas, int(os.environ["REQUIRED_VCPUS"])),
+              "CPUS": (regional_quotas, int(os.environ["REQUIRED_VCPUS"])),
+              "N2_CPUS": (regional_quotas, int(os.environ["REQUIRED_VCPUS"])),
+              "INSTANCES": (regional_quotas, int(os.environ["REQUIRED_INSTANCES"])),
+              "IN_USE_ADDRESSES": (
+                  regional_quotas,
+                  int(os.environ["REQUIRED_ADDRESSES"]),
+              ),
+              "SSD_TOTAL_GB": (
+                  regional_quotas,
+                  int(os.environ["REQUIRED_BALANCED_DISK_GB"]),
+              ),
+              "DISKS_TOTAL_GB": (
+                  regional_quotas,
+                  int(os.environ["REQUIRED_STANDARD_DISK_GB"]),
+              ),
+          }
+          failures = []
+          rows = []
+          for metric, (source, needed) in required.items():
+              quota = source.get(metric)
+              if quota is None:
+                  failures.append(f"{metric}: quota was not reported")
+                  continue
+              limit = int(quota.get("limit", 0))
+              usage = int(quota.get("usage", 0))
+              available = limit - usage
+              rows.append((metric, needed, available, limit, usage))
+              if available < needed:
+                  failures.append(
+                      f"{metric}: requires {needed}, only {available} available "
+                      f"(limit {limit}, usage {usage})"
+                  )
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a") as output:
+              output.write("## Parallel GCP quota preflight\n\n")
+              output.write("| Quota | Required | Available | Limit | Usage |\n")
+              output.write("| --- | ---: | ---: | ---: | ---: |\n")
+              for row in rows:
+                  output.write(f"| {row[0]} | {row[1]} | {row[2]} | {row[3]} | {row[4]} |\n")
+          if failures:
+              raise SystemExit("GCP capacity preflight failed:\n- " + "\n- ".join(failures))
+          PY
 
   qualify:
     name: Ephemeral GCP qualification
@@ -244,7 +364,7 @@ jobs:
   qualify-parallel:
     name: GCP workspace / ${{ matrix.id }}
     if: inputs.profile == 'workspace-parallel'
-    needs: plan-parallel
+    needs: [plan-parallel, preflight-parallel]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -274,6 +394,8 @@ jobs:
           SHARD_ID: ${{ matrix.id }}
           PACKAGES_B64: ${{ matrix.packages_b64 }}
           MACHINE_TYPE: ${{ matrix.machine_type }}
+          DISK_TYPE: ${{ matrix.disk_type }}
+          DISK_SIZE_GB: ${{ matrix.disk_size_gb }}
           PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
           ZONE: ${{ vars.RVOIP_GCP_ZONE }}
           NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
@@ -294,8 +416,8 @@ jobs:
             --subnet "$SUBNET" \
             --image-family ubuntu-2404-lts-amd64 \
             --image-project ubuntu-os-cloud \
-            --boot-disk-type pd-balanced \
-            --boot-disk-size 100GB \
+            --boot-disk-type "$DISK_TYPE" \
+            --boot-disk-size "${DISK_SIZE_GB}GB" \
             --boot-disk-auto-delete \
             --service-account "$RUNNER_SERVICE_ACCOUNT" \
             --scopes cloud-platform \
@@ -345,11 +467,16 @@ jobs:
           PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
           ZONE: ${{ vars.RVOIP_GCP_ZONE }}
           WORKER: ${{ steps.worker.outputs.name }}
-        run: >-
-          gcloud compute instances delete "$WORKER"
-          --project "$PROJECT"
-          --zone "$ZONE"
-          --quiet
+        run: |
+          if gcloud compute instances describe "$WORKER" \
+            --project "$PROJECT" \
+            --zone "$ZONE" \
+            >/dev/null 2>&1; then
+            gcloud compute instances delete "$WORKER" \
+              --project "$PROJECT" \
+              --zone "$ZONE" \
+              --quiet
+          fi
 
       - name: Upload shard controller evidence
         if: always()
@@ -385,7 +512,7 @@ jobs:
   cleanup-parallel:
     name: Delete every parallel GCP worker
     if: always() && inputs.profile == 'workspace-parallel'
-    needs: [plan-parallel, qualify-parallel]
+    needs: [plan-parallel, preflight-parallel, qualify-parallel]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -433,7 +560,7 @@ jobs:
   parallel-gate:
     name: Parallel GCP workspace
     if: always() && inputs.profile == 'workspace-parallel'
-    needs: [plan-parallel, qualify-parallel, cleanup-parallel]
+    needs: [plan-parallel, preflight-parallel, qualify-parallel, cleanup-parallel]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
