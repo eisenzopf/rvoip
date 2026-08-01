@@ -107,6 +107,12 @@ if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
   # Keep these heavyweight, network-facing tools off performance-only workers.
   apt-get install -y --no-install-recommends \
     baresip docker.io netcat-openbsd openssl sip-tester
+  command -v sipp >/dev/null
+elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]; then
+  # This performance test otherwise treats a missing external SIPp binary as a
+  # local-development skip. Release qualification must execute it, not skip it.
+  apt-get install -y --no-install-recommends sip-tester
+  command -v sipp >/dev/null
 fi
 
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
