@@ -1765,10 +1765,12 @@ impl AmazonConnectAdapter {
         connection_id: ConnectionId,
         route: Route,
     ) -> JoinHandle<()> {
+        // Subscribe before spawning so a terminal signal racing with task
+        // scheduling is retained by the watch channel for this supervisor.
+        let mut terminal = route.media.subscribe_terminal();
+        let mut dtmf = route.media.take_dtmf_events();
         tokio::spawn(async move {
             let prepared = route.prepared.as_ref().cloned();
-            let mut terminal = route.media.subscribe_terminal();
-            let mut dtmf = route.media.take_dtmf_events();
             let poll = environment
                 .config
                 .keepalive_interval
@@ -1780,28 +1782,39 @@ impl AmazonConnectAdapter {
                 if prepared.as_ref().is_some_and(|route| !route.is_live()) {
                     return;
                 }
+                // `watch::Receiver::changed` only observes versions newer
+                // than the receiver. Consume a terminal cause already stored
+                // in the channel before waiting, including one published
+                // before this task received its first poll.
+                let current_terminal = *terminal.borrow_and_update();
+                if let Some(cause) = current_terminal {
+                    let event = match cause {
+                        ConnectMediaTerminalCause::RemoteEnded
+                        | ConnectMediaTerminalCause::TransportClosed => AdapterEvent::Ended {
+                            connection_id: connection_id.clone(),
+                            reason: EndReason::Normal,
+                        },
+                        ConnectMediaTerminalCause::RemoteError { .. }
+                        | ConnectMediaTerminalCause::TransportError
+                        | ConnectMediaTerminalCause::PeerFailed => AdapterEvent::Failed {
+                            connection_id: connection_id.clone(),
+                            detail: "Amazon media session failed".into(),
+                        },
+                    };
+                    let _ = environment
+                        .terminate_active(&connection_id, event, false)
+                        .await;
+                    return;
+                }
                 tokio::select! {
                     _ = route.cancel.notified() => return,
                     changed = terminal.changed() => {
-                        let cause = if changed.is_err() {
-                            ConnectMediaTerminalCause::TransportClosed
-                        } else if let Some(cause) = *terminal.borrow_and_update() {
-                            cause
-                        } else {
+                        if changed.is_ok() {
                             continue;
-                        };
-                        let event = match cause {
-                            ConnectMediaTerminalCause::RemoteEnded
-                            | ConnectMediaTerminalCause::TransportClosed => AdapterEvent::Ended {
-                                connection_id: connection_id.clone(),
-                                reason: EndReason::Normal,
-                            },
-                            ConnectMediaTerminalCause::RemoteError { .. }
-                            | ConnectMediaTerminalCause::TransportError
-                            | ConnectMediaTerminalCause::PeerFailed => AdapterEvent::Failed {
-                                connection_id: connection_id.clone(),
-                                detail: "Amazon media session failed".into(),
-                            },
+                        }
+                        let event = AdapterEvent::Ended {
+                            connection_id: connection_id.clone(),
+                            reason: EndReason::Normal,
                         };
                         let _ = environment
                             .terminate_active(&connection_id, event, false)

@@ -115,6 +115,11 @@ for _suffix, _target in FUZZ_TARGETS.items():
         _target,
         "--fuzz-dir",
         _fuzz_dir,
+        # GitHub's hosted environment may set a static-musl Cargo target.
+        # libFuzzer's AddressSanitizer requires the runner's dynamically
+        # linked GNU target instead.
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10",
