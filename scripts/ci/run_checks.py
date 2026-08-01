@@ -191,7 +191,35 @@ def specialty_commands(
                 ],
                 None,
                 None,
-            )
+            ),
+            (
+                [
+                    "cargo",
+                    "+nightly",
+                    "fuzz",
+                    "check",
+                    "--fuzz-dir",
+                    "crates/sip/fuzz",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
+                    "cargo",
+                    "+nightly",
+                    "fuzz",
+                    "check",
+                    "--fuzz-dir",
+                    "crates/media/fuzz",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
+                ],
+                None,
+                None,
+            ),
         ]
     if gate == "rtp-interop":
         return [(["bash", "scripts/test_libsrtp_interop.sh"], None, None)]

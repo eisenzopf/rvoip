@@ -42,6 +42,18 @@ jobs:
         with:
           toolchain: 1.91.0
 
+      - name: Install nightly for release fuzz validation
+        if: matrix.gate == 'release-tooling'
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz for release fuzz validation
+        if: matrix.gate == 'release-tooling'
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
       - name: Calculate affected crates and gates
         id: plan
         shell: bash
