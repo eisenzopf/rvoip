@@ -1601,7 +1601,20 @@ mod tests {
             assert_eq!(receive_handler_id(&mut recording_rx).await, id);
             assert_eq!(receive_test_id(&mut bus).await, id);
         }
-        let saturated = coordinator.event_bus_diagnostic_snapshot();
+        let saturated = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let snapshot = coordinator.event_bus_diagnostic_snapshot();
+                if snapshot["observational_handlers"]["dropped_full"] == 1
+                    && snapshot["observational_handlers"]["in_flight_current"] == 1
+                    && snapshot["observational_handlers"]["queued_current"] == 2
+                {
+                    break snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("non-blocking handler diagnostics converged while blocking handler remained full");
         assert_eq!(saturated["observational_handlers"]["dropped_full"], 1);
         assert_eq!(saturated["observational_handlers"]["in_flight_current"], 1);
         assert_eq!(saturated["observational_handlers"]["queued_current"], 2);
