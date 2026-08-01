@@ -19,6 +19,7 @@ from typing import Any
 SCHEMA = "rvoip-ci-command-receipt-v1"
 PACKAGE = re.compile(r"^[A-Za-z0-9_-]+$")
 GATE = re.compile(r"^[A-Za-z0-9_-]+$")
+TARGET = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class CheckError(RuntimeError):
@@ -144,6 +145,37 @@ def shard_clippy_commands(
 ) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
     selected = package_args(packages_csv)
     return [(["cargo", "clippy", "--locked", "--all-targets", *selected], None, None)]
+
+
+def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    return [
+        (
+            [
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "rvoip-sip",
+                "--lib",
+                "--bins",
+                "--examples",
+            ],
+            None,
+            None,
+        )
+    ]
+
+
+def sip_integration_commands(
+    targets_csv: str,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    targets = sorted(set(filter(None, targets_csv.split(","))))
+    if not targets or any(not TARGET.fullmatch(target) for target in targets):
+        raise CheckError(f"invalid SIP integration target selection: {targets_csv!r}")
+    argv = ["cargo", "test", "--locked", "-p", "rvoip-sip"]
+    for target in targets:
+        argv.extend(("--test", target))
+    return [(argv, None, None)]
 
 
 def specialty_commands(
@@ -427,11 +459,14 @@ def main(argv: list[str] | None = None) -> int:
             "shard-clippy",
             "specialty",
             "doctest",
+            "sip-core",
+            "sip-integration",
         ),
     )
     parser.add_argument("--name", required=True)
     parser.add_argument("--packages", default="")
     parser.add_argument("--gate", default="")
+    parser.add_argument("--targets", default="")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -451,6 +486,10 @@ def main(argv: list[str] | None = None) -> int:
             commands = [
                 (["cargo", "test", "--workspace", "--doc", "--locked"], None, None)
             ]
+        elif args.kind == "sip-core":
+            commands = sip_core_commands()
+        elif args.kind == "sip-integration":
+            commands = sip_integration_commands(args.targets)
         else:
             if args.gate == "vcon-postgres":
                 postgres_name = start_postgres(root, records)
@@ -477,6 +516,7 @@ def main(argv: list[str] | None = None) -> int:
         "kind": args.kind,
         "gate": args.gate or None,
         "packages": sorted(filter(None, args.packages.split(","))),
+        "targets": sorted(filter(None, args.targets.split(","))),
         "git_commit": os.getenv("GITHUB_SHA")
         or capture_version(["git", "rev-parse", "HEAD"], root),
         "recorded_at": utc_now(),

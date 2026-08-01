@@ -19,7 +19,7 @@ use rvoip_sip_core::types::content_length::ContentLength;
 use rvoip_sip_core::types::param::Param;
 use rvoip_sip_core::types::status::StatusCode;
 use rvoip_sip_core::types::via::Via;
-use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::types::{HeaderName, Subject, TypedHeader};
 use rvoip_sip_core::{Message, Method, Request};
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_proxy::{RouteDecision, RouteFn, StatefulProxy};
@@ -420,8 +420,15 @@ async fn matched_upstream_cancel_gets_200_and_latches_until_provisional() {
         "CANCEL must be latched while the downstream INVITE is Calling"
     );
 
+    // A server transaction may independently generate its own upstream 100
+    // while this test is under load. Mark the downstream 100 so the assertion
+    // verifies that exact response is suppressed instead of confusing it with
+    // the transaction manager's legitimate local response.
     let trying =
         SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::Trying, None)
+            .header(TypedHeader::Subject(Subject::new(
+                "downstream-trying-must-not-be-forwarded",
+            )))
             .build();
     harness.inject(Message::Response(trying), uas_a).await;
 
@@ -432,11 +439,18 @@ async fn matched_upstream_cancel_gets_200_and_latches_until_provisional() {
         })
         .await;
     assert!(
-        !harness.transport.sent().await.iter().any(|(message, destination)| {
-            matches!(message, Message::Response(response) if response.status() == StatusCode::Trying)
-                && *destination != uas_a
-        }),
-        "100 releases a latched CANCEL but remains suppressed upstream"
+        !harness
+            .transport
+            .sent()
+            .await
+            .iter()
+            .any(|(message, destination)| {
+                matches!(message, Message::Response(response)
+                if response.status() == StatusCode::Trying
+                    && response.header(&HeaderName::Subject).is_some())
+                    && *destination != uas_a
+            }),
+        "the marked downstream 100 releases a latched CANCEL but remains suppressed upstream"
     );
 
     let terminated = SimpleResponseBuilder::response_from_request(

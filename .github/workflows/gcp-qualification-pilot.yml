@@ -33,6 +33,7 @@ jobs:
       worker_count: ${{ steps.matrix.outputs.worker_count }}
       expected_shards: ${{ steps.matrix.outputs.expected_shards }}
       expected_packages: ${{ steps.matrix.outputs.expected_packages }}
+      expected_sip_targets: ${{ steps.matrix.outputs.expected_sip_targets }}
       required_vcpus: ${{ steps.matrix.outputs.required_vcpus }}
       required_addresses: ${{ steps.matrix.outputs.required_addresses }}
       required_balanced_disk_gb: ${{ steps.matrix.outputs.required_balanced_disk_gb }}
@@ -57,6 +58,9 @@ jobs:
             --candidate HEAD \
             --changed-file Cargo.toml \
             --output target/gcp-workspace-plan.json
+          python3 scripts/ci/sip_test_partitions.py \
+            --partitions 3 \
+            --output target/gcp-sip-test-partitions.json
           python3 - "$GITHUB_OUTPUT" <<'PY'
           import base64
           import json
@@ -64,37 +68,63 @@ jobs:
           from pathlib import Path
 
           plan = json.loads(Path("target/gcp-workspace-plan.json").read_text())
+          sip_plan = json.loads(Path("target/gcp-sip-test-partitions.json").read_text())
           include = []
           for job in plan["shard_jobs"]:
               check = job["check"]
-              heavy_sip_test = check == "test" and "rvoip-sip" in job["packages"]
+              packages = [package for package in job["packages"] if not (
+                  check == "test" and package == "rvoip-sip"
+              )]
+              if not packages:
+                  continue
               include.append(
                   {
                       "id": job["id"],
                       "profile": f"workspace-shard-{check}",
                       "packages_b64": base64.b64encode(
-                          job["packages_csv"].encode()
+                          ",".join(packages).encode()
                       ).decode(),
+                      "targets_b64": "",
                       "machine_type": (
-                          "n2-standard-8" if check == "test" else "n2-standard-4"
+                          "n2-standard-8" if check == "test" else "n2-standard-2"
                       ),
-                      "disk_type": (
-                          "pd-standard"
-                          if heavy_sip_test
-                          else "pd-balanced"
-                          if check == "test"
-                          else "pd-standard"
-                      ),
-                      "disk_size_gb": 200 if heavy_sip_test else 80,
+                      "disk_type": "pd-balanced" if check == "test" else "pd-standard",
+                      "disk_size_gb": 80,
                   }
               )
+          sip_workers = [
+              {
+                  "id": "sip-core",
+                  "profile": "workspace-sip-core",
+                  "packages_b64": base64.b64encode(b"rvoip-sip").decode(),
+                  "targets_b64": "",
+                  "machine_type": "n2-standard-8",
+                  "disk_type": "pd-standard",
+                  "disk_size_gb": 200,
+              }
+          ]
+          for index, partition in enumerate(sip_plan["partitions"], start=1):
+              targets_csv = ",".join(partition["targets"])
+              sip_workers.append(
+                  {
+                      "id": f"sip-integration-{index}",
+                      "profile": "workspace-sip-integration",
+                      "packages_b64": base64.b64encode(b"rvoip-sip").decode(),
+                      "targets_b64": base64.b64encode(targets_csv.encode()).decode(),
+                      "machine_type": "n2-standard-8",
+                      "disk_type": "pd-standard",
+                      "disk_size_gb": 200,
+                  }
+              )
+          include.extend(sip_workers)
           include.extend(
               [
                   {
                       "id": "policy",
                       "profile": "workspace-policy",
                       "packages_b64": "",
-                      "machine_type": "n2-standard-4",
+                      "targets_b64": "",
+                      "machine_type": "n2-standard-2",
                       "disk_type": "pd-standard",
                       "disk_size_gb": 80,
                   },
@@ -102,7 +132,8 @@ jobs:
                       "id": "doctest",
                       "profile": "workspace-doctest",
                       "packages_b64": "",
-                      "machine_type": "n2-standard-4",
+                      "targets_b64": "",
+                      "machine_type": "n2-standard-2",
                       "disk_type": "pd-standard",
                       "disk_size_gb": 80,
                   },
@@ -110,7 +141,8 @@ jobs:
                       "id": "security-timing",
                       "profile": "workspace-security-timing",
                       "packages_b64": "",
-                      "machine_type": "n2-standard-4",
+                      "targets_b64": "",
+                      "machine_type": "n2-standard-2",
                       "disk_type": "pd-standard",
                       "disk_size_gb": 80,
                   },
@@ -123,14 +155,23 @@ jobs:
           expected_packages = json.dumps(
               sorted(plan["selected_crates"]), separators=(",", ":")
           )
+          expected_sip_targets = json.dumps(
+              sorted(
+                  target
+                  for partition in sip_plan["partitions"]
+                  for target in partition["targets"]
+              ),
+              separators=(",", ":"),
+          )
           with Path(sys.argv[1]).open("a") as output:
               output.write(f"matrix={compact}\n")
               output.write(f"candidate={plan['candidate_sha']}\n")
               output.write(f"worker_count={len(include)}\n")
               output.write(f"expected_shards={expected_shards}\n")
               output.write(f"expected_packages={expected_packages}\n")
+              output.write(f"expected_sip_targets={expected_sip_targets}\n")
               output.write(
-                  f"required_vcpus={sum(8 if item['machine_type'].endswith('-8') else 4 for item in include)}\n"
+                  f"required_vcpus={sum(int(item['machine_type'].rsplit('-', 1)[1]) for item in include)}\n"
               )
               output.write(f"required_addresses={len(include)}\n")
               output.write(
@@ -151,7 +192,8 @@ jobs:
             echo "- Candidate: \`${{ steps.matrix.outputs.candidate }}\`"
             echo "- Ephemeral workers: $(jq '.include | length' <<< '${{ steps.matrix.outputs.matrix }}')"
             echo "- Test workers: n2-standard-8"
-            echo "- Clippy, doctest, policy, and timing workers: n2-standard-4"
+            echo "- SIP test lanes: four n2-standard-8 workers"
+            echo "- Clippy, doctest, policy, and timing workers: n2-standard-2"
           } >> "$GITHUB_STEP_SUMMARY"
 
   preflight-parallel:
@@ -398,6 +440,7 @@ jobs:
           PROFILE: ${{ matrix.profile }}
           SHARD_ID: ${{ matrix.id }}
           PACKAGES_B64: ${{ matrix.packages_b64 }}
+          TARGETS_B64: ${{ matrix.targets_b64 }}
           MACHINE_TYPE: ${{ matrix.machine_type }}
           DISK_TYPE: ${{ matrix.disk_type }}
           DISK_SIZE_GB: ${{ matrix.disk_size_gb }}
@@ -430,7 +473,7 @@ jobs:
             --shielded-vtpm \
             --shielded-integrity-monitoring \
             --labels rvoip-role=workspace-shard,managed-by=github-actions \
-            --metadata "rvoip-candidate=${CANDIDATE},rvoip-profile=${PROFILE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-shard-id=${SHARD_ID},rvoip-packages-b64=${PACKAGES_B64}" \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-profile=${PROFILE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-shard-id=${SHARD_ID},rvoip-packages-b64=${PACKAGES_B64},rvoip-targets-b64=${TARGETS_B64}" \
             --metadata-from-file startup-script=infra/release-runners/gcp-pilot-startup.sh
 
       - name: Wait for immutable shard result
@@ -583,6 +626,7 @@ jobs:
           EXPECTED_COUNT: ${{ needs.plan-parallel.outputs.worker_count }}
           EXPECTED_SHARDS: ${{ needs.plan-parallel.outputs.expected_shards }}
           EXPECTED_PACKAGES: ${{ needs.plan-parallel.outputs.expected_packages }}
+          EXPECTED_SIP_TARGETS: ${{ needs.plan-parallel.outputs.expected_sip_targets }}
         run: |
           python3 - <<'PY'
           import json
@@ -593,6 +637,7 @@ jobs:
           expected = int(os.environ["EXPECTED_COUNT"])
           expected_shards = json.loads(os.environ["EXPECTED_SHARDS"])
           expected_packages = json.loads(os.environ["EXPECTED_PACKAGES"])
+          expected_sip_targets = json.loads(os.environ["EXPECTED_SIP_TARGETS"])
           receipts = [
               json.loads(path.read_text())
               for path in sorted(
@@ -618,20 +663,63 @@ jobs:
                   errors.append(f"{shard}: status is not PASS")
               if receipt.get("publishing_attempted") is not False:
                   errors.append(f"{shard}: publishing was not proven disabled")
-          for profile in ("workspace-shard-test", "workspace-shard-clippy"):
-              package_lists = [
-                  receipt.get("packages", [])
-                  for receipt in receipts
-                  if receipt.get("profile") == profile
-              ]
-              packages = [package for values in package_lists for package in values]
-              if len(packages) != len(set(packages)):
-                  errors.append(f"{profile}: a package appears in more than one shard")
-              if sorted(packages) != expected_packages:
-                  errors.append(
-                      f"{profile}: expected all {len(expected_packages)} workspace "
-                      f"packages exactly once, got {len(packages)}"
-                  )
+          clippy_packages = [
+              package
+              for receipt in receipts
+              if receipt.get("profile") == "workspace-shard-clippy"
+              for package in receipt.get("packages", [])
+          ]
+          if len(clippy_packages) != len(set(clippy_packages)):
+              errors.append("workspace-shard-clippy: a package appears in more than one shard")
+          if sorted(clippy_packages) != expected_packages:
+              errors.append(
+                  f"workspace-shard-clippy: expected all {len(expected_packages)} workspace "
+                  f"packages exactly once, got {len(clippy_packages)}"
+              )
+
+          ordinary_test_packages = [
+              package
+              for receipt in receipts
+              if receipt.get("profile") == "workspace-shard-test"
+              for package in receipt.get("packages", [])
+          ]
+          expected_ordinary = [
+              package for package in expected_packages if package != "rvoip-sip"
+          ]
+          if len(ordinary_test_packages) != len(set(ordinary_test_packages)):
+              errors.append("workspace-shard-test: a package appears in more than one shard")
+          if sorted(ordinary_test_packages) != expected_ordinary:
+              errors.append(
+                  f"workspace-shard-test: expected {len(expected_ordinary)} non-SIP packages "
+                  f"exactly once, got {len(ordinary_test_packages)}"
+              )
+
+          sip_core = [
+              receipt for receipt in receipts
+              if receipt.get("profile") == "workspace-sip-core"
+          ]
+          sip_integration = [
+              receipt for receipt in receipts
+              if receipt.get("profile") == "workspace-sip-integration"
+          ]
+          if len(sip_core) != 1 or len(sip_integration) != 3:
+              errors.append(
+                  f"expected one SIP core and three SIP integration receipts, "
+                  f"got {len(sip_core)} and {len(sip_integration)}"
+              )
+          for receipt in [*sip_core, *sip_integration]:
+              if receipt.get("packages") != ["rvoip-sip"]:
+                  errors.append(f"{receipt.get('shard_id')}: invalid SIP package binding")
+          sip_targets = [
+              target for receipt in sip_integration for target in receipt.get("targets", [])
+          ]
+          if len(sip_targets) != len(set(sip_targets)):
+              errors.append("a SIP integration target appears in more than one shard")
+          if sorted(sip_targets) != expected_sip_targets:
+              errors.append(
+                  f"expected all {len(expected_sip_targets)} SIP integration targets "
+                  f"exactly once, got {len(sip_targets)}"
+              )
           aggregate = {
               "schema": "rvoip-gcp-workspace-aggregate-v1",
               "candidate_sha": candidate,
@@ -640,6 +728,7 @@ jobs:
               "expected_shard_count": expected,
               "expected_shard_ids": expected_shards,
               "expected_packages": expected_packages,
+              "expected_sip_targets": expected_sip_targets,
               "received_shards": len(receipts),
               "shard_ids": present_shard_ids,
               "errors": errors,
