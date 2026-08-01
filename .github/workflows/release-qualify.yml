@@ -323,6 +323,7 @@ jobs:
           ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
           GATES: ${{ matrix.gates_csv }}
           SHARD_ID: ${{ matrix.id }}
+          RESOURCE_CLASS: ${{ matrix.resource_class }}
           MACHINE_TYPE: ${{ matrix.machine_type }}
           DISK_TYPE: ${{ matrix.disk_type }}
           DISK_SIZE_GB: ${{ matrix.disk_size_gb }}
@@ -357,7 +358,7 @@ jobs:
             --shielded-vtpm \
             --shielded-integrity-monitoring \
             --labels rvoip-role=release-gate,managed-by=github-actions \
-            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${SHARD_ID},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${SHARD_ID},rvoip-resource-class=${RESOURCE_CLASS},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
             --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
 
       - name: Wait for immutable worker evidence

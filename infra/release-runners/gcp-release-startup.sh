@@ -13,6 +13,7 @@ metadata() {
 CANDIDATE="$(metadata rvoip-candidate)"
 RUN_ID="$(metadata rvoip-run-id)"
 SHARD_ID="$(metadata rvoip-shard-id)"
+RESOURCE_CLASS="$(metadata rvoip-resource-class)"
 BUCKET="$(metadata rvoip-evidence-bucket)"
 PREFIX="$(metadata rvoip-prefix)"
 GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
@@ -98,8 +99,21 @@ trap finish EXIT
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
-  baresip build-essential ca-certificates cmake curl docker.io git jq \
-  libasound2-dev libopus-dev libssl-dev pkg-config protobuf-compiler sipp
+  build-essential ca-certificates cmake curl git jq libasound2-dev libopus-dev \
+  libssl-dev pkg-config protobuf-compiler
+
+if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
+  # Ubuntu packages the SIPp binary as `sip-tester`; `sipp` is not a package.
+  # Keep these heavyweight, network-facing tools off performance-only workers.
+  apt-get install -y --no-install-recommends \
+    baresip docker.io netcat-openbsd openssl sip-tester
+  command -v sipp >/dev/null
+elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]; then
+  # This performance test otherwise treats a missing external SIPp binary as a
+  # local-development skip. Release qualification must execute it, not skip it.
+  apt-get install -y --no-install-recommends sip-tester
+  command -v sipp >/dev/null
+fi
 
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
   https://sh.rustup.rs -o /tmp/rustup-init.sh
