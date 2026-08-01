@@ -1061,6 +1061,7 @@ def collect(
         "profile": plan["profile"],
         "catalog_sha256": plan["catalog_sha256"],
         "environment_id": plan["environment_id"],
+        "publishing_attempted": False,
         "gate_count": len(plan["gates"]),
         "fresh_count": sum(item["source"] == "fresh" for item in accepted),
         "reused_count": sum(item["source"] == "reused" for item in accepted),

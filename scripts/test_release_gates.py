@@ -537,6 +537,7 @@ class GateFrameworkTests(unittest.TestCase):
             result = json.loads(output.read_text())
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["gate_count"], 2)
+            self.assertFalse(result["publishing_attempted"])
             self.assertTrue((root / "collect-gate.aggregate/receipt.json").is_file())
 
             (dependency_dir / "receipt.json").unlink()
