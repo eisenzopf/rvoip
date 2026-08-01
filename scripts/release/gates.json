@@ -1952,8 +1952,7 @@
       "category": "Build, API, and documentation",
       "command": [
         "env",
-        "RUSTDOCFLAGS=-D",
-        "warnings",
+        "RUSTDOCFLAGS=-D warnings",
         "cargo",
         "doc",
         "--locked",
@@ -2706,7 +2705,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -2747,7 +2746,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -2837,7 +2836,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -2878,7 +2877,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -2919,7 +2918,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -2968,7 +2967,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 19,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3009,7 +3008,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3050,7 +3049,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3091,7 +3090,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3180,7 +3179,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3226,7 +3225,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 8,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3267,7 +3266,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3308,7 +3307,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 6,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3344,7 +3343,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3381,7 +3380,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3418,7 +3417,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 5,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3530,7 +3529,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 12,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3586,7 +3585,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 12,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3638,7 +3637,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3690,7 +3689,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3742,7 +3741,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3794,7 +3793,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 17,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3846,7 +3845,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 15,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -3950,7 +3949,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4002,7 +4001,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 15,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4054,7 +4053,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4106,7 +4105,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 15,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4158,7 +4157,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 17,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4210,7 +4209,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4262,7 +4261,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4314,7 +4313,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 15,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4366,7 +4365,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4418,7 +4417,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4470,7 +4469,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4524,7 +4523,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 14,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4582,7 +4581,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 17,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4706,7 +4705,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 11,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {
@@ -4762,7 +4761,7 @@
       "retry_on_exit_codes": [
         75
       ],
-      "timeout_minutes": 19,
+      "timeout_minutes": 20,
       "working_directory": "."
     },
     {

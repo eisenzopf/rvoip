@@ -185,6 +185,21 @@ class GateFrameworkTests(unittest.TestCase):
                 self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
                 self.assertIn('rust-version = "1.91"', manifest.read_text())
 
+    def test_rustdoc_warning_policy_is_one_environment_argument(self) -> None:
+        gate = next(
+            gate for gate in self.catalog["gates"] if gate["id"] == "build.rustdoc"
+        )
+        self.assertEqual(
+            gate["command"][:3], ["env", "RUSTDOCFLAGS=-D warnings", "cargo"]
+        )
+        self.assertNotIn("warnings", gate["command"])
+
+    def test_gcp_gates_allow_for_cold_release_builds(self) -> None:
+        for gate in self.catalog["gates"]:
+            if gate["resource_class"].startswith("gcp-"):
+                with self.subTest(gate=gate["id"]):
+                    self.assertGreaterEqual(gate["timeout_minutes"], 20)
+
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
         second = {"command": ["true"], "id": "a"}

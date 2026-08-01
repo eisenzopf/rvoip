@@ -81,8 +81,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('RESOURCE_CLASS="$(metadata rvoip-resource-class)"', startup)
         self.assertIn('if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]', startup)
         self.assertIn("sip-tester", startup)
+        self.assertIn("tshark", startup)
         self.assertIn('elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]', startup)
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
+        self.assertIn("command -v tshark >/dev/null", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
 

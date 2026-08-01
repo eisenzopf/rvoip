@@ -60,6 +60,21 @@ COMMAND_OVERRIDES = {
         "bans",
         "sources",
     ],
+    # Keep the environment assignment as one argv element. The historical
+    # shell-rendered command records it as `RUSTDOCFLAGS=-D warnings`, which
+    # shlex would otherwise split into an attempted `warnings` executable.
+    "build.rustdoc": [
+        "env",
+        "RUSTDOCFLAGS=-D warnings",
+        "cargo",
+        "doc",
+        "--locked",
+        "-p",
+        "rvoip-sip",
+        "--no-deps",
+        "--features",
+        "generated-validation,dev-insecure-tls",
+    ],
     "interop.asterisk-matrix": [
         "env",
         "PBX_OUT_ROOT={artifact_dir}",
@@ -304,6 +319,11 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # macOS-only beta wrapper.
         executor = "builtin"
     duration = int(record.get("duration_seconds", 0))
+    timeout_minutes = max(5, math.ceil(duration / 60 * 2) + 5)
+    if resource_class(record).startswith("gcp-"):
+        # GCP workers start without a warm target directory. Preserve enough
+        # headroom for the first release build as well as the measured gate.
+        timeout_minutes = max(timeout_minutes, 20)
     return {
         "id": record["id"],
         "name": record["name"],
@@ -315,7 +335,7 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         "working_directory": ".",
         "dependencies": dependencies(record, records),
         "resource_class": resource_class(record),
-        "timeout_minutes": max(5, math.ceil(duration / 60 * 2) + 5),
+        "timeout_minutes": timeout_minutes,
         "retry_on_exit_codes": [75],
         "max_infrastructure_retries": 1,
         "affected_crates": affected_crates(command, packages),
