@@ -51,7 +51,7 @@ url = "2"
 zeroize.workspace = true
 
 # Chime signaling: protobuf-over-secure-WebSocket.
-prost = "0.13"
+prost = "0.14"
 base64 = { workspace = true }
 # Pinned to the workspace's `ring` provider; used to install the process-default
 # rustls CryptoProvider before the Chime wss connect (the AWS SDK also links
@@ -76,7 +76,7 @@ rvoip-sip-core = { workspace = true, optional = true }
 rvoip-media-core = { workspace = true, optional = true, features = ["opus"] }
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

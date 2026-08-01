@@ -67,7 +67,7 @@ rvoip-media-core.workspace = true
 url = "2"
 
 # JWT validator integration test (plan C4 prelude).
-jsonwebtoken = "9.3"
+jsonwebtoken = "11.0"
 
 # Gap plan §5.2 v1 punch list — sig9421_gate.rs test signs envelopes
 # directly with Ed25519 + base64 to drive the coordinator's verify
