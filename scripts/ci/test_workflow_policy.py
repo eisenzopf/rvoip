@@ -94,6 +94,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         lifecycle = (ROOT / "infra/release-runners/interop-lifecycle.sh").read_text()
         self.assertIn("infra/release-runners/pbx", lifecycle)
         self.assertNotIn("beta-report/", lifecycle)
+        self.assertIn("wait_udp_port", lifecycle)
+        self.assertIn("/proc/net/udp", lifecycle)
+        self.assertNotIn("nc -z 127.0.0.1", lifecycle)
         for path in (
             "infra/release-runners/pbx/asterisk/Dockerfile",
             "infra/release-runners/pbx/asterisk/config/pjsip.conf",
@@ -102,6 +105,20 @@ class WorkflowPolicyTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertTrue((ROOT / path).is_file())
+
+    def test_burst_rss_gate_uses_post_retention_settled_window(self) -> None:
+        for path in (
+            "crates/sip/rvoip-sip/tests/perf/perf_burst_caller.rs",
+            "crates/sip/rvoip-sip/tests/perf/perf_burst_receiver.rs",
+        ):
+            source = (ROOT / path).read_text()
+            with self.subTest(path=path):
+                final_retention = source.index("capture_endpoint_retention_sample(")
+                settled_window = source.index("sample_settled_rss_window(", final_retention)
+                rss_gate = source.index("rss_result_metrics(", settled_window)
+                self.assertLess(final_retention, settled_window)
+                self.assertLess(settled_window, rss_gate)
+                self.assertIn("&settled_resources", source[rss_gate : rss_gate + 250])
 
 
 if __name__ == "__main__":

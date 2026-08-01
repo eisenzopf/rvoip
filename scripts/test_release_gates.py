@@ -211,6 +211,12 @@ class GateFrameworkTests(unittest.TestCase):
                 with self.subTest(gate=gate["id"]):
                     self.assertGreaterEqual(gate["timeout_minutes"], 20)
 
+    def test_cargo_gates_allow_for_cold_release_builds(self) -> None:
+        for gate in self.catalog["gates"]:
+            if gate["kind"] == "cargo":
+                with self.subTest(gate=gate["id"]):
+                    self.assertGreaterEqual(gate["timeout_minutes"], 20)
+
     def test_interop_gate_digests_include_tracked_pbx_lifecycle(self) -> None:
         interop = [
             gate
@@ -225,6 +231,17 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["affected_paths"],
                 )
                 self.assertIn("infra/release-runners/pbx/**", gate["affected_paths"])
+
+    def test_remote_proxy_gate_persists_full_failure_evidence(self) -> None:
+        gate = next(
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"] == "interop.remote-proxies"
+        )
+        self.assertIn(
+            "PROXY_INTEROP_ARTIFACT_DIR={artifact_dir}/proxy-interop",
+            gate["command"],
+        )
 
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}

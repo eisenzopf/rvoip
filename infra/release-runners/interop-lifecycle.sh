@@ -14,15 +14,27 @@ else
 fi
 mkdir -p "$STATE" "$LOCAL_ENV_ROOT/asterisk" "$LOCAL_ENV_ROOT/freeswitch"
 
-wait_port() {
-  local port="$1"
+wait_udp_port() {
+  local container="$1"
+  local port="$2"
+  local port_hex
+  printf -v port_hex '%04X' "$port"
   for _ in $(seq 1 180); do
-    if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
+    if docker exec "$container" awk -v port=":$port_hex" '
+      $2 ~ port "$" && $4 == "07" { found = 1 }
+      END { exit !found }
+    ' /proc/net/udp /proc/net/udp6 >/dev/null 2>&1; then
       return 0
+    fi
+    if ! docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null | grep -qx true; then
+      echo "$container exited before UDP port $port became ready" >&2
+      docker logs "$container" >&2 || true
+      return 1
     fi
     sleep 1
   done
-  echo "port $port did not become ready" >&2
+  echo "UDP port $port did not become ready in $container" >&2
+  docker logs "$container" >&2 || true
   return 1
 }
 
@@ -60,7 +72,7 @@ PY
     -v "$build/config/modules.conf:/etc/asterisk/modules.conf:ro" \
     -v "$build/keys:/etc/asterisk/keys:ro" \
     rvoip-release-asterisk >/dev/null
-  wait_port 5060
+  wait_udp_port rvoip-release-asterisk 5060
   cat > "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env" <<EOF
 SIP_SERVER=127.0.0.1
 SIP_PORT=5060
@@ -119,7 +131,7 @@ PY
     -e FS_EXTERNAL_SIP_IP=127.0.0.1 \
     -e FS_EXTERNAL_RTP_IP=127.0.0.1 \
     rvoip-release-freeswitch >/dev/null
-  wait_port 5062
+  wait_udp_port rvoip-release-freeswitch 5062
   cat > "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env" <<'EOF'
 FREESWITCH_ADDR=127.0.0.1:5060
 FREESWITCH_IP=127.0.0.1

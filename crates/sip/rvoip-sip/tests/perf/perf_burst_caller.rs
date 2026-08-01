@@ -31,8 +31,9 @@ use support::soak::{
     in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
     media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
     read_required_u16_env, resource_sampling_diagnostics, round2, round4,
-    sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile,
-    EndpointRetentionSampler, MemoryDiagnosticSampler, RssGrowthGate,
+    sample_settled_rss_window, sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics,
+    sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler, MemoryDiagnosticSampler,
+    RssGrowthGate,
 };
 use support::{
     CallSetupDiagnostics, LatencyHistogram, LoadProfile, ResourceSampler, ResourceSummary,
@@ -419,21 +420,28 @@ async fn perf_burst_caller() {
     retention_series.record_sample("burst_caller", final_sample);
     let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
     let retained_after_drain = final_retention_all.retained_total;
+    let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
+        sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
+            .await
+    } else {
+        (ResourceSummary::empty(), Duration::ZERO)
+    };
     let rss = support::soak::rss_result_metrics(
-        &resources,
-        active_wall.as_secs_f64(),
-        active_wall.as_secs_f64(),
-        retention_drain_wait.as_secs_f64(),
-        support::soak::RssGatePolicy::PostDrainOrTail,
+        &settled_resources,
+        0.0,
+        0.0,
+        settled_observation.as_secs_f64(),
+        support::soak::RssGatePolicy::SettledTail60,
     );
     let rss_gate_enforced =
         rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
     let rss_gate_reason = if rss_gate_enforced {
-        "post_drain_window_meets_minimum"
+        "settled_window_meets_minimum"
     } else {
-        "reported_only_short_post_drain_window"
+        "reported_only_short_settled_window"
     };
     resources.samples.clear();
+    settled_resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();
 
     let offered = counters.offered.load(Ordering::Relaxed);
@@ -641,6 +649,19 @@ async fn perf_burst_caller() {
         .diagnostic_block(
             "resource_sampling",
             resource_sampling_diagnostics("burst_caller", in_process_resource_sampling),
+        )
+        .diagnostic_block(
+            "settled_resource_sampling",
+            json!({
+                "observation_secs": round2(settled_observation.as_secs_f64()),
+                "sample_count": settled_resources.sample_count,
+                "samples_path": settled_resources
+                    .samples_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "baseline_rss_mb": round2(settled_resources.baseline_rss_mb),
+                "peak_rss_mb": round2(settled_resources.peak_rss_mb),
+            }),
         )
         .diagnostic_block(
             "call_failure_trace",

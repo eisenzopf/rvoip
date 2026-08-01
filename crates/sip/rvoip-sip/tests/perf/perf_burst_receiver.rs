@@ -30,9 +30,9 @@ use support::soak::{
     diagnostic_artifact_path, diagnostic_sample_path, endpoint_metric, endpoint_retention_summary,
     in_process_resource_sampler_enabled, media_receive_diagnostics, media_setup_raw_diagnostics,
     media_setup_timing_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary,
-    read_required_u16_env, resource_sampling_diagnostics, round2, sip_dialog_raw_diagnostics,
-    sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile, EndpointRetentionSampler,
-    MemoryDiagnosticSampler, RssGrowthGate,
+    read_required_u16_env, resource_sampling_diagnostics, round2, sample_settled_rss_window,
+    sip_dialog_raw_diagnostics, sip_dialog_timing_diagnostics, sip_udp_diagnostics, DhatProfile,
+    EndpointRetentionSampler, MemoryDiagnosticSampler, RssGrowthGate,
 };
 use support::{
     CallSetupDiagnostics, LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport,
@@ -222,21 +222,31 @@ async fn perf_burst_receiver() {
     let completed_audio_receivers = completed_audio_receivers.load(Ordering::Relaxed);
     let received_frames = received_frames.load(Ordering::Relaxed);
     let incoming_calls = incoming_calls.load(Ordering::Relaxed);
+    let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
+        sample_settled_rss_window(
+            "burst_receiver",
+            scenario.acceptance.min_rss_gate_window_secs,
+        )
+        .await
+    } else {
+        (ResourceSummary::empty(), Duration::ZERO)
+    };
     let rss = support::soak::rss_result_metrics(
-        &resources,
-        active_secs,
-        active_secs,
-        retention_drain_wait.as_secs_f64(),
-        support::soak::RssGatePolicy::PostDrainOrTail,
+        &settled_resources,
+        0.0,
+        0.0,
+        settled_observation.as_secs_f64(),
+        support::soak::RssGatePolicy::SettledTail60,
     );
     let rss_gate_enforced =
         rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
     let rss_gate_reason = if rss_gate_enforced {
-        "post_drain_window_meets_minimum"
+        "settled_window_meets_minimum"
     } else {
-        "reported_only_short_post_drain_window"
+        "reported_only_short_settled_window"
     };
     resources.samples.clear();
+    settled_resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();
     let retained_session_trace_path =
         if retained_after_drain > 0 || active_audio_receivers_after_drain > 0 {
@@ -345,6 +355,19 @@ async fn perf_burst_receiver() {
         .diagnostic_block(
             "resource_sampling",
             resource_sampling_diagnostics("burst_receiver", in_process_resource_sampling),
+        )
+        .diagnostic_block(
+            "settled_resource_sampling",
+            json!({
+                "observation_secs": round2(settled_observation.as_secs_f64()),
+                "sample_count": settled_resources.sample_count,
+                "samples_path": settled_resources
+                    .samples_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                "baseline_rss_mb": round2(settled_resources.baseline_rss_mb),
+                "peak_rss_mb": round2(settled_resources.peak_rss_mb),
+            }),
         )
         .diagnostic_block(
             "retained_session_trace",
