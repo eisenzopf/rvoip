@@ -58,6 +58,8 @@ crates/media/codec-core/src/codecs/g711/tests/test_data/sweep-r.*
 crates/media/codec-core/src/codecs/g711/tests/test_data/*_roundtrip_*.wav
 # General test/debug logs.
 *.log
+# Immutable v0.3.2 release-exception evidence referenced by its attestation.
+!crates/sip/rvoip-sip/docs/releases/beta/20260729T010954Z/exception-r1/source/performance-gate-metrics.log
 # CCD session state — never publish.
 .claude/
 
