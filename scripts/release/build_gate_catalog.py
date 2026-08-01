@@ -21,26 +21,36 @@ OUTPUT = Path("scripts/release/gates.json")
 LEGACY_UNSTRUCTURED = {
     "source.clean-start",
     "source.canonical-2k",
-    "interop.freeswitch-down-before-asterisk",
-    "interop.asterisk-up",
-    "interop.asterisk-down-after",
-    "interop.asterisk-down-before-freeswitch",
-    "interop.freeswitch-up",
-    "interop.freeswitch-down-after",
-    "interop.restore-asterisk-down",
-    "interop.restore-freeswitch-down",
-    "interop.sipp-start",
-    "interop.sipp-stop",
     "interop.proxy-descope",
     "perf.capture-boundary",
     "perf.literal-all-config",
-    "report.regression-baseline",
     "report.regression-audit",
     "report.perf-evidence-capture",
     "report.performance-metrics",
     "source.final-capture",
     "source.canonical-2k-unchanged",
 }
+COLLECT_AGGREGATES = {
+    "source.canonical-2k",
+    "perf.capture-boundary",
+    "perf.literal-all-config",
+    "report.regression-audit",
+    "report.perf-evidence-capture",
+    "report.performance-metrics",
+    "source.final-capture",
+    "source.canonical-2k-unchanged",
+    "interop.proxy-descope",
+    "perf.media-burst-matrix",
+}
+BURST_SCENARIOS = [
+    "carrier-smoke",
+    "access-edge-microburst",
+    "contact-center-flash",
+    "shift-change-long-hold",
+    "overload-recovery",
+    "high-density-media-burst",
+    "buffer-ab-legacy",
+]
 COMMAND_OVERRIDES = {
     "security.advisory-audit": [
         "cargo",
@@ -87,6 +97,24 @@ COMMAND_OVERRIDES = {
         "rvoip",
     ],
 }
+
+for _gate_id, _action in {
+    "interop.freeswitch-down-before-asterisk": "freeswitch-down",
+    "interop.asterisk-up": "asterisk-up",
+    "interop.asterisk-down-after": "asterisk-down",
+    "interop.asterisk-down-before-freeswitch": "asterisk-down",
+    "interop.freeswitch-up": "freeswitch-up",
+    "interop.freeswitch-down-after": "freeswitch-down",
+    "interop.restore-asterisk-down": "restore-asterisk-down",
+    "interop.restore-freeswitch-down": "restore-freeswitch-down",
+    "interop.sipp-start": "sipp-start",
+    "interop.sipp-stop": "sipp-stop",
+}.items():
+    COMMAND_OVERRIDES[_gate_id] = [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        _action,
+    ]
 
 FUZZ_TARGETS = {
     "sip-message": "sip_message",
@@ -198,7 +226,7 @@ def affected_paths(record: dict[str, Any], command: list[str] | None) -> list[st
         expanded = value.replace("{workspace}/", "")
         if "/Cargo.toml" in expanded:
             paths.append(expanded.rsplit("/Cargo.toml", 1)[0] + "/**")
-        elif expanded.startswith(("scripts/", "crates/", "examples/")):
+        elif expanded.startswith(("scripts/", "crates/", "examples/", "infra/")):
             path = expanded.split("=", 1)[-1]
             paths.append(path if "*" in path else path)
     return sorted(set(paths))
@@ -235,11 +263,20 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
     if gate_id == "source.clean-start":
         return []
     if gate_id == "source.canonical-2k":
-        return ["source.clean-start"]
+        return [
+            "source.clean-start",
+            "perf.concurrent-calls",
+            "perf.sipp-parity",
+            "perf.media-burst-matrix",
+        ]
     if gate_id == "source.final-capture":
         return [item["id"] for item in records if item["id"] != gate_id and not item["id"].startswith("source.canonical-2k-unchanged")]
     if gate_id == "source.canonical-2k-unchanged":
         return ["source.clean-start", "source.final-capture"]
+    if gate_id == "interop.proxy-descope":
+        return ["interop.remote-proxies"]
+    if gate_id == "perf.media-burst-matrix":
+        return [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
     if gate_id.startswith("report."):
         perf = [item["id"] for item in records if item["id"].startswith("perf.")]
         prior_reports = [
@@ -258,6 +295,10 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
 def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages: list[str]) -> dict[str, Any]:
     command = normalized_command(record)
     executor = "argv" if command else "legacy-group"
+    if record["id"] in COLLECT_AGGREGATES:
+        # These gates reconcile evidence produced by other shards. Running
+        # them concurrently would race the evidence they are meant to audit.
+        executor = "aggregate"
     if record["id"] == "source.clean-start":
         # The remote runner can verify this directly without invoking the
         # macOS-only beta wrapper.
@@ -412,6 +453,34 @@ def security_gates() -> list[dict[str, Any]]:
     return result
 
 
+def burst_scenario_gates() -> list[dict[str, Any]]:
+    result = []
+    for scenario in BURST_SCENARIOS:
+        gate = synthetic_gate(
+            f"perf.media-burst.{scenario}",
+            f"media burst scenario: {scenario}",
+            executor="argv",
+            command=[
+                "env",
+                "RVOIP_PERF_RESULTS={artifact_dir}",
+                f"RVOIP_PERF_BURST_SCENARIOS={scenario}",
+                "bash",
+                "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+            ],
+            resource="gcp-performance-soak",
+            dependencies=["source.remote-clean"],
+            paths=[
+                "crates/sip/rvoip-sip/**",
+                "crates/media/**",
+                "crates/foundation/**",
+            ],
+        )
+        gate["estimated_seconds"] = 900
+        gate["timeout_minutes"] = 75
+        result.append(gate)
+    return result
+
+
 def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     source_payload = json.loads(source.read_text())
     records = source_payload["records"]
@@ -464,7 +533,34 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             dependencies=["source.remote-clean"],
             paths=["crates/sip/sip-proxy/**", "crates/sip/sip-transport/**", "crates/sip/sip-core/**"],
         ),
+        synthetic_gate(
+            "interop.browser-dtmf",
+            "real Chromium outbound RFC 4733 interoperability (BridgeFu issue #54)",
+            executor="argv",
+            command=[
+                "cargo",
+                "test",
+                "--locked",
+                "-p",
+                "rvoip-webrtc",
+                "--features",
+                "interop-browser,signaling-whip,signaling-ws",
+                "--test",
+                "browser_interop",
+                "--",
+                "--include-ignored",
+                "--nocapture",
+            ],
+            resource="github-standard",
+            dependencies=["source.remote-clean"],
+            paths=[
+                "crates/webrtc/rvoip-rtc/**",
+                "crates/webrtc/rvoip-webrtc/**",
+                "crates/core/rvoip-core/**",
+            ],
+        ),
     ]
+    synthetic.extend(burst_scenario_gates())
     core = [core_gate(package, root, weights) for package in package_rows]
     security = security_gates()
     remote_without_final = [gate["id"] for gate in synthetic + core + security]
@@ -472,12 +568,14 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         synthetic_gate(
             "report.remote-aggregate",
             "exact-candidate evidence reconciliation",
+            executor="aggregate",
             dependencies=sorted(set(remote_without_final)),
             always_fresh=True,
         ),
         synthetic_gate(
             "source.remote-final",
             "final candidate source fingerprint",
+            executor="aggregate",
             dependencies=["report.remote-aggregate"],
             always_fresh=True,
         ),
@@ -485,26 +583,40 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     gates = legacy + synthetic + core + security + final
 
     direct_legacy = [gate["id"] for gate in legacy if gate["executor"] == "argv"]
+    structured_legacy = [
+        gate["id"] for gate in legacy if gate["executor"] != "legacy-group"
+    ]
     core_ids = [gate["id"] for gate in core]
     security_ids = [gate["id"] for gate in security]
     framework_ids = [
         "source.remote-clean",
         "source.clean-start",
         "package.inventory",
-        "report.remote-aggregate",
-        "source.remote-final",
     ]
     lightweight_legacy = [
         gate_id
         for gate_id in direct_legacy
-        if not gate_id.startswith(("perf.", "interop."))
+        if not gate_id.startswith(("perf.", "interop.", "report.", "source."))
     ]
+    lightweight_legacy.append("source.clean-start")
     heavy_direct = [
         gate_id for gate_id in direct_legacy if gate_id.startswith(("perf.", "interop."))
     ]
     remote_core = sorted(set(framework_ids + core_ids + lightweight_legacy + [security_ids[0]]))
     remote_release = sorted(
-        set(remote_core + security_ids[1:] + heavy_direct + ["interop.remote-libsrtp", "interop.remote-proxies"])
+        set(
+            remote_core
+            + security_ids[1:]
+            + structured_legacy
+            + [
+                "interop.remote-libsrtp",
+                "interop.remote-proxies",
+                "interop.browser-dtmf",
+                "report.remote-aggregate",
+                "source.remote-final",
+            ]
+            + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
+        )
     )
     remote_release_legacy_coverage = sorted(
         set(record["id"] for record in records) - set(remote_release)
@@ -520,7 +632,13 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         },
         "workspace_package_count": len(package_rows),
         "profiles": {
-            "legacy-full": [record["id"] for record in records],
+            "legacy-full": sorted(
+                set(
+                    [record["id"] for record in records]
+                    + ["source.remote-clean", "interop.remote-proxies"]
+                    + [f"perf.media-burst.{scenario}" for scenario in BURST_SCENARIOS]
+                )
+            ),
             "remote-core": remote_core,
             "remote-release": remote_release,
         },

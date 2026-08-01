@@ -43,11 +43,14 @@
       "category": "Source integrity",
       "command": null,
       "dependencies": [
-        "source.clean-start"
+        "source.clean-start",
+        "perf.concurrent-calls",
+        "perf.sipp-parity",
+        "perf.media-burst-matrix"
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py import --workspace-root <workspace> --beta-start <source-report> --artifact-dir <source-report> --run-dir <workspace>/target/perf-results/profiles/20260724T221956Z_clean_KRwxGm --run-dir <workspace>/target/perf-results/profiles/20260724T224300Z_clean_GbSiae --run-dir <workspace>/target/perf-results/profiles/20260724T225757Z_clean_p5XNXK",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2674,13 +2677,17 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "freeswitch-down"
+      ],
       "dependencies": [
         "source.clean-start"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2710,14 +2717,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "asterisk-up"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.freeswitch-down-before-asterisk"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 2,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2796,14 +2807,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "asterisk-down"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.asterisk-matrix"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 4,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2833,14 +2848,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "asterisk-down"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.asterisk-down-after"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2870,14 +2889,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "freeswitch-up"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.asterisk-down-before-freeswitch"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 7,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2956,14 +2979,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "freeswitch-down"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.freeswitch-matrix"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 11,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -2993,14 +3020,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "restore-asterisk-down"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.freeswitch-down-after"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3030,14 +3061,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "restore-freeswitch-down"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.restore-asterisk-down"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3115,14 +3150,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "sipp-start"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.sipp-build"
       ],
       "display_command": "managed perf_listener lifecycle operation (command was not structured separately by the v1 runner)",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3198,14 +3237,18 @@
       ],
       "always_fresh": false,
       "category": "PBX and interoperability",
-      "command": null,
+      "command": [
+        "bash",
+        "infra/release-runners/interop-lifecycle.sh",
+        "sipp-stop"
+      ],
       "dependencies": [
         "source.clean-start",
         "interop.sipp-matrix"
       ],
       "display_command": "managed perf_listener lifecycle operation (command was not structured separately by the v1 runner)",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3278,12 +3321,11 @@
       "category": "PBX and interoperability",
       "command": null,
       "dependencies": [
-        "source.clean-start",
-        "interop.strict-ua"
+        "interop.remote-proxies"
       ],
       "display_command": "bash -c set -euo pipefail",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3320,7 +3362,7 @@
       ],
       "display_command": "prepare_perf_results_capture",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -3357,7 +3399,7 @@
       ],
       "display_command": "env BETA_RUN_BURST_MATRIX=1 BETA_BURST_MATRIX=all BETA_RUN_LONG_SOAK=1 RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 bash -c ",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -4746,11 +4788,17 @@
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
-        "source.clean-start"
+        "perf.media-burst.carrier-smoke",
+        "perf.media-burst.access-edge-microburst",
+        "perf.media-burst.contact-center-flash",
+        "perf.media-burst.shift-change-long-hold",
+        "perf.media-burst.overload-recovery",
+        "perf.media-burst.high-density-media-burst",
+        "perf.media-burst.buffer-ab-legacy"
       ],
       "display_command": "env RVOIP_PERF_FEATURES=perf-tests RVOIP_PERF_BURST_SCENARIO_FILE=<workspace>/crates/sip/rvoip-sip/config/perf-burst-scenarios.yaml RVOIP_PERF_BURST_SCENARIOS=all RVOIP_PERF_MEMORY_DIAGNOSTICS=0 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=0 RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS=5 RVOIP_PERF_MIMALLOC_COLLECT_AT=off RVOIP_PERF_SKIP_AUDIO_FRAME_DELIVERY=0 RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 <workspace>/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 5574,
-      "executor": "argv",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -4838,7 +4886,17 @@
       ],
       "always_fresh": true,
       "category": "Reporting and regression",
-      "command": null,
+      "command": [
+        "python3",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py",
+        "package",
+        "--manifest",
+        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json",
+        "--source-root",
+        "{workspace}/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z",
+        "--artifact-dir",
+        "{artifact_dir}"
+      ],
       "dependencies": [
         "perf.ai-agent",
         "perf.b2bua",
@@ -4872,7 +4930,7 @@
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/perf_regression_baseline.py package --manifest <workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z/manifest.json --source-root <workspace>/crates/sip/rvoip-sip/perf-baselines/20260706T181609Z --artifact-dir <source-report>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "argv",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -4936,7 +4994,7 @@
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/perf_audit.py --baseline <source-report> --baseline-manifest <source-report> --current <workspace>/target/perf-results --out <source-report> --tolerance-pct 15 --latency-tolerance-pct 25 --fail-on-regression",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -5001,7 +5059,7 @@
       ],
       "display_command": "capture_current_perf_results",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -5067,7 +5125,7 @@
       ],
       "display_command": "write_performance_gate_metrics",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -5207,7 +5265,7 @@
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py fingerprint --workspace-root <workspace> --out <source-report>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -5243,7 +5301,7 @@
       ],
       "display_command": "python3 <workspace>/crates/sip/rvoip-sip/scripts/canonical_2k_evidence.py verify-source --workspace-root <workspace> --beta-start <source-report>",
       "estimated_seconds": 1,
-      "executor": "legacy-group",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -5397,6 +5455,317 @@
         75
       ],
       "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/webrtc/rvoip-rtc/**",
+        "crates/webrtc/rvoip-webrtc/**",
+        "crates/core/rvoip-core/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rvoip-webrtc",
+        "--features",
+        "interop-browser,signaling-whip,signaling-ws",
+        "--test",
+        "browser_interop",
+        "--",
+        "--include-ignored",
+        "--nocapture"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "cargo test --locked -p rvoip-webrtc --features interop-browser,signaling-whip,signaling-ws --test browser_interop -- --include-ignored --nocapture",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "interop.browser-dtmf",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "real Chromium outbound RFC 4733 interoperability (BridgeFu issue #54)",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=carrier-smoke",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=carrier-smoke bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.carrier-smoke",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: carrier-smoke",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.access-edge-microburst",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: access-edge-microburst",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=contact-center-flash",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=contact-center-flash bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.contact-center-flash",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: contact-center-flash",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.shift-change-long-hold",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: shift-change-long-hold",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=overload-recovery",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=overload-recovery bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.overload-recovery",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: overload-recovery",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.high-density-media-burst",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: high-density-media-burst",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "crates/sip/rvoip-sip/**",
+        "crates/media/**",
+        "crates/foundation/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "env",
+        "RVOIP_PERF_RESULTS={artifact_dir}",
+        "RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy",
+        "bash",
+        "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "estimated_seconds": 900,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.media-burst.buffer-ab-legacy",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "media burst scenario: buffer-ab-legacy",
+      "resource_class": "gcp-performance-soak",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 75,
       "working_directory": "."
     },
     {
@@ -7804,9 +8173,17 @@
         "core.rvoip-webrtc-stack",
         "core.rvoip-websocket",
         "core.rvoip-webtransport",
+        "interop.browser-dtmf",
         "interop.remote-libsrtp",
         "interop.remote-proxies",
         "package.inventory",
+        "perf.media-burst.access-edge-microburst",
+        "perf.media-burst.buffer-ab-legacy",
+        "perf.media-burst.carrier-smoke",
+        "perf.media-burst.contact-center-flash",
+        "perf.media-burst.high-density-media-burst",
+        "perf.media-burst.overload-recovery",
+        "perf.media-burst.shift-change-long-hold",
         "security.remote-advisories",
         "security.remote-fuzz-dtls",
         "security.remote-fuzz-g711",
@@ -7820,9 +8197,9 @@
         "security.remote-fuzz-uri",
         "source.remote-clean"
       ],
-      "display_command": "builtin report.remote-aggregate",
+      "display_command": "aggregate report.remote-aggregate",
       "estimated_seconds": 1,
-      "executor": "builtin",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -7850,9 +8227,9 @@
       "dependencies": [
         "report.remote-aggregate"
       ],
-      "display_command": "builtin source.remote-final",
+      "display_command": "aggregate source.remote-final",
       "estimated_seconds": 1,
-      "executor": "builtin",
+      "executor": "aggregate",
       "expected_outputs": [
         "receipt.json",
         "command.log"
@@ -7878,34 +8255,98 @@
   },
   "profiles": {
     "legacy-full": [
-      "source.clean-start",
-      "source.canonical-2k",
-      "build.format",
-      "build.evidence-helper-tests",
-      "build.public-api",
-      "build.sip-all-targets",
       "build.claimed-lower-crates",
-      "test.supporting-sip-crates",
-      "test.rtp-core",
-      "test.workspace-unit",
-      "test.workspace-integration",
-      "test.workspace-doctest",
-      "test.sip-unit",
-      "test.sip-integration",
-      "test.sip-doctest",
-      "build.sip-examples",
-      "build.downstream-rvoip",
-      "build.downstream-rvoip-app",
+      "build.downstream-amazon-connect",
+      "build.downstream-audio-device",
       "build.downstream-client",
       "build.downstream-client-full",
       "build.downstream-core",
-      "build.downstream-amazon-connect",
-      "build.downstream-uctp",
       "build.downstream-quic",
-      "build.downstream-webtransport",
-      "build.downstream-websocket",
+      "build.downstream-rvoip",
+      "build.downstream-rvoip-app",
+      "build.downstream-uctp",
       "build.downstream-webrtc",
-      "build.downstream-audio-device",
+      "build.downstream-websocket",
+      "build.downstream-webtransport",
+      "build.evidence-helper-tests",
+      "build.format",
+      "build.public-api",
+      "build.rustdoc",
+      "build.sip-all-targets",
+      "build.sip-examples",
+      "interop.asterisk-down-after",
+      "interop.asterisk-down-before-freeswitch",
+      "interop.asterisk-matrix",
+      "interop.asterisk-up",
+      "interop.freeswitch-down-after",
+      "interop.freeswitch-down-before-asterisk",
+      "interop.freeswitch-matrix",
+      "interop.freeswitch-up",
+      "interop.proxy-descope",
+      "interop.remote-proxies",
+      "interop.restore-asterisk-down",
+      "interop.restore-freeswitch-down",
+      "interop.sipp-build",
+      "interop.sipp-matrix",
+      "interop.sipp-start",
+      "interop.sipp-stop",
+      "interop.strict-ua",
+      "perf.ai-agent",
+      "perf.b2bua",
+      "perf.backpressure",
+      "perf.call-setup-endpoint",
+      "perf.call-setup-pbx",
+      "perf.call-setup-signaling",
+      "perf.capture-boundary",
+      "perf.concurrent-calls",
+      "perf.contact-center",
+      "perf.literal-all-config",
+      "perf.long-duration",
+      "perf.mass-teardown",
+      "perf.media-burst-matrix",
+      "perf.media-burst.access-edge-microburst",
+      "perf.media-burst.buffer-ab-legacy",
+      "perf.media-burst.carrier-smoke",
+      "perf.media-burst.contact-center-flash",
+      "perf.media-burst.high-density-media-burst",
+      "perf.media-burst.overload-recovery",
+      "perf.media-burst.shift-change-long-hold",
+      "perf.media-churn",
+      "perf.mid-call-signaling",
+      "perf.mixed-workload",
+      "perf.monolithic-soak",
+      "perf.pdd-180",
+      "perf.registrar-scale",
+      "perf.registration",
+      "perf.resiliency-all",
+      "perf.rtp-steady-state",
+      "perf.session-churn",
+      "perf.sipp-parity",
+      "perf.soak-candidate",
+      "perf.soak-invariants",
+      "perf.srtp-overhead",
+      "perf.tls-overhead",
+      "perf.transport-recovery",
+      "report.perf-evidence-capture",
+      "report.performance-metrics",
+      "report.regression-audit",
+      "report.regression-baseline",
+      "security.advisory-audit",
+      "security.fuzz-dtls",
+      "security.fuzz-g711",
+      "security.fuzz-header",
+      "security.fuzz-rtcp",
+      "security.fuzz-rtp",
+      "security.fuzz-sdp",
+      "security.fuzz-sip-message",
+      "security.fuzz-srtp",
+      "security.fuzz-stun",
+      "security.fuzz-uri",
+      "source.canonical-2k",
+      "source.canonical-2k-unchanged",
+      "source.clean-start",
+      "source.final-capture",
+      "source.remote-clean",
       "test.example-01",
       "test.example-02",
       "test.example-03",
@@ -7919,73 +8360,18 @@
       "test.example-11",
       "test.example-12",
       "test.example-13",
-      "test.pbx-analyzer",
-      "build.rustdoc",
-      "test.rfc4475",
-      "test.generated-message",
       "test.generated-dialog",
-      "security.advisory-audit",
-      "security.fuzz-sip-message",
-      "security.fuzz-uri",
-      "security.fuzz-header",
-      "security.fuzz-sdp",
-      "security.fuzz-rtp",
-      "security.fuzz-rtcp",
-      "security.fuzz-srtp",
-      "security.fuzz-dtls",
-      "security.fuzz-stun",
-      "security.fuzz-g711",
-      "interop.freeswitch-down-before-asterisk",
-      "interop.asterisk-up",
-      "interop.asterisk-matrix",
-      "interop.asterisk-down-after",
-      "interop.asterisk-down-before-freeswitch",
-      "interop.freeswitch-up",
-      "interop.freeswitch-matrix",
-      "interop.freeswitch-down-after",
-      "interop.restore-asterisk-down",
-      "interop.restore-freeswitch-down",
-      "interop.sipp-build",
-      "interop.sipp-start",
-      "interop.sipp-matrix",
-      "interop.sipp-stop",
-      "interop.strict-ua",
-      "interop.proxy-descope",
-      "perf.capture-boundary",
-      "perf.literal-all-config",
-      "perf.call-setup-endpoint",
-      "perf.call-setup-pbx",
-      "perf.call-setup-signaling",
-      "perf.registration",
-      "perf.concurrent-calls",
-      "perf.rtp-steady-state",
-      "perf.backpressure",
-      "perf.transport-recovery",
-      "perf.resiliency-all",
-      "perf.mid-call-signaling",
-      "perf.tls-overhead",
-      "perf.srtp-overhead",
-      "perf.pdd-180",
-      "perf.long-duration",
-      "perf.registrar-scale",
-      "perf.mixed-workload",
-      "perf.b2bua",
-      "perf.ai-agent",
-      "perf.contact-center",
-      "perf.sipp-parity",
-      "perf.soak-invariants",
-      "perf.media-churn",
-      "perf.monolithic-soak",
-      "perf.mass-teardown",
-      "perf.session-churn",
-      "perf.media-burst-matrix",
-      "perf.soak-candidate",
-      "report.regression-baseline",
-      "report.regression-audit",
-      "report.perf-evidence-capture",
-      "report.performance-metrics",
-      "source.final-capture",
-      "source.canonical-2k-unchanged"
+      "test.generated-message",
+      "test.pbx-analyzer",
+      "test.rfc4475",
+      "test.rtp-core",
+      "test.sip-doctest",
+      "test.sip-integration",
+      "test.sip-unit",
+      "test.supporting-sip-crates",
+      "test.workspace-doctest",
+      "test.workspace-integration",
+      "test.workspace-unit"
     ],
     "remote-core": [
       "build.claimed-lower-crates",
@@ -8052,7 +8438,6 @@
       "core.rvoip-websocket",
       "core.rvoip-webtransport",
       "package.inventory",
-      "report.remote-aggregate",
       "security.advisory-audit",
       "security.fuzz-dtls",
       "security.fuzz-g711",
@@ -8067,7 +8452,6 @@
       "security.remote-advisories",
       "source.clean-start",
       "source.remote-clean",
-      "source.remote-final",
       "test.example-01",
       "test.example-02",
       "test.example-03",
@@ -8158,12 +8542,24 @@
       "core.rvoip-webrtc-stack",
       "core.rvoip-websocket",
       "core.rvoip-webtransport",
+      "interop.asterisk-down-after",
+      "interop.asterisk-down-before-freeswitch",
       "interop.asterisk-matrix",
+      "interop.asterisk-up",
+      "interop.browser-dtmf",
+      "interop.freeswitch-down-after",
+      "interop.freeswitch-down-before-asterisk",
       "interop.freeswitch-matrix",
+      "interop.freeswitch-up",
+      "interop.proxy-descope",
       "interop.remote-libsrtp",
       "interop.remote-proxies",
+      "interop.restore-asterisk-down",
+      "interop.restore-freeswitch-down",
       "interop.sipp-build",
       "interop.sipp-matrix",
+      "interop.sipp-start",
+      "interop.sipp-stop",
       "interop.strict-ua",
       "package.inventory",
       "perf.ai-agent",
@@ -8172,11 +8568,20 @@
       "perf.call-setup-endpoint",
       "perf.call-setup-pbx",
       "perf.call-setup-signaling",
+      "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
+      "perf.literal-all-config",
       "perf.long-duration",
       "perf.mass-teardown",
       "perf.media-burst-matrix",
+      "perf.media-burst.access-edge-microburst",
+      "perf.media-burst.buffer-ab-legacy",
+      "perf.media-burst.carrier-smoke",
+      "perf.media-burst.contact-center-flash",
+      "perf.media-burst.high-density-media-burst",
+      "perf.media-burst.overload-recovery",
+      "perf.media-burst.shift-change-long-hold",
       "perf.media-churn",
       "perf.mid-call-signaling",
       "perf.mixed-workload",
@@ -8193,6 +8598,10 @@
       "perf.srtp-overhead",
       "perf.tls-overhead",
       "perf.transport-recovery",
+      "report.perf-evidence-capture",
+      "report.performance-metrics",
+      "report.regression-audit",
+      "report.regression-baseline",
       "report.remote-aggregate",
       "security.advisory-audit",
       "security.fuzz-dtls",
@@ -8216,7 +8625,10 @@
       "security.remote-fuzz-srtp",
       "security.remote-fuzz-stun",
       "security.remote-fuzz-uri",
+      "source.canonical-2k",
+      "source.canonical-2k-unchanged",
       "source.clean-start",
+      "source.final-capture",
       "source.remote-clean",
       "source.remote-final",
       "test.example-01",
@@ -8247,30 +8659,9 @@
     ]
   },
   "remote_release_legacy_coverage": {
-    "profile_legacy_count": 88,
+    "profile_legacy_count": 108,
     "required_legacy_count": 108,
-    "unautomated_legacy_ids": [
-      "interop.asterisk-down-after",
-      "interop.asterisk-down-before-freeswitch",
-      "interop.asterisk-up",
-      "interop.freeswitch-down-after",
-      "interop.freeswitch-down-before-asterisk",
-      "interop.freeswitch-up",
-      "interop.proxy-descope",
-      "interop.restore-asterisk-down",
-      "interop.restore-freeswitch-down",
-      "interop.sipp-start",
-      "interop.sipp-stop",
-      "perf.capture-boundary",
-      "perf.literal-all-config",
-      "report.perf-evidence-capture",
-      "report.performance-metrics",
-      "report.regression-audit",
-      "report.regression-baseline",
-      "source.canonical-2k",
-      "source.canonical-2k-unchanged",
-      "source.final-capture"
-    ]
+    "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
   "workspace_package_count": 44

@@ -51,7 +51,11 @@ jobs:
     timeout-minutes: 15
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      hosted_matrix: ${{ steps.plan.outputs.hosted_matrix }}
+      gcp_matrix: ${{ steps.plan.outputs.gcp_matrix }}
       shard_count: ${{ steps.plan.outputs.shard_count }}
+      hosted_shard_count: ${{ steps.plan.outputs.hosted_shard_count }}
+      gcp_shard_count: ${{ steps.plan.outputs.gcp_shard_count }}
       candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
       environment_id: ${{ steps.plan.outputs.environment_id }}
       run_count: ${{ steps.plan.outputs.run_count }}
@@ -75,17 +79,6 @@ jobs:
             echo "release candidates must be commits on origin/main" >&2
             exit 1
           }
-
-      - name: Require provisioned specialty runners
-        if: inputs.profile == 'remote-release'
-        env:
-          GCP_RUNNERS_READY: ${{ vars.RVOIP_GCP_RUNNERS_READY }}
-        run: |
-          if test "$GCP_RUNNERS_READY" != true; then
-            echo "remote-release requires the approved ephemeral GCP runner fleet" >&2
-            echo "set repository variable RVOIP_GCP_RUNNERS_READY=true only after runner labels and cleanup are verified" >&2
-            exit 1
-          fi
 
       - name: Require complete structured release coverage
         if: inputs.profile == 'remote-release'
@@ -159,14 +152,15 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  gate:
+  gate-hosted:
     name: ${{ matrix.resource_class }} / ${{ matrix.id }}
+    if: needs.plan.outputs.hosted_shard_count != '0'
     needs: plan
-    runs-on: ${{ matrix.runs_on }}
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.hosted_matrix) }}
     steps:
       - name: Check out exact candidate
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -209,6 +203,10 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
 
+      - name: Install Chromium for the BridgeFu DTMF regression
+        if: matrix.needs_chromium
+        run: sudo apt-get install -y chromium
+
       - name: Run gate shard
         run: >-
           python3 scripts/release/gates.py run-shard
@@ -226,10 +224,239 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+  preflight-gcp:
+    name: Verify ephemeral GCP capacity
+    if: needs.plan.outputs.gcp_shard_count != '0'
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Require all compute and disk quota before creating workers
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          REGION: ${{ vars.RVOIP_GCP_REGION }}
+          GCP_MATRIX: ${{ needs.plan.outputs.gcp_matrix }}
+        run: |
+          set -euo pipefail
+          gcloud compute project-info describe --project "$PROJECT" --format=json > global-quotas.json
+          gcloud compute regions describe "$REGION" --project "$PROJECT" --format=json > regional-quotas.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          workers = json.loads(os.environ["GCP_MATRIX"])["include"]
+          vcpus = sum(int(item["machine_type"].rsplit("-", 1)[1]) for item in workers)
+          instances = len(workers)
+          disk_gb = sum(int(item["disk_size_gb"]) for item in workers)
+          global_quotas = {
+              row["metric"]: row
+              for row in json.loads(Path("global-quotas.json").read_text())["quotas"]
+          }
+          regional_quotas = {
+              row["metric"]: row
+              for row in json.loads(Path("regional-quotas.json").read_text())["quotas"]
+          }
+          required = {
+              "CPUS_ALL_REGIONS": (global_quotas, vcpus),
+              "CPUS": (regional_quotas, vcpus),
+              "N2_CPUS": (regional_quotas, vcpus),
+              "INSTANCES": (regional_quotas, instances),
+              "IN_USE_ADDRESSES": (regional_quotas, instances),
+              "DISKS_TOTAL_GB": (regional_quotas, disk_gb),
+          }
+          failures = []
+          summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
+          with summary.open("a") as output:
+              output.write("## Ephemeral release capacity\n\n")
+              output.write(f"- Workers: {instances}\n- N2 vCPUs: {vcpus}\n- Standard disk: {disk_gb} GB\n\n")
+              output.write("| Quota | Required | Available |\n| --- | ---: | ---: |\n")
+              for metric, (source, needed) in required.items():
+                  quota = source.get(metric)
+                  available = -1 if quota is None else int(quota["limit"] - quota.get("usage", 0))
+                  output.write(f"| {metric} | {needed} | {available} |\n")
+                  if available < needed:
+                      failures.append(f"{metric}: requires {needed}, only {available} available")
+          if failures:
+              raise SystemExit("GCP capacity preflight failed:\n- " + "\n- ".join(failures))
+          PY
+
+  gate-gcp:
+    name: ${{ matrix.resource_class }} / ${{ matrix.id }}
+    if: needs.plan.outputs.gcp_shard_count != '0'
+    needs: [plan, preflight-gcp]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.gcp_matrix) }}
+    steps:
+      - name: Check out controller definition
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+
+      - name: Authenticate to Google Cloud without a key
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+
+      - name: Create an ephemeral release worker
+        id: worker
+        env:
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
+          GATES: ${{ matrix.gates_csv }}
+          SHARD_ID: ${{ matrix.id }}
+          MACHINE_TYPE: ${{ matrix.machine_type }}
+          DISK_TYPE: ${{ matrix.disk_type }}
+          DISK_SIZE_GB: ${{ matrix.disk_size_gb }}
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
+          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          worker="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD_ID}"
+          prefix="release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/${SHARD_ID}"
+          gates_b64="$(printf '%s' "$GATES" | base64 -w0)"
+          environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
+          echo "name=$worker" >> "$GITHUB_OUTPUT"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          gcloud compute instances create "$worker" \
+            --project "$PROJECT" \
+            --zone "$ZONE" \
+            --machine-type "$MACHINE_TYPE" \
+            --network "$NETWORK" \
+            --subnet "$SUBNET" \
+            --image-family ubuntu-2404-lts-amd64 \
+            --image-project ubuntu-os-cloud \
+            --boot-disk-type "$DISK_TYPE" \
+            --boot-disk-size "${DISK_SIZE_GB}GB" \
+            --boot-disk-auto-delete \
+            --service-account "$RUNNER_SERVICE_ACCOUNT" \
+            --scopes cloud-platform \
+            --shielded-secure-boot \
+            --shielded-vtpm \
+            --shielded-integrity-monitoring \
+            --labels rvoip-role=release-gate,managed-by=github-actions \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${SHARD_ID},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+            --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
+
+      - name: Wait for immutable worker evidence
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          WORKER: ${{ steps.worker.outputs.name }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 340); do
+            if gcloud storage cat "gs://${BUCKET}/${PREFIX}/result.json" > result.json 2>/dev/null; then
+              exit 0
+            fi
+            state="$(gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" --format='value(status)' 2>/dev/null || true)"
+            if [[ "$state" == TERMINATED ]]; then
+              echo "worker terminated without uploading a result" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          echo "release shard exceeded its 170-minute evidence deadline" >&2
+          exit 1
+
+      - name: Download and verify shard evidence
+        if: always() && steps.worker.outputs.prefix != ''
+        env:
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          PREFIX: ${{ steps.worker.outputs.prefix }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          SHARD_ID: ${{ matrix.id }}
+        run: |
+          set -euo pipefail
+          gcloud storage cp "gs://${BUCKET}/${PREFIX}/qualification.log" qualification.log || true
+          test -f result.json
+          gcloud storage cp "gs://${BUCKET}/${PREFIX}/release-shard.tar.gz" release-shard.tar.gz
+          echo "$(jq -r .evidence_archive_sha256 result.json)  release-shard.tar.gz" | sha256sum --check
+          mkdir -p target
+          tar -C target -xzf release-shard.tar.gz
+          jq -e \
+            --arg candidate "$CANDIDATE" \
+            --arg shard "$SHARD_ID" \
+            '.candidate_sha == $candidate and .shard_id == $shard and .status == "PASS" and .publishing_attempted == false' \
+            result.json
+
+      - name: Delete worker and attached disk
+        if: always() && steps.worker.outputs.name != ''
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          WORKER: ${{ steps.worker.outputs.name }}
+        run: |
+          if gcloud compute instances describe "$WORKER" --project "$PROJECT" --zone "$ZONE" >/dev/null 2>&1; then
+            gcloud compute instances delete "$WORKER" --project "$PROJECT" --zone "$ZONE" --quiet
+          fi
+
+      - name: Upload GCP shard evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-gate-shard-${{ matrix.id }}
+          path: target/release-shard/
+          retention-days: 90
+          if-no-files-found: warn
+
+  cleanup-gcp:
+    name: Delete every ephemeral release worker
+    if: always() && needs.plan.outputs.gcp_shard_count != '0'
+    needs: [plan, gate-gcp]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.RVOIP_GCP_PILOT_PROVIDER }}
+          service_account: ${{ vars.RVOIP_GCP_PROVISIONER_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
+      - name: Sweep workers left by interrupted controllers
+        env:
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          RUN_PREFIX: rvoip-rel-${{ github.run_id }}-${{ github.run_attempt }}-
+        run: |
+          set -euo pipefail
+          instances="$(gcloud compute instances list --project "$PROJECT" --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" --format='csv[no-heading](name,zone.basename())' || true)"
+          while IFS=, read -r worker zone; do
+            test -n "$worker" || continue
+            gcloud compute instances delete "$worker" --project "$PROJECT" --zone "$zone" --quiet
+          done <<< "$instances"
+          remaining="$(gcloud compute instances list --project "$PROJECT" --filter="labels.managed-by=github-actions AND name~'^${RUN_PREFIX}'" --format='value(name)')"
+          test -z "$remaining"
+
   collect:
     name: Release Gate
     if: always()
-    needs: [plan, gate]
+    needs: [plan, gate-hosted, gate-gcp, cleanup-gcp]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
