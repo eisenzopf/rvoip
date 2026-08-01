@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
 CRATE_DIR="${WORKSPACE_ROOT}/crates/sip/rvoip-sip"
-PERF_DIR="${WORKSPACE_ROOT}/target/perf-results"
+PERF_DIR="${RVOIP_PERF_RESULTS:-${WORKSPACE_ROOT}/target/perf-results}"
 CARGO_ARTIFACT_HELPER="${SCRIPT_DIR}/perf_cargo_artifact.py"
 
 export CARGO_MANIFEST_DIR="${CRATE_DIR}"

@@ -97,6 +97,10 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("wait_udp_port", lifecycle)
         self.assertIn("/proc/net/udp", lifecycle)
         self.assertNotIn("nc -z 127.0.0.1", lifecycle)
+        self.assertIn("--name rvoip-freeswitch", lifecycle)
+        self.assertIn("wait_udp_port rvoip-freeswitch 5062", lifecycle)
+        self.assertNotIn("--name rvoip-release-freeswitch", lifecycle)
+        self.assertNotIn("down rvoip-release-freeswitch", lifecycle)
         for path in (
             "infra/release-runners/pbx/asterisk/Dockerfile",
             "infra/release-runners/pbx/asterisk/config/pjsip.conf",
@@ -105,6 +109,25 @@ class WorkflowPolicyTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertTrue((ROOT / path).is_file())
+
+    def test_linux_proxy_helpers_share_the_reviewed_host_network(self) -> None:
+        common = (
+            ROOT / "crates/sip/sip-proxy/tests/interop/scripts/common.sh"
+        ).read_text()
+        self.assertIn('elif [[ "$(uname -s)" == "Linux" ]]', common)
+        self.assertIn('COMPOSE_FILE_ARGS+=(--file "$COLIMA_HOST_COMPOSE_FILE")', common)
+        self.assertIn(
+            "PROXY_INTEROP_NETWORK_TOPOLOGY=linux-native-host-network", common
+        )
+
+    def test_burst_runner_honors_remote_artifact_directory(self) -> None:
+        runner = (
+            ROOT / "crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+        ).read_text()
+        self.assertIn(
+            'PERF_DIR="${RVOIP_PERF_RESULTS:-${WORKSPACE_ROOT}/target/perf-results}"',
+            runner,
+        )
 
     def test_burst_rss_gate_uses_post_retention_settled_window(self) -> None:
         for path in (

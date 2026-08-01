@@ -18,6 +18,14 @@ if command -v colima >/dev/null 2>&1 \
   && [[ "$(docker context show 2>/dev/null)" == "colima" ]]; then
   COMPOSE_FILE_ARGS+=(--file "$COLIMA_HOST_COMPOSE_FILE")
   export PROXY_INTEROP_NETWORK_TOPOLOGY=colima-vm-host
+elif [[ "$(uname -s)" == "Linux" ]] \
+  && [[ "$(docker info --format '{{.OperatingSystem}}' 2>/dev/null)" != *"Docker Desktop"* ]]; then
+  # Every helper that sources this file (including up.sh) must use the same
+  # native host network selected by run.sh. Keeping this only in run.sh made
+  # `compose config` report host networking while the subprocess that actually
+  # started the peer silently fell back to an isolated bridge network.
+  COMPOSE_FILE_ARGS+=(--file "$COLIMA_HOST_COMPOSE_FILE")
+  export PROXY_INTEROP_NETWORK_TOPOLOGY=linux-native-host-network
 else
   export PROXY_INTEROP_NETWORK_TOPOLOGY=${PROXY_INTEROP_NETWORK_TOPOLOGY:-portable-published-port}
 fi
