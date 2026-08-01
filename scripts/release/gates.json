@@ -7714,8 +7714,10 @@
         "fuzz",
         "run",
         "sip_message",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7723,7 +7725,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run sip_message --manifest-path {workspace}/crates/sip/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run sip_message --fuzz-dir {workspace}/crates/sip/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7756,8 +7758,10 @@
         "fuzz",
         "run",
         "uri",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7765,7 +7769,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run uri --manifest-path {workspace}/crates/sip/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run uri --fuzz-dir {workspace}/crates/sip/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7798,8 +7802,10 @@
         "fuzz",
         "run",
         "header",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7807,7 +7813,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run header --manifest-path {workspace}/crates/sip/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run header --fuzz-dir {workspace}/crates/sip/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7840,8 +7846,10 @@
         "fuzz",
         "run",
         "sdp",
-        "--manifest-path",
-        "{workspace}/crates/sip/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/sip/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7849,7 +7857,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run sdp --manifest-path {workspace}/crates/sip/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run sdp --fuzz-dir {workspace}/crates/sip/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7882,8 +7890,10 @@
         "fuzz",
         "run",
         "rtp_packet",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7891,7 +7901,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run rtp_packet --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run rtp_packet --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7924,8 +7934,10 @@
         "fuzz",
         "run",
         "rtcp_packet",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7933,7 +7945,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run rtcp_packet --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run rtcp_packet --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -7966,8 +7978,10 @@
         "fuzz",
         "run",
         "srtp_unprotect",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -7975,7 +7989,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run srtp_unprotect --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run srtp_unprotect --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -8008,8 +8022,10 @@
         "fuzz",
         "run",
         "dtls_record",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -8017,7 +8033,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run dtls_record --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run dtls_record --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -8050,8 +8066,10 @@
         "fuzz",
         "run",
         "stun_response",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -8059,7 +8077,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run stun_response --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run stun_response --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [
@@ -8092,8 +8110,10 @@
         "fuzz",
         "run",
         "g711_unpack",
-        "--manifest-path",
-        "{workspace}/crates/media/fuzz/Cargo.toml",
+        "--fuzz-dir",
+        "{workspace}/crates/media/fuzz",
+        "--target",
+        "x86_64-unknown-linux-gnu",
         "--",
         "-runs=1000",
         "-max_total_time=10"
@@ -8101,7 +8121,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "cargo +nightly fuzz run g711_unpack --manifest-path {workspace}/crates/media/fuzz/Cargo.toml -- -runs=1000 -max_total_time=10",
+      "display_command": "cargo +nightly fuzz run g711_unpack --fuzz-dir {workspace}/crates/media/fuzz --target x86_64-unknown-linux-gnu -- -runs=1000 -max_total_time=10",
       "estimated_seconds": 1,
       "executor": "argv",
       "expected_outputs": [

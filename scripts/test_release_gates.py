@@ -91,6 +91,22 @@ class GateFrameworkTests(unittest.TestCase):
                     "x86_64-unknown-linux-gnu",
                 )
 
+        remote_fuzz_gates = [
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("security.remote-fuzz-")
+        ]
+        self.assertEqual(len(remote_fuzz_gates), 10)
+        for gate in remote_fuzz_gates:
+            with self.subTest(gate=gate["id"]):
+                self.assertNotIn("--manifest-path", gate["command"])
+                self.assertIn("--fuzz-dir", gate["command"])
+                target_index = gate["command"].index("--target")
+                self.assertEqual(
+                    gate["command"][target_index + 1],
+                    "x86_64-unknown-linux-gnu",
+                )
+
     def test_multi_hour_performance_gates_are_isolated_from_perf_batch(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         soak_ids = {

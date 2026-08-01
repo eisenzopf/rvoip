@@ -428,6 +428,7 @@ def security_gates() -> list[dict[str, Any]]:
         "g711": ("crates/media/fuzz/Cargo.toml", "g711_unpack"),
     }
     for suffix, (manifest, target) in targets.items():
+        fuzz_dir = manifest.rsplit("/", 1)[0]
         result.append(
             synthetic_gate(
                 f"security.remote-fuzz-{suffix}",
@@ -439,15 +440,17 @@ def security_gates() -> list[dict[str, Any]]:
                     "fuzz",
                     "run",
                     target,
-                    "--manifest-path",
-                    f"{{workspace}}/{manifest}",
+                    "--fuzz-dir",
+                    f"{{workspace}}/{fuzz_dir}",
+                    "--target",
+                    "x86_64-unknown-linux-gnu",
                     "--",
                     "-runs=1000",
                     "-max_total_time=10",
                 ],
                 resource="github-nightly",
                 dependencies=["source.remote-clean"],
-                paths=[manifest, manifest.rsplit("/", 1)[0] + "/**"],
+                paths=[manifest, fuzz_dir + "/**"],
             )
         )
     return result
