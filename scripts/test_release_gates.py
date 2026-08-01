@@ -71,6 +71,11 @@ class GateFrameworkTests(unittest.TestCase):
                         "{workspace}/crates/media/fuzz",
                     },
                 )
+                target_index = gate["command"].index("--target")
+                self.assertEqual(
+                    gate["command"][target_index + 1],
+                    "x86_64-unknown-linux-gnu",
+                )
 
     def test_multi_hour_performance_gates_are_isolated_from_perf_batch(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
