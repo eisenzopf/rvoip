@@ -326,6 +326,19 @@ class GateFrameworkTests(unittest.TestCase):
         reverse = gates.reverse_gate_dependencies(list(by_id), by_id)
         self.assertEqual(gates.dependent_closure({"a"}, reverse), {"a", "b", "c"})
 
+    def test_input_miss_invalidates_only_downstream_gate_closure(self) -> None:
+        by_id = {
+            "changed": {"dependencies": []},
+            "consumer": {"dependencies": ["changed"]},
+            "consumer-of-consumer": {"dependencies": ["consumer"]},
+            "unrelated": {"dependencies": []},
+        }
+        reverse = gates.reverse_gate_dependencies(list(by_id), by_id)
+        self.assertEqual(
+            gates.dependent_closure({"changed"}, reverse),
+            {"changed", "consumer", "consumer-of-consumer"},
+        )
+
     def test_shard_runs_gate_dependencies_before_dependents(self) -> None:
         by_id = {
             "c": {"dependencies": ["b"]},
