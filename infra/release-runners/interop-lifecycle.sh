@@ -5,7 +5,14 @@ ACTION="${1:?usage: interop-lifecycle.sh ACTION}"
 ROOT="$(git rev-parse --show-toplevel)"
 STATE="$ROOT/target/release-interop"
 PBX_SNAPSHOT="$ROOT/crates/sip/rvoip-sip/beta-report/20260729T010954Z/environment/local-pbx"
-mkdir -p "$STATE" "$HOME/Developer/asterisk" "$HOME/Developer/freeswitch"
+if [[ -n "${RVOIP_PBX_LOCAL_ENV_ROOT:-}" ]]; then
+  LOCAL_ENV_ROOT="$RVOIP_PBX_LOCAL_ENV_ROOT"
+elif [[ -n "${HOME:-}" ]]; then
+  LOCAL_ENV_ROOT="$HOME/Developer"
+else
+  LOCAL_ENV_ROOT="$STATE/local-env"
+fi
+mkdir -p "$STATE" "$LOCAL_ENV_ROOT/asterisk" "$LOCAL_ENV_ROOT/freeswitch"
 
 wait_port() {
   local port="$1"
@@ -54,7 +61,7 @@ PY
     -v "$build/keys:/etc/asterisk/keys:ro" \
     rvoip-release-asterisk >/dev/null
   wait_port 5060
-  cat > "$HOME/Developer/asterisk/rvoip-local.env" <<EOF
+  cat > "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env" <<EOF
 SIP_SERVER=127.0.0.1
 SIP_PORT=5060
 SIP_TRANSPORT=TLS
@@ -113,7 +120,7 @@ PY
     -e FS_EXTERNAL_RTP_IP=127.0.0.1 \
     rvoip-release-freeswitch >/dev/null
   wait_port 5062
-  cat > "$HOME/Developer/freeswitch/freeswitch-local.env" <<'EOF'
+  cat > "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env" <<'EOF'
 FREESWITCH_ADDR=127.0.0.1:5060
 FREESWITCH_IP=127.0.0.1
 FREESWITCH_SIP_PORT=5060

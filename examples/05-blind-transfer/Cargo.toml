@@ -2,9 +2,8 @@
 name = "rvoip-example-blind-transfer"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.91"
 publish = false
-
-[workspace]
 
 [dependencies]
 # Copying into your own project? Drop `path` and keep: rvoip-sip = "0.3.2"

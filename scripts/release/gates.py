@@ -262,7 +262,6 @@ def input_record(
     root: Path,
     gate: dict[str, Any],
     environment_id: str,
-    catalog_sha256: str,
     files: list[str],
     package_roots: dict[str, str],
     package_dependencies: dict[str, set[str]],
@@ -278,17 +277,17 @@ def input_record(
             "Cargo.lock",
             "rust-toolchain.toml",
             "scripts/release/gates.py",
-            "scripts/release/**",
             "scripts/ci/**",
             ".config/**",
             ".github/workflows/**",
             "deny.toml",
         }
     )
+    if gate["resource_class"].startswith("gcp-"):
+        patterns.add("infra/release-runners/gcp-release-startup.sh")
     selected = [path for path in files if matches(path, patterns)]
     file_hashes = {path: file_sha256(root / path) for path in selected}
     payload = {
-        "catalog_sha256": catalog_sha256,
         "gate_definition_sha256": definition_digest(gate),
         "environment_sha256": environment_digest(gate_environment_id(environment_id, gate)),
         "files": file_hashes,
@@ -309,13 +308,11 @@ def all_input_records(
     files = tracked_files(root)
     roots, dependencies = workspace_graph(root)
     by_id = gate_map(catalog)
-    catalog_sha256 = sha256_bytes(canonical_bytes(catalog))
     return {
         gate_id: input_record(
             root=root,
             gate=by_id[gate_id],
             environment_id=environment_id,
-            catalog_sha256=catalog_sha256,
             files=files,
             package_roots=roots,
             package_dependencies=dependencies,
@@ -522,16 +519,34 @@ def create_plan(
         if any(matches(path, by_id[gate_id].get("affected_paths", [])) for path in changed)
     }
     invalidated_by_change = dependent_closure(changed_gate_ids, reverse_dependencies)
+    reusable_receipts = {
+        gate_id: exact_reusable(
+            prior.get(gate_id, []), by_id[gate_id], inputs[gate_id], environment_id
+        )
+        for gate_id in selected
+    }
+    # A definition, environment, or selected-input mismatch must also rerun
+    # every downstream gate that consumes the changed gate. Always-fresh
+    # source/report gates are intentionally excluded: regenerating their
+    # receipts does not make otherwise exact test evidence stale.
+    input_misses = {
+        gate_id
+        for gate_id in selected
+        if not by_id[gate_id].get("always_fresh")
+        and reusable_receipts[gate_id] is None
+    }
+    invalidated_by_input = dependent_closure(input_misses, reverse_dependencies)
     decisions = []
     force_all = first_candidate or bool(unknown)
     for gate_id in selected:
         gate = by_id[gate_id]
-        reuse = exact_reusable(prior.get(gate_id, []), gate, inputs[gate_id], environment_id)
+        reuse = reusable_receipts[gate_id]
         if (
             force_all
             or gate.get("always_fresh")
             or gate_id in invalidated_by_failure
             or gate_id in invalidated_by_change
+            or gate_id in invalidated_by_input
             or not reuse
         ):
             reason = "first candidate" if first_candidate else "input, failure, change, or freshness policy requires execution"

@@ -168,10 +168,126 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertTrue(matrix[0]["hosted"])
         self.assertTrue(matrix[0]["needs_chromium"])
 
+    def test_locked_standalone_example_gates_have_reproducible_inputs(self) -> None:
+        example_gates = [
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("test.example-")
+        ]
+        self.assertEqual(len(example_gates), 13)
+        for gate in example_gates:
+            command = gate["command"]
+            with self.subTest(gate=gate["id"]):
+                self.assertIn("--locked", command)
+                manifest_index = command.index("--manifest-path") + 1
+                manifest = ROOT / command[manifest_index].replace("{workspace}/", "")
+                lockfile = ROOT / "examples/Cargo.lock"
+                self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
+                self.assertIn('rust-version = "1.91"', manifest.read_text())
+
+    def test_rustdoc_warning_policy_is_one_environment_argument(self) -> None:
+        gate = next(
+            gate for gate in self.catalog["gates"] if gate["id"] == "build.rustdoc"
+        )
+        self.assertEqual(
+            gate["command"][:3], ["env", "RUSTDOCFLAGS=-D warnings", "cargo"]
+        )
+        self.assertNotIn("warnings", gate["command"])
+
+    def test_format_gate_does_not_receive_unsupported_locked_flag(self) -> None:
+        gate = next(
+            gate for gate in self.catalog["gates"] if gate["id"] == "build.format"
+        )
+        self.assertEqual(gate["command"][:2], ["cargo", "fmt"])
+        self.assertNotIn("--locked", gate["command"])
+        self.assertEqual(
+            builder.insert_locked(["cargo", "+1.91.0", "fmt", "--all"]),
+            ["cargo", "+1.91.0", "fmt", "--all"],
+        )
+
+    def test_gcp_gates_allow_for_cold_release_builds(self) -> None:
+        for gate in self.catalog["gates"]:
+            if gate["resource_class"].startswith("gcp-"):
+                with self.subTest(gate=gate["id"]):
+                    self.assertGreaterEqual(gate["timeout_minutes"], 20)
+
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
         second = {"command": ["true"], "id": "a"}
         self.assertEqual(gates.definition_digest(first), gates.definition_digest(second))
+
+    def test_unrelated_catalog_changes_do_not_invalidate_a_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / "scripts/release/gates.py"
+            runner.parent.mkdir(parents=True)
+            runner.write_text("runner-v1\n")
+            gate = {
+                "id": "gate-a",
+                "resource_class": "github-standard",
+                "affected_paths": [],
+                "affected_crates": [],
+                "dependencies": [],
+                "command": ["true"],
+            }
+            definitions = {"gate-a": gate}
+            first = gates.input_record(
+                root=root,
+                gate=gate,
+                environment_id="environment-v1",
+                files=["scripts/release/gates.py"],
+                package_roots={},
+                package_dependencies={},
+                gate_definitions=definitions,
+            )
+            unrelated = {**definitions, "gate-b": {"id": "gate-b", "command": ["false"]}}
+            second = gates.input_record(
+                root=root,
+                gate=gate,
+                environment_id="environment-v1",
+                files=["scripts/release/gates.py"],
+                package_roots={},
+                package_dependencies={},
+                gate_definitions=unrelated,
+            )
+            self.assertEqual(first, second)
+
+    def test_gcp_gate_digest_includes_ephemeral_worker_definition(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runner = root / "scripts/release/gates.py"
+            startup = root / "infra/release-runners/gcp-release-startup.sh"
+            runner.parent.mkdir(parents=True)
+            startup.parent.mkdir(parents=True)
+            runner.write_text("runner-v1\n")
+            startup.write_text("startup-v1\n")
+            gate = {
+                "id": "gate-a",
+                "resource_class": "gcp-performance",
+                "affected_paths": [],
+                "affected_crates": [],
+                "dependencies": [],
+                "command": ["true"],
+            }
+            definitions = {"gate-a": gate}
+
+            def record() -> dict:
+                return gates.input_record(
+                    root=root,
+                    gate=gate,
+                    environment_id="environment-v1",
+                    files=[
+                        "scripts/release/gates.py",
+                        "infra/release-runners/gcp-release-startup.sh",
+                    ],
+                    package_roots={},
+                    package_dependencies={},
+                    gate_definitions=definitions,
+                )
+
+            first = record()
+            startup.write_text("startup-v2\n")
+            self.assertNotEqual(first["input_sha256"], record()["input_sha256"])
 
     def test_exact_reuse_rejects_failure_drift_and_always_fresh(self) -> None:
         gate = {"always_fresh": False}
@@ -209,6 +325,19 @@ class GateFrameworkTests(unittest.TestCase):
         }
         reverse = gates.reverse_gate_dependencies(list(by_id), by_id)
         self.assertEqual(gates.dependent_closure({"a"}, reverse), {"a", "b", "c"})
+
+    def test_input_miss_invalidates_only_downstream_gate_closure(self) -> None:
+        by_id = {
+            "changed": {"dependencies": []},
+            "consumer": {"dependencies": ["changed"]},
+            "consumer-of-consumer": {"dependencies": ["consumer"]},
+            "unrelated": {"dependencies": []},
+        }
+        reverse = gates.reverse_gate_dependencies(list(by_id), by_id)
+        self.assertEqual(
+            gates.dependent_closure({"changed"}, reverse),
+            {"changed", "consumer", "consumer-of-consumer"},
+        )
 
     def test_shard_runs_gate_dependencies_before_dependents(self) -> None:
         by_id = {

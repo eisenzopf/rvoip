@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import stat
@@ -377,14 +378,17 @@ class BetaGateCompatibilitySourceTests(unittest.TestCase):
             examples,
         )
 
-        workflow = (WORKSPACE_ROOT / ".github/workflows/examples.yml").read_text(
-            encoding="utf-8"
+        catalog = json.loads(
+            (WORKSPACE_ROOT / "scripts/release/gates.json").read_text(encoding="utf-8")
         )
+        gates = {gate["id"]: gate for gate in catalog["gates"]}
         for example in expected:
+            gate_id = f"test.example-{example.split('-', maxsplit=1)[0]}"
+            self.assertIn(gate_id, gates, f"release catalog omits {example}")
             self.assertIn(
-                f"- {example}",
-                workflow,
-                f"GitHub build matrix omits {example}",
+                f"{{workspace}}/examples/{example}/Cargo.toml",
+                gates[gate_id]["command"],
+                f"release catalog gate {gate_id} targets the wrong manifest",
             )
 
     def test_active_beta_metadata_matches_workspace_version(self) -> None:

@@ -56,7 +56,8 @@ finish() {
         cd "$WORKSPACE/target/perf-results"
         find . -type f \
           \( -name '*.json' -o -name '*.md' -o -name '*.tsv' \
-             -o -name '*.csv' -o -name '*.log' -o -name '*.txt' \) \
+             -o -name '*.csv' -o -name '*.jsonl' -o -name '*.log' \
+             -o -name '*.txt' \) \
           -exec cp --parents -t "$EVIDENCE/_perf-results/$SHARD_ID" {} +
       )
     fi
@@ -106,8 +107,9 @@ if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]; then
   # Ubuntu packages the SIPp binary as `sip-tester`; `sipp` is not a package.
   # Keep these heavyweight, network-facing tools off performance-only workers.
   apt-get install -y --no-install-recommends \
-    baresip docker.io netcat-openbsd openssl sip-tester
+    baresip docker.io netcat-openbsd openssl sip-tester tshark
   command -v sipp >/dev/null
+  command -v tshark >/dev/null
 elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]; then
   # This performance test otherwise treats a missing external SIPp binary as a
   # local-development skip. Release qualification must execute it, not skip it.

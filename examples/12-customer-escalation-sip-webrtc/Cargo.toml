@@ -2,9 +2,8 @@
 name = "rvoip-example-customer-escalation-sip-webrtc"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.91"
 publish = false
-
-[workspace]
 
 [dependencies]
 bytes = "1"

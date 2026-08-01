@@ -11,6 +11,7 @@
 desktop.ini
 Cargo.lock
 !/Cargo.lock
+!/examples/Cargo.lock
 publish_order.sh
 # crates.io release tooling — run locally, never tracked in the repo.
 scripts/check-publish-readiness.sh

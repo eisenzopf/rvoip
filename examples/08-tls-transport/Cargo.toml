@@ -2,9 +2,8 @@
 name = "rvoip-example-tls-transport"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.91"
 publish = false
-
-[workspace]
 
 [dependencies]
 # `dev-insecure-tls` exposes `Config::tls_insecure_skip_verify` so the demo can

@@ -17,6 +17,13 @@ RUN_SUMMARY="$OUT_ROOT/summary.md"
 RUN_MATRIX="$OUT_ROOT/matrix.tsv"
 RUN_ENV="$OUT_ROOT/environment.md"
 EXAMPLE_BIN_DIR="${PBX_EXAMPLE_BIN_DIR:-}"
+if [ -n "${RVOIP_PBX_LOCAL_ENV_ROOT:-}" ]; then
+  LOCAL_ENV_ROOT=$RVOIP_PBX_LOCAL_ENV_ROOT
+elif [ -n "${HOME:-}" ]; then
+  LOCAL_ENV_ROOT=$HOME/Developer
+else
+  LOCAL_ENV_ROOT=$WORKSPACE_ROOT/target/release-interop/local-env
+fi
 
 PBX_ARG=${PBX_PROVIDER:-asterisk}
 API_ARG=${PBX_API:-all}
@@ -310,16 +317,16 @@ load_provider_env() {
       unset FREESWITCH_TLS_CONTACT_MODE FREESWITCH_TLS_FLOW_REUSE FREESWITCH_TLS_SRTP_REQUIRED
       ;;
   esac
-  if [ "$provider" = "asterisk" ] && [ -f "$HOME/Developer/asterisk/rvoip-local.env" ]; then
+  if [ "$provider" = "asterisk" ] && [ -f "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env" ]; then
     set -a
     # shellcheck disable=SC1091
-    . "$HOME/Developer/asterisk/rvoip-local.env"
+    . "$LOCAL_ENV_ROOT/asterisk/rvoip-local.env"
     set +a
   fi
-  if [ "$provider" = "freeswitch" ] && [ -f "$HOME/Developer/freeswitch/freeswitch-local.env" ]; then
+  if [ "$provider" = "freeswitch" ] && [ -f "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env" ]; then
     set -a
     # shellcheck disable=SC1091
-    . "$HOME/Developer/freeswitch/freeswitch-local.env"
+    . "$LOCAL_ENV_ROOT/freeswitch/freeswitch-local.env"
     set +a
   fi
   if [ -f "$SCRIPT_DIR/env/${provider}.env" ]; then

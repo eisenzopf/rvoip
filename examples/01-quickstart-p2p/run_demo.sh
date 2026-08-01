@@ -3,6 +3,7 @@
 # loopback, exchange ~1s of media, and hang up. Exits 0 on success.
 set -euo pipefail
 cd "$(dirname "$0")"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-../target}"
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 CALLER_PORT=5060
@@ -17,7 +18,7 @@ echo -e "${GREEN}Building…${NC}"
 cargo build --release --quiet
 
 echo -e "${CYAN}[callee]${NC} starting on :$CALLEE_PORT"
-./target/release/callee --port "$CALLEE_PORT" > logs/callee.log 2>&1 &
+"$CARGO_TARGET_DIR/release/callee" --port "$CALLEE_PORT" > logs/callee.log 2>&1 &
 PIDS+=($!)
 
 # Wait until the callee's SIP/UDP port is listening.
@@ -27,7 +28,7 @@ for _ in {1..20}; do
 done
 
 echo -e "${CYAN}[caller]${NC} dialing callee on :$CALLEE_PORT"
-./target/release/caller --port "$CALLER_PORT" --peer-port "$CALLEE_PORT" > logs/caller.log 2>&1 &
+"$CARGO_TARGET_DIR/release/caller" --port "$CALLER_PORT" --peer-port "$CALLEE_PORT" > logs/caller.log 2>&1 &
 CALLER_PID=$!; PIDS+=($CALLER_PID)
 wait "$CALLER_PID"; RC=$?
 

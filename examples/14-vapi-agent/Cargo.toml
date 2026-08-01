@@ -2,9 +2,8 @@
 name = "rvoip-example-vapi-agent"
 version = "0.3.2"
 edition = "2021"
+rust-version = "1.91"
 publish = false
-
-[workspace]
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
