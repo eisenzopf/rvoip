@@ -10,9 +10,8 @@ use crate::peer::builder::HDREXT_SDES_MID;
 
 /// Final audio MID header-extension binding for locally-originated RTP.
 ///
-/// The alpha WebRTC engine does not put supplemental SSRCs in SDP. Browsers
-/// therefore need the negotiated SDES MID extension to associate RFC 4733
-/// packets with the audio m-section. Keep both the value and ID here so the
+/// Browsers use the negotiated SDES MID extension to associate bundled RFC
+/// 4733 packets with the audio m-section. Keep both the value and ID here so the
 /// negotiation boundary can reject an ambiguous or non-one-byte binding
 /// before any RTP is written.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,9 +34,8 @@ fn one_audio_mid_candidate(sdp: &str) -> Option<AudioMidCandidate> {
         .iter()
         .filter(|media| media.media.eq_ignore_ascii_case("audio") && media.port != 0);
     let media = audio.next()?;
-    // One local audio sender cannot safely guess which MID owns an
-    // unsignalled supplemental SSRC when SDP contains multiple active audio
-    // sections.
+    // One local audio sender cannot safely guess which MID owns its packets
+    // when SDP contains multiple active audio sections.
     if audio.next().is_some() {
         return None;
     }

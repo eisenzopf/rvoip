@@ -27,6 +27,7 @@
     <button id="start">Start publish</button>
     <button id="stop" disabled>Stop</button>
   </p>
+  <audio id="remote-audio" autoplay></audio>
   <div id="log"></div>
 
   <script>
@@ -56,6 +57,7 @@
       mdnsCandidatePresent: false,
       sdpHasAudio: false,
       sdpHasVideo: false,
+      inboundAudioPackets: 0,
       error: null,
     });
     window.__rfcResults = initialResults();
@@ -113,6 +115,11 @@
         log('captured ' + stream.getTracks().map(t => t.kind).join('+'));
 
         pc = new RTCPeerConnection();
+        pc.ontrack = (event) => {
+          if (event.track.kind === 'audio') {
+            $('remote-audio').srcObject = event.streams[0] || new MediaStream([event.track]);
+          }
+        };
         pc.onconnectionstatechange = () => {
           log('pc.connectionState = ' + pc.connectionState);
           window.__rfcResults.status = pc.connectionState;
@@ -176,6 +183,25 @@
         setStatus('failed');
         $('start').disabled = false;
       }
+    };
+
+    // Browser interop tests use the receiver's real WebRTC stats instead of
+    // trusting server-side send success. RFC 4733 packets count as inbound
+    // audio RTP even though they do not produce audible PCM samples.
+    window.__inboundAudioPacketCount = async () => {
+      if (!pc) return 0;
+      let packets = 0;
+      for (const receiver of pc.getReceivers()) {
+        if (!receiver.track || receiver.track.kind !== 'audio') continue;
+        const stats = await receiver.getStats();
+        for (const report of stats.values()) {
+          if (report.type === 'inbound-rtp' && report.kind === 'audio') {
+            packets += report.packetsReceived || 0;
+          }
+        }
+      }
+      window.__rfcResults.inboundAudioPackets = packets;
+      return packets;
     };
 
     $('stop').onclick = async () => {
