@@ -82,11 +82,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]', startup)
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
+        self.assertIn("docker-compose-v2", startup)
         self.assertIn('elif [[ ",$GATES," == *",perf.sipp-parity,"* ]]', startup)
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
         self.assertIn("command -v tshark >/dev/null", startup)
+        self.assertIn("docker compose version >/dev/null", startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
+
+    def test_release_pbx_lifecycle_uses_tracked_templates(self) -> None:
+        lifecycle = (ROOT / "infra/release-runners/interop-lifecycle.sh").read_text()
+        self.assertIn("infra/release-runners/pbx", lifecycle)
+        self.assertNotIn("beta-report/", lifecycle)
+        for path in (
+            "infra/release-runners/pbx/asterisk/Dockerfile",
+            "infra/release-runners/pbx/asterisk/config/pjsip.conf",
+            "infra/release-runners/pbx/freeswitch/Dockerfile",
+            "infra/release-runners/pbx/freeswitch/docker-entrypoint.sh",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue((ROOT / path).is_file())
 
 
 if __name__ == "__main__":

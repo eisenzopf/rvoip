@@ -211,6 +211,21 @@ class GateFrameworkTests(unittest.TestCase):
                 with self.subTest(gate=gate["id"]):
                     self.assertGreaterEqual(gate["timeout_minutes"], 20)
 
+    def test_interop_gate_digests_include_tracked_pbx_lifecycle(self) -> None:
+        interop = [
+            gate
+            for gate in self.catalog["gates"]
+            if gate["id"].startswith("interop.") and gate.get("legacy")
+        ]
+        self.assertTrue(interop)
+        for gate in interop:
+            with self.subTest(gate=gate["id"]):
+                self.assertIn(
+                    "infra/release-runners/interop-lifecycle.sh",
+                    gate["affected_paths"],
+                )
+                self.assertIn("infra/release-runners/pbx/**", gate["affected_paths"])
+
     def test_definition_digest_is_key_order_independent(self) -> None:
         first = {"id": "a", "command": ["true"]}
         second = {"command": ["true"], "id": "a"}

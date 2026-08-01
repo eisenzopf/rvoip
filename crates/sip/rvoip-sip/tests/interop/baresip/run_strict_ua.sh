@@ -147,7 +147,26 @@ start_managed_target() {
 
 write_baresip_config() {
   local cfg="$OUT_ROOT/baresip"
+  local source_wav="$OUT_ROOT/baresip_tx.wav"
   mkdir -p "$cfg"
+  python3 - "$source_wav" "$CALL_SECONDS" <<'PY'
+import math
+from pathlib import Path
+import struct
+import sys
+import wave
+
+path = Path(sys.argv[1])
+seconds = max(1, int(sys.argv[2]) + 1)
+sample_rate = 8000
+with wave.open(str(path), "wb") as output:
+    output.setnchannels(1)
+    output.setsampwidth(2)
+    output.setframerate(sample_rate)
+    for index in range(sample_rate * seconds):
+        sample = int(4000 * math.sin(2 * math.pi * 440 * index / sample_rate))
+        output.writeframesraw(struct.pack("<h", sample))
+PY
   cat >"$cfg/config" <<EOF
 sip_listen 0.0.0.0:0
 sip_transports udp
@@ -156,13 +175,10 @@ call_local_timeout 10
 call_max_calls 2
 call_accept no
 audio_player aufile,$OUT_ROOT/baresip_rx.wav
-audio_source ausine,440
+audio_source aufile,$source_wav
 module_path $BARESIP_MODULE_PATH
 module g711.so
-module auconv.so
-module auresamp.so
 module aufile.so
-module ausine.so
 module uuid.so
 module_app account.so
 module_app menu.so

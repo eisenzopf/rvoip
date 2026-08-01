@@ -393,6 +393,7 @@ async fn perf_soak_30min() {
         Arc::clone(&alice),
         Arc::clone(&bob.coordinator),
         support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
+        (duration_secs >= 600).then(|| Duration::from_secs(duration_secs - 600)),
     );
 
     // Cycling active media pool. Replenishment stops early enough to avoid
@@ -1567,6 +1568,7 @@ impl RetentionSampler {
         alice: Arc<UnifiedCoordinator>,
         bob: Arc<UnifiedCoordinator>,
         interval: Duration,
+        periodic_limit: Option<Duration>,
     ) -> Self {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(async move {
@@ -1576,9 +1578,20 @@ impl RetentionSampler {
             loop {
                 let sample = capture_retention_sample("periodic", started, &alice, &bob).await;
                 series.record(sample, &mut writer);
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = stop_rx.changed() => break,
+                if let Some(limit) = periodic_limit {
+                    let remaining = limit.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval.min(remaining)) => {}
+                        _ = stop_rx.changed() => break,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = stop_rx.changed() => break,
+                    }
                 }
             }
             let sample = capture_retention_sample("after_drain", started, &alice, &bob).await;

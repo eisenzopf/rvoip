@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1410,6 +1410,9 @@ async fn force_teardown_remaining_sessions(
 pub struct EndpointRetentionSampler {
     stop_tx: tokio::sync::watch::Sender<bool>,
     task: JoinHandle<EndpointRetentionSeries>,
+    role: &'static str,
+    endpoint: Arc<UnifiedCoordinator>,
+    started: std::time::Instant,
 }
 
 pub struct MemoryDiagnosticSampler {
@@ -1443,31 +1446,73 @@ impl EndpointRetentionSampler {
         endpoint: Arc<UnifiedCoordinator>,
         interval: Duration,
     ) -> Self {
+        Self::start_with_periodic_limit(role, endpoint, interval, None)
+    }
+
+    /// Start structural sampling with an optional wall-clock limit. Long soak
+    /// tests stop these allocator-heavy snapshots before the authoritative
+    /// final-ten-minute RSS window while continuing lightweight RSS sampling.
+    pub fn start_with_periodic_limit(
+        role: &'static str,
+        endpoint: Arc<UnifiedCoordinator>,
+        interval: Duration,
+        periodic_limit: Option<Duration>,
+    ) -> Self {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let samples_path = diagnostic_sample_path(role, "retention");
+        let started = std::time::Instant::now();
+        let sampled_endpoint = Arc::clone(&endpoint);
         let task = tokio::spawn(async move {
-            let started = std::time::Instant::now();
             let mut series = EndpointRetentionSeries::new(samples_path);
             let mut writer = series.open_writer();
             loop {
                 let sample =
-                    capture_endpoint_retention_sample(role, "periodic", started, &endpoint).await;
+                    capture_endpoint_retention_sample(role, "periodic", started, &sampled_endpoint)
+                        .await;
                 series.record(role, sample, &mut writer);
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = stop_rx.changed() => break,
+                if let Some(limit) = periodic_limit {
+                    let remaining = limit.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval.min(remaining)) => {}
+                        _ = stop_rx.changed() => break,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = stop_rx.changed() => break,
+                    }
                 }
             }
-            let sample =
-                capture_endpoint_retention_sample(role, "after_drain", started, &endpoint).await;
-            series.record(role, sample, &mut writer);
             writer.flush().expect("flush retention diagnostics JSONL");
             series
         });
-        Self { stop_tx, task }
+        Self {
+            stop_tx,
+            task,
+            role,
+            endpoint,
+            started,
+        }
     }
 
     pub async fn stop(self) -> EndpointRetentionSeries {
+        let role = self.role;
+        let endpoint = Arc::clone(&self.endpoint);
+        let started = self.started;
+        let mut series = self.stop_periodic().await;
+        let sample =
+            capture_endpoint_retention_sample(role, "after_drain", started, &endpoint).await;
+        series.record_sample(role, sample);
+        series
+    }
+
+    /// Stop periodic structural diagnostics without taking the final snapshot.
+    /// Burst tests use this at the active-load boundary so diagnostic walks do
+    /// not perturb the subsequent authoritative RSS drain window.
+    pub async fn stop_periodic(self) -> EndpointRetentionSeries {
         let _ = self.stop_tx.send(true);
         self.task.await.unwrap_or_else(|_| {
             EndpointRetentionSeries::new(diagnostic_sample_path("unknown", "retention"))
@@ -1782,6 +1827,20 @@ impl EndpointRetentionSeries {
         BufWriter::new(
             File::create(&self.samples_path).expect("create retention diagnostics JSONL"),
         )
+    }
+
+    pub fn record_sample(&mut self, role: &'static str, sample: serde_json::Value) {
+        if let Some(parent) = self.samples_path.parent() {
+            std::fs::create_dir_all(parent).expect("create retention diagnostics dir");
+        }
+        let mut writer = BufWriter::new(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.samples_path)
+                .expect("append retention diagnostics JSONL"),
+        );
+        self.record(role, sample, &mut writer);
     }
 
     fn record(

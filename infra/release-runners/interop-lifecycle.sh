@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ACTION="${1:?usage: interop-lifecycle.sh ACTION}"
 ROOT="$(git rev-parse --show-toplevel)"
 STATE="$ROOT/target/release-interop"
-PBX_SNAPSHOT="$ROOT/crates/sip/rvoip-sip/beta-report/20260729T010954Z/environment/local-pbx"
+PBX_SNAPSHOT="$ROOT/infra/release-runners/pbx"
 if [[ -n "${RVOIP_PBX_LOCAL_ENV_ROOT:-}" ]]; then
   LOCAL_ENV_ROOT="$RVOIP_PBX_LOCAL_ENV_ROOT"
 elif [[ -n "${HOME:-}" ]]; then

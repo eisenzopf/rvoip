@@ -145,10 +145,13 @@ async fn perf_soak_caller() {
     } else {
         None
     };
-    let retention_sampler = support::soak::EndpointRetentionSampler::start(
+    let retention_periodic_limit =
+        (settings.duration_secs >= 600).then(|| Duration::from_secs(settings.duration_secs - 600));
+    let retention_sampler = support::soak::EndpointRetentionSampler::start_with_periodic_limit(
         "caller",
         Arc::clone(&caller),
         support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
+        retention_periodic_limit,
     );
     let memory_sampler =
         MemoryDiagnosticSampler::start("caller", &settings, memory_diagnostic_interval());
