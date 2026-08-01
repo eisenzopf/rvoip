@@ -53,7 +53,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("if: always() && steps.worker.outputs.name != ''", workflow)
         self.assertIn("expected_shards", workflow)
         self.assertIn("expected_packages", workflow)
-        self.assertIn('"pd-balanced" if check == "test" else "pd-standard"', workflow)
+        self.assertIn('heavy_sip_test = check == "test" and "rvoip-sip"', workflow)
+        self.assertIn('"disk_size_gb": 200 if heavy_sip_test else 80', workflow)
         self.assertIn("publishing_attempted == false", workflow)
         self.assertIn('"publishing_attempted": False', startup)
         for profile in (

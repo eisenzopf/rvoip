@@ -67,6 +67,7 @@ jobs:
           include = []
           for job in plan["shard_jobs"]:
               check = job["check"]
+              heavy_sip_test = check == "test" and "rvoip-sip" in job["packages"]
               include.append(
                   {
                       "id": job["id"],
@@ -78,9 +79,13 @@ jobs:
                           "n2-standard-8" if check == "test" else "n2-standard-4"
                       ),
                       "disk_type": (
-                          "pd-balanced" if check == "test" else "pd-standard"
+                          "pd-standard"
+                          if heavy_sip_test
+                          else "pd-balanced"
+                          if check == "test"
+                          else "pd-standard"
                       ),
-                      "disk_size_gb": 80,
+                      "disk_size_gb": 200 if heavy_sip_test else 80,
                   }
               )
           include.extend(
