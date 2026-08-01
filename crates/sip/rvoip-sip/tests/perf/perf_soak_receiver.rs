@@ -66,10 +66,13 @@ async fn perf_soak_receiver() {
     } else {
         None
     };
-    let retention_sampler = EndpointRetentionSampler::start(
+    let retention_periodic_limit =
+        (settings.duration_secs >= 600).then(|| Duration::from_secs(settings.duration_secs - 600));
+    let retention_sampler = EndpointRetentionSampler::start_with_periodic_limit(
         "receiver",
         receiver.coordinator.clone(),
         support::soak::RETENTION_DIAGNOSTIC_SAMPLE_INTERVAL,
+        retention_periodic_limit,
     );
     let memory_sampler =
         MemoryDiagnosticSampler::start("receiver", &settings, memory_diagnostic_interval());

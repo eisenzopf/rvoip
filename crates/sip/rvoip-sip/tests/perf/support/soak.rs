@@ -1446,6 +1446,18 @@ impl EndpointRetentionSampler {
         endpoint: Arc<UnifiedCoordinator>,
         interval: Duration,
     ) -> Self {
+        Self::start_with_periodic_limit(role, endpoint, interval, None)
+    }
+
+    /// Start structural sampling with an optional wall-clock limit. Long soak
+    /// tests stop these allocator-heavy snapshots before the authoritative
+    /// final-ten-minute RSS window while continuing lightweight RSS sampling.
+    pub fn start_with_periodic_limit(
+        role: &'static str,
+        endpoint: Arc<UnifiedCoordinator>,
+        interval: Duration,
+        periodic_limit: Option<Duration>,
+    ) -> Self {
         let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
         let samples_path = diagnostic_sample_path(role, "retention");
         let started = std::time::Instant::now();
@@ -1458,9 +1470,20 @@ impl EndpointRetentionSampler {
                     capture_endpoint_retention_sample(role, "periodic", started, &sampled_endpoint)
                         .await;
                 series.record(role, sample, &mut writer);
-                tokio::select! {
-                    _ = tokio::time::sleep(interval) => {}
-                    _ = stop_rx.changed() => break,
+                if let Some(limit) = periodic_limit {
+                    let remaining = limit.saturating_sub(started.elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval.min(remaining)) => {}
+                        _ = stop_rx.changed() => break,
+                    }
+                } else {
+                    tokio::select! {
+                        _ = tokio::time::sleep(interval) => {}
+                        _ = stop_rx.changed() => break,
+                    }
                 }
             }
             writer.flush().expect("flush retention diagnostics JSONL");
