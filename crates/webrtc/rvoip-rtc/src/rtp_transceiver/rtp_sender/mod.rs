@@ -247,10 +247,23 @@ fn bind_outbound_packet_to_encoding(
         return Err(Error::ErrRTPTransceiverCodecUnsupported);
     }
 
-    // Payload type belongs to the encoding selected by this packet's SSRC.
-    // A sibling supplemental encoding must never change the primary SSRC's
-    // codec binding, even when both codecs use the same RTP clock rate.
-    packet.header.payload_type = codec.payload_type;
+    // RFC 4733 telephone-events are an alternate audio payload on the
+    // primary audio source. Preserve an explicitly requested, negotiated
+    // telephone-event PT on that SSRC so it shares the regular audio
+    // sequence/timestamp base. Other packets remain bound to the codec of
+    // their selected encoding and cannot borrow an arbitrary sibling PT.
+    let requested = codecs
+        .iter()
+        .find(|candidate| candidate.payload_type == packet.header.payload_type);
+    let is_negotiated_telephone_event = requested.is_some_and(|candidate| {
+        candidate
+            .rtp_codec
+            .mime_type
+            .eq_ignore_ascii_case("audio/telephone-event")
+    });
+    if !is_negotiated_telephone_event {
+        packet.header.payload_type = codec.payload_type;
+    }
     Ok(())
 }
 
@@ -469,31 +482,37 @@ mod tests {
     }
 
     #[test]
-    fn outbound_payload_type_rejects_codec_bound_to_another_ssrc() {
+    fn outbound_payload_type_allows_rfc4733_on_primary_audio_ssrc_only() {
         let opus_ssrc = 0x0102_0304;
         let telephone_event_ssrc = 0x0506_0708;
         let opus = codec(111, "audio/opus", 48_000);
         let telephone_event = codec(110, "audio/telephone-event", 48_000);
         let codecs = vec![opus.clone(), telephone_event.clone()];
-        let encodings = vec![
-            encoding(opus_ssrc, &opus),
-            encoding(telephone_event_ssrc, &telephone_event),
-        ];
+        let encodings = vec![encoding(opus_ssrc, &opus)];
         let mut opus_packet = rtp::Packet::default();
         opus_packet.header.ssrc = opus_ssrc;
         opus_packet.header.payload_type = telephone_event.payload_type;
         bind_outbound_packet_to_encoding(&mut opus_packet, &codecs, &encodings)
             .expect("Opus SSRC binding");
-        assert_eq!(opus_packet.header.payload_type, opus.payload_type);
+        assert_eq!(
+            opus_packet.header.payload_type, telephone_event.payload_type,
+            "RFC 4733 must remain on the primary audio source"
+        );
+
+        let mut unknown_packet = rtp::Packet::default();
+        unknown_packet.header.ssrc = opus_ssrc;
+        unknown_packet.header.payload_type = 123;
+        bind_outbound_packet_to_encoding(&mut unknown_packet, &codecs, &encodings)
+            .expect("unknown PT falls back to the SSRC codec");
+        assert_eq!(unknown_packet.header.payload_type, opus.payload_type);
 
         let mut telephone_event_packet = rtp::Packet::default();
         telephone_event_packet.header.ssrc = telephone_event_ssrc;
         telephone_event_packet.header.payload_type = telephone_event.payload_type;
-        bind_outbound_packet_to_encoding(&mut telephone_event_packet, &codecs, &encodings)
-            .expect("telephone-event SSRC binding");
-        assert_eq!(
-            telephone_event_packet.header.payload_type,
-            telephone_event.payload_type
+        assert!(
+            bind_outbound_packet_to_encoding(&mut telephone_event_packet, &codecs, &encodings)
+                .is_err(),
+            "an unadvertised supplemental SSRC must not be accepted"
         );
     }
 }

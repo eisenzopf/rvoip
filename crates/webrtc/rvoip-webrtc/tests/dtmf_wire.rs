@@ -2,10 +2,10 @@
 //! generates correct telephone-event RTP packets on the wire, end-to-end
 //! through SRTP on a real loopback.
 //!
-//! DTMF is a supplemental SSRC encoding on the same negotiated audio sender as
-//! Opus. The offer therefore carries one audio m-line, while primary audio and
-//! telephone-event retain independent RTP timelines. The tests discover every
-//! audio remote track so they remain insensitive to receiver-side demux shape.
+//! DTMF is an alternate payload on the same negotiated audio source as Opus.
+//! The offer therefore carries one audio m-line, SSRC, and sequence/timestamp
+//! owner. The tests discover every audio remote track so they remain
+//! insensitive to receiver-side demux shape.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,13 +74,11 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
         .await
         .expect("loopback");
 
-    // D1 — Opus and telephone-event are codec-distinct encodings on one
-    // negotiated audio sender. Receiver implementations may expose those
-    // SSRCs through one grouped track or multiple remote-track events, so the
-    // watcher drains every audio track and polls each one. A track may appear
-    // only after the first PT 101 packet arrives, so keep polling until the
-    // deadline.
-    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u8, u16, bool)>>> =
+    // Opus and telephone-event share one negotiated audio source. Receiver
+    // implementations may expose a remote track only after the first RTP
+    // packet arrives, so keep discovering and polling until the deadline.
+    let expected_ssrc = offerer.local_audio_ssrc().expect("primary audio SSRC");
+    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u8, u16, bool, u32)>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
     let cap_clone = Arc::clone(&captured);
     let answerer_watch = Arc::clone(&answerer);
@@ -103,7 +101,14 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
                         if let TrackRemoteEvent::OnRtpPacket(pkt) = event {
                             if pkt.header.payload_type == TELEPHONE_EVENT_PT {
                                 if let Some((ev, eoe, vol, dur)) = decode_event(&pkt.payload) {
-                                    cap.lock().push((ev, eoe, vol, dur, pkt.header.marker));
+                                    cap.lock().push((
+                                        ev,
+                                        eoe,
+                                        vol,
+                                        dur,
+                                        pkt.header.marker,
+                                        pkt.header.ssrc,
+                                    ));
                                 }
                             }
                         }
@@ -117,8 +122,7 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
         }
     });
 
-    // Send DTMF "5" for 100ms. The first PT 101 packet may trigger a new
-    // remote-track event for the supplemental SSRC.
+    // Send DTMF "5" for 100ms on the already-negotiated primary audio source.
     send_dtmf(&offerer, "5", 100).await.expect("send_dtmf");
 
     // Wait long enough for end-of-event retransmissions to arrive.
@@ -132,9 +136,13 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
     );
 
     // Every captured event must be digit 5 with reasonable volume (0..63).
-    for (ev, _, vol, _, _) in &events {
+    for (ev, _, vol, _, _, ssrc) in &events {
         assert_eq!(*ev, 5, "event code must be 5 for digit '5'");
         assert!(*vol <= 63, "volume must fit in 6 bits (got {vol})");
+        assert_eq!(
+            *ssrc, expected_ssrc,
+            "RFC 4733 must use the primary audio source"
+        );
     }
 
     // First packet must carry the marker bit.
@@ -154,7 +162,7 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
 
     // Duration must monotonically increase (cumulative samples across the tone).
     let mut last = 0u16;
-    for (_, _, _, dur, _) in &events {
+    for (_, _, _, dur, _, _) in &events {
         assert!(*dur >= last, "duration regressed: {dur} < {last}");
         last = *dur;
     }
@@ -202,6 +210,7 @@ async fn negotiated_pt110_48khz_reaches_the_remote_peer() {
     let expected_mid_id = sender
         .negotiated_outbound_audio_mid_extension_id()
         .expect("negotiated outbound audio MID extension ID");
+    let expected_ssrc = sender.local_audio_ssrc().expect("primary audio SSRC");
 
     let timeout = Duration::from_secs(config.connection_timeout_secs);
     tokio::try_join!(
@@ -210,7 +219,7 @@ async fn negotiated_pt110_48khz_reaches_the_remote_peer() {
     )
     .expect("connected peers");
 
-    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u16, bool, Option<Vec<u8>>)>>> =
+    let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u16, bool, Option<Vec<u8>>, u32)>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
     let captured_for_watcher = Arc::clone(&captured);
     let receiver_for_watcher = Arc::clone(&receiver);
@@ -241,6 +250,7 @@ async fn negotiated_pt110_48khz_reaches_the_remote_peer() {
                                         .header
                                         .get_extension(expected_mid_id)
                                         .map(|payload| payload.to_vec()),
+                                    packet.header.ssrc,
                                 ));
                             }
                         }
@@ -266,12 +276,16 @@ async fn negotiated_pt110_48khz_reaches_the_remote_peer() {
     assert!(events.first().is_some_and(|event| event.3));
     assert!(events
         .iter()
-        .any(|(_, end, duration, _, _)| { *end && *duration == 5_760 }));
+        .any(|(_, end, duration, _, _, _)| { *end && *duration == 5_760 }));
     assert!(
         events
             .iter()
             .all(|event| event.4.as_deref() == Some(expected_mid.as_bytes())),
-        "every supplemental-SSRC packet must carry the exact negotiated MID bytes"
+        "every telephone-event packet must carry the exact negotiated MID bytes"
+    );
+    assert!(
+        events.iter().all(|event| event.5 == expected_ssrc),
+        "PT110 must use the primary audio source"
     );
 
     receiver.close().await.ok();

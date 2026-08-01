@@ -4,11 +4,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(test)]
 use rtc::rtp;
-use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 
 use crate::errors::{Result, WebRtcError};
-use crate::media::outbound::sdes_mid_header_extension;
+use crate::media::outbound::OutboundAudioRtpWriter;
 pub use crate::peer::builder::TELEPHONE_EVENT_PAYLOAD_TYPE;
 use crate::peer::RvoipPeerConnection;
 
@@ -58,65 +58,6 @@ pub enum OutboundDtmfNegotiation {
     Pending,
     Negotiated(TelephoneEventCodec),
     Unsupported,
-}
-
-/// Per-peer outbound RFC 4733 sequence/timestamp state.
-///
-/// The state is held behind the owning peer's async mutex for the complete
-/// digit sequence. That keeps concurrent application calls from interleaving
-/// events on one SSRC and preserves one RTP sequence/timestamp timeline across
-/// successive `send_dtmf` calls.
-#[derive(Debug)]
-pub(crate) struct DtmfSenderState {
-    next_sequence_number: u16,
-    next_timestamp: u32,
-}
-
-impl DtmfSenderState {
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        Self {
-            next_sequence_number: seed as u16,
-            next_timestamp: ((seed >> 16) as u32) | 1,
-        }
-    }
-
-    fn next_sequence_number(&mut self) -> u16 {
-        let sequence_number = self.next_sequence_number;
-        self.next_sequence_number = self.next_sequence_number.wrapping_add(1);
-        sequence_number
-    }
-
-    fn reserve_event_timestamp(&mut self, timing: DtmfTiming) -> u32 {
-        let timestamp = self.next_timestamp;
-        // `send_single_digit` emits its final duration one tick before the
-        // represented end of the event. `send_dtmf` waits that last tick
-        // before starting another digit, so adjacent event timestamps advance
-        // by the exact negotiated-clock duration without overlap.
-        self.next_timestamp = self
-            .next_timestamp
-            .wrapping_add(u32::from(timing.final_duration_samples));
-        timestamp
-    }
-}
-
-trait DtmfTimeline {
-    fn next_sequence_number(&mut self) -> u16;
-    fn reserve_event_timestamp(&mut self, timing: DtmfTiming) -> u32;
-}
-
-impl DtmfTimeline for DtmfSenderState {
-    fn next_sequence_number(&mut self) -> u16 {
-        DtmfSenderState::next_sequence_number(self)
-    }
-
-    fn reserve_event_timestamp(&mut self, timing: DtmfTiming) -> u32 {
-        DtmfSenderState::reserve_event_timestamp(self, timing)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -324,6 +265,7 @@ impl DtmfDecoder {
     }
 }
 
+#[cfg(test)]
 fn telephone_event_packet(
     codec: TelephoneEventCodec,
     sequence_number: u16,
@@ -354,11 +296,9 @@ fn telephone_event_packet(
 
 #[allow(clippy::too_many_arguments)]
 async fn write_telephone_event(
-    track: &Arc<TrackLocalStaticRTP>,
+    writer: &Arc<OutboundAudioRtpWriter>,
     mid: &str,
     codec: TelephoneEventCodec,
-    sequence_number: u16,
-    ssrc: u32,
     event: u8,
     end_of_event: bool,
     volume: u8,
@@ -366,40 +306,32 @@ async fn write_telephone_event(
     timestamp: u32,
     marker: bool,
 ) -> Result<()> {
-    let pkt = telephone_event_packet(
-        codec,
-        sequence_number,
-        ssrc,
-        event,
-        end_of_event,
-        volume,
-        duration,
-        timestamp,
-        marker,
-    );
+    let payload = encode_telephone_event(event, end_of_event, volume, duration);
     tracing::trace!(
         payload_type = codec.payload_type,
         clock_rate_hz = codec.clock_rate_hz,
-        sequence_number,
-        ssrc,
+        ssrc = writer.ssrc(),
         mid,
         event,
         end_of_event,
         duration,
         "writing negotiated WebRTC telephone-event RTP"
     );
-    track
-        .write_rtp_with_extensions(pkt, &[sdes_mid_header_extension(mid)])
+    writer
+        .write_supplemental_audio(
+            codec.payload_type,
+            timestamp,
+            marker,
+            bytes::Bytes::copy_from_slice(&payload),
+        )
         .await
-        .map_err(|e| WebRtcError::Webrtc(format!("DTMF write_rtp_with_extensions: {e}")))
+        .map_err(|e| WebRtcError::Webrtc(format!("DTMF write_supplemental_audio: {e}")))
 }
 
-async fn send_single_digit<S: DtmfTimeline>(
-    track: &Arc<TrackLocalStaticRTP>,
+async fn send_single_digit(
+    writer: &Arc<OutboundAudioRtpWriter>,
     mid: &str,
     codec: TelephoneEventCodec,
-    state: &mut S,
-    ssrc: u32,
     digit: char,
     duration_ms: u32,
 ) -> Result<()> {
@@ -407,15 +339,15 @@ async fn send_single_digit<S: DtmfTimeline>(
         .ok_or_else(|| WebRtcError::Adapter(format!("invalid DTMF digit '{digit}'")))?;
 
     let timing = DtmfTiming::new(codec, duration_ms)?;
-    let start_timestamp = state.reserve_event_timestamp(timing);
+    let start_timestamp = writer
+        .reserve_telephone_event_timestamp(codec.clock_rate_hz, timing.final_duration_samples)
+        .await;
     let mut duration_samples = timing.samples_per_tick;
 
     write_telephone_event(
-        track,
+        writer,
         mid,
         codec,
-        state.next_sequence_number(),
-        ssrc,
         event_code,
         false,
         DEFAULT_VOLUME,
@@ -430,11 +362,9 @@ async fn send_single_digit<S: DtmfTimeline>(
         tokio::time::sleep(TICK).await;
         duration_samples = duration_samples.saturating_add(timing.samples_per_tick);
         write_telephone_event(
-            track,
+            writer,
             mid,
             codec,
-            state.next_sequence_number(),
-            ssrc,
             event_code,
             false,
             DEFAULT_VOLUME,
@@ -449,11 +379,9 @@ async fn send_single_digit<S: DtmfTimeline>(
     duration_samples = duration_samples.saturating_add(timing.samples_per_tick);
     for _ in 0..END_OF_EVENT_RETRANSMITS {
         write_telephone_event(
-            track,
+            writer,
             mid,
             codec,
-            state.next_sequence_number(),
-            ssrc,
             event_code,
             true,
             DEFAULT_VOLUME,
@@ -470,20 +398,16 @@ async fn send_single_digit<S: DtmfTimeline>(
 /// Send one or more DTMF digits using the remote SDP's negotiated RFC 4733
 /// payload type and clock rate.
 ///
-/// Telephone events use the negotiated telephone-event encoding's dedicated
-/// SSRC and carry the exact negotiated audio MID. This avoids changing the RTP
-/// payload mapping of the primary audio SSRC (which the alpha WebRTC engine
-/// rewrites to the primary codec) and permits a separately negotiated event
-/// clock as clarified by the verified RFC 4733 erratum. Pending or unsupported
-/// final SDP fails closed before any packet is written.
+/// Telephone events use the primary negotiated audio SSRC, sequence-number
+/// owner, timestamp base, and MID as required by RFC 4733. Pending or
+/// unsupported final SDP fails closed before any packet is written.
 pub async fn send_dtmf(
     peer: &Arc<RvoipPeerConnection>,
     digits: &str,
     duration_ms: u32,
 ) -> Result<()> {
     let codec = outbound_codec_for_sender(peer.outbound_dtmf_negotiation())?;
-    // The supplemental DTMF SSRC is intentionally not signalled in SDP.
-    // Require the exact mutually negotiated audio MID so packet demux never
+    // Require the exact mutually negotiated audio MID so BUNDLE demux never
     // falls back to payload-type or first-m-line heuristics.
     let mid = peer
         .negotiated_outbound_audio_mid()
@@ -492,16 +416,13 @@ pub async fn send_dtmf(
         .chars()
         .filter(|digit| !digit.is_whitespace())
         .collect::<Vec<_>>();
-    let track = peer
-        .local_dtmf_track()
+    peer.local_dtmf_track()
         .ok_or(WebRtcError::IncompatibleCapabilities)?;
-    let ssrc = peer
-        .local_dtmf_ssrc_for_codec(codec)
+    let writer = peer
+        .outbound_audio_writer()
         .ok_or(WebRtcError::IncompatibleCapabilities)?;
-    let mut states = peer.dtmf_sender_states().lock().await;
-    let state = states.entry(ssrc).or_insert_with(DtmfSenderState::new);
     for (index, digit) in digits.iter().copied().enumerate() {
-        send_single_digit(&track, &mid, codec, state, ssrc, digit, duration_ms).await?;
+        send_single_digit(&writer, &mid, codec, digit, duration_ms).await?;
         if index + 1 < digits.len() {
             tokio::time::sleep(TICK).await;
         }
@@ -513,6 +434,7 @@ pub async fn send_dtmf(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::outbound::sdes_mid_header_extension;
     use crate::peer::builder::HDREXT_SDES_MID;
     use rtc::shared::marshal::Marshal;
 
@@ -604,14 +526,10 @@ mod tests {
         assert_eq!(timing.total_ticks, 6);
         assert_eq!(timing.final_duration_samples, 5_760);
 
-        let mut state = DtmfSenderState {
-            next_sequence_number: 400,
-            next_timestamp: 48_000,
-        };
-        let timestamp = state.reserve_event_timestamp(timing);
+        let timestamp = 48_000;
         let first = telephone_event_packet(
             codec,
-            state.next_sequence_number(),
+            400,
             7,
             6,
             false,
@@ -622,7 +540,7 @@ mod tests {
         );
         let final_packet = telephone_event_packet(
             codec,
-            state.next_sequence_number(),
+            401,
             7,
             6,
             true,
@@ -640,7 +558,6 @@ mod tests {
         assert_eq!(final_packet.header.sequence_number, 401);
         assert_eq!(final_packet.header.timestamp, first.header.timestamp);
         assert_eq!(&final_packet.payload[2..], &5_760_u16.to_be_bytes());
-        assert_eq!(state.next_timestamp, 53_760);
     }
 
     #[test]
