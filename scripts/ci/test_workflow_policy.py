@@ -58,6 +58,26 @@ class WorkflowPolicyTests(unittest.TestCase):
         }
         self.assertEqual(mapped_examples - declared_examples, set())
 
+    def test_nextest_defers_exactly_the_catalogued_sip_process_fixtures(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        mapping = policy["pr_sip_fixture_examples"]
+        config_text = (ROOT / ".config/nextest.toml").read_text()
+        config = tomllib.loads(config_text)
+        default_filter = config["profile"]["ci"]["default-filter"]
+        deferred = set(re.findall(r"binary\(=([a-z0-9_]+)\)", default_filter))
+
+        self.assertEqual(deferred, set(mapping))
+        self.assertIn(
+            "test(=adapters::session_event_handler::tests::"
+            "malformed_inbound_sdes_update_returns_one_cached_488_without_state_mutation)",
+            config_text,
+        )
+        self.assertIn('threads-required = "num-test-threads"', config_text)
+
+        workflow = (ROOT / ".github/workflows/nextest-parity.yml").read_text()
+        self.assertIn("target/nextest/ci/junit.xml", workflow)
+        self.assertIn("if-no-files-found: error", workflow)
+
     def test_main_aggregates_one_receipt_per_combined_shard(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
         self.assertIn("--shard-layout shards", text)

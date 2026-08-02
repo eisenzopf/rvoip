@@ -109,6 +109,6 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nextest-junit-${{ matrix.partition }}
-          path: target/nextest/junit.xml
+          path: target/nextest/ci/junit.xml
           retention-days: 14
-          if-no-files-found: warn
+          if-no-files-found: error
