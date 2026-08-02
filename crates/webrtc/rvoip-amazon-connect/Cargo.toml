@@ -60,9 +60,12 @@ rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 # AWS control plane (optional — see `aws-control` feature).
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
-aws-sdk-connect = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-smithy-types = { version = "1", optional = true }
+# Keep these exact: newer generated SDK releases have a higher MSRV than the
+# workspace Rust 1.91.0 contract. The optional-feature CI lane compiles this
+# graph so an incompatible SDK cannot enter through a lockfile refresh.
+aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
+aws-sdk-connect = { version = "=1.161.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-smithy-types = { version = "=1.4.5", optional = true }
 # Logging for the `connect-probe` binary (which requires `aws-control`); kept out
 # of the library's adapter-only dependency tree.
 tracing-subscriber = { workspace = true, optional = true }
