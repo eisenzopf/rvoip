@@ -47,7 +47,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.91-nextest-0.9.140
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v2-rust-1.91-nextest-0.9.140-sccache-0.15.0
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -272,11 +272,13 @@ jobs:
       - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
       - name: Require all compute and disk quota before creating workers
         env:
+          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
           PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
           REGION: ${{ vars.RVOIP_GCP_REGION }}
           GCP_MATRIX: ${{ needs.plan.outputs.gcp_matrix }}
         run: |
           set -euo pipefail
+          test -n "$CACHE_BUCKET"
           gcloud compute project-info describe --project "$PROJECT" --format=json > global-quotas.json
           gcloud compute regions describe "$REGION" --project "$PROJECT" --format=json > regional-quotas.json
           python3 - <<'PY'
@@ -372,6 +374,7 @@ jobs:
       - name: Create every ephemeral release worker concurrently
         env:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
           PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
           ZONE: ${{ vars.RVOIP_GCP_ZONE }}
           NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
@@ -410,7 +413,7 @@ jobs:
                 --shielded-vtpm \
                 --shielded-integrity-monitoring \
                 --labels rvoip-role=release-gate,managed-by=github-actions \
-                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
                 --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
             ) > "target/gcp-controller/create-logs/${shard_id}.log" 2>&1 &
             pids+=("$!")

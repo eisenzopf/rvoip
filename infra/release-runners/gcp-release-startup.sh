@@ -15,6 +15,7 @@ RUN_ID="$(metadata rvoip-run-id)"
 SHARD_ID="$(metadata rvoip-shard-id)"
 RESOURCE_CLASS="$(metadata rvoip-resource-class)"
 BUCKET="$(metadata rvoip-evidence-bucket)"
+CACHE_BUCKET="$(metadata rvoip-cache-bucket)"
 PREFIX="$(metadata rvoip-prefix)"
 GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
 ENVIRONMENT_ID="$(metadata rvoip-environment-b64 | base64 --decode)"
@@ -49,6 +50,13 @@ finish() {
   ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   duration="$(( $(date +%s) - START_SECONDS ))"
   archive_sha=""
+  if [[ "${RVOIP_SCCACHE_ACTIVE:-0}" == "1" ]]; then
+    mkdir -p "$EVIDENCE"
+    {
+      sccache --show-stats
+      sccache --stop-server
+    } > "$EVIDENCE/_sccache-stats.txt" 2>&1 || true
+  fi
   if [[ -d "$EVIDENCE" ]]; then
     if [[ -d "$WORKSPACE/target/perf-results" ]]; then
       mkdir -p "$EVIDENCE/_perf-results/$SHARD_ID"
@@ -130,6 +138,57 @@ cd "$WORKSPACE"
 git fetch --depth=1 origin "$CANDIDATE"
 git checkout --detach "$CANDIDATE"
 test "$(git rev-parse HEAD)" = "$CANDIDATE"
+
+# Every ephemeral worker previously spent roughly twenty-one minutes compiling
+# the same release graph. Use a dedicated, lifecycle-managed GCS bucket as a
+# content-addressed compiler cache. Cache availability is an optimization only:
+# a download, authentication, or backend failure falls back to direct rustc so
+# release correctness never depends on cached state.
+SCCACHE_VERSION=0.15.0
+SCCACHE_ARCHIVE="sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+SCCACHE_SHA256=782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e
+SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_ARCHIVE}"
+install_sccache() {
+  curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+    "$SCCACHE_URL" -o "/tmp/$SCCACHE_ARCHIVE" || return 1
+  echo "$SCCACHE_SHA256  /tmp/$SCCACHE_ARCHIVE" | sha256sum --check --status \
+    || return 1
+  tar -C /tmp -xzf "/tmp/$SCCACHE_ARCHIVE" || return 1
+  install -m 0755 \
+    "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" \
+    /usr/local/bin/sccache || return 1
+}
+
+mkdir -p "$EVIDENCE" /var/cache/rvoip-sccache
+if install_sccache; then
+  export CARGO_INCREMENTAL=0
+  export RUSTC_WRAPPER=sccache
+  export SCCACHE_BASEDIRS="$WORKSPACE"
+  export SCCACHE_CACHE_SIZE=20G
+  export SCCACHE_DIR=/var/cache/rvoip-sccache
+  export SCCACHE_GCS_BUCKET="$CACHE_BUCKET"
+  export SCCACHE_GCS_KEY_PREFIX=rvoip-release-v1/rust-1.91.0/x86_64-unknown-linux-gnu
+  export SCCACHE_GCS_RW_MODE=READ_WRITE
+  cache_service_account="$(curl --fail --silent --show-error \
+    -H 'Metadata-Flavor: Google' \
+    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email)" \
+    || cache_service_account=""
+  export SCCACHE_IDLE_TIMEOUT=0
+  export SCCACHE_MULTILEVEL_CHAIN=disk,gcs
+  export SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=ignore
+  if [[ -n "$cache_service_account" ]]; then
+    export SCCACHE_GCS_SERVICE_ACCOUNT="$cache_service_account"
+  fi
+  if [[ -n "$cache_service_account" ]] && sccache --start-server; then
+    export RVOIP_SCCACHE_ACTIVE=1
+    echo "shared GCS compiler cache enabled"
+  else
+    unset RUSTC_WRAPPER
+    echo "shared compiler cache unavailable; continuing with direct rustc" >&2
+  fi
+else
+  echo "verified sccache install unavailable; continuing with direct rustc" >&2
+fi
 
 # The stock Ubuntu startup service inherits a soft nofile limit of 1024.
 # SIPp and high-density media qualification legitimately require thousands of
