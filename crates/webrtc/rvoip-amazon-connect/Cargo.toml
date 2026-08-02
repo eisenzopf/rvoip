@@ -51,7 +51,7 @@ url = "2"
 zeroize.workspace = true
 
 # Chime signaling: protobuf-over-secure-WebSocket.
-prost = "0.13"
+prost = "0.14"
 base64 = { workspace = true }
 # Pinned to the workspace's `ring` provider; used to install the process-default
 # rustls CryptoProvider before the Chime wss connect (the AWS SDK also links
@@ -65,7 +65,7 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 # graph so an incompatible SDK cannot enter through a lockfile refresh.
 aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
 aws-sdk-connect = { version = "=1.161.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-smithy-types = { version = "=1.4.5", optional = true }
+aws-smithy-types = { version = "=1.6.1", optional = true }
 # Logging for the `connect-probe` binary (which requires `aws-control`); kept out
 # of the library's adapter-only dependency tree.
 tracing-subscriber = { workspace = true, optional = true }
@@ -79,7 +79,7 @@ rvoip-sip-core = { workspace = true, optional = true }
 rvoip-media-core = { workspace = true, optional = true, features = ["opus"] }
 
 [build-dependencies]
-prost-build = "0.13"
+prost-build = "0.14"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
