@@ -18,6 +18,7 @@ WORKSPACE_ROOT = CRATE_DIR.parents[2]
 BETA_GATE = (SCRIPT_DIR / "beta_gate.sh").read_text(encoding="utf-8")
 FULL_BETA_RELEASE_PATH = SCRIPT_DIR / "full_beta_release.sh"
 FULL_BETA_RELEASE = FULL_BETA_RELEASE_PATH.read_text(encoding="utf-8")
+PERF_SOAK_SPLIT = (SCRIPT_DIR / "perf_soak_split.sh").read_text(encoding="utf-8")
 
 
 def shell_function(name: str) -> str:
@@ -32,6 +33,20 @@ def shell_function(name: str) -> str:
 
 
 class BetaGateCompatibilitySourceTests(unittest.TestCase):
+    def test_split_soak_builds_both_exact_binaries_in_one_cargo_invocation(self) -> None:
+        build = re.search(
+            r"^build_exact_test_bins\(\) \{\n(?P<body>.*?)^\}$",
+            PERF_SOAK_SPLIT,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        self.assertIsNotNone(build)
+        body = build.group("body")
+        self.assertEqual(body.count("cargo test"), 1)
+        self.assertIn("--test perf_soak_receiver", body)
+        self.assertIn("--test perf_soak_caller", body)
+        self.assertEqual(body.count("--build-target perf_soak_receiver"), 1)
+        self.assertEqual(body.count("--build-target perf_soak_caller"), 1)
+
     def test_full_beta_release_wrapper_is_fail_closed_and_literal_all(self) -> None:
         self.assertIn(
             'DOCKER_BIN="$HOMEBREW_PREFIX/opt/docker/bin/docker"',

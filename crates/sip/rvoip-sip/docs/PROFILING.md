@@ -149,11 +149,11 @@ representative timestamps. The beta monolithic and split soaks use the
 reviewed 15 MB/hour limit as of 2026-07-24; the canonical 2K cleanup control
 retains its independent 10 MB/hour intent.
 
-A qualifying monolithic or split soak gates RSS on the final 600 seconds under
-active load, reported as `rss_gate_window: "active_tail_600s"` and
+A qualifying monolithic or split soak gates RSS on the final 1,200 seconds
+under active load, reported as `rss_gate_window: "active_tail_1200s"` and
 `rss_gate_growth_mb_per_hr`. Its `rss_active_tail_*` fields record the robust
-first/last-minute endpoint-median rate, sample count, actual coverage, and
-completeness. Post-drain RSS remains useful
+Theil-Sen pairwise-slope rate, sample count, actual coverage, completeness, and
+first/last-minute endpoint diagnostics. Post-drain RSS remains useful
 allocator-settling diagnostics, while `retained_objects_after_drain` and the
 final transaction/session retention checks remain independent hard gates.
 Short diagnostic runs can report a `post_drain` or `tail` fallback, but those

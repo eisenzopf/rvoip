@@ -90,7 +90,9 @@ def high_density_metrics(
     )
     if caller_path is None or receiver_path is None:
         if required:
-            raise MetricsError("required high-density caller/receiver artifacts are missing")
+            raise MetricsError(
+                "required high-density caller/receiver artifacts are missing"
+            )
         return {"enabled": False, "required": False, "passed": True}
 
     caller = load_json(caller_path)
@@ -104,16 +106,12 @@ def high_density_metrics(
     )
     burst_cps = (
         phases[1].get("cps")
-        if isinstance(phases, list)
-        and len(phases) > 1
-        and isinstance(phases[1], dict)
+        if isinstance(phases, list) and len(phases) > 1 and isinstance(phases[1], dict)
         else None
     )
     min_asr = acceptance.get("minAsr") if isinstance(acceptance, dict) else None
     rss_limit = (
-        acceptance.get("maxRssGrowthMbPerHr")
-        if isinstance(acceptance, dict)
-        else None
+        acceptance.get("maxRssGrowthMbPerHr") if isinstance(acceptance, dict) else None
     )
     caller_skip = (
         caller.get("diagnostics", {})
@@ -216,7 +214,10 @@ def high_density_metrics(
         exact_errors == 0,
     )
     for metric, observed in (
-        ("caller_retained_after_drain", caller_results.get("retained_objects_after_drain")),
+        (
+            "caller_retained_after_drain",
+            caller_results.get("retained_objects_after_drain"),
+        ),
         (
             "receiver_retained_after_drain",
             receiver_results.get("retained_objects_after_drain"),
@@ -282,9 +283,9 @@ def high_density_metrics(
             "peak_active_calls": caller_results.get("active_call_occupancy", {}).get(
                 "peak_active_calls"
             ),
-            "peak_pending_setups": caller_results.get(
-                "active_call_occupancy", {}
-            ).get("peak_pending_setups"),
+            "peak_pending_setups": caller_results.get("active_call_occupancy", {}).get(
+                "peak_pending_setups"
+            ),
             "delivered_audio_frames": delivered_frames,
             "completed_audio_receivers": receiver_results.get(
                 "bob_completed_audio_receivers"
@@ -379,8 +380,34 @@ def monolithic_metrics(
             results.get("controlled_drain_failed"),
             results.get("controlled_drain_failed") == 0,
         ),
+        (
+            "rss_gate_window",
+            "active_tail_1200s",
+            results.get("rss_gate_window"),
+            results.get("rss_gate_window") == "active_tail_1200s",
+        ),
+        (
+            "rss_active_tail_window_complete",
+            "true",
+            results.get("rss_active_tail_window_complete"),
+            results.get("rss_active_tail_window_complete") is True,
+        ),
+        (
+            "rss_active_tail_estimator",
+            "theil_sen_pairwise_slopes",
+            results.get("rss_active_tail_estimator"),
+            results.get("rss_active_tail_estimator") == "theil_sen_pairwise_slopes",
+        ),
     ):
         add_check(checks, metric, requirement, observed, passed)
+    active_tail_window_secs = finite_number(results.get("rss_active_tail_window_secs"))
+    add_check(
+        checks,
+        "rss_active_tail_window_secs",
+        ">= 1190",
+        active_tail_window_secs,
+        active_tail_window_secs is not None and active_tail_window_secs >= 1190.0,
+    )
     offered = results.get("calls_offered")
     succeeded = results.get("calls_succeeded")
     add_check(
@@ -426,7 +453,7 @@ def monolithic_metrics(
             "delivered_audio_frames": frames,
             "rss_gate_growth_mb_per_hr": rss_growth,
             "rss_gate_window": results.get("rss_gate_window"),
-            "rss_active_tail_window_secs": results.get("rss_active_tail_window_secs"),
+            "rss_active_tail_window_secs": active_tail_window_secs,
             "rss_post_drain_growth_mb_per_hr": results.get(
                 "rss_post_drain_growth_mb_per_hr"
             ),

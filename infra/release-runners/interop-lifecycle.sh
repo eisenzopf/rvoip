@@ -128,6 +128,8 @@ PY
   docker run -d --name rvoip-freeswitch --network host \
     -e FS_DEFAULT_PASSWORD=1234 \
     -e FS_EVENT_SOCKET_PASSWORD=ClueCon \
+    -e FS_SIP_IP=127.0.0.1 \
+    -e FS_LOCAL_RTP_IP=127.0.0.1 \
     -e FS_EXTERNAL_SIP_IP=127.0.0.1 \
     -e FS_EXTERNAL_RTP_IP=127.0.0.1 \
     rvoip-release-freeswitch >/dev/null

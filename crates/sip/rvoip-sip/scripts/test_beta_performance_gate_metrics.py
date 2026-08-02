@@ -26,9 +26,7 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
             },
         }
         caller = {
-            "diagnostics": {
-                "media_receive": {"skip_audio_frame_delivery": False}
-            },
+            "diagnostics": {"media_receive": {"skip_audio_frame_delivery": False}},
             "results": {
                 "scenario_definition": definition,
                 "asr": 0.998,
@@ -53,9 +51,7 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
             },
         }
         receiver = {
-            "diagnostics": {
-                "media_receive": {"skip_audio_frame_delivery": False}
-            },
+            "diagnostics": {"media_receive": {"skip_audio_frame_delivery": False}},
             "results": {
                 "scenario_definition": definition,
                 "retained_objects_after_drain": 0,
@@ -94,8 +90,10 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
                 "calls_succeeded": 587,
                 "bob_received_frames": 1_000_000,
                 "rss_gate_growth_mb_per_hr": 12.55,
-                "rss_gate_window": "active_tail_600s",
-                "rss_active_tail_window_secs": 600.0,
+                "rss_gate_window": "active_tail_1200s",
+                "rss_active_tail_window_secs": 1200.0,
+                "rss_active_tail_window_complete": True,
+                "rss_active_tail_estimator": "theil_sen_pairwise_slopes",
                 "rss_post_drain_growth_mb_per_hr": 0.0,
             }
         }
@@ -111,22 +109,27 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         soak = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
         self.assertTrue(burst["passed"])
         self.assertTrue(soak["passed"])
-        self.assertIn("full_audio_frame_delivery", metrics.markdown({
-            "high_density_media_burst": burst,
-            "monolithic_soak": soak,
-        }))
+        self.assertIn(
+            "full_audio_frame_delivery",
+            metrics.markdown(
+                {
+                    "high_density_media_burst": burst,
+                    "monolithic_soak": soak,
+                }
+            ),
+        )
 
     def test_skipped_audio_delivery_fails(self):
-        path = next(self.root.glob(
-            "perf_burst_matrix/burst_*/high-density-media-burst/"
-            "perf_burst_receiver_high-density-media-burst.json"
-        ))
+        path = next(
+            self.root.glob(
+                "perf_burst_matrix/burst_*/high-density-media-burst/"
+                "perf_burst_receiver_high-density-media-burst.json"
+            )
+        )
         value = json.loads(path.read_text(encoding="utf-8"))
         value["diagnostics"]["media_receive"]["skip_audio_frame_delivery"] = True
         path.write_text(json.dumps(value), encoding="utf-8")
-        result = metrics.high_density_metrics(
-            self.root, 160.0, 0.995, 15.0, True
-        )
+        result = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
         self.assertFalse(result["passed"])
 
     def test_wrong_rss_limit_fails(self):
@@ -137,17 +140,26 @@ class BetaPerformanceGateMetricsTests(unittest.TestCase):
         result = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
         self.assertFalse(result["passed"])
 
+    def test_short_or_wrong_active_tail_window_fails(self):
+        path = self.root / "perf_soak_30min.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["results"]["rss_gate_window"] = "active_tail_600s"
+        value["results"]["rss_active_tail_window_secs"] = 600.0
+        path.write_text(json.dumps(value), encoding="utf-8")
+        result = metrics.monolithic_metrics(self.root, 3600, 30, 15.0, True)
+        self.assertFalse(result["passed"])
+
     def test_timeout_count_must_reconcile_with_call_accounting(self):
-        path = next(self.root.glob(
-            "perf_burst_matrix/burst_*/high-density-media-burst/"
-            "perf_burst_caller_high-density-media-burst.json"
-        ))
+        path = next(
+            self.root.glob(
+                "perf_burst_matrix/burst_*/high-density-media-burst/"
+                "perf_burst_caller_high-density-media-burst.json"
+            )
+        )
         value = json.loads(path.read_text(encoding="utf-8"))
         value["results"]["errors"]["timeout"] = 100
         path.write_text(json.dumps(value), encoding="utf-8")
-        result = metrics.high_density_metrics(
-            self.root, 160.0, 0.995, 15.0, True
-        )
+        result = metrics.high_density_metrics(self.root, 160.0, 0.995, 15.0, True)
         self.assertFalse(result["passed"])
 
 

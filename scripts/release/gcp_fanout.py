@@ -25,6 +25,7 @@ RESOURCE_MACHINES = {
     "gcp-interop": "n2-standard-4",
     "gcp-performance": "n2-standard-8",
     "gcp-performance-soak": "n2-standard-4",
+    "gcp-performance-soak-long": "n2-standard-8",
 }
 MACHINE_VCPUS = {
     "n2-standard-4": 4,

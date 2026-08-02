@@ -104,7 +104,7 @@ pub fn resource_sampling_diagnostics(role: &str, in_process_enabled: bool) -> se
 /// completed. A new baseline keeps allocator page activity from those
 /// operations out of the authoritative quiescent-runtime slope.
 pub async fn sample_settled_rss_window(
-    role: &str,
+    role: &'static str,
     minimum_window_secs: f64,
 ) -> (ResourceSummary, Duration) {
     let minimum_window_secs = minimum_window_secs.ceil().max(1.0) as u64;
@@ -115,8 +115,16 @@ pub async fn sample_settled_rss_window(
         Duration::from_secs(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
         diagnostic_sample_path(role, "settled_resource"),
     );
+    let memory_sampler = MemoryDiagnosticSampler::start_settled(
+        role,
+        Duration::from_secs(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),
+    );
     tokio::time::sleep(observation).await;
-    (sampler.stop().await, observation)
+    let resources = sampler.stop().await;
+    if let Some(memory_sampler) = memory_sampler {
+        let _ = memory_sampler.stop().await;
+    }
+    (resources, observation)
 }
 
 pub fn media_receive_diagnostics() -> serde_json::Value {
@@ -1471,7 +1479,7 @@ impl EndpointRetentionSampler {
 
     /// Start structural sampling with an optional wall-clock limit. Long soak
     /// tests stop these allocator-heavy snapshots before the authoritative
-    /// final-ten-minute RSS window while continuing lightweight RSS sampling.
+    /// final-twenty-minute RSS window while continuing lightweight RSS sampling.
     pub fn start_with_periodic_limit(
         role: &'static str,
         endpoint: Arc<UnifiedCoordinator>,
@@ -1550,6 +1558,11 @@ impl MemoryDiagnosticSampler {
         None
     }
 
+    #[cfg(not(feature = "perf-infra-memory-diagnostics"))]
+    pub fn start_settled(_role: &'static str, _interval: Duration) -> Option<Self> {
+        None
+    }
+
     #[cfg(feature = "perf-infra-memory-diagnostics")]
     pub fn start(
         role: &'static str,
@@ -1623,6 +1636,65 @@ impl MemoryDiagnosticSampler {
         Some(Self { stop_tx, task })
     }
 
+    /// Capture allocator/process telemetry across the authoritative settled
+    /// RSS window. This sidecar is opt-in and never runs in ordinary release
+    /// qualification, so diagnostic allocation cannot affect normal scores.
+    #[cfg(feature = "perf-infra-memory-diagnostics")]
+    pub fn start_settled(role: &'static str, interval: Duration) -> Option<Self> {
+        if !memory_diagnostics_enabled() {
+            return None;
+        }
+        let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+        let samples_path = diagnostic_sample_path(role, "settled_memory_diag");
+        let allocator_diagnostics_enabled = read_bool_env(ALLOCATOR_DIAGNOSTICS_ENV);
+        let collect_at = MimallocCollectAt::from_env();
+        let task = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let mut series = MemoryDiagnosticSeries::new(
+                samples_path,
+                allocator_diagnostics_enabled,
+                collect_at.as_str().to_string(),
+            );
+            let mut writer = series.open_writer();
+            if collect_at.includes_settled() {
+                rvoip_infra_common::memory_diagnostics::collect_allocator(true);
+                series.collect_count += 1;
+                let sample = capture_memory_diagnostic_sample(
+                    role,
+                    "settled_collect",
+                    started,
+                    allocator_diagnostics_enabled,
+                );
+                series.record(sample, &mut writer);
+            }
+            loop {
+                let sample = capture_memory_diagnostic_sample(
+                    role,
+                    "settled_periodic",
+                    started,
+                    allocator_diagnostics_enabled,
+                );
+                series.record(sample, &mut writer);
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {}
+                    _ = stop_rx.changed() => break,
+                }
+            }
+            let sample = capture_memory_diagnostic_sample(
+                role,
+                "settled_final",
+                started,
+                allocator_diagnostics_enabled,
+            );
+            series.record(sample, &mut writer);
+            writer
+                .flush()
+                .expect("flush settled memory diagnostics JSONL");
+            series
+        });
+        Some(Self { stop_tx, task })
+    }
+
     pub async fn stop(self) -> MemoryDiagnosticSeries {
         let _ = self.stop_tx.send(true);
         self.task.await.unwrap_or_else(|_| {
@@ -1677,6 +1749,8 @@ enum MimallocCollectAt {
     Phase,
     Drain,
     Both,
+    Settled,
+    All,
 }
 
 impl MimallocCollectAt {
@@ -1690,7 +1764,11 @@ impl MimallocCollectAt {
             "phase" => Self::Phase,
             "drain" => Self::Drain,
             "both" => Self::Both,
-            other => panic!("{MIMALLOC_COLLECT_AT_ENV} must be off|phase|drain|both, got {other}"),
+            "settled" => Self::Settled,
+            "all" => Self::All,
+            other => panic!(
+                "{MIMALLOC_COLLECT_AT_ENV} must be off|phase|drain|both|settled|all, got {other}"
+            ),
         }
     }
 
@@ -1700,15 +1778,21 @@ impl MimallocCollectAt {
             Self::Phase => "phase",
             Self::Drain => "drain",
             Self::Both => "both",
+            Self::Settled => "settled",
+            Self::All => "all",
         }
     }
 
     fn includes_phase(self) -> bool {
-        matches!(self, Self::Phase | Self::Both)
+        matches!(self, Self::Phase | Self::Both | Self::All)
     }
 
     fn includes_drain(self) -> bool {
-        matches!(self, Self::Drain | Self::Both)
+        matches!(self, Self::Drain | Self::Both | Self::All)
+    }
+
+    fn includes_settled(self) -> bool {
+        matches!(self, Self::Settled | Self::All)
     }
 }
 
@@ -2158,16 +2242,16 @@ pub struct RssResultMetrics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RssGatePolicy {
-    /// Long-soak authority: qualify the final ten minutes under load and fail
+    /// Long-soak authority: qualify the final twenty minutes under load and fail
     /// separately if that complete window was not captured.
-    ActiveTail600,
+    ActiveTail1200,
     /// Compatibility policy for short monolithic soak invocations whose RSS
     /// series includes both active load and the declared post-drain period.
     PostDrainOrTail,
     /// Short/burst authority: require a complete observation captured after
-    /// teardown and structural retention checks, then qualify its final 60
-    /// seconds as quiescent runtime behavior.
-    SettledTail60,
+    /// teardown and structural retention checks, then qualify the complete
+    /// settled window with a robust pairwise-slope estimator.
+    SettledFull,
 }
 
 pub fn rss_result_metrics(
@@ -2177,9 +2261,9 @@ pub fn rss_result_metrics(
     drain_secs: f64,
     gate_policy: RssGatePolicy,
 ) -> RssResultMetrics {
-    const LONG_SOAK_ACTIVE_WINDOW_SECS: f64 = 600.0;
-    const LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS: f64 = 590.0;
-    const LONG_SOAK_MIN_ACTIVE_SAMPLES: usize = 110;
+    const LONG_SOAK_ACTIVE_WINDOW_SECS: f64 = 1200.0;
+    const LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS: f64 = 1190.0;
+    const LONG_SOAK_MIN_ACTIVE_SAMPLES: usize = 230;
 
     let full_growth_mb_per_hr = resources.rss_growth_mb_per_min * 60.0;
     let sustained_growth_mb_per_hr = resources.rss_tail_growth_mb_per_min * 60.0;
@@ -2215,32 +2299,34 @@ pub fn rss_result_metrics(
         .cloned()
         .collect();
     let post_drain_growth_mb_per_hr = rss_growth_mb_per_min(&post_drain_samples) * 60.0;
+    let settled_theil_sen_growth_mb_per_hr = rss_theil_sen_growth_mb_per_hr(&post_drain_samples);
     let post_drain_window_secs = match (post_drain_samples.first(), post_drain_samples.last()) {
         (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
         _ => 0.0,
     };
     // A long soak must be qualified by sustained behavior under active load.
-    // A short scenario retains its complete post-drain evidence window, but
-    // its authoritative slope comes from the final 60 seconds after bounded
-    // cleanup settling. Because the sampler is stopped at the drain boundary,
-    // report allocations cannot contaminate this settled-runtime estimate.
+    // A short scenario retains and qualifies its complete post-drain evidence
+    // window. The Theil-Sen estimator keeps a bounded allocator step from
+    // being projected into a false hourly leak while preserving the exact
+    // slope for continuous growth. Because the sampler is stopped at the
+    // drain boundary, report allocations cannot contaminate this estimate.
     let (gate_growth_mb_per_hr, gate_window) = match gate_policy {
-        RssGatePolicy::ActiveTail600 => (
+        RssGatePolicy::ActiveTail1200 => (
             active_tail_growth_mb_per_hr,
             if active_tail_window_complete {
-                "active_tail_600s"
+                "active_tail_1200s"
             } else {
-                "active_tail_600s_incomplete"
+                "active_tail_1200s_incomplete"
             },
         ),
         RssGatePolicy::PostDrainOrTail if post_drain_samples.len() >= 2 => {
             (sustained_growth_mb_per_hr, "post_drain_tail_60s")
         }
         RssGatePolicy::PostDrainOrTail => (sustained_growth_mb_per_hr, "tail"),
-        RssGatePolicy::SettledTail60 if post_drain_samples.len() >= 2 => {
-            (sustained_growth_mb_per_hr, "settled_tail_60s")
-        }
-        RssGatePolicy::SettledTail60 => (sustained_growth_mb_per_hr, "settled_tail_incomplete"),
+        RssGatePolicy::SettledFull => match settled_theil_sen_growth_mb_per_hr {
+            Some(growth) => (growth, "settled_full_theil_sen"),
+            None => (sustained_growth_mb_per_hr, "settled_full_incomplete"),
+        },
     };
     let windows = rss_window_summaries(
         &resources.samples,
@@ -2286,10 +2372,10 @@ pub fn rss_result_metrics(
 /// Robust slope across the complete selected RSS window.
 ///
 /// The median of every pairwise slope (the Theil-Sen estimator) uses the
-/// entire ten-minute evidence window, resists allocator/sample spikes, and
+/// entire twenty-minute evidence window, resists allocator/sample cycles, and
 /// still returns the exact rate for continuous linear growth. At the release
-/// sampler's 5-second cadence this is only 7,140
-/// slopes, so the quadratic calculation remains negligible.
+/// sampler's 5-second cadence this is fewer than 30,000 slopes, so the
+/// quadratic calculation remains negligible.
 pub fn rss_theil_sen_growth_mb_per_hr(samples: &[ResourceSample]) -> Option<f64> {
     const MIN_SAMPLES: usize = 3;
 

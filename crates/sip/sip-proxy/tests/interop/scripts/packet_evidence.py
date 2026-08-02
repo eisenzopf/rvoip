@@ -16,6 +16,7 @@ from typing import Any
 
 
 SCHEMA = "rvoip-sip-proxy-interop-packet-evidence-v1"
+DNS_QUERY_LOG_SCHEMA = "rvoip-sip-proxy-rfc3263-dns-v1"
 SIP_FIELDS = (
     "frame.number",
     "frame.time_epoch",
@@ -509,6 +510,55 @@ def normalized_dns_name(value: str) -> str:
     return value.rstrip(".").lower()
 
 
+def authoritative_dns_query_pairs(
+    path: Path | None,
+) -> tuple[set[tuple[str, str]], dict[str, Any]]:
+    if path is None:
+        return set(), {"present": False}
+    if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+        raise EvidenceError(f"invalid RFC 3263 DNS query log: {path}")
+
+    pairs: set[tuple[str, str]] = set()
+    row_count = 0
+    with path.open(encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise EvidenceError(
+                    f"invalid RFC 3263 DNS query log JSON at line {line_number}: {error}"
+                ) from error
+            if row.get("schema") != DNS_QUERY_LOG_SCHEMA:
+                raise EvidenceError(
+                    f"invalid RFC 3263 DNS query log schema at line {line_number}"
+                )
+            query_name = row.get("query_name")
+            query_type = row.get("query_type")
+            if (
+                not isinstance(query_name, str)
+                or not isinstance(query_type, int)
+                or isinstance(query_type, bool)
+            ):
+                raise EvidenceError(
+                    f"invalid RFC 3263 DNS query identity at line {line_number}"
+                )
+            pairs.add((normalized_dns_name(query_name), str(query_type)))
+            row_count += 1
+
+    if row_count == 0:
+        raise EvidenceError("RFC 3263 DNS query log contains no records")
+    return pairs, {
+        "present": True,
+        "filename": path.name,
+        "sha256": sha256(path),
+        "bytes": path.stat().st_size,
+        "row_count": row_count,
+        "observed": sorted(pairs),
+    }
+
+
 def check_rfc3263_packet_contract(
     assertions: list[dict[str, Any]],
     sip_rows: list[dict[str, str]],
@@ -535,6 +585,9 @@ def check_rfc3263_packet_contract(
         for name in occurrence_list(row.get("dns.qry.name"))
         for query_type in occurrence_list(row.get("dns.qry.type"))
     }
+    authoritative_query_pairs, authoritative_query_log = authoritative_dns_query_pairs(
+        getattr(args, "dns_query_log", None)
+    )
     srv_answers: set[tuple[int, int, str]] = set()
     srv_answer_sequences: list[list[tuple[int, int, str]]] = []
     for row in dns_rows:
@@ -595,10 +648,12 @@ def check_rfc3263_packet_contract(
     check(
         assertions,
         "rfc3263-both-candidate-a-queries-observed",
-        {(dead_name, "1"), (live_name, "1")} <= query_pairs,
+        {(dead_name, "1"), (live_name, "1")} <= query_pairs | authoritative_query_pairs,
         {
             "required": sorted({(dead_name, "1"), (live_name, "1")}),
-            "observed": sorted(query_pairs),
+            "packet_observed": sorted(query_pairs),
+            "authoritative_server_log": authoritative_query_log,
+            "combined_observed": sorted(query_pairs | authoritative_query_pairs),
         },
     )
     check(
@@ -725,16 +780,11 @@ def check_capacity_packet_contract(
         row
         for row in rows
         if response_has_status(row, 503, "INVITE")
-        and endpoint(row, "src")
-        == (args.rvoip_address, str(args.rvoip_port))
+        and endpoint(row, "src") == (args.rvoip_address, str(args.rvoip_port))
     ]
-    overloaded = {
-        call_id(row) for row in rvoip_overload_rows if call_id(row)
-    }
+    overloaded = {call_id(row) for row in rvoip_overload_rows if call_id(row)}
     expected_upstream_status = 500 if args.order == "peer-first" else 503
-    upstream_overloaded = call_ids_with_status(
-        rows, expected_upstream_status, "INVITE"
-    )
+    upstream_overloaded = call_ids_with_status(rows, expected_upstream_status, "INVITE")
     busy = call_ids_with_status(rows, 486, "INVITE")
     forwarded = {
         call_id(row)
@@ -1555,6 +1605,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--dns-port", type=int)
     result.add_argument("--live-target-port", type=int)
     result.add_argument("--rfc3263-zone", default="failover.interop.test")
+    result.add_argument("--dns-query-log", type=Path)
     result.add_argument("--original-target-uri")
     result.add_argument("--next-hop-route-uri")
     result.add_argument("--record-route-uri")

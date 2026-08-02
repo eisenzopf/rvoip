@@ -66,9 +66,9 @@ const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = 40;
 const DEFAULT_CONTROLLED_DRAIN_CPS: f64 = 10.0;
 const DEFAULT_ERROR_SAMPLE_LIMIT: usize = 32;
 const MAX_ERROR_MESSAGE_CHARS: usize = 256;
-const LONG_SOAK_ACTIVE_RSS_WINDOW_SECS: f64 = 600.0;
-const LONG_SOAK_MIN_ACTIVE_RSS_COVERAGE_SECS: f64 = 590.0;
-const LONG_SOAK_MIN_ACTIVE_RSS_SAMPLES: usize = 110;
+const LONG_SOAK_ACTIVE_RSS_WINDOW_SECS: f64 = 1200.0;
+const LONG_SOAK_MIN_ACTIVE_RSS_COVERAGE_SECS: f64 = 1190.0;
+const LONG_SOAK_MIN_ACTIVE_RSS_SAMPLES: usize = 230;
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -796,9 +796,9 @@ async fn perf_soak_30min() {
             (
                 rss_active_tail.growth_mb_per_hr,
                 if rss_active_tail.complete {
-                    "active_tail_600s"
+                    "active_tail_1200s"
                 } else {
-                    "active_tail_600s_incomplete"
+                    "active_tail_1200s_incomplete"
                 },
             )
         } else if rss_post_drain_samples.len() >= 2 {
@@ -2376,16 +2376,16 @@ mod tests {
     }
 
     #[test]
-    fn active_tail_measurement_requires_and_covers_ten_minutes() {
-        let samples = linear_rss_samples(640);
-        let metrics = rss_active_tail_metrics(&samples, 640.0, 5.0);
+    fn active_tail_measurement_requires_and_covers_twenty_minutes() {
+        let samples = linear_rss_samples(1240);
+        let metrics = rss_active_tail_metrics(&samples, 1240.0, 5.0);
         assert!(metrics.complete);
-        assert_eq!(metrics.sample_count, 121);
-        assert_eq!(metrics.window_secs, 600.0);
+        assert_eq!(metrics.sample_count, 241);
+        assert_eq!(metrics.window_secs, 1200.0);
         assert_eq!(metrics.estimator, "theil_sen_pairwise_slopes");
         assert!((metrics.growth_mb_per_hr - 36.0).abs() < 0.000_001);
 
-        assert!(!rss_active_tail_metrics(&samples, 599.0, 5.0).complete);
+        assert!(!rss_active_tail_metrics(&samples, 1199.0, 5.0).complete);
 
         let sparse = vec![
             ResourceSample {
@@ -2394,26 +2394,26 @@ mod tests {
                 cpu_pct: 0.0,
             },
             ResourceSample {
-                t_secs: 400.0,
+                t_secs: 800.0,
                 rss_mb: 101.0,
                 cpu_pct: 0.0,
             },
         ];
-        assert!(!rss_active_tail_metrics(&sparse, 600.0, 400.0).complete);
+        assert!(!rss_active_tail_metrics(&sparse, 1200.0, 800.0).complete);
 
         let endpoint_gap = std::iter::once(ResourceSample {
             t_secs: 0.0,
             rss_mb: 100.0,
             cpu_pct: 0.0,
         })
-        .chain((12..=120).map(|index| ResourceSample {
+        .chain((12..=240).map(|index| ResourceSample {
             t_secs: index as f64 * 5.0,
             rss_mb: 100.0,
             cpu_pct: 0.0,
         }))
         .collect::<Vec<_>>();
-        assert_eq!(endpoint_gap.len(), 110);
-        let endpoint_gap_metrics = rss_active_tail_metrics(&endpoint_gap, 600.0, 5.0);
+        assert_eq!(endpoint_gap.len(), 230);
+        let endpoint_gap_metrics = rss_active_tail_metrics(&endpoint_gap, 1200.0, 5.0);
         assert!(!endpoint_gap_metrics.complete);
         assert_eq!(
             endpoint_gap_metrics.estimator,
@@ -2424,18 +2424,18 @@ mod tests {
     #[test]
     fn active_tail_estimator_rejects_allocator_noise_but_detects_growth() {
         let noise = [0.0, 4.5, -3.0, 2.0, -1.5, 3.5, -4.0, 1.0];
-        let noisy_flat = (0..=120)
+        let noisy_flat = (0..=240)
             .map(|index| ResourceSample {
                 t_secs: index as f64 * 5.0,
                 rss_mb: 220.0 + noise[index % noise.len()],
                 cpu_pct: 0.0,
             })
             .collect::<Vec<_>>();
-        let flat = rss_active_tail_metrics(&noisy_flat, 600.0, 5.0);
+        let flat = rss_active_tail_metrics(&noisy_flat, 1200.0, 5.0);
         assert!(flat.complete);
         assert!(flat.growth_mb_per_hr.abs() < 1.0);
 
-        let continuous_growth = (0..=120)
+        let continuous_growth = (0..=240)
             .map(|index| {
                 let t_secs = index as f64 * 5.0;
                 ResourceSample {
@@ -2445,7 +2445,7 @@ mod tests {
                 }
             })
             .collect::<Vec<_>>();
-        let growth = rss_active_tail_metrics(&continuous_growth, 600.0, 5.0);
+        let growth = rss_active_tail_metrics(&continuous_growth, 1200.0, 5.0);
         assert!(growth.complete);
         assert!((growth.growth_mb_per_hr - 20.0).abs() < 0.000_001);
     }
@@ -2453,22 +2453,22 @@ mod tests {
     #[test]
     fn shared_long_soak_gate_selects_active_tail_not_post_drain() {
         let mut resources = support::ResourceSummary::empty();
-        resources.samples = linear_rss_samples(680);
+        resources.samples = linear_rss_samples(1280);
         resources.sample_interval_estimate_secs = 5.0;
         let rss = support::soak::rss_result_metrics(
             &resources,
-            640.0,
-            640.0,
+            1240.0,
+            1240.0,
             40.0,
-            support::soak::RssGatePolicy::ActiveTail600,
+            support::soak::RssGatePolicy::ActiveTail1200,
         );
         assert!(rss.active_tail_window_complete);
-        assert_eq!(rss.gate_window, "active_tail_600s");
+        assert_eq!(rss.gate_window, "active_tail_1200s");
         assert!((rss.gate_growth_mb_per_hr - 36.0).abs() < 0.000_001);
     }
 
     #[test]
-    fn shared_burst_policy_qualifies_settled_post_drain_tail() {
+    fn shared_burst_policy_qualifies_complete_settled_window() {
         let mut resources = support::ResourceSummary::empty();
         resources.samples = linear_rss_samples(680);
         for sample in &mut resources.samples {
@@ -2485,16 +2485,16 @@ mod tests {
             640.0,
             640.0,
             40.0,
-            support::soak::RssGatePolicy::SettledTail60,
+            support::soak::RssGatePolicy::SettledFull,
         );
-        assert_eq!(rss.gate_window, "settled_tail_60s");
+        assert_eq!(rss.gate_window, "settled_full_theil_sen");
         assert!(rss.gate_growth_mb_per_hr.abs() < 0.000_001);
         assert!(rss.post_drain_growth_mb_per_hr > 0.0);
         assert!(rss.active_tail_growth_mb_per_hr > 30.0);
     }
 
     #[test]
-    fn shared_burst_policy_rejects_persistent_settled_tail_growth() {
+    fn shared_burst_policy_rejects_persistent_settled_growth() {
         let mut resources = support::ResourceSummary::empty();
         resources.samples = (0..=136)
             .map(|index| {
@@ -2513,12 +2513,45 @@ mod tests {
             550.0,
             550.0,
             130.0,
-            support::soak::RssGatePolicy::SettledTail60,
+            support::soak::RssGatePolicy::SettledFull,
         );
 
-        assert_eq!(rss.gate_window, "settled_tail_60s");
+        assert_eq!(rss.gate_window, "settled_full_theil_sen");
         assert!((rss.gate_growth_mb_per_hr - 10.01).abs() < 0.000_001);
         assert!(rss.gate_growth_mb_per_hr > 10.0);
+    }
+
+    #[test]
+    fn shared_burst_policy_does_not_project_one_late_allocator_step() {
+        let mut resources = support::ResourceSummary::empty();
+        resources.samples = (0..=25)
+            .map(|index| {
+                let t_secs = index as f64 * 5.0;
+                ResourceSample {
+                    t_secs,
+                    rss_mb: 212.5 + if t_secs >= 115.0 { 3.0 } else { 0.0 },
+                    cpu_pct: 0.0,
+                }
+            })
+            .collect();
+        // The final-minute OLS diagnostic annualizes the bounded step and is
+        // intentionally not authoritative for the settled leak gate.
+        resources.rss_tail_growth_mb_per_min = 215.0 / 60.0;
+        resources.sample_interval_estimate_secs = 5.0;
+
+        let rss = support::soak::rss_result_metrics(
+            &resources,
+            0.0,
+            0.0,
+            125.0,
+            support::soak::RssGatePolicy::SettledFull,
+        );
+
+        assert_eq!(rss.gate_window, "settled_full_theil_sen");
+        assert!(rss.sustained_growth_mb_per_hr > 200.0);
+        assert!(rss.gate_growth_mb_per_hr.abs() < 0.000_001);
+        assert_eq!(rss.post_drain_sample_count, 26);
+        assert_eq!(rss.post_drain_window_secs, 125.0);
     }
 
     #[test]
@@ -2553,12 +2586,12 @@ mod tests {
     #[test]
     fn active_tail_gate_ignores_one_bounded_allocator_step() {
         let mut resources = support::ResourceSummary::empty();
-        resources.samples = (0..=120)
+        resources.samples = (0..=240)
             .map(|index| {
                 let t_secs = index as f64 * 5.0;
                 ResourceSample {
                     t_secs,
-                    rss_mb: 100.0 + if t_secs >= 360.0 { 16.0 } else { 0.0 },
+                    rss_mb: 100.0 + if t_secs >= 720.0 { 16.0 } else { 0.0 },
                     cpu_pct: 0.0,
                 }
             })
@@ -2569,23 +2602,23 @@ mod tests {
 
         let rss = support::soak::rss_result_metrics(
             &resources,
-            600.0,
-            600.0,
+            1200.0,
+            1200.0,
             0.0,
-            support::soak::RssGatePolicy::ActiveTail600,
+            support::soak::RssGatePolicy::ActiveTail1200,
         );
 
         assert!(rss.active_tail_window_complete);
         assert_eq!(rss.active_tail_estimator, "theil_sen_pairwise_slopes");
         assert!(rss.active_tail_growth_mb_per_hr.abs() < 0.000_001);
         assert!(endpoint.growth_mb_per_hr > 15.0);
-        assert!(rss.active_tail_endpoint_separation_secs > 500.0);
+        assert!(rss.active_tail_endpoint_separation_secs > 1100.0);
     }
 
     #[test]
     fn active_tail_gate_still_rejects_continuous_growth() {
         let mut resources = support::ResourceSummary::empty();
-        resources.samples = (0..=120)
+        resources.samples = (0..=240)
             .map(|index| {
                 let t_secs = index as f64 * 5.0;
                 ResourceSample {
@@ -2599,10 +2632,10 @@ mod tests {
 
         let rss = support::soak::rss_result_metrics(
             &resources,
-            600.0,
-            600.0,
+            1200.0,
+            1200.0,
             0.0,
-            support::soak::RssGatePolicy::ActiveTail600,
+            support::soak::RssGatePolicy::ActiveTail1200,
         );
 
         assert!((rss.active_tail_growth_mb_per_hr - 15.01).abs() < 0.000_001);

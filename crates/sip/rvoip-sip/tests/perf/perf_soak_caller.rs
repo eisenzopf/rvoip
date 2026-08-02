@@ -184,7 +184,7 @@ async fn perf_soak_caller() {
         None => ResourceSummary::empty(),
     };
     let rss_gate_policy = if settings.duration_secs >= 600 {
-        RssGatePolicy::ActiveTail600
+        RssGatePolicy::ActiveTail1200
     } else {
         RssGatePolicy::PostDrainOrTail
     };

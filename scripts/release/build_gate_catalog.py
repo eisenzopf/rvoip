@@ -261,7 +261,9 @@ def affected_paths(record: dict[str, Any], command: list[str] | None) -> list[st
 def resource_class(record: dict[str, Any]) -> str:
     gate_id = record["id"]
     if gate_id.startswith("perf."):
-        if gate_id in {"perf.monolithic-soak", "perf.media-burst-matrix", "perf.soak-candidate"}:
+        if gate_id in {"perf.monolithic-soak", "perf.soak-candidate"}:
+            return "gcp-performance-soak-long"
+        if gate_id == "perf.media-burst-matrix":
             return "gcp-performance-soak"
         return "gcp-performance"
     if gate_id.startswith("interop."):
@@ -442,10 +444,10 @@ def synthetic_gate(
 def infrastructure_preflight_gates() -> list[dict[str, Any]]:
     """Build the full-shape, short-running GCP orchestration acceptance profile.
 
-    The release profile currently uses seven performance workers, nine soak
-    workers, and one interoperability worker.  Keep the same fanout here so a
-    controller, quota, startup, evidence, or cleanup defect is found before a
-    real hour-long qualification begins.
+    The release profile uses six short-performance workers, seven burst/soak
+    workers, two long-soak workers, and one interoperability worker. Keep the
+    same 96-vCPU fanout here so a controller, quota, startup, evidence, or
+    cleanup defect is found before a real hour-long qualification begins.
     """
     paths = [
         ".github/workflows/release-qualify.yml",
@@ -458,8 +460,9 @@ def infrastructure_preflight_gates() -> list[dict[str, Any]]:
     ]
     result = []
     for resource, count in (
-        ("gcp-performance", 7),
-        ("gcp-performance-soak", 9),
+        ("gcp-performance", 6),
+        ("gcp-performance-soak", 7),
+        ("gcp-performance-soak-long", 2),
         ("gcp-interop", 1),
     ):
         suffix = resource.removeprefix("gcp-")

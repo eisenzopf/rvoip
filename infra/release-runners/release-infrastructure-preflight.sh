@@ -5,7 +5,7 @@ EXPECTED_RESOURCE="${1:?expected GCP resource class is required}"
 ARTIFACT_DIR="${2:?artifact directory is required}"
 
 case "$EXPECTED_RESOURCE" in
-  gcp-performance)
+  gcp-performance|gcp-performance-soak-long)
     EXPECTED_VCPUS=8
     EXPECTED_MEMORY_GIB=28
     ;;
@@ -118,4 +118,3 @@ with open(path, "w", encoding="utf-8") as output:
     json.dump(payload, output, indent=2, sort_keys=True)
     output.write("\n")
 PY
-

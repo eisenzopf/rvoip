@@ -26,7 +26,8 @@ the lockfile transactionally.
 
 After the preparation PR merges, run **Release qualification** for that exact
 `main` commit. After release-orchestration changes merge, use
-`remote-preflight` first. It launches the same 17-worker, 96-vCPU GCP shape as a full run, but
+`remote-preflight` first. It launches the same 16-worker, 96-vCPU GCP shape as
+a full run, but
 executes short infrastructure probes so credentials, quota, VM startup, OS
 limits, tool installation, repository checkout, GCS evidence transfer,
 controller reconciliation, and cleanup fail within a target of 15 minutes.
@@ -96,12 +97,15 @@ auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
 never receive the crates.io token and no release worker remains provisioned
 between qualifications.
 
-The current full profile is balanced across seven `n2-standard-8` performance
-workers, nine `n2-standard-4` soak workers, and one `n2-standard-4`
-interoperability worker. These are real performance machines; the workflow
+The current full profile is balanced across six `n2-standard-8` short-performance
+workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
+burst/soak workers, and one `n2-standard-4` interoperability worker. The two
+long soaks receive the additional cores because exact release compilation is
+on their critical path; the total remains 96 N2 vCPUs. These are real
+performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
 The `remote-preflight` profile recreates that complete capacity shape, including
-all 17 concurrent VM creations, but its short probes never substitute for the
+all 16 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
 qualification, plus provisioning, build, evidence, and cleanup time. Gates
