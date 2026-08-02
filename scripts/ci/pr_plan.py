@@ -444,6 +444,7 @@ def make_plan(
         )
     packages = workspace_packages(root, metadata)
     known_policy_paths = set(policy.get("known_policy_paths", []))
+    specialty_only_paths = policy.get("specialty_only_paths", [])
     specialty_set = {
             rule["gate"]
             for rule in policy.get("specialty_rules", [])
@@ -502,6 +503,18 @@ def make_plan(
     unknown: list[str] = []
     if not docs_only and not full_reasons:
         for path in normalized:
+            specialty_rules = [
+                rule
+                for rule in policy.get("specialty_rules", [])
+                if matches_any(path, rule.get("patterns", []))
+            ]
+            if matches_any(path, specialty_only_paths):
+                # Test harnesses can live below a Cargo package without
+                # changing the compiled crate. They may bypass crate closure
+                # only when an explicit specialty gate owns the path.
+                if not specialty_rules:
+                    unknown.append(path)
+                continue
             owner = owning_package(path, packages)
             if owner:
                 direct.add(owner)
@@ -509,10 +522,7 @@ def make_plan(
                 continue
             elif not matches_any(path, known_policy_paths):
                 # Specialty-only trees are mapped even though they are not Cargo members.
-                if not any(
-                    matches_any(path, rule.get("patterns", []))
-                    for rule in policy.get("specialty_rules", [])
-                ):
+                if not specialty_rules:
                     unknown.append(path)
 
     if not normalized:

@@ -27,6 +27,9 @@
     "CHANGELOG.md",
     "README.md"
   ],
+  "specialty_only_paths": [
+    "crates/sip/sip-proxy/tests/interop/scripts/**"
+  ],
   "example_projects": [
     "01-quickstart-p2p",
     "02-softphone-audio",
@@ -151,6 +154,7 @@
     {
       "gate": "release-tooling",
       "patterns": [
+        "crates/sip/sip-proxy/tests/interop/scripts/**",
         "scripts/release.py",
         "scripts/release.sh",
         "scripts/release/**",

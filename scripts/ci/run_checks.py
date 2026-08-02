@@ -281,6 +281,20 @@ def specialty_commands(
             ),
             (
                 [
+                    "python3",
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "crates/sip/sip-proxy/tests/interop/scripts",
+                    "-p",
+                    "test_*.py",
+                ],
+                None,
+                None,
+            ),
+            (
+                [
                     "cargo",
                     "+nightly",
                     "fuzz",
