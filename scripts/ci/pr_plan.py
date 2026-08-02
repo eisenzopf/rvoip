@@ -338,15 +338,71 @@ def make_plan(
             raise PlanError(
                 "unknown deferred SIP test targets: " + ", ".join(unknown_deferred)
             )
-        runnable_sip_targets = sorted(set(all_sip_targets) - set(deferred_sip_targets))
+        fixture_examples = policy.get("pr_sip_fixture_examples", {})
+        if not isinstance(fixture_examples, dict):
+            raise PlanError("pr_sip_fixture_examples must be an object")
+        unknown_fixture_targets = sorted(set(fixture_examples) - set(all_sip_targets))
+        if unknown_fixture_targets:
+            raise PlanError(
+                "unknown SIP process-fixture targets: "
+                + ", ".join(unknown_fixture_targets)
+            )
+        for target, examples in fixture_examples.items():
+            if (
+                not isinstance(examples, list)
+                or not examples
+                or any(
+                    not isinstance(example, str)
+                    or not example
+                    or any(
+                        not (character.isalnum() or character in "_-")
+                        for character in example
+                    )
+                    for example in examples
+                )
+            ):
+                raise PlanError(
+                    f"SIP process-fixture target {target!r} has invalid examples"
+                )
+        runnable_sip_targets = set(all_sip_targets) - set(deferred_sip_targets)
+        fixture_targets = sorted(runnable_sip_targets & set(fixture_examples))
+        regular_sip_targets = sorted(runnable_sip_targets - set(fixture_targets))
         requested_partitions = max(1, int(policy.get("pr_sip_partitions", 3)))
-        partition_count = min(requested_partitions, len(runnable_sip_targets))
-        partitions = partition_named_targets(
-            runnable_sip_targets,
-            partition_count,
-            policy.get("pr_sip_target_weights", {}),
+        partition_count = min(requested_partitions, len(regular_sip_targets))
+        partitions = (
+            partition_named_targets(
+                regular_sip_targets,
+                partition_count,
+                policy.get("pr_sip_target_weights", {}),
+            )
+            if partition_count
+            else []
         )
-        sip_jobs.append({"id": "core", "kind": "core", "targets_csv": ""})
+        # Keep the two independent compile-heavy commands parallel. Process
+        # fixture tests share a stable lane so their example binaries are
+        # built once instead of rebuilding the dependency graph per shard.
+        sip_jobs.extend(
+            [
+                {"id": "core-test", "kind": "core-test", "targets_csv": ""},
+                {"id": "clippy", "kind": "clippy", "targets_csv": ""},
+            ]
+        )
+        if fixture_targets:
+            examples = sorted(
+                {
+                    example
+                    for target in fixture_targets
+                    for example in fixture_examples[target]
+                }
+            )
+            sip_jobs.append(
+                {
+                    "id": "fixtures",
+                    "kind": "fixtures",
+                    "targets_csv": ",".join(fixture_targets),
+                    "examples_csv": ",".join(examples),
+                }
+            )
         sip_jobs.extend(
             {
                 "id": f"integration-{index}",

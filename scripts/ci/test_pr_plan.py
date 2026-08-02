@@ -207,6 +207,7 @@ class PlannerTests(unittest.TestCase):
                 "targets": [
                     {"name": "rvoip_sip", "kind": ["lib"]},
                     {"name": "audio_roundtrip_integration", "kind": ["test"]},
+                    {"name": "cancel_integration", "kind": ["test"]},
                     {"name": "event_tests", "kind": ["test"]},
                     {"name": "srtp_call_integration", "kind": ["test"]},
                 ],
@@ -214,6 +215,9 @@ class PlannerTests(unittest.TestCase):
         )
         policy = copy.deepcopy(self.policy)
         policy["pr_deferred_sip_targets"] = ["audio_roundtrip_integration"]
+        policy["pr_sip_fixture_examples"] = {
+            "cancel_integration": ["cancel_alice", "cancel_bob"]
+        }
         policy["pr_sip_partitions"] = 2
         plan = pr_plan.make_plan(
             root=self.root,
@@ -226,11 +230,55 @@ class PlannerTests(unittest.TestCase):
             job_mode="combined",
         )
         self.assertEqual(plan["deferred_sip_targets"], ["audio_roundtrip_integration"])
-        self.assertEqual([job["id"] for job in plan["sip_jobs"]], ["core", "integration-1", "integration-2"])
+        self.assertEqual(
+            [job["id"] for job in plan["sip_jobs"]],
+            ["core-test", "clippy", "fixtures", "integration-1", "integration-2"],
+        )
+        fixture_job = next(job for job in plan["sip_jobs"] if job["id"] == "fixtures")
+        self.assertEqual(fixture_job["targets_csv"], "cancel_integration")
+        self.assertEqual(fixture_job["examples_csv"], "cancel_alice,cancel_bob")
+        assigned = {
+            target
+            for job in plan["sip_jobs"]
+            if job["kind"] == "integration"
+            for target in job["targets_csv"].split(",")
+        }
+        self.assertEqual(assigned, {"event_tests", "srtp_call_integration"})
         self.assertNotIn(
             "rvoip-sip",
             [package for shard in plan["shards"] for package in shard["packages"]],
         )
+
+    def test_unknown_sip_fixture_target_fails_closed(self) -> None:
+        metadata = copy.deepcopy(self.metadata)
+        package_root = self.root / "crates" / "rvoip-sip"
+        package_root.mkdir(parents=True)
+        manifest = package_root / "Cargo.toml"
+        manifest.write_text("[package]\nname = 'rvoip-sip'\n")
+        package_id = f"path+file://{package_root}#rvoip-sip@1.0.0"
+        metadata["workspace_members"].append(package_id)
+        metadata["packages"].append(
+            {
+                "id": package_id,
+                "name": "rvoip-sip",
+                "manifest_path": str(manifest),
+                "dependencies": [],
+                "targets": [{"name": "event_tests", "kind": ["test"]}],
+            }
+        )
+        policy = copy.deepcopy(self.policy)
+        policy["pr_sip_fixture_examples"] = {"missing": ["fixture"]}
+        with self.assertRaises(pr_plan.PlanError):
+            pr_plan.make_plan(
+                root=self.root,
+                metadata=metadata,
+                policy=policy,
+                paths=["crates/rvoip-sip/src/lib.rs"],
+                base="base",
+                head="head",
+                candidate=None,
+                job_mode="combined",
+            )
 
 
 if __name__ == "__main__":

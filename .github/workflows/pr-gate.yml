@@ -260,11 +260,27 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
 
-      - name: Test and lint SIP core
-        if: matrix.kind == 'core'
+      - name: Test SIP library, binaries, and examples
+        if: matrix.kind == 'core-test'
         run: >-
-          python3 scripts/ci/run_checks.py sip-pr-core
+          python3 scripts/ci/run_checks.py sip-core
           --name sip-${{ matrix.id }}
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Lint every SIP target
+        if: matrix.kind == 'clippy'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-clippy
+          --name sip-${{ matrix.id }}
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Build and run SIP process fixtures once
+        if: matrix.kind == 'fixtures'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-fixtures
+          --name sip-${{ matrix.id }}
+          --targets '${{ matrix.targets_csv }}'
+          --examples '${{ matrix.examples_csv }}'
           --output target/ci-receipts/sip-${{ matrix.id }}.json
 
       - name: Run bounded SIP integration partition

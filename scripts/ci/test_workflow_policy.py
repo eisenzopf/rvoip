@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
+import tomllib
 import unittest
 
 
@@ -31,8 +33,30 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("run_checks.py shard", text)
         self.assertIn("shard-${{ matrix.shard_id }}-all", text)
         self.assertNotIn("run_checks.py shard-${{ matrix.check }}", text)
-        self.assertIn("sip-pr-core", text)
+        self.assertIn("run_checks.py sip-core", text)
+        self.assertIn("run_checks.py sip-clippy", text)
+        self.assertIn("run_checks.py sip-fixtures", text)
         self.assertIn("sip-integration", text)
+
+    def test_every_sip_process_fixture_is_prebuilt_by_the_dedicated_lane(self) -> None:
+        policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
+        mapping = policy["pr_sip_fixture_examples"]
+        test_root = ROOT / "crates/sip/rvoip-sip/tests"
+        fixture_targets = {
+            path.stem
+            for path in test_root.glob("*.rs")
+            if "build_examples(" in path.read_text()
+        }
+        self.assertEqual(set(mapping), fixture_targets)
+
+        manifest = tomllib.loads(
+            (ROOT / "crates/sip/rvoip-sip/Cargo.toml").read_text()
+        )
+        declared_examples = {item["name"] for item in manifest.get("example", [])}
+        mapped_examples = {
+            example for examples in mapping.values() for example in examples
+        }
+        self.assertEqual(mapped_examples - declared_examples, set())
 
     def test_main_aggregates_one_receipt_per_combined_shard(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
