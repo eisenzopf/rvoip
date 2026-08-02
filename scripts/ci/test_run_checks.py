@@ -120,6 +120,13 @@ class RunChecksTests(unittest.TestCase):
             commands[1][0],
         )
 
+    def test_otel_gate_compiles_the_optional_exporter(self) -> None:
+        commands = run_checks.specialty_commands("infra-otel", Path("/workspace"))
+        self.assertEqual(len(commands), 1)
+        self.assertIn("rvoip-infra-common", commands[0][0])
+        self.assertIn("otel", commands[0][0])
+        self.assertIn("--all-targets", commands[0][0])
+
 
 if __name__ == "__main__":
     unittest.main()
