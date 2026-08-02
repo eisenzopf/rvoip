@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import tomllib
 import unittest
@@ -134,6 +135,72 @@ class ReleaseTests(unittest.TestCase):
         for value in ("0.3", "v0.3.0", "0.3.0-beta.1", "next"):
             with self.subTest(value=value), self.assertRaises(release.ReleaseError):
                 release.require_version(value)
+
+    def test_release_lockfiles_cover_root_and_standalone_examples(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "examples").mkdir()
+            (root / "Cargo.toml").write_text("[workspace]\n")
+            (root / "examples/Cargo.toml").write_text("[workspace]\n")
+            commands: list[list[str]] = []
+
+            def fake_run(
+                argv: list[str],
+                *,
+                cwd: Path,
+                **_: object,
+            ) -> subprocess.CompletedProcess[str]:
+                self.assertEqual(cwd, root)
+                commands.append(argv)
+                return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+            with mock.patch.object(release, "run", side_effect=fake_run):
+                release.refresh_release_lockfiles(root)
+                release.validate_release_lockfiles(root)
+
+            self.assertEqual(
+                release.release_lock_paths(root),
+                (root / "Cargo.lock", root / "examples/Cargo.lock"),
+            )
+            self.assertEqual(
+                commands,
+                [
+                    [
+                        "cargo",
+                        "metadata",
+                        "--manifest-path",
+                        "Cargo.toml",
+                        "--format-version",
+                        "1",
+                    ],
+                    [
+                        "cargo",
+                        "metadata",
+                        "--manifest-path",
+                        "examples/Cargo.toml",
+                        "--format-version",
+                        "1",
+                    ],
+                    [
+                        "cargo",
+                        "metadata",
+                        "--manifest-path",
+                        "Cargo.toml",
+                        "--format-version",
+                        "1",
+                        "--locked",
+                    ],
+                    [
+                        "cargo",
+                        "metadata",
+                        "--manifest-path",
+                        "examples/Cargo.toml",
+                        "--format-version",
+                        "1",
+                        "--locked",
+                    ],
+                ],
+            )
 
     def test_topological_order_includes_0_3_and_ignores_dev_cycle(self) -> None:
         packages = {
