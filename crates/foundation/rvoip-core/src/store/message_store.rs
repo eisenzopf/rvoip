@@ -4,7 +4,7 @@
 //! against (Postgres, Redis, etc.). The in-memory `MemoryMessageStore`
 //! is the v1 default for dev/tests.
 
-use crate::error::Result;
+use crate::error::{Result, RvoipError};
 use crate::ids::{ConversationId, MessageId, ParticipantId};
 use crate::message::{ContentType, Message};
 use chrono::{DateTime, Utc};
@@ -24,9 +24,13 @@ pub struct MessageFilter {
     pub page_size: Option<usize>,
 }
 
-/// Opaque cursor. Today: byte offset into the per-Conversation log.
-/// Wire form is a JSON-encoded number so clients can round-trip it
-/// without parsing.
+/// Cursor into the sequence produced after applying [`MessageFilter`].
+///
+/// A cursor must be reused with the same Conversation and materially identical
+/// filter. The memory store preserves insertion order and does not support
+/// removals. Matching messages appended after a page was read may therefore
+/// appear on a later page. The public `offset` field is retained for wire and
+/// source compatibility; callers should treat it as opaque.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PageCursor {
     pub offset: usize,
@@ -129,10 +133,17 @@ impl MessageStore for MemoryMessageStore {
             .unwrap_or_default();
         let start = cursor.map(|c| c.offset).unwrap_or(0);
         let limit = filter.page_size.unwrap_or(50);
+        if limit == 0 {
+            return Err(RvoipError::InvalidState(
+                "message page size must be greater than zero",
+            ));
+        }
 
-        let filtered: Vec<Message> = log
+        // The cursor and its successor are both expressed in filtered-result
+        // coordinates. Taking one look-ahead item makes `next` exact, including
+        // when the match count is an exact multiple of the page size.
+        let mut filtered: Vec<Message> = log
             .into_iter()
-            .skip(start)
             .filter(|m| {
                 filter
                     .from_participant
@@ -145,10 +156,15 @@ impl MessageStore for MemoryMessageStore {
                     && filter.since.map_or(true, |t| m.timestamp >= t)
                     && filter.until.map_or(true, |t| m.timestamp <= t)
             })
-            .take(limit)
+            .skip(start)
+            .take(limit.saturating_add(1))
             .collect();
 
-        let next = if filtered.len() == limit {
+        let has_more = filtered.len() > limit;
+        if has_more {
+            filtered.truncate(limit);
+        }
+        let next = if has_more {
             Some(PageCursor {
                 offset: start + limit,
             })
