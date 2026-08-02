@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 from typing import Any
 import urllib.error
 import urllib.request
@@ -28,6 +29,11 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
+ACTIVE_RELEASE_METADATA_FILES = (
+    Path("README.md"),
+    Path("crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"),
+    Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"),
+)
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
@@ -504,6 +510,25 @@ def planned_version_edits(
     return changes
 
 
+def planned_release_metadata_edits(
+    root: Path, current_version: str, version: str
+) -> dict[Path, bytes]:
+    """Update current-version references in the active release documents."""
+    changes: dict[Path, bytes] = {}
+    for relative_path in ACTIVE_RELEASE_METADATA_FILES:
+        path = root / relative_path
+        text = path.read_text(encoding="utf-8")
+        count = text.count(current_version)
+        if count == 0:
+            raise ReleaseError(
+                f"active release metadata in {relative_path} does not reference "
+                f"workspace version {current_version}"
+            )
+        updated = text.replace(current_version, version)
+        changes[path] = updated.encode()
+    return changes
+
+
 def write_atomic(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as temporary:
@@ -647,7 +672,12 @@ def prepare(root: Path, version: str) -> None:
         raise ReleaseError(
             f"cannot prepare an already-published version for: {existing}"
         )
+    root_manifest = root / "Cargo.toml"
+    current_version = tomllib.loads(root_manifest.read_text(encoding="utf-8"))[
+        "workspace"
+    ]["package"]["version"]
     edits = planned_version_edits(root, packages, version)
+    edits.update(planned_release_metadata_edits(root, current_version, version))
     lock_paths = release_lock_paths(root)
     originals = {
         path: path.read_bytes() if path.exists() else None

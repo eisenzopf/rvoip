@@ -64,6 +64,8 @@ mod tests {
         should_fail_send: Arc<AtomicBool>,
         raw_send_count: Arc<AtomicUsize>,
         raw_routes: Arc<Mutex<Vec<rvoip_sip_transport::TransportRoute>>>,
+        ack_before_final_response_returns:
+            Arc<Mutex<Option<(mpsc::Sender<TransportEvent>, Request, SocketAddr)>>>,
     }
 
     impl MockTransport {
@@ -74,6 +76,7 @@ mod tests {
                 should_fail_send: Arc::new(AtomicBool::new(false)),
                 raw_send_count: Arc::new(AtomicUsize::new(0)),
                 raw_routes: Arc::new(Mutex::new(Vec::new())),
+                ack_before_final_response_returns: Arc::new(Mutex::new(None)),
             }
         }
 
@@ -84,7 +87,18 @@ mod tests {
                 should_fail_send: Arc::new(AtomicBool::new(should_fail)),
                 raw_send_count: Arc::new(AtomicUsize::new(0)),
                 raw_routes: Arc::new(Mutex::new(Vec::new())),
+                ack_before_final_response_returns: Arc::new(Mutex::new(None)),
             }
+        }
+
+        async fn inject_ack_before_final_response_returns(
+            &self,
+            transport_tx: mpsc::Sender<TransportEvent>,
+            ack: Request,
+            source: SocketAddr,
+        ) {
+            *self.ack_before_final_response_returns.lock().await =
+                Some((transport_tx, ack, source));
         }
 
         #[allow(dead_code)]
@@ -120,8 +134,7 @@ mod tests {
                 ));
             }
 
-            // Otherwise process normally
-            let mut messages = self.sent_messages.lock().await;
+            // Otherwise process normally.
             println!(
                 "MockTransport::send_message - Sending message: {:?} to {}",
                 if let Message::Request(ref req) = message {
@@ -131,7 +144,26 @@ mod tests {
                 },
                 destination
             );
-            messages.push((message, destination));
+            self.sent_messages
+                .lock()
+                .await
+                .push((message.clone(), destination));
+
+            if matches!(
+                &message,
+                Message::Response(response)
+                    if !response.status().is_provisional() && !response.status().is_success()
+            ) {
+                if let Some((transport_tx, ack, source)) =
+                    self.ack_before_final_response_returns.lock().await.take()
+                {
+                    transport_tx
+                        .send(dispatch_event_from(Message::Request(ack), source))
+                        .await
+                        .expect("inject ACK at the final-response write boundary");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
             Ok(())
         }
 
@@ -1908,6 +1940,58 @@ mod tests {
                 .await
                 .is_err(),
             "retransmission must not escape through unmatched-CANCEL ingress"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_2xx_ack_at_response_write_boundary_is_transaction_owned() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (transport_tx, transport_rx) = mpsc::channel(32);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+
+        let source: SocketAddr = "192.0.2.81:5060".parse().unwrap();
+        let branch = "z9hG4bK.ack-write-boundary";
+        let invite = create_dispatch_request(Method::Invite, branch, 301)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event_from(
+                Message::Request(invite.clone()),
+                source,
+            ))
+            .await?;
+        let invite_id =
+            match drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await {
+                Some(TransactionEvent::InviteRequest { transaction_id, .. }) => transaction_id,
+                other => panic!("expected INVITE request, got {other:?}"),
+            };
+
+        let failure = create_test_response(&invite, StatusCode::Decline, Some("Decline"));
+        let ack =
+            crate::transaction::method::ack::create_ack_for_error_response(&invite, &failure)?;
+        transport
+            .inject_ack_before_final_response_returns(transport_tx, ack, source)
+            .await;
+
+        manager.send_response(&invite_id, failure).await?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &invite_id,
+                    TransactionState::Confirmed,
+                    Duration::from_millis(500),
+                )
+                .await?,
+            "a non-2xx ACK arriving immediately after the wire write must confirm the INVITE"
+        );
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "the hop-by-hop ACK must not be published as an end-to-end AckRequest"
         );
 
         manager.shutdown().await;

@@ -1576,10 +1576,24 @@ impl TransactionManager {
                 .get(&invite_key)
                 .map(|r| r.value().clone());
             if let Some(transaction) = invite_tx {
+                let state = transaction.state();
+                let response_crossed_wire_before_state_transition = state
+                    == TransactionState::Proceeding
+                    && transaction.data().final_response_may_have_reached_wire()
+                    && transaction
+                        .data()
+                        .last_response
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|response| {
+                            !response.status().is_provisional() && !response.status().is_success()
+                        });
                 if matches!(
-                    transaction.state(),
+                    state,
                     TransactionState::Completed | TransactionState::Confirmed
-                ) {
+                ) || response_crossed_wire_before_state_transition
+                {
                     if self.request_ingress_authorizer().is_some()
                         && self
                             .inbound_principal_for_context(&invite_key, ingress_context)
