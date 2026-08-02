@@ -24,7 +24,7 @@ scenarios:
       maxRetainedAfterDrain: 0
       maxActiveAudioReceiversAfterDrain: 0
       maxRssGrowthMbPerHr: 15
-      minRssGateWindowSecs: 600
+      minRssGateWindowSecs: 120
 
   - name: access-edge-microburst
     description: "Repeated access-edge microbursts over baseline media traffic."

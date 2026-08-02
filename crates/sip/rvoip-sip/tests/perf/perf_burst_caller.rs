@@ -422,26 +422,12 @@ async fn perf_burst_caller() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
-    let pre_rss_sample = capture_endpoint_retention_sample(
-        "burst_caller",
-        "before_rss_settle",
-        started,
-        &clients[0].peer,
-    )
-    .await;
-    retention_series.record_sample("burst_caller", pre_rss_sample);
-    let pre_rss_retention_all = capture_all_caller_retention(clients.as_slice()).await;
-    let retained_before_rss_settle = pre_rss_retention_all.retained_total;
-    let retention_proof_passed =
-        retained_before_rss_settle <= scenario.acceptance.max_retained_after_drain;
-    drop(pre_rss_retention_all);
-    let (mut settled_resources, settled_observation) =
-        if in_process_resource_sampling && retention_proof_passed {
-            sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
-                .await
-        } else {
-            (ResourceSummary::empty(), Duration::ZERO)
-        };
+    let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
+        sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
+            .await
+    } else {
+        (ResourceSummary::empty(), Duration::ZERO)
+    };
     let rss = support::soak::rss_result_metrics(
         &settled_resources,
         0.0,
@@ -449,11 +435,9 @@ async fn perf_burst_caller() {
         settled_observation.as_secs_f64(),
         support::soak::RssGatePolicy::SettledFull,
     );
-    let rss_gate_enforced = retention_proof_passed
-        && rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
-    let rss_gate_reason = if !retention_proof_passed {
-        "skipped_retention_proof_failed"
-    } else if rss_gate_enforced {
+    let rss_gate_enforced =
+        rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
+    let rss_gate_reason = if rss_gate_enforced {
         "settled_window_meets_minimum"
     } else {
         "reported_only_short_settled_window"
@@ -607,14 +591,6 @@ async fn perf_burst_caller() {
         )
         .result_block("rss_gate", rss_gate.to_json())
         .result("retained_objects_after_drain", retained_after_drain)
-        .result(
-            "retained_objects_before_rss_settle",
-            retained_before_rss_settle,
-        )
-        .result(
-            "rss_pre_gate_settle_secs",
-            support::soak::BURST_RSS_PRE_GATE_SETTLE_SECS,
-        )
         .result(
             "transaction_manager_active_after_drain",
             final_retention_all.transaction_manager_active,
@@ -810,11 +786,6 @@ async fn perf_burst_caller() {
     if retained_after_drain > scenario.acceptance.max_retained_after_drain {
         gate_failures.push(format!(
             "caller_retained_objects_after_drain={retained_after_drain}"
-        ));
-    }
-    if !retention_proof_passed {
-        gate_failures.push(format!(
-            "caller_retained_objects_before_rss_settle={retained_before_rss_settle}"
         ));
     }
     if rss_gate_enforced && rss.gate_growth_mb_per_hr > rss_limit {

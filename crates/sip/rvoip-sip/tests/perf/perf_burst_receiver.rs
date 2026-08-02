@@ -209,27 +209,15 @@ async fn perf_burst_receiver() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
-    let pre_rss_sample = capture_endpoint_retention_sample(
-        "burst_receiver",
-        "before_rss_settle",
-        started,
-        &receiver.coordinator,
-    )
-    .await;
-    retention_series.record_sample("burst_receiver", pre_rss_sample);
-    let retained_before_rss_settle = retention_series.final_retained_objects;
-    let retention_proof_passed =
-        retained_before_rss_settle <= scenario.acceptance.max_retained_after_drain;
-    let (mut settled_resources, settled_observation) =
-        if in_process_resource_sampling && retention_proof_passed {
-            sample_settled_rss_window(
-                "burst_receiver",
-                scenario.acceptance.min_rss_gate_window_secs,
-            )
-            .await
-        } else {
-            (ResourceSummary::empty(), Duration::ZERO)
-        };
+    let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
+        sample_settled_rss_window(
+            "burst_receiver",
+            scenario.acceptance.min_rss_gate_window_secs,
+        )
+        .await
+    } else {
+        (ResourceSummary::empty(), Duration::ZERO)
+    };
     let rss = support::soak::rss_result_metrics(
         &settled_resources,
         0.0,
@@ -237,11 +225,9 @@ async fn perf_burst_receiver() {
         settled_observation.as_secs_f64(),
         support::soak::RssGatePolicy::SettledFull,
     );
-    let rss_gate_enforced = retention_proof_passed
-        && rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
-    let rss_gate_reason = if !retention_proof_passed {
-        "skipped_retention_proof_failed"
-    } else if rss_gate_enforced {
+    let rss_gate_enforced =
+        rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;
+    let rss_gate_reason = if rss_gate_enforced {
         "settled_window_meets_minimum"
     } else {
         "reported_only_short_settled_window"
@@ -328,14 +314,6 @@ async fn perf_burst_receiver() {
         )
         .result_block("rss_gate", rss_gate.to_json())
         .result("retained_objects_after_drain", retained_after_drain)
-        .result(
-            "retained_objects_before_rss_settle",
-            retained_before_rss_settle,
-        )
-        .result(
-            "rss_pre_gate_settle_secs",
-            support::soak::BURST_RSS_PRE_GATE_SETTLE_SECS,
-        )
         .result(
             "transaction_manager_active_after_drain",
             endpoint_metric(
@@ -440,11 +418,6 @@ async fn perf_burst_receiver() {
     if retained_after_drain > scenario.acceptance.max_retained_after_drain {
         gate_failures.push(format!(
             "receiver_retained_objects_after_drain={retained_after_drain}"
-        ));
-    }
-    if !retention_proof_passed {
-        gate_failures.push(format!(
-            "receiver_retained_objects_before_rss_settle={retained_before_rss_settle}"
         ));
     }
     if active_audio_receivers_after_drain

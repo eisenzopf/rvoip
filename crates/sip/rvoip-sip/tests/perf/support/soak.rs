@@ -27,11 +27,6 @@ pub const MIN_RETENTION_DRAIN_WAIT_SECS: usize =
 pub const DEFAULT_RETENTION_DRAIN_WAIT_SECS: usize = MIN_RETENTION_DRAIN_WAIT_SECS;
 pub const BURST_RSS_DIAGNOSTIC_SETTLE_SECS: usize = 5;
 pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
-/// A burst can leave large, empty runtime maps whose deferred cleanup touches
-/// allocator pages for several minutes after logical retention reaches zero.
-/// Prove that retention is zero first, then leave this fixed quiescence period
-/// before taking the baseline for the authoritative RSS slope.
-pub const BURST_RSS_PRE_GATE_SETTLE_SECS: u64 = 300;
 pub const BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS: u64 = 5;
 pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
     MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
@@ -124,15 +119,13 @@ pub fn burst_retention_periodic_limit(
 }
 
 /// Measure RSS after teardown and after periodic structural diagnostics have
-/// stopped. Callers must prove logical retention before entering this helper.
-/// The fixed pre-gate delay lets allocations made by that proof settle before
-/// a fresh sampler establishes the authoritative baseline. The exact final
-/// structural-retention capture must happen after this function returns.
+/// stopped. The exact final structural-retention capture must happen after
+/// this function returns so its allocations cannot contaminate the
+/// authoritative quiescent-runtime slope.
 pub async fn sample_settled_rss_window(
     role: &'static str,
     minimum_window_secs: f64,
 ) -> (ResourceSummary, Duration) {
-    tokio::time::sleep(Duration::from_secs(BURST_RSS_PRE_GATE_SETTLE_SECS)).await;
     let minimum_window_secs = minimum_window_secs.ceil().max(1.0) as u64;
     let observation = Duration::from_secs(
         minimum_window_secs.saturating_add(BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS),

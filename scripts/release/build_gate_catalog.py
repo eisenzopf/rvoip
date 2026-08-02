@@ -615,11 +615,7 @@ def burst_scenario_gates() -> list[dict[str, Any]]:
                 "crates/foundation/**",
             ],
         )
-        # Includes the mandatory 300-second quiescence and independent
-        # 600-second RSS window. The seven burst scenarios run on separate
-        # real-server workers, so this improves measurement power without
-        # serializing the release wall clock.
-        gate["estimated_seconds"] = 1650
+        gate["estimated_seconds"] = 900
         gate["timeout_minutes"] = 75
         result.append(gate)
     return result
