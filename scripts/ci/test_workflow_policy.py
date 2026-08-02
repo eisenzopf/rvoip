@@ -293,6 +293,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"', startup)
         self.assertIn('export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"', startup)
         self.assertIn('export RVOIP_RELEASE_GATES="$GATES"', startup)
+        self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
         self.assertIn("expected 44 publishable workspace packages", probe)
         self.assertIn("gcp-performance|gcp-performance-soak-long", probe)
         self.assertIn("gcp-proxy-interop", probe)

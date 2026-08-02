@@ -290,6 +290,16 @@ class RunFailStopTests(unittest.TestCase):
         self.assertIn('"$row_dir/${scenario}--$safe_name.pcap"', self.source)
         self.assertNotIn('"$row_dir/$safe_name.pcap"', self.source)
 
+    def test_packet_capture_uses_explicit_loss_resistant_buffer(self) -> None:
+        self.assertIn(
+            "TCPDUMP_BUFFER_KIB=${PROXY_INTEROP_TCPDUMP_BUFFER_KIB:-32768}",
+            self.source,
+        )
+        self.assertIn(
+            '-B "$TCPDUMP_BUFFER_KIB" -i "$interface"',
+            self.source,
+        )
+
     def test_tcp_uac_uses_per_call_socket_while_uas_remains_single_socket(
         self,
     ) -> None:
