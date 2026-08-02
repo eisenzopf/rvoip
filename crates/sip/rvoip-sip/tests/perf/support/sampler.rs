@@ -292,7 +292,10 @@ impl ResourceSampler {
                 }
                 BufWriter::new(File::create(path).expect("create resource sample JSONL"))
             });
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                ticker.tick().await;
                 // Refresh CPU + memory for our PID. Both backends report the
                 // first CPU reading as 0 because there is no preceding sample;
                 // it is retained and excluded from the final CPU average.
@@ -326,7 +329,6 @@ impl ResourceSampler {
                 if stop_task.load(Ordering::Relaxed) {
                     break;
                 }
-                tokio::time::sleep(interval).await;
             }
         });
 

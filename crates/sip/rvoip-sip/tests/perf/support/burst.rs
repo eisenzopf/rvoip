@@ -416,6 +416,12 @@ pub struct BurstAcceptance {
     pub min_recovery_asr: Option<f64>,
 }
 
+/// A shorter window can project one bounded allocator page step into a false
+/// hourly leak. Ten minutes is the established profiling window and gives the
+/// 15 MB/hour release threshold enough power to distinguish a plateau from
+/// continuous retained growth.
+pub const MIN_RSS_GATE_WINDOW_SECS: f64 = 600.0;
+
 impl Default for BurstAcceptance {
     fn default() -> Self {
         Self {
@@ -446,8 +452,9 @@ impl BurstAcceptance {
             );
         }
         assert!(
-            self.min_rss_gate_window_secs.is_finite() && self.min_rss_gate_window_secs >= 0.0,
-            "burst scenario '{scenario}' acceptance.minRssGateWindowSecs must be >= 0"
+            self.min_rss_gate_window_secs.is_finite()
+                && self.min_rss_gate_window_secs >= MIN_RSS_GATE_WINDOW_SECS,
+            "burst scenario '{scenario}' acceptance.minRssGateWindowSecs must be >= {MIN_RSS_GATE_WINDOW_SECS}"
         );
         if let Some(min_recovery_asr) = self.min_recovery_asr {
             assert!(
@@ -514,7 +521,7 @@ fn default_min_asr() -> f64 {
 }
 
 fn default_min_rss_gate_window_secs() -> f64 {
-    120.0
+    MIN_RSS_GATE_WINDOW_SECS
 }
 
 fn deterministic_u64(mut x: u64) -> u64 {

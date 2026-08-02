@@ -22,6 +22,9 @@ fn bundled_burst_scenarios_parse_and_validate() {
     assert!(names.contains(&"overload-recovery"));
     assert!(names.contains(&"high-density-media-burst"));
     assert!(names.contains(&"buffer-ab-legacy"));
+    assert!(book.scenarios.iter().all(|scenario| {
+        scenario.acceptance.min_rss_gate_window_secs >= burst::MIN_RSS_GATE_WINDOW_SECS
+    }));
 
     let smoke = book.scenario("carrier-smoke");
     assert_eq!(smoke.total_offered_calls(), 39);

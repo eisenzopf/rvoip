@@ -6040,7 +6040,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=carrier-smoke bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6078,7 +6078,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6116,7 +6116,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=contact-center-flash bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6154,7 +6154,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6192,7 +6192,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=overload-recovery bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6230,7 +6230,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
@@ -6268,7 +6268,7 @@
         "source.remote-clean"
       ],
       "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
-      "estimated_seconds": 900,
+      "estimated_seconds": 1650,
       "executor": "argv",
       "expected_outputs": [
         "receipt.json",
