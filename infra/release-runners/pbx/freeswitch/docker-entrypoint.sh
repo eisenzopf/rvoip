@@ -99,7 +99,7 @@ write_rvoip_profile() {
     <param name="rfc2833-pt" value="101"/>
     <param name="dtmf-duration" value="2000"/>
     <param name="sip-port" value="$sip_port"/>
-    <param name="sip-ip" value="0.0.0.0"/>
+    <param name="sip-ip" value="$sip_ip"/>
     <param name="rtp-ip" value="$local_rtp_ip"/>
     <param name="ext-sip-ip" value="$external_sip_ip"/>
     <param name="ext-rtp-ip" value="$external_rtp_ip"/>
@@ -250,9 +250,10 @@ write_modules_conf() {
 EOF
 }
 
+sip_ip=${FS_SIP_IP:-0.0.0.0}
 external_sip_ip=$(value_or_container_ip "${FS_EXTERNAL_SIP_IP:-auto}")
 external_rtp_ip=$(value_or_container_ip "${FS_EXTERNAL_RTP_IP:-auto}")
-local_ip=$(value_or_container_ip auto)
+local_ip=$(value_or_container_ip "${FS_LOCAL_RTP_IP:-auto}")
 
 write_modules_conf
 ensure_tls_cert
@@ -268,7 +269,7 @@ set_xml_var rvoip_tls_sip_port "${FS_RVOIP_TLS_SIP_PORT:-5063}"
 set_switch_param rtp-start-port "${FS_RTP_START:-16384}"
 set_switch_param rtp-end-port "${FS_RTP_END:-16484}"
 
-set_profile_param sip-ip 0.0.0.0
+set_profile_param sip-ip "$sip_ip"
 set_profile_param ext-sip-ip "$external_sip_ip"
 set_profile_param ext-rtp-ip "$external_rtp_ip"
 

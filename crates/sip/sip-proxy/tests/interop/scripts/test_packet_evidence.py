@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -217,6 +219,7 @@ class PacketEvidenceTests(unittest.TestCase):
                 "peer.proxy.test",
                 "sipp.proxy.test",
             ],
+            dns_query_log=None,
         )
 
     def analyze(
@@ -226,6 +229,7 @@ class PacketEvidenceTests(unittest.TestCase):
         *,
         tcp_rows: list[dict[str, str]] | None = None,
         dns_rows: list[dict[str, str]] | None = None,
+        dns_query_log: Path | None = None,
     ) -> dict[str, object]:
         by_filter = {
             "sip": sip_rows,
@@ -241,9 +245,11 @@ class PacketEvidenceTests(unittest.TestCase):
         ) -> list[dict[str, str]]:
             return [dict(item) for item in by_filter[display_filter]]
 
+        args = self.args(scenario)
+        args.dns_query_log = dns_query_log
         with mock.patch.object(packet_evidence, "run_fields", side_effect=fields):
             return packet_evidence.analyze_sip(
-                self.args(scenario),
+                args,
                 [{"path": str(Path(f"{scenario}--lo0.pcap"))}],
             )
 
@@ -449,9 +455,9 @@ class PacketEvidenceTests(unittest.TestCase):
                     assertions["timer-c-proceeding-180-precedes-cancel"]["passed"]
                 )
                 self.assertFalse(
-                    assertions[
-                        "timer-c-proceeding-cancel-reuses-invite-branch"
-                    ]["passed"]
+                    assertions["timer-c-proceeding-cancel-reuses-invite-branch"][
+                        "passed"
+                    ]
                 )
 
     def test_transport_failure_proves_dead_syn_and_no_normal_invite(self) -> None:
@@ -571,9 +577,7 @@ class PacketEvidenceTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            assertions["transport-failure-dead-endpoint-received-zero-sip"][
-                "passed"
-            ]
+            assertions["transport-failure-dead-endpoint-received-zero-sip"]["passed"]
         )
 
     def rfc3263_dns_rows(self) -> list[dict[str, str]]:
@@ -625,6 +629,108 @@ class PacketEvidenceTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertTrue(assertions[name]["passed"])
+
+    def test_rfc3263_accepts_scenario_owned_dns_log_when_pcap_misses_one_query(
+        self,
+    ) -> None:
+        rows = [
+            row(
+                call_id="dns@example.test",
+                marker="rfc3263-failover",
+                method="INVITE",
+                destination=("127.0.0.1", "25081"),
+            ),
+            row(
+                call_id="dns@example.test",
+                marker="rfc3263-failover",
+                status="200",
+                cseq_method="INVITE",
+            ),
+        ]
+        dns_rows = [
+            item
+            for item in self.rfc3263_dns_rows()
+            if not (
+                item["dns.qry.name"] == "dead.failover.interop.test"
+                and item["dns.qry.type"] == "1"
+            )
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "dns-queries.jsonl"
+            records = [
+                {
+                    "schema": packet_evidence.DNS_QUERY_LOG_SCHEMA,
+                    "query_name": name,
+                    "query_type": query_type,
+                    "status": "answered",
+                    "answers": [],
+                }
+                for name, query_type in (
+                    ("_sip._tcp.failover.interop.test", 33),
+                    ("dead.failover.interop.test", 1),
+                    ("live.failover.interop.test", 1),
+                )
+            ]
+            log.write_text("".join(json.dumps(item) + "\n" for item in records))
+            assertions = self.assertions(
+                self.analyze(
+                    "rfc3263-failover",
+                    rows,
+                    tcp_rows=[tcp_row(destination_port=25998)],
+                    dns_rows=dns_rows,
+                    dns_query_log=log,
+                )
+            )
+
+        assertion = assertions["rfc3263-both-candidate-a-queries-observed"]
+        self.assertTrue(assertion["passed"])
+        evidence = assertion["observed"]
+        self.assertTrue(evidence["authoritative_server_log"]["present"])
+        self.assertEqual(evidence["authoritative_server_log"]["row_count"], 3)
+
+    def test_rfc3263_rejects_tampered_dns_log_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "dns-queries.jsonl"
+            log.write_text(
+                json.dumps(
+                    {
+                        "schema": "unexpected",
+                        "query_name": "dead.failover.interop.test",
+                        "query_type": 1,
+                    }
+                )
+                + "\n"
+            )
+            with self.assertRaises(packet_evidence.EvidenceError):
+                self.analyze(
+                    "rfc3263-failover",
+                    [],
+                    tcp_rows=[],
+                    dns_rows=[],
+                    dns_query_log=log,
+                )
+
+    def test_rfc3263_rejects_boolean_dns_query_type(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / "dns-queries.jsonl"
+            log.write_text(
+                json.dumps(
+                    {
+                        "schema": packet_evidence.DNS_QUERY_LOG_SCHEMA,
+                        "query_name": "dead.failover.interop.test",
+                        "query_type": True,
+                    }
+                )
+                + "\n"
+            )
+            with self.assertRaises(packet_evidence.EvidenceError):
+                self.analyze(
+                    "rfc3263-failover",
+                    [],
+                    tcp_rows=[],
+                    dns_rows=[],
+                    dns_query_log=log,
+                )
 
     def test_routing_requires_exact_ruri_route_and_record_route(self) -> None:
         rows = [
@@ -865,9 +971,7 @@ class PacketEvidenceTests(unittest.TestCase):
             tls_row(source_port=45001, destination_port=25070),
             tls_row(source_port=45002, destination_port=25180),
         ]
-        with mock.patch.object(
-            packet_evidence, "run_fields", return_value=rows
-        ):
+        with mock.patch.object(packet_evidence, "run_fields", return_value=rows):
             analysis = packet_evidence.analyze_tls(
                 self.args("options-readiness"),
                 [{"path": "options-readiness--lo0.pcap"}],
@@ -877,13 +981,9 @@ class PacketEvidenceTests(unittest.TestCase):
         self.assertTrue(
             assertions["tls-application-data-on-every-encrypted-hop"]["passed"]
         )
+        self.assertTrue(assertions["tls-handshake-sni-valid-when-observed"]["passed"])
         self.assertTrue(
-            assertions["tls-handshake-sni-valid-when-observed"]["passed"]
-        )
-        self.assertTrue(
-            assertions[
-                "tls-handshake-certificates-observed-when-initiated"
-            ]["passed"]
+            assertions["tls-handshake-certificates-observed-when-initiated"]["passed"]
         )
         self.assertEqual(analysis["observed_sni"], [])
 
@@ -892,9 +992,7 @@ class PacketEvidenceTests(unittest.TestCase):
             tls_row(source_port=45000, destination_port=25060),
             tls_row(source_port=45001, destination_port=25070),
         ]
-        with mock.patch.object(
-            packet_evidence, "run_fields", return_value=rows
-        ):
+        with mock.patch.object(packet_evidence, "run_fields", return_value=rows):
             analysis = packet_evidence.analyze_tls(
                 self.args("options-readiness"),
                 [{"path": "options-readiness--lo0.pcap"}],
@@ -917,17 +1015,13 @@ class PacketEvidenceTests(unittest.TestCase):
             tls_row(source_port=45001, destination_port=25070),
             tls_row(source_port=45002, destination_port=25180),
         ]
-        with mock.patch.object(
-            packet_evidence, "run_fields", return_value=rows
-        ):
+        with mock.patch.object(packet_evidence, "run_fields", return_value=rows):
             analysis = packet_evidence.analyze_tls(
                 self.args("options-readiness"),
                 [{"path": "options-readiness--lo0.pcap"}],
             )
         assertions = self.assertions(analysis)
-        self.assertFalse(
-            assertions["tls-handshake-sni-valid-when-observed"]["passed"]
-        )
+        self.assertFalse(assertions["tls-handshake-sni-valid-when-observed"]["passed"])
 
     def test_invite_dialog_uses_contact_and_reversed_route_set(self) -> None:
         call_id = "invite-route@example.test"
@@ -1047,9 +1141,9 @@ class PacketEvidenceTests(unittest.TestCase):
         ]
         assertions = self.assertions(self.analyze("invite-success", rows))
         self.assertFalse(
-            assertions[
-                "invite-dialog-uac-ack-bye-use-contact-and-reversed-route-set"
-            ]["passed"]
+            assertions["invite-dialog-uac-ack-bye-use-contact-and-reversed-route-set"][
+                "passed"
+            ]
         )
 
     def test_sips_routing_combines_plaintext_uri_and_tls_proof(self) -> None:

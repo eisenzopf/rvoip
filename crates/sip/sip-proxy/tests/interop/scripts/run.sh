@@ -711,6 +711,9 @@ validate_scenario_packet_evidence() {
       --expected-tls-sni "$PROXY_INTEROP_TLS_SIPP_IDENTITY"
     )
   fi
+  if [[ "$scenario" == rfc3263-failover ]]; then
+    packet_command+=(--dns-query-log "$scenario_dir/dns-queries.jsonl")
+  fi
   packet_command+=(
     --output "$scenario_dir/packet-evidence.json"
     "${capture_paths[@]}"
