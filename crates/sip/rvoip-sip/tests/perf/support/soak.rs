@@ -30,6 +30,7 @@ pub const BURST_RSS_QUIET_TAIL_SECS: usize = 60;
 pub const BURST_SETTLED_RSS_SAMPLE_INTERVAL_SECS: u64 = 5;
 pub const MIN_BURST_RETENTION_DRAIN_WAIT_SECS: usize =
     MIN_RETENTION_DRAIN_WAIT_SECS + BURST_RSS_DIAGNOSTIC_SETTLE_SECS + BURST_RSS_QUIET_TAIL_SECS;
+pub const LONG_SOAK_ACTIVE_WINDOW_SECS: u64 = 1_200;
 /// Full endpoint-retention snapshots walk and serialize every owned runtime
 /// index. Keep that diagnostic off the 5-second RSS sampling hot path so the
 /// leak gate does not measure allocator page growth caused by its own report.
@@ -100,9 +101,27 @@ pub fn resource_sampling_diagnostics(role: &str, in_process_enabled: bool) -> se
     })
 }
 
-/// Measure RSS after teardown and exact structural-retention capture have
-/// completed. A new baseline keeps allocator page activity from those
-/// operations out of the authoritative quiescent-runtime slope.
+/// Stop allocator-heavy structural diagnostics before the complete active-tail
+/// window used by a long-soak RSS gate.
+pub fn long_soak_retention_periodic_limit(duration_secs: u64) -> Option<Duration> {
+    (duration_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS)
+        .then(|| Duration::from_secs(duration_secs.saturating_sub(LONG_SOAK_ACTIVE_WINDOW_SECS)))
+}
+
+/// Stop burst structural diagnostics after the offered load and its longest
+/// possible call have completed. An exact final snapshot is still captured
+/// after the authoritative settled-RSS window.
+pub fn burst_retention_periodic_limit(
+    active_duration_secs: u64,
+    maximum_hold: Duration,
+) -> Duration {
+    Duration::from_secs(active_duration_secs).saturating_add(maximum_hold)
+}
+
+/// Measure RSS after teardown and after periodic structural diagnostics have
+/// stopped. The exact final structural-retention capture must happen after
+/// this function returns so its allocations cannot contaminate the
+/// authoritative quiescent-runtime slope.
 pub async fn sample_settled_rss_window(
     role: &'static str,
     minimum_window_secs: f64,
@@ -2261,13 +2280,13 @@ pub fn rss_result_metrics(
     drain_secs: f64,
     gate_policy: RssGatePolicy,
 ) -> RssResultMetrics {
-    const LONG_SOAK_ACTIVE_WINDOW_SECS: f64 = 1200.0;
     const LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS: f64 = 1190.0;
     const LONG_SOAK_MIN_ACTIVE_SAMPLES: usize = 230;
 
     let full_growth_mb_per_hr = resources.rss_growth_mb_per_min * 60.0;
     let sustained_growth_mb_per_hr = resources.rss_tail_growth_mb_per_min * 60.0;
-    let active_tail_start_secs = (active_load_end_secs - LONG_SOAK_ACTIVE_WINDOW_SECS).max(0.0);
+    let active_tail_start_secs =
+        (active_load_end_secs - LONG_SOAK_ACTIVE_WINDOW_SECS as f64).max(0.0);
     let active_tail_samples: Vec<ResourceSample> = resources
         .samples
         .iter()
@@ -2284,7 +2303,7 @@ pub fn rss_result_metrics(
         (Some(first), Some(last)) => (last.t_secs - first.t_secs).max(0.0),
         _ => 0.0,
     };
-    let active_tail_window_complete = active_load_end_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS
+    let active_tail_window_complete = active_load_end_secs >= LONG_SOAK_ACTIVE_WINDOW_SECS as f64
         && active_tail_window_secs >= LONG_SOAK_MIN_ACTIVE_COVERAGE_SECS
         && active_tail_samples.len() >= LONG_SOAK_MIN_ACTIVE_SAMPLES
         && active_tail_theil_sen.is_some()

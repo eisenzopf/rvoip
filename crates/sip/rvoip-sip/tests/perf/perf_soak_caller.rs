@@ -146,7 +146,7 @@ async fn perf_soak_caller() {
         None
     };
     let retention_periodic_limit =
-        (settings.duration_secs >= 600).then(|| Duration::from_secs(settings.duration_secs - 600));
+        support::soak::long_soak_retention_periodic_limit(settings.duration_secs);
     let retention_sampler = support::soak::EndpointRetentionSampler::start_with_periodic_limit(
         "caller",
         Arc::clone(&caller),
@@ -183,7 +183,7 @@ async fn perf_soak_caller() {
         Some(sampler) => sampler.stop().await,
         None => ResourceSummary::empty(),
     };
-    let rss_gate_policy = if settings.duration_secs >= 600 {
+    let rss_gate_policy = if settings.duration_secs >= support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS {
         RssGatePolicy::ActiveTail1200
     } else {
         RssGatePolicy::PostDrainOrTail
@@ -384,10 +384,14 @@ async fn perf_soak_caller() {
     drop(caller);
 
     let mut gate_failures = Vec::new();
-    if settings.duration_secs >= 600 && !rss.active_tail_window_complete {
+    if settings.duration_secs >= support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS
+        && !rss.active_tail_window_complete
+    {
         gate_failures.push(format!(
-            "caller active RSS gate window incomplete: measured {:.2}s with {} samples; required 600s",
-            rss.active_tail_window_secs, rss.active_tail_sample_count
+            "caller active RSS gate window incomplete: measured {:.2}s with {} samples; required {}s",
+            rss.active_tail_window_secs,
+            rss.active_tail_sample_count,
+            support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS,
         ));
     }
     if rss.gate_growth_mb_per_hr > rss_gate.effective_mb_per_hr {

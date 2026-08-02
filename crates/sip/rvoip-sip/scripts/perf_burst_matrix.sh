@@ -17,10 +17,10 @@ export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 # horizon beyond that protocol deadline so it never manufactures a timeout
 # while the transaction layer is still behaving correctly.
 : "${RVOIP_PERF_CALL_TIMEOUT_SECS:=40}"
-# Burst acceptance first waits through the 90-second SIP-retention horizon,
-# captures exact structural diagnostics, then leaves a 5-second settle and a
-# quiet 60-second RSS tail. The Rust harness clamps shorter overrides to this
-# same 160-second minimum.
+# Burst acceptance first waits through the 90-second SIP-retention horizon and
+# an allocator-settle margin. It then measures a separate quiet RSS window and
+# captures exact structural diagnostics only after that measurement. The Rust
+# harness clamps shorter drain overrides to this same 160-second minimum.
 : "${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:=160}"
 : "${RVOIP_PERF_MEMORY_DIAGNOSTICS:=0}"
 : "${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:=0}"

@@ -21,11 +21,12 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 mod support;
 use support::soak::{
     boot_receiver, diagnostic_sample_path, endpoint_metric, endpoint_retention_summary,
-    in_process_resource_sampler_enabled, media_receive_diagnostics, memory_diagnostic_interval,
-    memory_diagnostic_summary, perf_config, read_required_u16_env, resource_sampling_diagnostics,
-    retention_drain_wait, round2, rss_result_metrics, DhatProfile, EndpointRetentionSampler,
-    MemoryDiagnosticSampler, ReceiverDiagnostics, RssGatePolicy, RssGrowthGate, SoakLoadSettings,
-    ALICE_PORT_ENV, BOB_PORT_ENV, READY_FILE_ENV, STOP_FILE_ENV,
+    in_process_resource_sampler_enabled, long_soak_retention_periodic_limit,
+    media_receive_diagnostics, memory_diagnostic_interval, memory_diagnostic_summary, perf_config,
+    read_required_u16_env, resource_sampling_diagnostics, retention_drain_wait, round2,
+    rss_result_metrics, DhatProfile, EndpointRetentionSampler, MemoryDiagnosticSampler,
+    ReceiverDiagnostics, RssGatePolicy, RssGrowthGate, SoakLoadSettings, ALICE_PORT_ENV,
+    BOB_PORT_ENV, READY_FILE_ENV, STOP_FILE_ENV,
 };
 use support::{LoadProfile, ResourceSampler, ResourceSummary, ScenarioReport};
 
@@ -66,8 +67,7 @@ async fn perf_soak_receiver() {
     } else {
         None
     };
-    let retention_periodic_limit =
-        (settings.duration_secs >= 600).then(|| Duration::from_secs(settings.duration_secs - 600));
+    let retention_periodic_limit = long_soak_retention_periodic_limit(settings.duration_secs);
     let retention_sampler = EndpointRetentionSampler::start_with_periodic_limit(
         "receiver",
         receiver.coordinator.clone(),
@@ -115,7 +115,7 @@ async fn perf_soak_receiver() {
         None => ResourceSummary::empty(),
     };
     let active_load_boundary_secs = settings.duration_secs as f64;
-    let rss_gate_policy = if settings.duration_secs >= 600 {
+    let rss_gate_policy = if settings.duration_secs >= support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS {
         RssGatePolicy::ActiveTail1200
     } else {
         RssGatePolicy::PostDrainOrTail
@@ -278,10 +278,14 @@ async fn perf_soak_receiver() {
     if !stop_seen {
         gate_failures.push("receiver stop file was not observed".to_string());
     }
-    if settings.duration_secs >= 600 && !rss.active_tail_window_complete {
+    if settings.duration_secs >= support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS
+        && !rss.active_tail_window_complete
+    {
         gate_failures.push(format!(
-            "receiver active RSS gate window incomplete: measured {:.2}s with {} samples; required 600s",
-            rss.active_tail_window_secs, rss.active_tail_sample_count
+            "receiver active RSS gate window incomplete: measured {:.2}s with {} samples; required {}s",
+            rss.active_tail_window_secs,
+            rss.active_tail_sample_count,
+            support::soak::LONG_SOAK_ACTIVE_WINDOW_SECS,
         ));
     }
     if rss.gate_growth_mb_per_hr > rss_gate.effective_mb_per_hr {

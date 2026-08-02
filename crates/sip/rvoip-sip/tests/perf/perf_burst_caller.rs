@@ -399,12 +399,10 @@ async fn perf_burst_caller() {
 
     let mut retention_series = retention_sampler.stop_periodic().await;
     // Structural snapshots walk every owned runtime index and perturb the
-    // allocator. Keep the complete drain/RSS window quiet, then capture the
-    // exact final retention evidence after process sampling has stopped.
+    // allocator. Keep the complete drain/RSS window quiet.
     tokio::time::sleep(retention_drain_wait).await;
-    // End process sampling at the declared drain boundary. Retention capture
-    // and report construction allocate diagnostic data and are not part of
-    // the runtime-under-test RSS window.
+    // End active-process sampling at the declared drain boundary. The separate
+    // settled sampler below is the authoritative memory-growth window.
     let mut resources = match sampler {
         Some(sampler) => sampler.stop().await,
         None => ResourceSummary::empty(),
@@ -414,12 +412,6 @@ async fn perf_burst_caller() {
         Some(sampler) => Some(sampler.stop().await),
         None => None,
     };
-    let final_sample =
-        capture_endpoint_retention_sample("burst_caller", "after_drain", started, &clients[0].peer)
-            .await;
-    retention_series.record_sample("burst_caller", final_sample);
-    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
-    let retained_after_drain = final_retention_all.retained_total;
     let (mut settled_resources, settled_observation) = if in_process_resource_sampling {
         sample_settled_rss_window("burst_caller", scenario.acceptance.min_rss_gate_window_secs)
             .await
@@ -440,6 +432,14 @@ async fn perf_burst_caller() {
     } else {
         "reported_only_short_settled_window"
     };
+    // Capture exact structural proof only after authoritative RSS sampling has
+    // stopped so the proof cannot manufacture the growth it is meant to find.
+    let final_sample =
+        capture_endpoint_retention_sample("burst_caller", "after_drain", started, &clients[0].peer)
+            .await;
+    retention_series.record_sample("burst_caller", final_sample);
+    let final_retention_all = capture_all_caller_retention(clients.as_slice()).await;
+    let retained_after_drain = final_retention_all.retained_total;
     resources.samples.clear();
     settled_resources.samples.clear();
     let dhat_diagnostics = dhat_profile.finish();
