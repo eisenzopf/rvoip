@@ -46,6 +46,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Install nightly for release fuzz validation", specialty)
         self.assertIn("cargo-fuzz@0.13.2", specialty)
         self.assertGreaterEqual(specialty.count("matrix.gate == 'release-tooling'"), 2)
+        self.assertIn("max-parallel: 6", specialty)
 
     def test_parallel_gcp_workspace_is_ephemeral_and_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/gcp-qualification-pilot.yml").read_text()
