@@ -52,7 +52,12 @@ class PlannerTests(unittest.TestCase):
             "max_shards": 3,
             "target_shard_weight": 3,
             "full_paths": ["Cargo.toml", "Cargo.lock"],
-            "known_policy_paths": ["README.md", ".github/workflows/**", "scripts/ci/**"],
+            "known_policy_paths": [
+                "README.md",
+                ".config/nextest.toml",
+                ".github/workflows/**",
+                "scripts/ci/**",
+            ],
             "specialty_rules": [
                 {"gate": "browser-smoke", "patterns": ["tests/browser/**"]},
                 {"gate": "examples", "patterns": ["examples/**", "crates/delta/src/api/**"]},
@@ -103,6 +108,12 @@ class PlannerTests(unittest.TestCase):
 
     def test_ci_only_change_runs_policy_without_workspace_crates(self) -> None:
         plan = self.plan("scripts/ci/pr_plan.py", ".github/workflows/pr-gate.yml")
+        self.assertEqual(plan["mode"], "policy")
+        self.assertEqual(plan["selected_crates"], [])
+        self.assertEqual(plan["shard_jobs"], [])
+
+    def test_nextest_config_change_runs_policy_without_workspace_crates(self) -> None:
+        plan = self.plan(".config/nextest.toml")
         self.assertEqual(plan["mode"], "policy")
         self.assertEqual(plan["selected_crates"], [])
         self.assertEqual(plan["shard_jobs"], [])
