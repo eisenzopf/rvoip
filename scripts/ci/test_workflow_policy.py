@@ -87,6 +87,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(startup.count("command -v sipp >/dev/null"), 2)
         self.assertIn("command -v tshark >/dev/null", startup)
         self.assertIn("docker compose version >/dev/null", startup)
+        self.assertIn("ulimit -n 262144", startup)
+        self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 

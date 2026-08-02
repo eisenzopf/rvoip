@@ -501,49 +501,39 @@ fn validate_uac_audio_answer(
             return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
         }
         if !matches!(payload_type, 13 | 101) {
+            // RFC 3264 permits an answer to retain multiple formats from the
+            // offer. Validate every dynamic primary payload before choosing
+            // the answerer's first (preferred) format for this media session.
+            if payload_type >= 96 {
+                let offer_map = audio_rtpmap(offer, payload_type)
+                    .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-offer-rtpmap"))?;
+                let answer_map = audio_rtpmap(answer, payload_type)
+                    .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-answer-rtpmap"))?;
+                if !offer_map
+                    .encoding_name
+                    .eq_ignore_ascii_case(&answer_map.encoding_name)
+                    || offer_map.clock_rate != answer_map.clock_rate
+                    || offer_map.encoding_params != answer_map.encoding_params
+                {
+                    return Err(bounded_sdp_failure(
+                        "remote-answer",
+                        "changed-dynamic-payload",
+                    ));
+                }
+            }
             primary_payloads.push(payload_type);
         }
     }
-    let payload_type = match primary_payloads.as_slice() {
-        [payload_type] => *payload_type,
-        [] => {
-            return Err(bounded_sdp_failure(
-                "remote-answer",
-                "missing-primary-payload",
-            ))
-        }
-        _ => {
-            return Err(bounded_sdp_failure(
-                "remote-answer",
-                "multiple-primary-payloads",
-            ))
-        }
-    };
+    let payload_type = primary_payloads
+        .first()
+        .copied()
+        .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-primary-payload"))?;
     if !sdp_payload_codec_available(answer, payload_type) {
         return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
     }
     let negotiated_annex_b = payload_type == 18 && negotiated_g729_annex_b(answer, g729_annex_b);
     let (codec, clock_rate, channels) =
         negotiated_audio_shape_from_sdp(answer, payload_type, negotiated_annex_b)?;
-
-    // For dynamic payloads the answer must retain the offered codec identity.
-    if payload_type >= 96 {
-        let offer_map = audio_rtpmap(offer, payload_type)
-            .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-offer-rtpmap"))?;
-        let answer_map = audio_rtpmap(answer, payload_type)
-            .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-answer-rtpmap"))?;
-        if !offer_map
-            .encoding_name
-            .eq_ignore_ascii_case(&answer_map.encoding_name)
-            || offer_map.clock_rate != answer_map.clock_rate
-            || offer_map.encoding_params != answer_map.encoding_params
-        {
-            return Err(bounded_sdp_failure(
-                "remote-answer",
-                "changed-dynamic-payload",
-            ));
-        }
-    }
 
     Ok((payload_type, codec, clock_rate, channels))
 }
@@ -5608,7 +5598,7 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
-    fn uac_answer_requires_one_primary_and_valid_dynamic_mappings() {
+    fn uac_answer_accepts_multiple_offered_primaries_and_validates_dynamic_mappings() {
         let offer = SdpBuilder::new("Session")
             .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")
@@ -5622,7 +5612,9 @@ a=fmtp:101 0-15\r\n";
             .build()
             .unwrap();
         let multiple_primary = offer.clone();
-        assert!(validate_uac_audio_answer(&offer, &multiple_primary, true).is_err());
+        let negotiated = validate_uac_audio_answer(&offer, &multiple_primary, true)
+            .expect("an answer may retain multiple offered formats");
+        assert_eq!(negotiated.0, 0, "answer order selects the preferred codec");
 
         let missing_dynamic_map = SdpBuilder::new("Session")
             .origin("-", "2", "0", "IN", "IP4", "127.0.0.1")
