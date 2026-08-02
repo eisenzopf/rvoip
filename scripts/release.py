@@ -22,6 +22,7 @@ import urllib.request
 
 
 EXPECTED_PACKAGE_COUNT = 44
+RELEASE_LOCK_MANIFESTS = (Path("Cargo.toml"), Path("examples/Cargo.toml"))
 SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 USER_AGENT = "rvoip-unified-release/1.0"
@@ -240,6 +241,44 @@ def cargo_metadata(root: Path, *, locked: bool) -> dict[str, Any]:
     if locked:
         argv.append("--locked")
     return json.loads(run(argv, cwd=root).stdout)
+
+
+def release_lock_paths(root: Path) -> tuple[Path, ...]:
+    return tuple(root / manifest.parent / "Cargo.lock" for manifest in RELEASE_LOCK_MANIFESTS)
+
+
+def refresh_release_lockfiles(root: Path) -> None:
+    for manifest in RELEASE_LOCK_MANIFESTS:
+        manifest_path = root / manifest
+        if not manifest_path.is_file():
+            raise ReleaseError(f"release lock manifest is missing: {manifest}")
+        run(
+            [
+                "cargo",
+                "metadata",
+                "--manifest-path",
+                str(manifest),
+                "--format-version",
+                "1",
+            ],
+            cwd=root,
+        )
+
+
+def validate_release_lockfiles(root: Path) -> None:
+    for manifest in RELEASE_LOCK_MANIFESTS:
+        run(
+            [
+                "cargo",
+                "metadata",
+                "--manifest-path",
+                str(manifest),
+                "--format-version",
+                "1",
+                "--locked",
+            ],
+            cwd=root,
+        )
 
 
 def publishable_packages(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -609,15 +648,16 @@ def prepare(root: Path, version: str) -> None:
             f"cannot prepare an already-published version for: {existing}"
         )
     edits = planned_version_edits(root, packages, version)
-    lock_path = root / "Cargo.lock"
+    lock_paths = release_lock_paths(root)
     originals = {
         path: path.read_bytes() if path.exists() else None
-        for path in [*edits, lock_path]
+        for path in [*edits, *lock_paths]
     }
     try:
         for path, payload in edits.items():
             write_atomic(path, payload)
-        run(["cargo", "metadata", "--format-version", "1"], cwd=root)
+        refresh_release_lockfiles(root)
+        validate_release_lockfiles(root)
         validate_workspace(root, version, locked=True)
         run(
             ["cargo", "check", "--workspace", "--all-targets", "--locked"],
@@ -632,7 +672,7 @@ def prepare(root: Path, version: str) -> None:
                 write_atomic(path, payload)
         raise
     print(f"prepared all {len(packages)} workspace packages at {version}")
-    print("review and commit the manifest and Cargo.lock changes before verification")
+    print("review and commit the manifest and lockfile changes before verification")
 
 
 class ReleaseLog:
