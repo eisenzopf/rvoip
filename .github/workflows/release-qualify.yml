@@ -605,6 +605,46 @@ jobs:
                 terminated_without_result+=("$worker")
               fi
             done < <(jq -c '.workers[]' target/gcp-controller/workers.json)
+
+            # A candidate that has already failed the bounded performance,
+            # burst, or proxy lane cannot become releasable by finishing an
+            # hour-long soak.  Preserve all early results, then stop only the
+            # still-running deferred workers so fixes can be verified without
+            # waiting for proof that can no longer qualify this candidate.
+            cutoff_json="$(python3 scripts/release/gcp_fanout.py \
+              early-failure-decision \
+              --manifest target/gcp-controller/workers.json \
+              --downloads target/gcp-controller/downloads \
+              --states target/gcp-controller/states.csv)"
+            while IFS= read -r failed_shard; do
+              announcement="target/gcp-controller/downloads/${failed_shard}/failure-announced"
+              if [[ ! -f "$announcement" ]]; then
+                echo "::error title=GCP release gate failed::${failed_shard} reported or produced invalid failure evidence"
+                touch "$announcement"
+              fi
+            done < <(jq -r '.failed_shards[]' <<< "$cutoff_json")
+            mapfile -t deferred_running \
+              < <(jq -r '.deferred_running[]' <<< "$cutoff_json")
+            if [[ "$(jq -r .should_stop <<< "$cutoff_json")" == true \
+              && ! -f target/gcp-controller/early-failure-cutoff.txt ]]; then
+              early_expected="$(jq -r .early_expected <<< "$cutoff_json")"
+              early_settled="$(jq -r .early_settled <<< "$cutoff_json")"
+              observed_failures="$(jq '.failed_shards | length' <<< "$cutoff_json")"
+              printf '%s\n' "${deferred_running[@]}" \
+                > target/gcp-controller/early-failure-cutoff.txt
+              echo "::error title=Release candidate rejected early::Stopping ${#deferred_running[@]} deferred GCP workers after the bounded lane failed"
+              {
+                echo
+                echo "### Early failure cutoff"
+                echo
+                echo "- Bounded GCP workers settled: ${early_settled}/${early_expected}"
+                echo "- Observed failures: ${observed_failures}"
+                echo "- Deferred workers stopped: ${#deferred_running[@]}"
+                echo "- Completed evidence remains reusable when its exact digests match."
+              } >> "$GITHUB_STEP_SUMMARY"
+              gcloud compute instances stop "${deferred_running[@]}" \
+                --project "$PROJECT" --zone "$ZONE" --quiet || true
+            fi
             settled=$((completed + ${#terminated_without_result[@]}))
             if (( settled == expected )); then
               if (( ${#terminated_without_result[@]} != 0 )); then

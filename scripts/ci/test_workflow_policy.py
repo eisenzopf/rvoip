@@ -330,6 +330,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(
             "\n  cleanup-gcp:\n", maxsplit=1
         )[0]
+        self.assertIn("Early failure cutoff", controller)
+        self.assertIn("early-failure-decision", controller)
+        self.assertIn("gcloud compute instances stop", controller)
 
         self.assertNotIn("strategy:", controller)
         self.assertNotIn("matrix: ${{ fromJSON", controller)
