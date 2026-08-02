@@ -97,6 +97,30 @@ class GcpReleaseFanoutTests(unittest.TestCase):
                 run_attempt="1",
             )
 
+        long_soak = self.matrix_entry(
+            "gcp-performance-soak-long-1",
+            resource="gcp-performance-soak-long",
+            machine="n2-standard-8",
+            gates="perf.soak-candidate",
+        )
+        manifest = fanout.prepare_manifest(
+            matrix={"include": [long_soak]},
+            candidate=self.candidate,
+            environment_id="release-environment",
+            run_id="1",
+            run_attempt="1",
+        )
+        self.assertEqual(manifest["required_vcpus"], 8)
+        long_soak["machine_type"] = "n2-standard-4"
+        with self.assertRaisesRegex(fanout.FanoutError, "must use n2-standard-8"):
+            fanout.prepare_manifest(
+                matrix={"include": [long_soak]},
+                candidate=self.candidate,
+                environment_id="release-environment",
+                run_id="1",
+                run_attempt="1",
+            )
+
     @staticmethod
     def write_archive(path: Path, member_name: str, payload: bytes) -> str:
         with tarfile.open(path, "w:gz") as bundle:

@@ -21,9 +21,9 @@ any canonical gate becomes unmapped.
 
 The protected `Release qualification` workflow uses the same ephemeral model
 for the complete gate catalog. Its `remote-preflight` profile launches the full
-release capacity shape—seven `n2-standard-8` performance workers, nine
-`n2-standard-4` soak workers, and one `n2-standard-4` interoperability
-worker—but runs short infrastructure probes. That makes controller, quota,
+release capacity shape—six `n2-standard-8` short-performance workers, two
+`n2-standard-8` long-soak workers, seven `n2-standard-4` burst/soak workers,
+and one `n2-standard-4` interoperability worker—but runs short infrastructure probes. That makes controller, quota,
 startup, OS-limit, dependency, evidence-transfer, and cleanup defects visible
 before a full qualification begins. It is non-publishing and cannot qualify a
 release.

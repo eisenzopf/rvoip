@@ -426,8 +426,9 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         "github-standard": 6,
         "github-nightly": 5,
         "github-evidence": 1,
-        "gcp-performance": 7,
-        "gcp-performance-soak": 9,
+        "gcp-performance": 6,
+        "gcp-performance-soak": 7,
+        "gcp-performance-soak-long": 2,
         # Interoperability gates share one stateful peer lab. Keep their
         # lifecycle dependency chain in one shard so start/matrix/stop/restore
         # operations cannot race across ephemeral jobs.

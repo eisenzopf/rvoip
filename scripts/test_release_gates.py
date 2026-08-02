@@ -115,8 +115,15 @@ class GateFrameworkTests(unittest.TestCase):
             "perf.soak-candidate",
         }
         self.assertEqual(
-            {by_id[gate_id]["resource_class"] for gate_id in soak_ids},
-            {"gcp-performance-soak"},
+            {
+                gate_id: by_id[gate_id]["resource_class"]
+                for gate_id in soak_ids
+            },
+            {
+                "perf.monolithic-soak": "gcp-performance-soak-long",
+                "perf.media-burst-matrix": "gcp-performance-soak",
+                "perf.soak-candidate": "gcp-performance-soak-long",
+            },
         )
         matrix = gates.matrix_for(
             [
@@ -126,10 +133,15 @@ class GateFrameworkTests(unittest.TestCase):
             by_id,
         )
         soak_shards = [
-            shard for shard in matrix if shard["resource_class"] == "gcp-performance-soak"
+            shard
+            for shard in matrix
+            if shard["resource_class"] == "gcp-performance-soak-long"
         ]
         self.assertEqual(len(soak_shards), 2)
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in soak_shards))
+        self.assertTrue(
+            all(shard["machine_type"] == "n2-standard-8" for shard in soak_shards)
+        )
         self.assertNotIn(
             "perf.media-burst-matrix",
             {gate for shard in soak_shards for gate in shard["gates"]},
@@ -156,7 +168,7 @@ class GateFrameworkTests(unittest.TestCase):
 
     def test_remote_preflight_recreates_the_complete_gcp_worker_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-preflight"]
-        self.assertEqual(len(selected), 17)
+        self.assertEqual(len(selected), 16)
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
             [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
@@ -167,18 +179,20 @@ class GateFrameworkTests(unittest.TestCase):
             for resource in (
                 "gcp-performance",
                 "gcp-performance-soak",
+                "gcp-performance-soak-long",
                 "gcp-interop",
             )
         }
         self.assertEqual(
             counts,
             {
-                "gcp-performance": 7,
-                "gcp-performance-soak": 9,
+                "gcp-performance": 6,
+                "gcp-performance-soak": 7,
+                "gcp-performance-soak-long": 2,
                 "gcp-interop": 1,
             },
         )
-        self.assertEqual(len(matrix), 17)
+        self.assertEqual(len(matrix), 16)
         self.assertEqual(
             sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in matrix),
             96,
@@ -193,6 +207,38 @@ class GateFrameworkTests(unittest.TestCase):
                     "infra/release-runners/release-infrastructure-preflight.sh",
                     gate["command"],
                 )
+
+    def test_remote_release_uses_the_same_96_vcpu_gcp_shape(self) -> None:
+        selected = self.catalog["profiles"]["remote-release"]
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
+            by_id,
+        )
+        gcp = [shard for shard in matrix if not shard["hosted"]]
+        counts = {
+            resource: sum(shard["resource_class"] == resource for shard in gcp)
+            for resource in (
+                "gcp-performance",
+                "gcp-performance-soak",
+                "gcp-performance-soak-long",
+                "gcp-interop",
+            )
+        }
+        self.assertEqual(
+            counts,
+            {
+                "gcp-performance": 6,
+                "gcp-performance-soak": 7,
+                "gcp-performance-soak-long": 2,
+                "gcp-interop": 1,
+            },
+        )
+        self.assertEqual(len(gcp), 16)
+        self.assertEqual(
+            sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in gcp),
+            96,
+        )
 
     def test_remote_diagnostic_runs_only_exact_gcp_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]
@@ -214,7 +260,7 @@ class GateFrameworkTests(unittest.TestCase):
         )
         self.assertEqual(
             {shard["resource_class"] for shard in matrix},
-            {"gcp-interop", "gcp-performance-soak", "github-evidence"},
+            {"gcp-interop", "gcp-performance-soak-long", "github-evidence"},
         )
         self.assertEqual(
             {
