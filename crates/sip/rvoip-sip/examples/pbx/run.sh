@@ -825,16 +825,24 @@ wait_for_pbx_tls_ready() {
           | sed -n '1,80p' || true
       fi
       if command -v nc >/dev/null 2>&1; then
-        nc -z -w 2 "$host" "$port"
-        nc_rc=$?
+        if nc -z -w 2 "$host" "$port"; then
+          nc_rc=0
+        else
+          nc_rc=$?
+        fi
         echo "nc_rc=$nc_rc"
       else
         nc_rc=0
         echo "nc not found; skipping TCP socket probe"
       fi
       if command -v openssl >/dev/null 2>&1; then
-        printf '' | openssl s_client -connect "$host:$port" -servername "$host" -brief 2>&1 | sed -n '1,80p'
-        openssl_rc=$?
+        if printf '' \
+          | openssl s_client -connect "$host:$port" -servername "$host" -brief 2>&1 \
+          | sed -n '1,80p'; then
+          openssl_rc=0
+        else
+          openssl_rc=$?
+        fi
         echo "openssl_rc=$openssl_rc"
       else
         openssl_rc=0

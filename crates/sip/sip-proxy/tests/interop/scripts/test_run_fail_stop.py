@@ -101,6 +101,20 @@ class RunFailStopTests(unittest.TestCase):
             "a timed-out SIPp process must remain row-owned for cleanup",
         )
 
+    def test_sipp_fallback_outputs_are_contained_in_scenario_evidence(self) -> None:
+        self.assertGreaterEqual(
+            self.source.count('scenario_dir=$(CDPATH= cd -- "$scenario_dir" && pwd)'),
+            2,
+        )
+        self.assertIn(
+            '(cd "$scenario_dir" && exec "$SIPP_BIN" "${sipp_args[@]}")',
+            self.source,
+        )
+        self.assertIn(
+            '(cd "$scenario_dir" && "$SIPP_BIN" "${sipp_args[@]}")',
+            self.source,
+        )
+
     def test_failed_peer_shutdown_never_erases_peer_ownership(self) -> None:
         cleanup_start = self.source.index("\ncleanup_row() {")
         cleanup_end = self.source.index("\n}\n\ncleanup_all", cleanup_start)

@@ -130,6 +130,13 @@ git fetch --depth=1 origin "$CANDIDATE"
 git checkout --detach "$CANDIDATE"
 test "$(git rev-parse HEAD)" = "$CANDIDATE"
 
+# The stock Ubuntu startup service inherits a soft nofile limit of 1024.
+# SIPp and high-density media qualification legitimately require thousands of
+# concurrent sockets, so make the worker limit explicit and fail closed if a
+# future image cannot provide it.
+ulimit -n 262144
+test "$(ulimit -n)" -ge 262144
+
 python3 scripts/release/gates.py run-shard \
   --candidate "$CANDIDATE" \
   --environment-id "$ENVIRONMENT_ID" \

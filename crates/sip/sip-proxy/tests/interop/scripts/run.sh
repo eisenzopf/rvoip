@@ -803,6 +803,7 @@ validate_scenario_trace_bounds() {
 start_uas() {
   local scenario_file=$1
   local scenario_dir=$2
+  scenario_dir=$(CDPATH= cd -- "$scenario_dir" && pwd)
   local listen_port=${3:-$UAS_PORT}
   local mode
   mode=$(sipp_mode "$current_transport")
@@ -814,7 +815,11 @@ start_uas() {
     -trace_msg -message_file "$scenario_dir/uas-messages.log"
     -trace_stat -stf "$scenario_dir/uas-stats.csv"
   )
-  "$SIPP_BIN" "${sipp_args[@]}" \
+  # SIPp can create a fallback statistics file in its current directory when
+  # it rejects an option before honoring -stf (for example, a low nofile
+  # limit). Keep even those fail-fast artifacts inside the scenario evidence
+  # directory so a failed interop row cannot dirty the source checkout.
+  (cd "$scenario_dir" && exec "$SIPP_BIN" "${sipp_args[@]}") \
     >"$scenario_dir/uas.stdout.log" 2>&1 &
   uas_pid=$!
   sleep 0.25
@@ -828,6 +833,7 @@ start_uas() {
 run_uac() {
   local scenario_file=$1
   local scenario_dir=$2
+  scenario_dir=$(CDPATH= cd -- "$scenario_dir" && pwd)
   local target_host=$3
   local target_port=$4
   local mode
@@ -841,7 +847,7 @@ run_uac() {
     -trace_msg -message_file "$scenario_dir/uac-messages.log"
     -trace_stat -stf "$scenario_dir/uac-stats.csv"
   )
-  "$SIPP_BIN" "${sipp_args[@]}" \
+  (cd "$scenario_dir" && "$SIPP_BIN" "${sipp_args[@]}") \
     >"$scenario_dir/uac.stdout.log" 2>&1
 }
 
