@@ -3,9 +3,16 @@ fail-fast = false
 status-level = "fail"
 final-status-level = "slow"
 slow-timeout = { period = "60s", terminate-after = 2 }
+# These integration binaries invoke Cargo at runtime to build process fixtures.
+# They remain mandatory in the dedicated SIP fixture lane, which prebuilds the
+# examples once before executing the tests. Running them process-parallel under
+# nextest only creates nested Cargo lock contention and is not additional
+# coverage. scripts/ci/test_workflow_policy.py keeps this list identical to the
+# canonical fixture catalog in scripts/ci/policy.json.
+default-filter = 'not (binary(=audio_roundtrip_integration) or binary(=blind_transfer_integration) or binary(=bridge_roundtrip_integration) or binary(=cancel_integration) or binary(=endpoint_audio_roundtrip_integration) or binary(=glare_retry_integration) or binary(=notify_send_integration) or binary(=prack_integration) or binary(=session_timer_failure_integration) or binary(=session_timer_integration))'
 
 [profile.ci.junit]
-path = "target/nextest/junit.xml"
+path = "junit.xml"
 store-success-output = false
 store-failure-output = true
 
@@ -18,3 +25,10 @@ fixed-network-resource = { max-threads = 1 }
 # that process-per-test execution is safe or those ports become ephemeral.
 filter = 'binary(/(cross_transport_bridge|sip_only_orchestrator|orchestrator_bridge)/)'
 test-group = "fixed-network-resource"
+
+[[profile.ci.overrides]]
+# This live UDP test hands an ephemeral port from a reservation socket to the
+# SIP coordinator. Give the handoff exclusive runner capacity so unrelated
+# process-level tests cannot starve its bounded five-second response window.
+filter = 'test(=adapters::session_event_handler::tests::malformed_inbound_sdes_update_returns_one_cached_488_without_state_mutation)'
+threads-required = "num-test-threads"

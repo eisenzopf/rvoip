@@ -11,6 +11,7 @@
     "deny.toml"
   ],
   "known_policy_paths": [
+    ".config/nextest.toml",
     ".github/CODEOWNERS",
     ".github/dependabot.yml",
     ".github/pull_request_template.md",
