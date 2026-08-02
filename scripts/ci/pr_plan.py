@@ -449,9 +449,21 @@ def make_plan(
             for rule in policy.get("specialty_rules", [])
             if any(matches_any(path, rule.get("patterns", [])) for path in normalized)
         }
+    projects = policy.get("example_projects", [])
+    if "examples-smoke" in specialty_set:
+        specialty_set.remove("examples-smoke")
+        smoke_projects = policy.get("pr_example_smoke_projects", [])
+        unknown_smoke_projects = sorted(set(smoke_projects) - set(projects))
+        if not smoke_projects or unknown_smoke_projects:
+            raise PlanError(
+                "PR example smoke set is empty or unknown: "
+                + ", ".join(unknown_smoke_projects)
+            )
+        specialty_set.update(
+            f"example-smoke--{project}" for project in smoke_projects
+        )
     if "examples" in specialty_set:
         specialty_set.remove("examples")
-        projects = policy.get("example_projects", [])
         directly_changed = {
             project
             for project in projects

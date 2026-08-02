@@ -377,6 +377,44 @@ version = "2.0.0"
         plan = self.plan("examples/two/src/main.rs")
         self.assertEqual(plan["specialty_gates"], ["example--two"])
 
+    def test_example_smoke_matrix_is_split_into_independent_gates(self) -> None:
+        policy = copy.deepcopy(self.policy)
+        policy["specialty_rules"].append(
+            {"gate": "examples-smoke", "patterns": ["examples/**"]}
+        )
+        policy["pr_example_smoke_projects"] = ["one", "two"]
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=self.metadata,
+            policy=policy,
+            paths=["examples/two/src/main.rs"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+        )
+        self.assertEqual(
+            plan["specialty_gates"],
+            ["example--two", "example-smoke--one", "example-smoke--two"],
+        )
+
+    def test_invalid_example_smoke_matrix_fails_closed(self) -> None:
+        policy = copy.deepcopy(self.policy)
+        policy["specialty_rules"].append(
+            {"gate": "examples-smoke", "patterns": ["examples/**"]}
+        )
+        policy["pr_example_smoke_projects"] = ["missing"]
+        with self.assertRaisesRegex(pr_plan.PlanError, "smoke set"):
+            pr_plan.make_plan(
+                root=self.root,
+                metadata=self.metadata,
+                policy=policy,
+                paths=["examples/two/src/main.rs"],
+                base="base",
+                head="head",
+                candidate=None,
+            )
+
     def test_invalid_pr_example_contract_set_fails_closed(self) -> None:
         self.policy["pr_example_projects"] = ["missing"]
         with self.assertRaises(pr_plan.PlanError):

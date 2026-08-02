@@ -235,14 +235,23 @@ def specialty_commands(
         return [
             (["cargo", "build", "--manifest-path", str(manifest), "--locked"], None, None)
         ]
+    smoke_examples = (
+        "01-quickstart-p2p",
+        "02-softphone-audio",
+        "06-attended-transfer",
+        "07-secure-call-srtp",
+        "10-call-center-b2bua",
+    )
+    if gate.startswith("example-smoke--"):
+        example = gate.removeprefix("example-smoke--")
+        if example not in smoke_examples:
+            raise CheckError(f"unknown example smoke project: {example}")
+        directory = root / "examples" / example
+        return [
+            (["cargo", "build", "--release", "--locked"], directory, None),
+            (["timeout", "120", "./run_demo.sh"], directory, None),
+        ]
     if gate == "examples-smoke":
-        smoke_examples = (
-            "01-quickstart-p2p",
-            "02-softphone-audio",
-            "06-attended-transfer",
-            "07-secure-call-srtp",
-            "10-call-center-b2bua",
-        )
         commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
         for example in smoke_examples:
             directory = root / "examples" / example

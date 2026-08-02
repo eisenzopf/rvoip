@@ -89,6 +89,17 @@ class RunChecksTests(unittest.TestCase):
             5,
         )
 
+    def test_example_smoke_partition_runs_one_release_demo(self) -> None:
+        commands = run_checks.specialty_commands(
+            "example-smoke--07-secure-call-srtp", Path("/workspace")
+        )
+        self.assertEqual(len(commands), 2)
+        self.assertEqual(commands[0][0], ["cargo", "build", "--release", "--locked"])
+        self.assertEqual(commands[1][0], ["timeout", "120", "./run_demo.sh"])
+        self.assertEqual(
+            commands[0][1], Path("/workspace/examples/07-secure-call-srtp")
+        )
+
     def test_vcon_gate_contains_live_store_and_boundary_checks(self) -> None:
         commands = run_checks.specialty_commands("vcon-postgres", Path("/workspace"))
         argv = [item[0] for item in commands]
