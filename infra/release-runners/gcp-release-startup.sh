@@ -19,6 +19,8 @@ CACHE_BUCKET="$(metadata rvoip-cache-bucket)"
 PREFIX="$(metadata rvoip-prefix)"
 GATES="$(metadata rvoip-gates-b64 | base64 --decode)"
 ENVIRONMENT_ID="$(metadata rvoip-environment-b64 | base64 --decode)"
+PREBUILT_URI="$(metadata rvoip-prebuilt-uri)"
+PREBUILT_SHA256="$(metadata rvoip-prebuilt-sha256)"
 WORKSPACE=/opt/rvoip
 EVIDENCE=/tmp/release-shard
 ARCHIVE=/tmp/release-shard.tar.gz
@@ -35,12 +37,27 @@ upload() {
     http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
   encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
-  curl --fail --silent --show-error \
+  curl --fail --silent --show-error --retry 3 --retry-all-errors \
     -X POST \
     -H "Authorization: Bearer ${token}" \
     -H 'Content-Type: application/octet-stream' \
     --data-binary "@${source}" \
     "https://storage.googleapis.com/upload/storage/v1/b/${BUCKET}/o?uploadType=media&name=${encoded}"
+}
+
+download() {
+  local object="$1"
+  local destination="$2"
+  local token encoded
+  token="$(curl --fail --silent --show-error \
+    -H 'Metadata-Flavor: Google' \
+    http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')"
+  encoded="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$object")"
+  curl --fail --silent --show-error --retry 3 --retry-all-errors \
+    -H "Authorization: Bearer ${token}" \
+    "https://storage.googleapis.com/download/storage/v1/b/${BUCKET}/o/${encoded}?alt=media" \
+    -o "$destination"
 }
 
 finish() {
@@ -140,6 +157,31 @@ git fetch --depth=1 origin "$CANDIDATE"
 git checkout --detach "$CANDIDATE"
 test "$(git rev-parse HEAD)" = "$CANDIDATE"
 
+prebuilt_gate_ids="$(python3 scripts/release/prebuilt_performance.py select-gates \
+  --catalog scripts/release/gates.json --gates "$GATES")"
+if [[ -n "$prebuilt_gate_ids" ]]; then
+  expected_prefix="gs://${BUCKET}/release/${RUN_ID}/prebuild/"
+  if [[ "$PREBUILT_URI" != "${expected_prefix}"* \
+    || ! "$PREBUILT_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "performance worker lacks an exact-run prebuilt bundle" >&2
+    exit 1
+  fi
+  prebuilt_object="${PREBUILT_URI#"gs://${BUCKET}/"}"
+  download "$prebuilt_object" /tmp/performance-prebuilt.tar.gz
+  python3 scripts/release/prebuilt_performance.py install-bundle \
+    --archive /tmp/performance-prebuilt.tar.gz \
+    --archive-sha256 "$PREBUILT_SHA256" \
+    --destination /opt/rvoip-performance-prebuilt \
+    --workspace "$WORKSPACE" \
+    --candidate "$CANDIDATE" \
+    --environment-id "$ENVIRONMENT_ID"
+  export RVOIP_PERF_PREBUILT_MANIFEST=/opt/rvoip-performance-prebuilt/manifest.json
+  export RVOIP_PERF_PREBUILT_BUNDLE_SHA256="$PREBUILT_SHA256"
+  export RVOIP_PERF_PREBUILT_MANIFEST_SHA256
+  RVOIP_PERF_PREBUILT_MANIFEST_SHA256="$(sha256sum \
+    "$RVOIP_PERF_PREBUILT_MANIFEST" | awk '{print $1}')"
+fi
+
 # Every ephemeral worker previously spent roughly twenty-one minutes compiling
 # the same release graph. Use a dedicated, lifecycle-managed GCS bucket as a
 # content-addressed compiler cache. Cache availability is an optimization only:
@@ -199,6 +241,7 @@ ulimit -n 262144
 test "$(ulimit -n)" -ge 262144
 
 export RVOIP_RELEASE_CANDIDATE="$CANDIDATE"
+export RVOIP_RELEASE_ENVIRONMENT_ID="$ENVIRONMENT_ID"
 export RVOIP_RELEASE_GATES="$GATES"
 export RVOIP_RELEASE_RESOURCE_CLASS="$RESOURCE_CLASS"
 export RVOIP_RELEASE_RUN_ID="$RUN_ID"

@@ -41,3 +41,12 @@ consuming one GitHub job slot per cloud worker. Each worker is bound to one
 candidate SHA and gate list, uploads an immutable result and evidence archive,
 shuts down, and is deleted with its auto-delete disk. Controller and follow-up
 sweep cleanup both run on failure; there is no idle release fleet.
+
+For diagnostics and `remote-release` runs that select executable performance
+gates, the controller first creates one ephemeral `n2-standard-32` builder. It
+compiles the exact candidate once, packages only the selected test executables,
+uploads a SHA-256-bound bundle, and is deleted before the measurement fleet is
+created. Runtime workers still use their catalogued real GCP machine types,
+workloads, durations, and thresholds; they verify the bundle and executable
+hashes instead of recompiling the same graph. This makes compilation a shared
+setup phase without contaminating performance or soak measurements.

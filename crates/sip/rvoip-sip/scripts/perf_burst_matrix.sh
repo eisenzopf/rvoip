@@ -104,21 +104,43 @@ resolve_exact_test_bin() {
 }
 
 BURST_CARGO_MESSAGES="${BUILD_DIR}/burst-cargo-messages.jsonl"
-echo "Building exact burst artifacts together (features: ${PERF_FEATURES})..." >&2
-if ! cargo test \
-    -p rvoip-sip \
-    --release \
-    --features "${PERF_FEATURES}" \
-    --test perf_burst_receiver \
-    --test perf_burst_caller \
-    --no-run \
-    --message-format=json-render-diagnostics \
-    >"${BURST_CARGO_MESSAGES}"; then
-  echo "Cargo failed while building burst artifacts; refusing existing binaries" >&2
-  exit 1
+if [[ -n "${RVOIP_PERF_PREBUILT_MANIFEST:-}" ]]; then
+  : "${RVOIP_RELEASE_CANDIDATE:?prebuilt performance bundle requires exact candidate}"
+  : "${RVOIP_RELEASE_ENVIRONMENT_ID:?prebuilt performance bundle requires environment ID}"
+  echo "Resolving exact burst artifacts from the verified candidate bundle..." >&2
+  resolve_prebuilt_test_bin() {
+    local name="$1"
+    python3 "${WORKSPACE_ROOT}/scripts/release/prebuilt_performance.py" resolve \
+      --manifest "${RVOIP_PERF_PREBUILT_MANIFEST}" \
+      --workspace "${WORKSPACE_ROOT}" \
+      --candidate "${RVOIP_RELEASE_CANDIDATE}" \
+      --environment-id "${RVOIP_RELEASE_ENVIRONMENT_ID}" \
+      --features "${PERF_FEATURES}" \
+      --target "${name}" \
+      --artifact-manifest "${BUILD_DIR}/${name}-artifact.json" \
+      --source-at-build "${SOURCE_AT_BUILD}" \
+      --build-target perf_burst_receiver \
+      --build-target perf_burst_caller
+  }
+  RECEIVER_BIN="$(resolve_prebuilt_test_bin perf_burst_receiver)"
+  CALLER_BIN="$(resolve_prebuilt_test_bin perf_burst_caller)"
+else
+  echo "Building exact burst artifacts together (features: ${PERF_FEATURES})..." >&2
+  if ! cargo test \
+      -p rvoip-sip \
+      --release \
+      --features "${PERF_FEATURES}" \
+      --test perf_burst_receiver \
+      --test perf_burst_caller \
+      --no-run \
+      --message-format=json-render-diagnostics \
+      >"${BURST_CARGO_MESSAGES}"; then
+    echo "Cargo failed while building burst artifacts; refusing existing binaries" >&2
+    exit 1
+  fi
+  RECEIVER_BIN="$(resolve_exact_test_bin perf_burst_receiver "${BURST_CARGO_MESSAGES}")"
+  CALLER_BIN="$(resolve_exact_test_bin perf_burst_caller "${BURST_CARGO_MESSAGES}")"
 fi
-RECEIVER_BIN="$(resolve_exact_test_bin perf_burst_receiver "${BURST_CARGO_MESSAGES}")"
-CALLER_BIN="$(resolve_exact_test_bin perf_burst_caller "${BURST_CARGO_MESSAGES}")"
 python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
   --workspace-root "${WORKSPACE_ROOT}" \
   --output "${SOURCE_AFTER_BUILD}" >/dev/null

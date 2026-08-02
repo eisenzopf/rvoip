@@ -238,6 +238,30 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("continuing with direct rustc", startup)
         self.assertIn("_sccache-stats.txt", startup)
 
+    def test_performance_workers_consume_one_exact_prebuilt_bundle(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        builder = (
+            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+        ).read_text()
+        helper = (ROOT / "scripts/release/prebuilt_performance.py").read_text()
+
+        self.assertIn("Build selected performance executables once", workflow)
+        self.assertIn("--machine-type n2-standard-32", workflow)
+        self.assertIn("--boot-disk-type pd-balanced", workflow)
+        self.assertLess(
+            workflow.index("Build selected performance executables once"),
+            workflow.index("Create every ephemeral release worker concurrently"),
+        )
+        self.assertIn("rvoip-prebuilt-uri=${PREBUILT_URI}", workflow)
+        self.assertIn("rvoip-prebuilt-sha256=${PREBUILT_SHA256}", workflow)
+        self.assertIn("install-bundle", startup)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
+        self.assertIn("performance-prebuilt.tar.gz", builder)
+        self.assertIn("publishing_attempted", builder)
+        self.assertIn("bundle digest mismatch", helper)
+        self.assertIn("exact candidate", helper)
+
     def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
@@ -381,7 +405,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertEqual(runner.count("cargo test"), 1)
         self.assertIn("--test perf_burst_receiver", runner)
         self.assertIn("--test perf_burst_caller", runner)
-        self.assertEqual(runner.count("--build-target perf_burst_"), 2)
+        self.assertEqual(runner.count("--build-target perf_burst_"), 4)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", runner)
 
     def test_release_memory_gates_isolate_structural_diagnostics(self) -> None:
         receiver = (
