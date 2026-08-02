@@ -229,7 +229,7 @@ Environment:
                                   Include mimalloc snapshots in memory diagnostics. Defaults to 0.
   RVOIP_PERF_MEMORY_DIAG_INTERVAL_SECS
                                   Memory diagnostic interval. Defaults to 5.
-  RVOIP_PERF_MIMALLOC_COLLECT_AT Optional diagnostic mi_collect(true): off|phase|drain|both.
+  RVOIP_PERF_MIMALLOC_COLLECT_AT Optional diagnostic mi_collect(true): off|phase|drain|both|settled|all.
                                   Defaults to off in the beta gate.
   RVOIP_PERF_SYSTEM_ALLOCATOR=1  Build perf soak with the system allocator instead of mimalloc.
   RVOIP_PERF_DHAT=1              Build split soak with DHAT heap profiling allocator.
