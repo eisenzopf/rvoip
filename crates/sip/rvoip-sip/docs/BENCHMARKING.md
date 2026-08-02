@@ -407,10 +407,13 @@ appearing as mid-window growth. The one-hour monolithic and one-hour split
 soaks use the reviewed 15 MB/hour beta limit as of 2026-07-24 and remain
 authoritative for sustained-growth claims.
 
-For monolithic and split soaks with a complete active phase of at least 600
-seconds, `results.rss_gate_window` must be `active_tail_600s` and
-`results.rss_gate_growth_mb_per_hr` comes from the final 600 seconds while calls
-are still cycling, using first/last-minute endpoint medians. The report also
+For monolithic and split soaks with a complete active phase of at least 1,200
+seconds, `results.rss_gate_window` must be `active_tail_1200s` and
+`results.rss_gate_growth_mb_per_hr` comes from the final 1,200 seconds while
+calls are still cycling, using the Theil-Sen median of all pairwise slopes.
+The longer window spans the allocator's observed sawtooth cycle instead of
+annualizing one bounded step. First/last-minute endpoint medians remain an
+independent diagnostic. The report also
 emits `rss_active_tail_growth_mb_per_hr`,
 `rss_active_tail_sample_count`, `rss_active_tail_window_secs`, and
 `rss_active_tail_window_complete`. The post-drain slope remains diagnostic;

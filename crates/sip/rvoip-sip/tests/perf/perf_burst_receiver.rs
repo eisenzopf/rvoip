@@ -236,7 +236,7 @@ async fn perf_burst_receiver() {
         0.0,
         0.0,
         settled_observation.as_secs_f64(),
-        support::soak::RssGatePolicy::SettledTail60,
+        support::soak::RssGatePolicy::SettledFull,
     );
     let rss_gate_enforced =
         rss.post_drain_window_secs >= scenario.acceptance.min_rss_gate_window_secs;

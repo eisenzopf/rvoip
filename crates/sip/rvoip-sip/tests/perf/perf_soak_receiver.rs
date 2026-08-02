@@ -116,7 +116,7 @@ async fn perf_soak_receiver() {
     };
     let active_load_boundary_secs = settings.duration_secs as f64;
     let rss_gate_policy = if settings.duration_secs >= 600 {
-        RssGatePolicy::ActiveTail600
+        RssGatePolicy::ActiveTail1200
     } else {
         RssGatePolicy::PostDrainOrTail
     };
