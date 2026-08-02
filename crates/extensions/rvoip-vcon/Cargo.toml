@@ -31,7 +31,7 @@ x509-parser.workspace = true
 mime = "0.3"
 
 # JWS cryptographic primitives; wire framing is General JSON, not JWT.
-jsonwebtoken = "9.3"
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 
 thiserror = "1.0"
 
