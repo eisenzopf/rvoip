@@ -62,16 +62,22 @@ crates.io, so archive hashes are completed during the topological publication
 run.
 
 The `remote-core` profile uses GitHub-hosted runners. The complete
-`remote-release` profile also schedules performance, soak, and PBX/SIPp gates
-to ephemeral runners with the labels `self-hosted`, `rvoip-release`, and the
-resource class (`gcp-performance`, `gcp-performance-soak`, or `gcp-interop`).
-Those runners must be provisioned separately with workload identity and a
-single-job cleanup policy; they never receive the crates.io token. The
-`remote-release` workflow also requires the repository variable
-`RVOIP_GCP_RUNNERS_READY=true`, which should be set only after that fleet is
-verified. Until then, use `remote-core` for dry runs and retain the legacy beta
-wrapper for the unautomated specialty evidence rather than treating a queued
-job as a release result.
+`remote-release` profile sends performance, soak, and PBX/SIPp gates to real
+ephemeral Compute Engine workers. One GitHub controller creates all planned
+workers concurrently through workload identity, monitors their immutable GCS
+results, verifies and merges their evidence, and deletes every instance and
+auto-delete disk. A separate cleanup job sweeps interrupted runs. The workers
+never receive the crates.io token and no release worker remains provisioned
+between qualifications.
+
+The current full profile is balanced across seven `n2-standard-8` performance
+workers, nine `n2-standard-4` soak workers, and one `n2-standard-4`
+interoperability worker. These are real performance machines; the workflow
+does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
+The one-hour soak establishes a physical lower bound of one hour for a fresh
+qualification, plus provisioning, build, evidence, and cleanup time. Gates
+whose exact source, dependency, definition, environment, and threshold digests
+remain unchanged may reuse successful prior evidence on a later candidate.
 
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.

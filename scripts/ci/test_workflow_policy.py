@@ -120,11 +120,15 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_release_workers_install_interop_tools_only_for_interop(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        fanout = (ROOT / "scripts/release/gcp_fanout.py").read_text()
 
-        self.assertIn("RESOURCE_CLASS: ${{ matrix.resource_class }}", workflow)
-        self.assertIn("rvoip-resource-class=${RESOURCE_CLASS}", workflow)
+        self.assertIn('resource_class="$(jq -r .resource_class', workflow)
+        self.assertIn("rvoip-resource-class=${resource_class}", workflow)
         self.assertIn('RESOURCE_CLASS="$(metadata rvoip-resource-class)"', startup)
         self.assertIn('if [[ "$RESOURCE_CLASS" == "gcp-interop" ]]', startup)
+        self.assertIn('"gcp-interop": "n2-standard-4"', fanout)
+        self.assertIn('"gcp-performance": "n2-standard-8"', fanout)
+        self.assertIn('"gcp-performance-soak": "n2-standard-4"', fanout)
         self.assertIn("sip-tester", startup)
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
@@ -136,6 +140,23 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test "$(ulimit -n)" -ge 262144', startup)
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
+
+    def test_release_gcp_workers_do_not_consume_one_github_job_each(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        controller = workflow.split("\n  gate-gcp:\n", maxsplit=1)[1].split(
+            "\n  cleanup-gcp:\n", maxsplit=1
+        )[0]
+
+        self.assertNotIn("strategy:", controller)
+        self.assertNotIn("matrix: ${{ fromJSON", controller)
+        self.assertIn("Run all ephemeral GCP release shards", controller)
+        self.assertIn("gcp_fanout.py prepare", controller)
+        self.assertIn("Create every ephemeral release worker concurrently", controller)
+        self.assertIn('pids+=("$!")', controller)
+        self.assertIn("Wait for every immutable worker result", controller)
+        self.assertIn("gcp_fanout.py verify", controller)
+        self.assertIn("Delete all workers and attached disks", controller)
+        self.assertIn("release-gate-shard-gcp-controller", controller)
 
     def test_release_pbx_lifecycle_uses_tracked_templates(self) -> None:
         lifecycle = (ROOT / "infra/release-runners/interop-lifecycle.sh").read_text()

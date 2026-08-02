@@ -263,6 +263,7 @@ def specialty_commands(
                     "scripts/test_release.py",
                     "scripts/test_release_carry_forward_attestation.py",
                     "scripts/test_release_exception_attestation.py",
+                    "scripts/test_release_gcp_fanout.py",
                     "scripts/test_release_gates.py",
                 ],
                 None,
