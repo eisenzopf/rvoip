@@ -1,14 +1,14 @@
-# rvoip 0.3.5 Release Candidate Notes
+# rvoip 0.3.6 Release Candidate Notes
 
 Date: 2026-07-30
 
-These notes describe the coordinated 44-crate `0.3.5` release candidate.
+These notes describe the coordinated 44-crate `0.3.6` release candidate.
 Publication requires a fresh strict full-beta qualification bound to the exact
 clean release source. No `0.3.4` carry-forward evidence qualifies this release.
 
 ## Headline
 
-`0.3.5` is a security, media-correctness, and SIP-lifecycle release. It makes
+`0.3.6` is a security, media-correctness, and SIP-lifecycle release. It makes
 incomplete security features fail closed, repairs RTP/RTCP and SRTP/SRTCP
 state, replaces simulated codec behavior, completes transactional SIP
 renegotiation, closes issues #46 and #50, and makes Tokio the sole WebRTC
@@ -92,11 +92,11 @@ runtime.
 ## Qualification
 
 The release candidate must pass the one-command full beta gate from a clean,
-committed `0.3.5` source tree. Required evidence includes three fresh canonical
+committed `0.3.6` source tree. Required evidence includes three fresh canonical
 2,000-CPS runs; workspace, public-API, security, parser, PBX, SIPp, strict-UA,
 Kamailio, and OpenSIPS gates; full-media performance and resiliency matrices;
 and both one-hour monolithic and split soaks. The generated report package and
 its source fingerprint are verified before crates.io publication.
 
 Historical `0.3.2` exception and `0.3.4` carry-forward attestations remain
-unchanged release history. They are not presented as current `0.3.5` evidence.
+unchanged release history. They are not presented as current `0.3.6` evidence.
