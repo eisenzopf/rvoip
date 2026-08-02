@@ -18,8 +18,8 @@ default = []
 # aws-sdk-connect). Off by default so the crate + unit tests build with zero
 # AWS dependencies and no network/credentials. When enabled it adds
 # `aws-config`/`aws-sdk-connect`; both are configured `default-features = false`
-# to keep the workspace's single `ring` rustls CryptoProvider invariant (the AWS
-# SDK's default `aws-lc-rs` would create a second provider and panic at runtime).
+# and opt into the current HTTP 1.x client explicitly. The older generated
+# `rustls` feature selects AWS's legacy Rustls 0.21 adapter and must not be used.
 aws-control = ["dep:aws-config", "dep:aws-sdk-connect", "dep:aws-smithy-types", "dep:tracing-subscriber"]
 # Live end-to-end test against a real Amazon Connect instance (needs creds +
 # AMAZON_CONNECT_INSTANCE_ID / _FLOW_ID / AWS_REGION env vars).
@@ -60,8 +60,8 @@ rustls = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 # AWS control plane (optional — see `aws-control` feature).
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rustls", "rt-tokio", "credentials-login"], optional = true }
-aws-sdk-connect = { version = "1", default-features = false, features = ["rustls", "rt-tokio"], optional = true }
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
+aws-sdk-connect = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
 aws-smithy-types = { version = "1", optional = true }
 # Logging for the `connect-probe` binary (which requires `aws-control`); kept out
 # of the library's adapter-only dependency tree.

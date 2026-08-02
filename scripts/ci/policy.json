@@ -108,6 +108,15 @@
   },
   "specialty_rules": [
     {
+      "gate": "amazon-connect-aws-control",
+      "patterns": [
+        "Cargo.lock",
+        "crates/webrtc/rvoip-amazon-connect/**",
+        "examples/Cargo.lock",
+        "examples/13-sip-to-amazon-connect/**"
+      ]
+    },
+    {
       "gate": "browser-smoke",
       "patterns": [
         "tests/browser-smoke/**",
