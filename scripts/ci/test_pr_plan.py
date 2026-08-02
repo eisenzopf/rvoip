@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import sys
@@ -65,7 +66,7 @@ class PlannerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def plan(self, *paths: str):
+    def plan(self, *paths: str, job_mode: str = "combined"):
         return pr_plan.make_plan(
             root=self.root,
             metadata=self.metadata,
@@ -74,6 +75,7 @@ class PlannerTests(unittest.TestCase):
             base="base",
             head="head",
             candidate=None,
+            job_mode=job_mode,
         )
 
     def test_direct_change_selects_all_reverse_dependency_kinds(self) -> None:
@@ -154,6 +156,13 @@ class PlannerTests(unittest.TestCase):
         }
         self.assertEqual(actual, expected)
 
+    def test_split_jobs_remain_available_for_gcp_workspace_workers(self) -> None:
+        plan = self.plan("Cargo.lock", job_mode="split")
+        self.assertEqual(
+            {job["check"] for job in plan["shard_jobs"]},
+            {"test", "clippy"},
+        )
+
     def test_github_outputs_are_single_line_json(self) -> None:
         path = self.root / "github-output"
         plan = self.plan("crates/delta/src/lib.rs")
@@ -165,6 +174,8 @@ class PlannerTests(unittest.TestCase):
         self.assertTrue(all(job["packages"] == ["delta"] for job in jobs))
         shards = json.loads(values["shards"])["include"]
         self.assertEqual(shards, plan["shards"])
+        self.assertEqual(values["sip_job_count"], "0")
+        self.assertEqual(json.loads(values["sip_jobs"])["include"], [])
 
     def test_public_api_change_uses_bounded_example_contract_set(self) -> None:
         plan = self.plan("crates/delta/src/api/client.rs")
@@ -178,6 +189,48 @@ class PlannerTests(unittest.TestCase):
         self.policy["pr_example_projects"] = ["missing"]
         with self.assertRaises(pr_plan.PlanError):
             self.plan("crates/delta/src/api/client.rs")
+
+    def test_sip_uses_partitioned_pr_lanes_and_defers_declared_long_target(self) -> None:
+        metadata = copy.deepcopy(self.metadata)
+        package_root = self.root / "crates" / "rvoip-sip"
+        package_root.mkdir(parents=True)
+        manifest = package_root / "Cargo.toml"
+        manifest.write_text("[package]\nname = 'rvoip-sip'\n")
+        package_id = f"path+file://{package_root}#rvoip-sip@1.0.0"
+        metadata["workspace_members"].append(package_id)
+        metadata["packages"].append(
+            {
+                "id": package_id,
+                "name": "rvoip-sip",
+                "manifest_path": str(manifest),
+                "dependencies": [],
+                "targets": [
+                    {"name": "rvoip_sip", "kind": ["lib"]},
+                    {"name": "audio_roundtrip_integration", "kind": ["test"]},
+                    {"name": "event_tests", "kind": ["test"]},
+                    {"name": "srtp_call_integration", "kind": ["test"]},
+                ],
+            }
+        )
+        policy = copy.deepcopy(self.policy)
+        policy["pr_deferred_sip_targets"] = ["audio_roundtrip_integration"]
+        policy["pr_sip_partitions"] = 2
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=metadata,
+            policy=policy,
+            paths=["crates/rvoip-sip/src/lib.rs"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+        )
+        self.assertEqual(plan["deferred_sip_targets"], ["audio_roundtrip_integration"])
+        self.assertEqual([job["id"] for job in plan["sip_jobs"]], ["core", "integration-1", "integration-2"])
+        self.assertNotIn(
+            "rvoip-sip",
+            [package for shard in plan["shards"] for package in shard["packages"]],
+        )
 
 
 if __name__ == "__main__":

@@ -31,6 +31,12 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("run_checks.py shard", text)
         self.assertIn("shard-${{ matrix.shard_id }}-all", text)
         self.assertNotIn("run_checks.py shard-${{ matrix.check }}", text)
+        self.assertIn("sip-pr-core", text)
+        self.assertIn("sip-integration", text)
+
+    def test_main_aggregates_one_receipt_per_combined_shard(self) -> None:
+        text = (ROOT / ".github/workflows/main-ci.yml").read_text()
+        self.assertIn("--shard-layout shards", text)
 
     def test_main_release_tooling_installs_its_fuzz_toolchain(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()

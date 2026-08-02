@@ -41,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job", action="append", default=[])
     parser.add_argument("--required-job", action="append", default=[])
     parser.add_argument("--required-receipt", action="append", default=[])
+    parser.add_argument(
+        "--shard-layout",
+        choices=("jobs", "shards"),
+        default="jobs",
+        help="validate receipts from shard_jobs or one receipt per shard",
+    )
     args = parser.parse_args(argv)
 
     failures: list[str] = []
@@ -66,11 +72,16 @@ def main(argv: list[str] | None = None) -> int:
             failures.append(f"required job {required} was {jobs.get(required, 'missing')}")
 
     shard_count = len(plan.get("shards", []))
+    sip_count = len(plan.get("sip_jobs", []))
     specialty_count = len(plan.get("specialty_gates", []))
     if shard_count and jobs.get("crate-tests") != "success":
         failures.append(f"crate-tests was {jobs.get('crate-tests', 'missing')}")
     if not shard_count and jobs.get("crate-tests") not in {"skipped", "success"}:
         failures.append(f"unexpected crate-tests result {jobs.get('crate-tests', 'missing')}")
+    if sip_count and jobs.get("sip-tests") != "success":
+        failures.append(f"sip-tests was {jobs.get('sip-tests', 'missing')}")
+    if not sip_count and jobs.get("sip-tests") not in {None, "skipped", "success"}:
+        failures.append(f"unexpected sip-tests result {jobs.get('sip-tests', 'missing')}")
     if specialty_count and jobs.get("specialty") != "success":
         failures.append(f"specialty was {jobs.get('specialty', 'missing')}")
     if not specialty_count and jobs.get("specialty") not in {"skipped", "success"}:
@@ -85,10 +96,11 @@ def main(argv: list[str] | None = None) -> int:
         failures.append("impact plan is missing a 40-character candidate SHA")
     expected = {"policy"}
     shard_jobs = plan.get("shard_jobs")
-    if shard_jobs is None:
+    if args.shard_layout == "shards" or shard_jobs is None:
         expected.update(f"shard-{shard['id']}" for shard in plan.get("shards", []))
     else:
         expected.update(f"shard-{job['shard_id']}-{job['check']}" for job in shard_jobs)
+    expected.update(f"sip-{job['id']}" for job in plan.get("sip_jobs", []))
     expected.update(f"specialty-{gate}" for gate in plan.get("specialty_gates", []))
     expected.update(args.required_receipt)
     missing = sorted(expected - set(by_name))
@@ -125,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"- {failure}", file=sys.stderr)
         return 1
     print(
-        f"PR Gate passed: {shard_count} crate shard(s), "
+        f"PR Gate passed: {shard_count} crate shard(s), {sip_count} SIP lane(s), "
         f"{specialty_count} specialty gate(s)."
     )
     return 0

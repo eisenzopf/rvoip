@@ -45,6 +45,16 @@
     "06-attended-transfer",
     "11-ai-harness-demo"
   ],
+  "pr_sip_partitions": 3,
+  "pr_deferred_sip_targets": [
+    "audio_roundtrip_integration"
+  ],
+  "pr_sip_target_weights": {
+    "endpoint_unified_auth": 90,
+    "blind_transfer_integration": 55,
+    "bridge_roundtrip_integration": 35,
+    "endpoint_audio_roundtrip_integration": 20
+  },
   "specialty_rules": [
     {
       "gate": "browser-smoke",

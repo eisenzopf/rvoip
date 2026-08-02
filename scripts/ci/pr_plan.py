@@ -194,6 +194,48 @@ def make_shards(
     return shards
 
 
+def integration_test_targets(metadata: dict[str, Any], package_name: str) -> list[str]:
+    packages = [item for item in metadata.get("packages", []) if item.get("name") == package_name]
+    if len(packages) != 1:
+        raise PlanError(f"expected exactly one {package_name!r} package")
+    targets = []
+    for target in packages[0].get("targets", []):
+        if "test" not in target.get("kind", []) or target.get("required-features", []):
+            continue
+        name = target.get("name", "")
+        if not name or any(not (character.isalnum() or character in "_-") for character in name):
+            raise PlanError(f"unsafe integration target name: {name!r}")
+        targets.append(name)
+    if not targets or len(targets) != len(set(targets)):
+        raise PlanError(f"{package_name} integration target inventory is invalid")
+    return sorted(targets)
+
+
+def partition_named_targets(
+    targets: list[str], count: int, weights: dict[str, Any]
+) -> list[dict[str, Any]]:
+    if count < 1 or count > len(targets):
+        raise PlanError("target partition count is outside the target inventory")
+    partitions = [
+        {"targets": [], "estimated_seconds": 0} for _ in range(count)
+    ]
+    weighted = sorted(
+        ((max(1, int(weights.get(name, 5))), name) for name in targets),
+        key=lambda item: (-item[0], item[1]),
+    )
+    for weight, name in weighted:
+        destination = min(
+            partitions,
+            key=lambda item: (item["estimated_seconds"], len(item["targets"])),
+        )
+        destination["targets"].append(name)
+        destination["estimated_seconds"] += weight
+    for partition in partitions:
+        partition["targets"].sort()
+        partition["targets_csv"] = ",".join(partition["targets"])
+    return partitions
+
+
 def make_plan(
     *,
     root: Path,
@@ -203,7 +245,10 @@ def make_plan(
     base: str,
     head: str,
     candidate: str | None = None,
+    job_mode: str = "split",
 ) -> dict[str, Any]:
+    if job_mode not in {"split", "combined"}:
+        raise PlanError(f"unsupported shard job mode: {job_mode!r}")
     normalized = sorted({normalize_path(path) for path in paths})
     packages = workspace_packages(root, metadata)
     known_policy_paths = set(policy.get("known_policy_paths", []))
@@ -281,17 +326,50 @@ def make_plan(
         selected = reverse_closure(direct, packages)
         reason = "changed crates plus transitive reverse dependencies"
 
-    shards = make_shards(selected, policy)
+    shard_selection = set(selected)
+    sip_jobs: list[dict[str, Any]] = []
+    deferred_sip_targets: list[str] = []
+    if job_mode == "combined" and "rvoip-sip" in shard_selection:
+        shard_selection.remove("rvoip-sip")
+        all_sip_targets = integration_test_targets(metadata, "rvoip-sip")
+        deferred_sip_targets = sorted(set(policy.get("pr_deferred_sip_targets", [])))
+        unknown_deferred = sorted(set(deferred_sip_targets) - set(all_sip_targets))
+        if unknown_deferred:
+            raise PlanError(
+                "unknown deferred SIP test targets: " + ", ".join(unknown_deferred)
+            )
+        runnable_sip_targets = sorted(set(all_sip_targets) - set(deferred_sip_targets))
+        requested_partitions = max(1, int(policy.get("pr_sip_partitions", 3)))
+        partition_count = min(requested_partitions, len(runnable_sip_targets))
+        partitions = partition_named_targets(
+            runnable_sip_targets,
+            partition_count,
+            policy.get("pr_sip_target_weights", {}),
+        )
+        sip_jobs.append({"id": "core", "kind": "core", "targets_csv": ""})
+        sip_jobs.extend(
+            {
+                "id": f"integration-{index}",
+                "kind": "integration",
+                "targets_csv": partition["targets_csv"],
+                "estimated_seconds": partition["estimated_seconds"],
+            }
+            for index, partition in enumerate(partitions, start=1)
+        )
+
+    shards = make_shards(shard_selection, policy)
+    shard_checks = ("all",) if job_mode == "combined" else ("test", "clippy")
     shard_jobs = [
         {
-            "id": f"{shard['id']}-all",
+            "id": f"{shard['id']}-{check}",
             "shard_id": shard["id"],
-            "check": "all",
+            "check": check,
             "packages": shard["packages"],
             "packages_csv": shard["packages_csv"],
             "weight": shard["weight"],
         }
         for shard in shards
+        for check in shard_checks
     ]
     candidate_sha = (
         run(["git", "rev-parse", f"{candidate}^{{commit}}"], root).strip()
@@ -308,10 +386,13 @@ def make_plan(
         "candidate_sha": candidate_sha,
         "mode": mode,
         "reason": reason,
+        "job_mode": job_mode,
         "changed_files": normalized,
         "direct_crates": sorted(direct),
         "selected_crates": sorted(selected),
         "specialty_gates": specialty,
+        "sip_jobs": sip_jobs,
+        "deferred_sip_targets": deferred_sip_targets,
         "shards": shards,
         "shard_jobs": shard_jobs,
     }
@@ -320,6 +401,7 @@ def make_plan(
 def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
     shard_jobs = {"include": plan["shard_jobs"]}
     shards = {"include": plan["shards"]}
+    sip_jobs = {"include": plan.get("sip_jobs", [])}
     specialty = {"include": [{"gate": gate} for gate in plan["specialty_gates"]]}
     values = {
         "mode": plan["mode"],
@@ -327,6 +409,8 @@ def write_github_outputs(path: Path, plan: dict[str, Any]) -> None:
         "candidate_sha": plan["candidate_sha"] or "",
         "shard_jobs": json.dumps(shard_jobs, separators=(",", ":")),
         "shards": json.dumps(shards, separators=(",", ":")),
+        "sip_jobs": json.dumps(sip_jobs, separators=(",", ":")),
+        "sip_job_count": str(len(plan.get("sip_jobs", []))),
         "shard_job_count": str(len(plan["shard_jobs"])),
         "shard_count": str(len(plan["shards"])),
         "specialty": json.dumps(specialty, separators=(",", ":")),
@@ -352,6 +436,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--specialty-gate", action="append", default=[])
     result.add_argument("--metadata-file", type=Path)
     result.add_argument(
+        "--job-mode",
+        choices=("split", "combined"),
+        default="split",
+        help="emit separate test/clippy jobs or one warm combined job per shard",
+    )
+    result.add_argument(
         "--policy", type=Path, default=Path("scripts/ci/policy.json")
     )
     result.add_argument("--output", type=Path, default=Path("target/ci-plan/plan.json"))
@@ -376,6 +466,7 @@ def main(argv: list[str] | None = None) -> int:
             base=args.base,
             head=args.head,
             candidate=args.candidate,
+            job_mode=args.job_mode,
         )
         for gate in args.specialty_gate:
             if not gate or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in gate):

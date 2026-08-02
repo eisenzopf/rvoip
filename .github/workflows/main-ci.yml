@@ -241,6 +241,7 @@ jobs:
             --job 'specialty=${{ needs.specialty.result }}' \
             --job 'doctest=${{ needs.doctest.result }}' \
             --required-job doctest \
+            --shard-layout shards \
             --required-receipt doctest
       - name: Upload full main receipt
         if: always()
