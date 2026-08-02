@@ -239,6 +239,15 @@ class GateFrameworkTests(unittest.TestCase):
             sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in gcp),
             96,
         )
+        hosted = [shard for shard in matrix if shard["hosted"]]
+        standard = [
+            shard for shard in hosted if shard["resource_class"] == "github-standard"
+        ]
+        self.assertEqual(len(standard), 12)
+        # Twelve standard, five nightly, one evidence, and one GCP controller
+        # stay below the twenty-job repository concurrency ceiling.
+        self.assertLessEqual(len(hosted) + 1, 19)
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1260)
 
     def test_remote_diagnostic_runs_only_exact_gcp_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]

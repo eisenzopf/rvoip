@@ -112,6 +112,16 @@ qualification, plus provisioning, build, evidence, and cleanup time. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
 
+All GCP workers use a verified, pinned `sccache` binary and a private,
+lifecycle-managed GCS compiler-cache bucket. The cache is content-addressed,
+contains no release credentials, and is shared only by trusted protected-main
+workers. Every worker records cache statistics in its evidence archive. A cache
+download or backend failure falls back to direct compilation without changing
+the command, workload, machine class, or acceptance threshold. Hosted release
+checks are balanced across twelve standard shards; together with five nightly
+shards, one evidence shard, and the one GCP controller, the workflow remains
+below the repository's twenty-job concurrency ceiling.
+
 This verification is the version/package delta boundary. It does not claim
 that a prior beta run exercised a later version-only commit.
 

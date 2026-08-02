@@ -199,6 +199,27 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("-name '*.jsonl'", startup)
         self.assertNotRegex(startup, r"apt-get install[^\n]*\bsipp\b")
 
+    def test_release_workers_use_a_verified_fail_open_gcs_compiler_cache(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+
+        self.assertIn("RVOIP_GCP_CACHE_BUCKET", workflow)
+        self.assertIn("rvoip-cache-bucket=${CACHE_BUCKET}", workflow)
+        self.assertIn('CACHE_BUCKET="$(metadata rvoip-cache-bucket)"', startup)
+        self.assertIn("SCCACHE_VERSION=0.15.0", startup)
+        self.assertIn(
+            "SCCACHE_SHA256=782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e",
+            startup,
+        )
+        self.assertIn("--show-error --location", startup)
+        self.assertIn("sha256sum --check --status", startup)
+        self.assertIn("SCCACHE_MULTILEVEL_CHAIN=disk,gcs", startup)
+        self.assertIn("SCCACHE_GCS_RW_MODE=READ_WRITE", startup)
+        self.assertIn("RUSTC_WRAPPER=sccache", startup)
+        self.assertIn("unset RUSTC_WRAPPER", startup)
+        self.assertIn("continuing with direct rustc", startup)
+        self.assertIn("_sccache-stats.txt", startup)
+
     def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()

@@ -423,7 +423,12 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         groups[gate["resource_class"]].append(gate)
     matrix = []
     limits = {
-        "github-standard": 6,
+        # Keep the complete hosted release fanout below GitHub's 20-job
+        # repository limit while avoiding the two 50+ minute serial shards
+        # observed during the v0.3.6 qualification. Twelve standard shards,
+        # five nightly shards, one evidence shard, and the single GCP
+        # controller peak at nineteen concurrent jobs.
+        "github-standard": 12,
         "github-nightly": 5,
         "github-evidence": 1,
         "gcp-performance": 6,
