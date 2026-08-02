@@ -159,6 +159,71 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         implicit = explicit.replace("external 2.0.0", "external", 1)
         self.assertEqual(pr_plan.lockfile_delta(explicit, implicit), (set(), set()))
 
+    def test_lockfile_delta_tolerates_unreachable_stale_record(self) -> None:
+        payload = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+[[package]]
+name = "stale"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+dependencies = ["missing 9.9.9"]
+"""
+        self.assertEqual(pr_plan.lockfile_delta(payload, payload), (set(), set()))
+        self.assertEqual(
+            pr_plan.lockfile_dependency_closure(payload, {"alpha"}),
+            {pr_plan.LockPackage("alpha", "1.0.0", "")},
+        )
+
+    def test_lockfile_closure_tolerates_unmaterialized_target_dependency(self) -> None:
+        payload = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["target-only 9.9.9"]
+"""
+        self.assertEqual(
+            pr_plan.lockfile_dependency_closure(payload, {"alpha"}),
+            {pr_plan.LockPackage("alpha", "1.0.0", "")},
+        )
+
+    def test_lockfile_validator_accepts_dependency_that_becomes_reachable(self) -> None:
+        base_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+[[package]]
+name = "external"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "old"
+"""
+        head_lock = """\
+version = 4
+[[package]]
+name = "alpha"
+version = "1.0.0"
+dependencies = ["external"]
+[[package]]
+name = "external"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "new"
+"""
+        with mock.patch.object(pr_plan, "run", side_effect=[base_lock, head_lock]):
+            changed = pr_plan.validate_scoped_lockfile(
+                root=self.root,
+                packages=pr_plan.workspace_packages(self.root, self.metadata),
+                paths=["Cargo.lock", "crates/alpha/Cargo.toml"],
+                base="base",
+                head="head",
+            )
+        self.assertEqual(changed, ["alpha", "external"])
+
     def test_lockfile_validator_accepts_only_reachable_dependency_delta(self) -> None:
         metadata = copy.deepcopy(self.metadata)
         base_lock = """\

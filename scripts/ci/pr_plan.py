@@ -109,7 +109,11 @@ def load_metadata(root: Path, metadata_file: Path | None) -> dict[str, Any]:
 
 def lockfile_graph(
     payload: str,
-) -> tuple[dict[LockPackage, dict[str, Any]], dict[LockPackage, frozenset[LockPackage]]]:
+) -> tuple[
+    dict[LockPackage, dict[str, Any]],
+    dict[LockPackage, frozenset[LockPackage]],
+    dict[LockPackage, frozenset[str]],
+]:
     document = tomllib.loads(payload)
     raw_packages = document.get("package", [])
     if not isinstance(raw_packages, list):
@@ -134,7 +138,7 @@ def lockfile_graph(
     if not packages:
         raise PlanError("Cargo.lock contains no packages")
 
-    def resolve_dependency(reference: str) -> LockPackage:
+    def resolve_dependency(reference: str) -> LockPackage | None:
         fields = reference.split(" ")
         name = fields[0]
         version = fields[1] if len(fields) >= 2 and fields[1][:1].isdigit() else None
@@ -145,30 +149,38 @@ def lockfile_graph(
             if version is None or identity.version == version
             if not source or identity.source == source
         ]
-        if len(candidates) != 1:
-            raise PlanError(f"Cargo.lock dependency reference is ambiguous: {reference!r}")
-        return candidates[0]
+        return candidates[0] if len(candidates) == 1 else None
 
     dependencies: dict[LockPackage, frozenset[LockPackage]] = {}
+    unresolved: dict[LockPackage, frozenset[str]] = {}
     for identity, raw in packages.items():
         references = raw.get("dependencies", [])
         if not isinstance(references, list):
             raise PlanError(f"Cargo.lock dependencies are invalid for {identity.name}")
+        resolved = [
+            (str(reference), resolve_dependency(str(reference)))
+            for reference in references
+        ]
         dependencies[identity] = frozenset(
-            resolve_dependency(str(reference)) for reference in references
+            dependency
+            for _, dependency in resolved
+            if dependency is not None
         )
-    return packages, dependencies
+        unresolved[identity] = frozenset(
+            reference for reference, dependency in resolved if dependency is None
+        )
+    return packages, dependencies, unresolved
 
 
 def parse_lockfile(payload: str) -> dict[LockPackage, str]:
-    packages, dependencies = lockfile_graph(payload)
+    packages, dependencies, unresolved = lockfile_graph(payload)
     fingerprints: dict[LockPackage, str] = {}
     for identity, raw in packages.items():
         canonical = dict(raw)
         canonical["dependencies"] = [
-            [dependency.name, dependency.version, dependency.source]
+            ["package", dependency.name, dependency.version, dependency.source]
             for dependency in sorted(dependencies[identity])
-        ]
+        ] + [["unresolved", reference] for reference in sorted(unresolved[identity])]
         fingerprints[identity] = json.dumps(
             canonical, sort_keys=True, separators=(",", ":")
         )
@@ -176,7 +188,7 @@ def parse_lockfile(payload: str) -> dict[LockPackage, str]:
 
 
 def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackage]:
-    packages, dependencies = lockfile_graph(payload)
+    packages, dependencies, _unresolved = lockfile_graph(payload)
     by_name: dict[str, list[LockPackage]] = {}
     for identity in packages:
         by_name.setdefault(identity.name, []).append(identity)
@@ -196,6 +208,10 @@ def lockfile_dependency_closure(payload: str, roots: set[str]) -> set[LockPackag
         identity = pending.pop()
         if identity in visited:
             continue
+        # Cargo may retain a target-specific dependency reference without
+        # materializing that package for the current resolver target. Keep the
+        # exact reference in the package fingerprint, but there is no package
+        # identity to traverse or attribute to another workspace crate.
         visited.add(identity)
         pending.extend(sorted(dependencies[identity] - visited))
     return visited
@@ -241,10 +257,14 @@ def validate_scoped_lockfile(
         raise PlanError("Cargo.lock changed without a package graph delta")
     base_reachable = lockfile_dependency_closure(base_payload, manifest_roots)
     head_reachable = lockfile_dependency_closure(head_payload, manifest_roots)
-    unexplained_head = changed_head - head_reachable
-    unexplained_base = changed_base - base_reachable
-    if unexplained_head or unexplained_base:
-        unexplained = sorted(unexplained_head | unexplained_base)
+    changed_in_place = changed_base & changed_head
+    unexplained_common = changed_in_place - (base_reachable | head_reachable)
+    unexplained_head = (changed_head - changed_in_place) - head_reachable
+    unexplained_base = (changed_base - changed_in_place) - base_reachable
+    if unexplained_common or unexplained_head or unexplained_base:
+        unexplained = sorted(
+            unexplained_common | unexplained_head | unexplained_base
+        )
         detail = ", ".join(
             f"{identity.name}@{identity.version}" for identity in unexplained
         )
