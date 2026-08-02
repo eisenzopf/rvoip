@@ -131,7 +131,26 @@ build_exact_test_bins() {
 }
 
 RESOLVED_EXECUTABLES="${BUILD_DIR}/resolved-executables.txt"
-build_exact_test_bins >"${RESOLVED_EXECUTABLES}"
+if [[ -n "${RVOIP_PERF_PREBUILT_MANIFEST:-}" ]]; then
+  : "${RVOIP_RELEASE_CANDIDATE:?prebuilt performance bundle requires exact candidate}"
+  : "${RVOIP_RELEASE_ENVIRONMENT_ID:?prebuilt performance bundle requires environment ID}"
+  echo "Resolving exact split-soak artifacts from the verified candidate bundle..." >&2
+  for name in perf_soak_receiver perf_soak_caller; do
+    python3 "${WORKSPACE_ROOT}/scripts/release/prebuilt_performance.py" resolve \
+      --manifest "${RVOIP_PERF_PREBUILT_MANIFEST}" \
+      --workspace "${WORKSPACE_ROOT}" \
+      --candidate "${RVOIP_RELEASE_CANDIDATE}" \
+      --environment-id "${RVOIP_RELEASE_ENVIRONMENT_ID}" \
+      --features "${PERF_FEATURES}" \
+      --target "${name}" \
+      --artifact-manifest "${BUILD_DIR}/${name}-artifact.json" \
+      --source-at-build "${SOURCE_AT_BUILD}" \
+      --build-target perf_soak_receiver \
+      --build-target perf_soak_caller
+  done >"${RESOLVED_EXECUTABLES}"
+else
+  build_exact_test_bins >"${RESOLVED_EXECUTABLES}"
+fi
 if [[ "$(wc -l <"${RESOLVED_EXECUTABLES}" | tr -d ' ')" != "2" ]]; then
   echo "Expected exactly two attested split-soak executables" >&2
   exit 1

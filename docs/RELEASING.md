@@ -102,24 +102,36 @@ workers, two `n2-standard-8` one-hour-soak workers, seven `n2-standard-4`
 burst/soak workers, one `n2-standard-4` stateful interoperability worker, and
 two `n2-standard-2` proxy-interoperability workers. Each proxy worker runs six
 of the twelve required peer/order/transport rows. The two
-long soaks receive the additional cores because exact release compilation is
-on their critical path; the total is 100 N2 vCPUs. These are real
+long soaks receive the additional cores for the measured workload; the total
+runtime shape is 100 N2 vCPUs. These are real
 performance machines; the workflow
 does not substitute GitHub-hosted capacity or reduce workloads and thresholds.
+Before creating that runtime shape, the controller uses one ephemeral
+`n2-standard-32` builder with balanced persistent disk to compile the selected
+performance executables exactly once. The builder uploads a candidate-, source
+tree-, toolchain-, and environment-bound bundle, then is deleted before the
+measurement workers start. Every performance worker verifies the bundle and
+each executable by SHA-256 and records both bundle and manifest digests in its
+gate receipt. Compilation therefore cannot perturb performance measurements or
+be repeated independently on every worker.
 The `remote-preflight` profile recreates that complete capacity shape, including
 all 18 concurrent VM creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
 The one-hour soak establishes a physical lower bound of one hour for a fresh
-qualification, plus provisioning, build, evidence, and cleanup time. Gates
+qualification, plus short provisioning and evidence overhead. The shared build
+stage is intentionally outside the measured workloads and can be reused only
+within its exact workflow run; it removes duplicate compilation but does not
+shorten or divide the continuous soak requirement. Gates
 whose exact source, dependency, definition, environment, and threshold digests
 remain unchanged may reuse successful prior evidence on a later candidate.
 Each proxy row has its own stable gate ID, so a later diagnostic can rerun only
 the failed combination without rerunning the other eleven rows.
 
-All GCP workers use a verified, pinned `sccache` binary and a private,
+The shared builder and GCP workers use a verified, pinned `sccache` binary and a private,
 lifecycle-managed GCS compiler-cache bucket. The cache is content-addressed,
 contains no release credentials, and is shared only by trusted protected-main
-workers. Every worker records cache statistics in its evidence archive. A cache
+or same-repository diagnostic workflows. Build processes record cache
+statistics in their evidence. A cache
 download or backend failure falls back to direct compilation without changing
 the command, workload, machine class, or acceptance threshold. Hosted release
 checks are balanced across twelve standard shards; together with five nightly

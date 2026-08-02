@@ -42,6 +42,7 @@ use support::{
 
 const BOB_PORT_ENV: &str = "RVOIP_PERF_BURST_BOB_PORT";
 const ALICE_PORT_ENV: &str = "RVOIP_PERF_BURST_ALICE_PORT";
+const STOP_FILE_ENV: &str = "RVOIP_PERF_BURST_STOP_FILE";
 const RUN_DIR_ENV: &str = "RVOIP_PERF_BURST_RUN_DIR";
 const SKIP_AUDIO_SOURCE_ENV: &str = "RVOIP_PERF_BURST_SKIP_AUDIO_SOURCE";
 
@@ -396,6 +397,15 @@ async fn perf_burst_caller() {
     )
     .await;
     let active_wall = started.elapsed();
+    let receiver_stop_signaled = std::env::var_os(STOP_FILE_ENV)
+        .map(PathBuf::from)
+        .map(|path| {
+            std::fs::write(&path, "stop\n").unwrap_or_else(|error| {
+                panic!("write burst receiver stop file {}: {error}", path.display())
+            });
+            true
+        })
+        .unwrap_or(false);
 
     let mut retention_series = retention_sampler.stop_periodic().await;
     // Structural snapshots walk every owned runtime index and perturb the
@@ -497,6 +507,7 @@ async fn perf_burst_caller() {
     report
         .result("process_role", "caller")
         .result("scenario", scenario.name.clone())
+        .result("receiver_stop_signaled_by_caller", receiver_stop_signaled)
         .result("scenario_seed", scenario.seed)
         .result("offered_cps_peak", max_phase_cps(&scenario))
         .result("achieved_cps", round2(achieved_cps))

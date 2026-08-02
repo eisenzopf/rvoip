@@ -18,9 +18,9 @@ export CARGO_MANIFEST_DIR="${CRATE_DIR}"
 # while the transaction layer is still behaving correctly.
 : "${RVOIP_PERF_CALL_TIMEOUT_SECS:=40}"
 # Burst acceptance first waits through the 90-second SIP-retention horizon and
-# an allocator-settle margin. It then measures a separate quiet RSS window and
-# captures exact structural diagnostics only after that measurement. The Rust
-# harness clamps shorter drain overrides to this same 160-second minimum.
+# proves logical retention is zero. It then leaves a fixed allocator-quiescence
+# interval before measuring a separate quiet RSS window. The Rust harness
+# clamps shorter drain overrides to the same 160-second retention minimum.
 : "${RVOIP_PERF_RETENTION_DRAIN_WAIT_SECS:=160}"
 : "${RVOIP_PERF_MEMORY_DIAGNOSTICS:=0}"
 : "${RVOIP_PERF_ALLOCATOR_DIAGNOSTICS:=0}"
@@ -82,24 +82,11 @@ python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
   --workspace-root "${WORKSPACE_ROOT}" \
   --output "${SOURCE_AT_BUILD}" >/dev/null
 
-build_exact_test_bin() {
+resolve_exact_test_bin() {
   local name="$1"
-  local messages="${BUILD_DIR}/${name}-cargo-messages.jsonl"
+  local messages="$2"
   local manifest="${BUILD_DIR}/${name}-artifact.json"
   local target_source="${CRATE_DIR}/tests/perf/${name}.rs"
-
-  echo "Building exact ${name} artifact (features: ${PERF_FEATURES})..." >&2
-  if ! cargo test \
-      -p rvoip-sip \
-      --release \
-      --features "${PERF_FEATURES}" \
-      --test "${name}" \
-      --no-run \
-      --message-format=json-render-diagnostics \
-      >"${messages}"; then
-    echo "Cargo failed while building ${name}; refusing any existing binary" >&2
-    return 1
-  fi
 
   python3 "${CARGO_ARTIFACT_HELPER}" resolve \
     --messages "${messages}" \
@@ -111,11 +98,49 @@ build_exact_test_bin() {
     --package rvoip-sip \
     --profile release \
     --features "${PERF_FEATURES}" \
+    --build-target perf_burst_receiver \
+    --build-target perf_burst_caller \
     --default-features enabled
 }
 
-RECEIVER_BIN="$(build_exact_test_bin perf_burst_receiver)"
-CALLER_BIN="$(build_exact_test_bin perf_burst_caller)"
+BURST_CARGO_MESSAGES="${BUILD_DIR}/burst-cargo-messages.jsonl"
+if [[ -n "${RVOIP_PERF_PREBUILT_MANIFEST:-}" ]]; then
+  : "${RVOIP_RELEASE_CANDIDATE:?prebuilt performance bundle requires exact candidate}"
+  : "${RVOIP_RELEASE_ENVIRONMENT_ID:?prebuilt performance bundle requires environment ID}"
+  echo "Resolving exact burst artifacts from the verified candidate bundle..." >&2
+  resolve_prebuilt_test_bin() {
+    local name="$1"
+    python3 "${WORKSPACE_ROOT}/scripts/release/prebuilt_performance.py" resolve \
+      --manifest "${RVOIP_PERF_PREBUILT_MANIFEST}" \
+      --workspace "${WORKSPACE_ROOT}" \
+      --candidate "${RVOIP_RELEASE_CANDIDATE}" \
+      --environment-id "${RVOIP_RELEASE_ENVIRONMENT_ID}" \
+      --features "${PERF_FEATURES}" \
+      --target "${name}" \
+      --artifact-manifest "${BUILD_DIR}/${name}-artifact.json" \
+      --source-at-build "${SOURCE_AT_BUILD}" \
+      --build-target perf_burst_receiver \
+      --build-target perf_burst_caller
+  }
+  RECEIVER_BIN="$(resolve_prebuilt_test_bin perf_burst_receiver)"
+  CALLER_BIN="$(resolve_prebuilt_test_bin perf_burst_caller)"
+else
+  echo "Building exact burst artifacts together (features: ${PERF_FEATURES})..." >&2
+  if ! cargo test \
+      -p rvoip-sip \
+      --release \
+      --features "${PERF_FEATURES}" \
+      --test perf_burst_receiver \
+      --test perf_burst_caller \
+      --no-run \
+      --message-format=json-render-diagnostics \
+      >"${BURST_CARGO_MESSAGES}"; then
+    echo "Cargo failed while building burst artifacts; refusing existing binaries" >&2
+    exit 1
+  fi
+  RECEIVER_BIN="$(resolve_exact_test_bin perf_burst_receiver "${BURST_CARGO_MESSAGES}")"
+  CALLER_BIN="$(resolve_exact_test_bin perf_burst_caller "${BURST_CARGO_MESSAGES}")"
+fi
 python3 "${CARGO_ARTIFACT_HELPER}" capture-source \
   --workspace-root "${WORKSPACE_ROOT}" \
   --output "${SOURCE_AFTER_BUILD}" >/dev/null
@@ -284,6 +309,9 @@ for scenario in $(normalise_scenarios "${RVOIP_PERF_BURST_SCENARIOS}"); do
   ) || caller_status=$?
   caller_pid=""
 
+  # The caller signals immediately after offered load completes so caller and
+  # receiver retention/RSS qualification run concurrently. This is a harmless
+  # fallback for older caller binaries and interrupted runs.
   touch "${STOP_FILE}"
 
   receiver_status=0

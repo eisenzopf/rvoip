@@ -47,7 +47,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v2-rust-1.91-nextest-0.9.140-sccache-0.15.0
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v3-rust-1.91-nextest-0.9.140-prebuilt-perf-v1
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
@@ -303,9 +303,17 @@ jobs:
           from pathlib import Path
 
           workers = json.loads(os.environ["GCP_MATRIX"])["include"]
-          vcpus = sum(int(item["machine_type"].rsplit("-", 1)[1]) for item in workers)
-          instances = len(workers)
-          disk_gb = sum(int(item["disk_size_gb"]) for item in workers)
+          worker_vcpus = sum(int(item["machine_type"].rsplit("-", 1)[1]) for item in workers)
+          worker_instances = len(workers)
+          worker_disk_gb = sum(int(item["disk_size_gb"]) for item in workers)
+          has_performance = any(
+              item["resource_class"].startswith("gcp-performance") for item in workers
+          )
+          # The 32-vCPU builder runs first and is deleted before measurement
+          # workers are created, so capacity is the larger phase, not their sum.
+          vcpus = max(worker_vcpus, 32 if has_performance else 0)
+          instances = max(worker_instances, 1 if has_performance else 0)
+          disk_gb = max(worker_disk_gb, 200 if has_performance else 0)
           global_quotas = {
               row["metric"]: row
               for row in json.loads(Path("global-quotas.json").read_text())["quotas"]
@@ -321,12 +329,13 @@ jobs:
               "INSTANCES": (regional_quotas, instances),
               "IN_USE_ADDRESSES": (regional_quotas, instances),
               "DISKS_TOTAL_GB": (regional_quotas, disk_gb),
+              "SSD_TOTAL_GB": (regional_quotas, 200 if has_performance else 0),
           }
           failures = []
           summary = Path(os.environ["GITHUB_STEP_SUMMARY"])
           with summary.open("a") as output:
               output.write("## Ephemeral release capacity\n\n")
-              output.write(f"- Workers: {instances}\n- N2 vCPUs: {vcpus}\n- Standard disk: {disk_gb} GB\n\n")
+              output.write(f"- Peak instances: {instances}\n- Peak N2 vCPUs: {vcpus}\n- Peak persistent disk: {disk_gb} GB\n\n")
               output.write("| Quota | Required | Available |\n| --- | ---: | ---: |\n")
               for metric, (source, needed) in required.items():
                   quota = source.get(metric)
@@ -387,6 +396,108 @@ jobs:
             echo "- Idle workers retained after the run: 0"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Build selected performance executables once
+        id: prebuild
+        env:
+          CACHE_BUCKET: ${{ vars.RVOIP_GCP_CACHE_BUCKET }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          ENVIRONMENT_ID: ${{ needs.plan.outputs.environment_id }}
+          PROJECT: ${{ vars.RVOIP_GCP_PROJECT_ID }}
+          ZONE: ${{ vars.RVOIP_GCP_ZONE }}
+          NETWORK: ${{ vars.RVOIP_GCP_NETWORK }}
+          SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
+          BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
+          RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/gcp-controller/prebuild
+          selected_gates="$(
+            jq -r '[.workers[] | select(.resource_class | startswith("gcp-performance")) | .gates[]] | unique | join(",")' \
+              target/gcp-controller/workers.json
+          )"
+          gates_csv="$(python3 scripts/release/prebuilt_performance.py select-gates \
+            --catalog scripts/release/gates.json --gates "$selected_gates")"
+          if [[ -z "$gates_csv" ]]; then
+            echo "bundle_uri=none" >> "$GITHUB_OUTPUT"
+            echo "bundle_sha256=none" >> "$GITHUB_OUTPUT"
+            echo "No performance binaries are required for this fanout." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          builder="rvoip-rel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-prebuild"
+          prefix="release/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/prebuild"
+          gates_b64="$(printf '%s' "$gates_csv" | base64 -w0)"
+          environment_b64="$(printf '%s' "$ENVIRONMENT_ID" | base64 -w0)"
+          cleanup_builder() {
+            gcloud compute instances delete "$builder" \
+              --project "$PROJECT" --zone "$ZONE" --quiet >/dev/null 2>&1 || true
+          }
+          trap cleanup_builder EXIT
+
+          gcloud compute instances create "$builder" \
+            --project "$PROJECT" \
+            --zone "$ZONE" \
+            --machine-type n2-standard-32 \
+            --network "$NETWORK" \
+            --subnet "$SUBNET" \
+            --image-family ubuntu-2404-lts-amd64 \
+            --image-project ubuntu-os-cloud \
+            --boot-disk-type pd-balanced \
+            --boot-disk-size 200GB \
+            --boot-disk-auto-delete \
+            --service-account "$RUNNER_SERVICE_ACCOUNT" \
+            --scopes cloud-platform \
+            --shielded-secure-boot \
+            --shielded-vtpm \
+            --shielded-integrity-monitoring \
+            --labels rvoip-role=release-prebuild,managed-by=github-actions \
+            --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+            --metadata-from-file startup-script=infra/release-runners/gcp-performance-prebuild-startup.sh \
+            > target/gcp-controller/prebuild/create.log
+
+          result_uri="gs://${BUCKET}/${prefix}/prebuild-result.json"
+          for attempt in $(seq 1 120); do
+            if gcloud storage cp "$result_uri" \
+              target/gcp-controller/prebuild/prebuild-result.json 2>/dev/null; then
+              break
+            fi
+            state="$(gcloud compute instances describe "$builder" \
+              --project "$PROJECT" --zone "$ZONE" --format='value(status)' || true)"
+            if [[ "$state" == TERMINATED ]]; then
+              echo "performance prebuilder stopped without an immutable result" >&2
+              break
+            fi
+            echo "Waiting for exact-candidate performance bundle (poll ${attempt}/120)"
+            sleep 20
+          done
+          gcloud storage cp "gs://${BUCKET}/${prefix}/prebuild.log" \
+            target/gcp-controller/prebuild/prebuild.log 2>/dev/null || true
+          test -f target/gcp-controller/prebuild/prebuild-result.json
+          python3 scripts/release/prebuilt_performance.py verify-result \
+            --result target/gcp-controller/prebuild/prebuild-result.json \
+            --candidate "$CANDIDATE" \
+            --environment-id "$ENVIRONMENT_ID" \
+            --gates "$gates_csv" \
+            --github-output "$GITHUB_OUTPUT"
+          manifest_uri="$(jq -r .manifest_uri target/gcp-controller/prebuild/prebuild-result.json)"
+          manifest_sha="$(jq -r .manifest_sha256 target/gcp-controller/prebuild/prebuild-result.json)"
+          gcloud storage cp "$manifest_uri" \
+            target/gcp-controller/prebuild/performance-manifest.json
+          echo "${manifest_sha}  target/gcp-controller/prebuild/performance-manifest.json" \
+            | sha256sum --check --status
+          duration="$(jq -r .duration_seconds target/gcp-controller/prebuild/prebuild-result.json)"
+          count="$(jq -r '.selected_gate_ids | length' target/gcp-controller/prebuild/prebuild-result.json)"
+          {
+            echo
+            echo "### Shared exact-candidate performance build"
+            echo
+            echo "- Selected gates: ${count}"
+            echo "- Builder: ephemeral n2-standard-32"
+            echo "- Build and package duration: ${duration}s"
+            echo "- Builder retained after this step: no"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create every ephemeral release worker concurrently
         env:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
@@ -397,6 +508,8 @@ jobs:
           SUBNET: ${{ vars.RVOIP_GCP_SUBNET }}
           BUCKET: ${{ vars.RVOIP_GCP_EVIDENCE_BUCKET }}
           RUNNER_SERVICE_ACCOUNT: ${{ vars.RVOIP_GCP_RUNNER_SERVICE_ACCOUNT }}
+          PREBUILT_URI: ${{ steps.prebuild.outputs.bundle_uri }}
+          PREBUILT_SHA256: ${{ steps.prebuild.outputs.bundle_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p target/gcp-controller/create-logs
@@ -429,7 +542,7 @@ jobs:
                 --shielded-vtpm \
                 --shielded-integrity-monitoring \
                 --labels rvoip-role=release-gate,managed-by=github-actions \
-                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64}" \
+                --metadata "rvoip-candidate=${CANDIDATE},rvoip-run-id=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT},rvoip-shard-id=${shard_id},rvoip-resource-class=${resource_class},rvoip-evidence-bucket=${BUCKET},rvoip-cache-bucket=${CACHE_BUCKET},rvoip-prefix=${prefix},rvoip-gates-b64=${gates_b64},rvoip-environment-b64=${environment_b64},rvoip-prebuilt-uri=${PREBUILT_URI},rvoip-prebuilt-sha256=${PREBUILT_SHA256}" \
                 --metadata-from-file startup-script=infra/release-runners/gcp-release-startup.sh
             ) > "target/gcp-controller/create-logs/${shard_id}.log" 2>&1 &
             pids+=("$!")

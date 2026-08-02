@@ -24,13 +24,13 @@
 #![allow(dead_code)]
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(not(target_os = "linux"))]
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
@@ -100,7 +100,7 @@ fn linux_process_sample(
     })
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResourceSample {
     /// Seconds since the sampler started.
     pub t_secs: f64,
@@ -259,8 +259,11 @@ impl ResourceSampler {
     }
 
     /// Start sampling and append each sample to `path` as JSONL while the
-    /// test is running. The in-memory series remains available for summary
-    /// math, but callers can clear it before writing the final report.
+    /// test is running. File-backed samplers deliberately do not grow an
+    /// in-memory vector during the measured interval: `Vec` capacity changes
+    /// can fault allocator pages and manufacture an RSS slope. The complete
+    /// series is loaded only after sampling stops and remains available in the
+    /// returned summary.
     pub fn start_with_output(interval: Duration, path: PathBuf) -> Self {
         Self::start_inner(interval, Some(path))
     }
@@ -289,7 +292,10 @@ impl ResourceSampler {
                 }
                 BufWriter::new(File::create(path).expect("create resource sample JSONL"))
             });
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                ticker.tick().await;
                 // Refresh CPU + memory for our PID. Both backends report the
                 // first CPU reading as 0 because there is no preceding sample;
                 // it is retained and excluded from the final CPU average.
@@ -309,10 +315,6 @@ impl ResourceSampler {
                     })
                 };
                 if let Some(sample) = sample {
-                    samples_task
-                        .lock()
-                        .expect("sampler lock")
-                        .push(sample.clone());
                     if let Some(writer) = writer.as_mut() {
                         serde_json::to_writer(&mut *writer, &sample)
                             .expect("write resource sample JSONL");
@@ -320,12 +322,13 @@ impl ResourceSampler {
                             .write_all(b"\n")
                             .expect("write resource sample newline");
                         writer.flush().expect("flush resource sample JSONL");
+                    } else {
+                        samples_task.lock().expect("sampler lock").push(sample);
                     }
                 }
                 if stop_task.load(Ordering::Relaxed) {
                     break;
                 }
-                tokio::time::sleep(interval).await;
             }
         });
 
@@ -364,7 +367,10 @@ impl ResourceSampler {
         if let Some(t) = self.task.take() {
             let _ = t.await;
         }
-        let samples = std::mem::take(&mut *self.samples.lock().expect("sampler lock"));
+        let samples = self.samples_path.as_ref().map_or_else(
+            || std::mem::take(&mut *self.samples.lock().expect("sampler lock")),
+            |path| load_resource_samples(path),
+        );
         let sample_count = samples.len();
 
         let baseline_rss_mb = samples.first().map(|s| s.rss_mb).unwrap_or(0.0);
@@ -414,6 +420,31 @@ impl ResourceSampler {
             samples,
         }
     }
+}
+
+fn load_resource_samples(path: &Path) -> Vec<ResourceSample> {
+    let file = File::open(path)
+        .unwrap_or_else(|error| panic!("open resource sample JSONL {}: {error}", path.display()));
+    BufReader::new(file)
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let line = line.unwrap_or_else(|error| {
+                panic!(
+                    "read resource sample JSONL {} line {}: {error}",
+                    path.display(),
+                    index + 1
+                )
+            });
+            serde_json::from_str(&line).unwrap_or_else(|error| {
+                panic!(
+                    "parse resource sample JSONL {} line {}: {error}",
+                    path.display(),
+                    index + 1
+                )
+            })
+        })
+        .collect()
 }
 
 fn summarize_window(
@@ -640,6 +671,30 @@ fn linear_slope_mb_per_sec(samples: &[ResourceSample]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_backed_sampler_does_not_grow_history_during_measurement() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rvoip-resource-samples-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        let sampler = ResourceSampler::start_with_output(Duration::from_millis(1), path.clone());
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            sampler.samples.lock().expect("sampler lock").is_empty(),
+            "file-backed sampling must not reallocate an in-memory history"
+        );
+
+        let summary = sampler.stop().await;
+        assert!(summary.sample_count >= 1);
+        assert_eq!(summary.samples.len(), summary.sample_count);
+        assert_eq!(summary.samples_path.as_deref(), Some(path.as_path()));
+        std::fs::remove_file(path).expect("remove resource sample test output");
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

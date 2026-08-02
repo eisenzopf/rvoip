@@ -2391,7 +2391,7 @@ pub fn rss_result_metrics(
 /// Robust slope across the complete selected RSS window.
 ///
 /// The median of every pairwise slope (the Theil-Sen estimator) uses the
-/// entire twenty-minute evidence window, resists allocator/sample cycles, and
+/// entire evidence window, resists allocator/sample cycles, and
 /// still returns the exact rate for continuous linear growth. At the release
 /// sampler's 5-second cadence this is fewer than 30,000 slopes, so the
 /// quadratic calculation remains negligible.

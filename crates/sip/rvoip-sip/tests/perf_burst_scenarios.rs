@@ -22,7 +22,6 @@ fn bundled_burst_scenarios_parse_and_validate() {
     assert!(names.contains(&"overload-recovery"));
     assert!(names.contains(&"high-density-media-burst"));
     assert!(names.contains(&"buffer-ab-legacy"));
-
     let smoke = book.scenario("carrier-smoke");
     assert_eq!(smoke.total_offered_calls(), 39);
     assert_eq!(smoke.retained_lifecycle_capacity(), 139);

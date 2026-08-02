@@ -238,6 +238,32 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("continuing with direct rustc", startup)
         self.assertIn("_sccache-stats.txt", startup)
 
+    def test_performance_workers_consume_one_exact_prebuilt_bundle(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
+        builder = (
+            ROOT / "infra/release-runners/gcp-performance-prebuild-startup.sh"
+        ).read_text()
+        helper = (ROOT / "scripts/release/prebuilt_performance.py").read_text()
+
+        self.assertIn("Build selected performance executables once", workflow)
+        self.assertIn("--machine-type n2-standard-32", workflow)
+        self.assertIn("--boot-disk-type pd-balanced", workflow)
+        self.assertLess(
+            workflow.index("Build selected performance executables once"),
+            workflow.index("Create every ephemeral release worker concurrently"),
+        )
+        self.assertIn("rvoip-prebuilt-uri=${PREBUILT_URI}", workflow)
+        self.assertIn("rvoip-prebuilt-sha256=${PREBUILT_SHA256}", workflow)
+        self.assertIn("install-bundle", startup)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", startup)
+        self.assertIn("performance-prebuilt.tar.gz", builder)
+        self.assertIn('download "${PREFIX}/performance-manifest.json"', builder)
+        self.assertIn("performance-manifest-readback.json", builder)
+        self.assertIn("publishing_attempted", builder)
+        self.assertIn("bundle digest mismatch", helper)
+        self.assertIn("exact candidate", helper)
+
     def test_release_infrastructure_preflight_is_full_shape_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         startup = (ROOT / "infra/release-runners/gcp-release-startup.sh").read_text()
@@ -360,6 +386,25 @@ class WorkflowPolicyTests(unittest.TestCase):
                 self.assertLess(settled_window, rss_gate)
                 self.assertLess(rss_gate, final_retention)
                 self.assertIn("&settled_resources", source[rss_gate : rss_gate + 250])
+
+    def test_burst_caller_signals_receiver_before_post_load_qualification(self) -> None:
+        caller = (
+            ROOT / "crates/sip/rvoip-sip/tests/perf/perf_burst_caller.rs"
+        ).read_text()
+        active_end = caller.index("let active_wall = started.elapsed();")
+        stop_write = caller.index("std::fs::write(&path", active_end)
+        periodic_stop = caller.index("retention_sampler.stop_periodic()", stop_write)
+        self.assertLess(active_end, stop_write)
+        self.assertLess(stop_write, periodic_stop)
+
+        runner = (
+            ROOT / "crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
+        ).read_text()
+        self.assertEqual(runner.count("cargo test"), 1)
+        self.assertIn("--test perf_burst_receiver", runner)
+        self.assertIn("--test perf_burst_caller", runner)
+        self.assertEqual(runner.count("--build-target perf_burst_"), 4)
+        self.assertIn("RVOIP_PERF_PREBUILT_MANIFEST", runner)
 
     def test_release_memory_gates_isolate_structural_diagnostics(self) -> None:
         receiver = (

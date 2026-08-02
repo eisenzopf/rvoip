@@ -691,6 +691,52 @@ def expand_command(
     ]
 
 
+def prebuilt_performance_command(
+    *,
+    gate: dict[str, Any],
+    root: Path,
+    artifact: Path,
+    candidate: str,
+    environment_id: str,
+) -> list[str] | None:
+    """Route direct Cargo performance gates through an attested binary bundle."""
+
+    manifest = os.environ.get("RVOIP_PERF_PREBUILT_MANIFEST")
+    if not manifest or not str(gate.get("resource_class", "")).startswith(
+        "gcp-performance"
+    ):
+        return None
+    command = gate.get("command") or []
+    try:
+        cargo_index = command.index("cargo")
+    except ValueError:
+        # Shell orchestrators resolve their individual binaries themselves.
+        return None
+    if cargo_index + 1 >= len(command) or command[cargo_index + 1] != "test":
+        raise GateError(
+            f"prebuilt performance gate {gate['id']} has an unsupported Cargo command"
+        )
+    return [
+        "python3",
+        str(root / "scripts/release/prebuilt_performance.py"),
+        "run-gate",
+        "--manifest",
+        manifest,
+        "--catalog",
+        str(root / DEFAULT_CATALOG),
+        "--gate-id",
+        gate["id"],
+        "--workspace",
+        str(root),
+        "--artifact-dir",
+        str(artifact),
+        "--candidate",
+        candidate,
+        "--environment-id",
+        environment_id,
+    ]
+
+
 def dependency_order(gate_ids: list[str], by_id: dict[str, dict[str, Any]]) -> list[str]:
     """Return a stable topological order for the gates in one shard."""
     selected = set(gate_ids)
@@ -817,7 +863,13 @@ def execute_gate(
                     )
                 final_code = 2
         else:
-            argv = expand_command(gate["command"], root, artifact, candidate)
+            argv = prebuilt_performance_command(
+                gate=gate,
+                root=root,
+                artifact=artifact,
+                candidate=candidate,
+                environment_id=environment_id,
+            ) or expand_command(gate["command"], root, artifact, candidate)
             final_code = run_to_log(
                 argv,
                 cwd=root / gate.get("working_directory", "."),
@@ -854,6 +906,20 @@ def execute_gate(
             "bytes": log_path.stat().st_size,
         },
     }
+    prebuilt_manifest_sha = os.environ.get("RVOIP_PERF_PREBUILT_MANIFEST_SHA256")
+    prebuilt_bundle_sha = os.environ.get("RVOIP_PERF_PREBUILT_BUNDLE_SHA256")
+    if prebuilt_manifest_sha or prebuilt_bundle_sha:
+        if not (
+            prebuilt_manifest_sha
+            and prebuilt_bundle_sha
+            and re.fullmatch(r"[0-9a-f]{64}", prebuilt_manifest_sha)
+            and re.fullmatch(r"[0-9a-f]{64}", prebuilt_bundle_sha)
+        ):
+            raise GateError("prebuilt performance digest environment is incomplete")
+        receipt["prebuilt_performance"] = {
+            "bundle_sha256": prebuilt_bundle_sha,
+            "manifest_sha256": prebuilt_manifest_sha,
+        }
     (artifact / "receipt.json").write_bytes(canonical_bytes(receipt))
     return receipt
 
