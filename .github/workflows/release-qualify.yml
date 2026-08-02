@@ -4,26 +4,31 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Commit or main ref to qualify
+        description: Protected main commit or ref to diagnose or qualify
         required: true
         default: main
         type: string
       profile:
-        description: Infrastructure preflight, core dry run, or complete qualification
+        description: Preflight, exact-gate diagnosis, core dry run, or qualification
         required: true
         default: remote-core
         type: choice
         options:
           - remote-preflight
+          - remote-diagnostic
           - remote-core
           - remote-release
+      diagnostic_gates:
+        description: Comma-separated exact GCP gate IDs for remote-diagnostic
+        required: false
+        type: string
       first_candidate:
         description: Force every selected gate to run fresh
         required: true
         default: true
         type: boolean
       prior_run_id:
-        description: Optional successful/failed qualification run to reuse exactly matching evidence
+        description: Optional comma-separated run IDs whose exact matching evidence may be reused
         required: false
         type: string
       changed_since:
@@ -37,7 +42,7 @@ permissions:
 
 concurrency:
   group: release-qualification-${{ inputs.profile }}-${{ inputs.candidate }}
-  cancel-in-progress: ${{ inputs.profile == 'remote-preflight' }}
+  cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
   RELEASE_ENVIRONMENT_ID: rvoip-release-v1-rust-1.91-nextest-0.9.140
@@ -95,16 +100,29 @@ jobs:
           PY
 
       - name: Download prior qualification evidence
-        if: inputs.profile != 'remote-preflight' && inputs.prior_run_id != ''
+        if: inputs.profile != 'remote-preflight' && inputs.profile != 'remote-diagnostic' && inputs.prior_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          PRIOR_RUN_ID: ${{ inputs.prior_run_id }}
+          PRIOR_RUN_IDS: ${{ inputs.prior_run_id }}
           REPOSITORY: ${{ github.repository }}
-        run: >-
-          gh run download "$PRIOR_RUN_ID"
-          --repo "$REPOSITORY"
-          --name release-gate-evidence
-          --dir target/prior-evidence
+        run: |
+          set -euo pipefail
+          IFS=, read -r -a run_ids <<< "$PRIOR_RUN_IDS"
+          if (( ${#run_ids[@]} > 5 )); then
+            echo "at most five prior evidence runs may be combined" >&2
+            exit 1
+          fi
+          for value in "${run_ids[@]}"; do
+            run_id="${value//[[:space:]]/}"
+            [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
+              echo "invalid prior run ID: $value" >&2
+              exit 1
+            }
+            gh run download "$run_id" \
+              --repo "$REPOSITORY" \
+              --name release-gate-evidence \
+              --dir "target/prior-evidence/$run_id"
+          done
 
       - name: Plan fresh and reusable gates
         id: plan
@@ -113,6 +131,7 @@ jobs:
           FIRST_CANDIDATE: ${{ inputs.first_candidate }}
           PRIOR_RUN_ID: ${{ inputs.prior_run_id }}
           CHANGED_SINCE: ${{ inputs.changed_since }}
+          DIAGNOSTIC_GATES: ${{ inputs.diagnostic_gates }}
           PROFILE: ${{ inputs.profile }}
         run: |
           args=(
@@ -122,13 +141,22 @@ jobs:
             --output target/release-plan/plan.json
             --github-output "$GITHUB_OUTPUT"
           )
-          if test "$FIRST_CANDIDATE" = true || test "$PROFILE" = remote-preflight; then
+          if test "$PROFILE" = remote-diagnostic; then
+            args+=(--only-gates "$DIAGNOSTIC_GATES")
+          fi
+          if test "$FIRST_CANDIDATE" = true \
+            || test "$PROFILE" = remote-preflight \
+            || test "$PROFILE" = remote-diagnostic; then
             args+=(--first-candidate)
           fi
-          if test "$PROFILE" != remote-preflight && test -n "$PRIOR_RUN_ID"; then
+          if test "$PROFILE" != remote-preflight \
+            && test "$PROFILE" != remote-diagnostic \
+            && test -n "$PRIOR_RUN_ID"; then
             args+=(--prior-evidence target/prior-evidence)
           fi
-          if test "$PROFILE" != remote-preflight && test -n "$CHANGED_SINCE"; then
+          if test "$PROFILE" != remote-preflight \
+            && test "$PROFILE" != remote-diagnostic \
+            && test -n "$CHANGED_SINCE"; then
             args+=(--changed-since "$CHANGED_SINCE")
           fi
           python3 scripts/release/gates.py plan "${args[@]}"
