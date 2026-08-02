@@ -6033,13 +6033,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=carrier-smoke",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=carrier-smoke bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=carrier-smoke RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6071,13 +6075,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=access-edge-microburst RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6109,13 +6117,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=contact-center-flash",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=contact-center-flash bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=contact-center-flash RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6147,13 +6159,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=shift-change-long-hold RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6185,13 +6201,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=overload-recovery",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=overload-recovery bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=overload-recovery RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6223,13 +6243,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=high-density-media-burst RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
@@ -6261,13 +6285,17 @@
         "env",
         "RVOIP_PERF_RESULTS={artifact_dir}",
         "RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy",
+        "RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics",
+        "RVOIP_PERF_MEMORY_DIAGNOSTICS=1",
+        "RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1",
+        "RVOIP_PERF_MIMALLOC_COLLECT_AT=off",
         "bash",
         "{workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
+      "display_command": "env RVOIP_PERF_RESULTS={artifact_dir} RVOIP_PERF_BURST_SCENARIOS=buffer-ab-legacy RVOIP_PERF_FEATURES=perf-tests,perf-infra-memory-diagnostics RVOIP_PERF_MEMORY_DIAGNOSTICS=1 RVOIP_PERF_ALLOCATOR_DIAGNOSTICS=1 RVOIP_PERF_MIMALLOC_COLLECT_AT=off bash {workspace}/crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh",
       "estimated_seconds": 900,
       "executor": "argv",
       "expected_outputs": [
