@@ -28,6 +28,8 @@ jobs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
       specialty: ${{ steps.plan.outputs.specialty }}
       specialty_count: ${{ steps.plan.outputs.specialty_count }}
+      sip_jobs: ${{ steps.plan.outputs.sip_jobs }}
+      sip_job_count: ${{ steps.plan.outputs.sip_job_count }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -43,6 +45,8 @@ jobs:
             --base HEAD
             --head HEAD
             --changed-file Cargo.lock
+            --job-mode combined
+            --deferred-sip-mode separate
             --github-output "$GITHUB_OUTPUT"
             --specialty-gate release-tooling
             --specialty-gate rtp-interop
@@ -169,6 +173,74 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  sip-tests:
+    name: Full SIP ${{ matrix.id }}
+    needs: plan
+    if: needs.plan.outputs.sip_job_count != '0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.sip_jobs) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: clippy
+
+      - name: Restore SIP lane cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          shared-key: main-sip-${{ matrix.id }}
+
+      - name: Install system dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev protobuf-compiler pkg-config cmake lsof
+
+      - name: Test SIP library, binaries, and examples
+        if: matrix.kind == 'core-test'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-core
+          --name sip-${{ matrix.id }}
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Lint every SIP target
+        if: matrix.kind == 'clippy'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-clippy
+          --name sip-${{ matrix.id }}
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Build and run SIP process fixtures once
+        if: matrix.kind == 'fixtures'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-fixtures
+          --name sip-${{ matrix.id }}
+          --targets '${{ matrix.targets_csv }}'
+          --examples '${{ matrix.examples_csv }}'
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Run bounded SIP integration partition
+        if: matrix.kind == 'integration'
+        run: >-
+          python3 scripts/ci/run_checks.py sip-integration
+          --name sip-${{ matrix.id }}
+          --targets '${{ matrix.targets_csv }}'
+          --output target/ci-receipts/sip-${{ matrix.id }}.json
+
+      - name: Upload SIP lane receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: main-evidence-sip-${{ matrix.id }}
+          path: target/ci-receipts/sip-${{ matrix.id }}.json
+          retention-days: 30
+          if-no-files-found: warn
+
   specialty:
     name: Full specialty ${{ matrix.gate }}
     needs: plan
@@ -218,7 +290,7 @@ jobs:
   main-gate:
     name: Main Gate
     if: always()
-    needs: [plan, policy, crate-tests, doctest, specialty]
+    needs: [plan, policy, crate-tests, doctest, specialty, sip-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -239,6 +311,7 @@ jobs:
             --job 'plan=${{ needs.plan.result }}' \
             --job 'policy=${{ needs.policy.result }}' \
             --job 'crate-tests=${{ needs.crate-tests.result }}' \
+            --job 'sip-tests=${{ needs.sip-tests.result }}' \
             --job 'specialty=${{ needs.specialty.result }}' \
             --job 'doctest=${{ needs.doctest.result }}' \
             --required-job doctest \

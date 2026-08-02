@@ -61,6 +61,14 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_main_aggregates_one_receipt_per_combined_shard(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()
         self.assertIn("--shard-layout shards", text)
+        self.assertIn("--job-mode combined", text)
+        self.assertIn("--deferred-sip-mode separate", text)
+        self.assertIn("Full SIP ${{ matrix.id }}", text)
+        self.assertIn("run_checks.py sip-core", text)
+        self.assertIn("run_checks.py sip-clippy", text)
+        self.assertIn("run_checks.py sip-fixtures", text)
+        self.assertIn("run_checks.py sip-integration", text)
+        self.assertIn("--job 'sip-tests=${{ needs.sip-tests.result }}'", text)
 
     def test_main_release_tooling_installs_its_fuzz_toolchain(self) -> None:
         text = (ROOT / ".github/workflows/main-ci.yml").read_text()

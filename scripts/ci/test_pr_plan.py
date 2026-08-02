@@ -280,6 +280,55 @@ class PlannerTests(unittest.TestCase):
                 job_mode="combined",
             )
 
+    def test_main_runs_pr_deferred_sip_target_in_a_separate_lane(self) -> None:
+        metadata = copy.deepcopy(self.metadata)
+        package_root = self.root / "crates" / "rvoip-sip"
+        package_root.mkdir(parents=True)
+        manifest = package_root / "Cargo.toml"
+        manifest.write_text("[package]\nname = 'rvoip-sip'\n")
+        package_id = f"path+file://{package_root}#rvoip-sip@1.0.0"
+        metadata["workspace_members"].append(package_id)
+        metadata["packages"].append(
+            {
+                "id": package_id,
+                "name": "rvoip-sip",
+                "manifest_path": str(manifest),
+                "dependencies": [],
+                "targets": [
+                    {"name": "audio_roundtrip_integration", "kind": ["test"]},
+                    {"name": "event_tests", "kind": ["test"]},
+                ],
+            }
+        )
+        policy = copy.deepcopy(self.policy)
+        policy["pr_deferred_sip_targets"] = ["audio_roundtrip_integration"]
+        policy["pr_sip_fixture_examples"] = {
+            "audio_roundtrip_integration": ["audio_alice", "audio_bob"]
+        }
+        plan = pr_plan.make_plan(
+            root=self.root,
+            metadata=metadata,
+            policy=policy,
+            paths=["Cargo.lock"],
+            base="base",
+            head="head",
+            candidate=None,
+            job_mode="combined",
+            deferred_sip_mode="separate",
+        )
+        self.assertEqual(plan["deferred_sip_targets"], [])
+        self.assertEqual(
+            plan["separate_sip_targets"], ["audio_roundtrip_integration"]
+        )
+        long_job = next(
+            job
+            for job in plan["sip_jobs"]
+            if job["id"] == "long-audio_roundtrip_integration"
+        )
+        self.assertEqual(long_job["kind"], "fixtures")
+        self.assertEqual(long_job["targets_csv"], "audio_roundtrip_integration")
+        self.assertEqual(long_job["examples_csv"], "audio_alice,audio_bob")
+
 
 if __name__ == "__main__":
     unittest.main()

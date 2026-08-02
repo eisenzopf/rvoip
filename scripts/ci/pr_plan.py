@@ -246,9 +246,12 @@ def make_plan(
     head: str,
     candidate: str | None = None,
     job_mode: str = "split",
+    deferred_sip_mode: str = "defer",
 ) -> dict[str, Any]:
     if job_mode not in {"split", "combined"}:
         raise PlanError(f"unsupported shard job mode: {job_mode!r}")
+    if deferred_sip_mode not in {"defer", "separate"}:
+        raise PlanError(f"unsupported deferred SIP mode: {deferred_sip_mode!r}")
     normalized = sorted({normalize_path(path) for path in paths})
     packages = workspace_packages(root, metadata)
     known_policy_paths = set(policy.get("known_policy_paths", []))
@@ -329,11 +332,16 @@ def make_plan(
     shard_selection = set(selected)
     sip_jobs: list[dict[str, Any]] = []
     deferred_sip_targets: list[str] = []
+    separate_sip_targets: list[str] = []
     if job_mode == "combined" and "rvoip-sip" in shard_selection:
         shard_selection.remove("rvoip-sip")
         all_sip_targets = integration_test_targets(metadata, "rvoip-sip")
-        deferred_sip_targets = sorted(set(policy.get("pr_deferred_sip_targets", [])))
-        unknown_deferred = sorted(set(deferred_sip_targets) - set(all_sip_targets))
+        declared_deferred_sip_targets = sorted(
+            set(policy.get("pr_deferred_sip_targets", []))
+        )
+        unknown_deferred = sorted(
+            set(declared_deferred_sip_targets) - set(all_sip_targets)
+        )
         if unknown_deferred:
             raise PlanError(
                 "unknown deferred SIP test targets: " + ", ".join(unknown_deferred)
@@ -364,7 +372,15 @@ def make_plan(
                 raise PlanError(
                     f"SIP process-fixture target {target!r} has invalid examples"
                 )
-        runnable_sip_targets = set(all_sip_targets) - set(deferred_sip_targets)
+        deferred_sip_targets = (
+            declared_deferred_sip_targets if deferred_sip_mode == "defer" else []
+        )
+        separate_sip_targets = (
+            declared_deferred_sip_targets if deferred_sip_mode == "separate" else []
+        )
+        runnable_sip_targets = (
+            set(all_sip_targets) - set(declared_deferred_sip_targets)
+        )
         fixture_targets = sorted(runnable_sip_targets & set(fixture_examples))
         regular_sip_targets = sorted(runnable_sip_targets - set(fixture_targets))
         requested_partitions = max(1, int(policy.get("pr_sip_partitions", 3)))
@@ -412,6 +428,27 @@ def make_plan(
             }
             for index, partition in enumerate(partitions, start=1)
         )
+        for target in separate_sip_targets:
+            if target in fixture_examples:
+                sip_jobs.append(
+                    {
+                        "id": f"long-{target}",
+                        "kind": "fixtures",
+                        "targets_csv": target,
+                        "examples_csv": ",".join(sorted(set(fixture_examples[target]))),
+                    }
+                )
+            else:
+                sip_jobs.append(
+                    {
+                        "id": f"long-{target}",
+                        "kind": "integration",
+                        "targets_csv": target,
+                        "estimated_seconds": int(
+                            policy.get("pr_sip_target_weights", {}).get(target, 5)
+                        ),
+                    }
+                )
 
     shards = make_shards(shard_selection, policy)
     shard_checks = ("all",) if job_mode == "combined" else ("test", "clippy")
@@ -449,6 +486,7 @@ def make_plan(
         "specialty_gates": specialty,
         "sip_jobs": sip_jobs,
         "deferred_sip_targets": deferred_sip_targets,
+        "separate_sip_targets": separate_sip_targets,
         "shards": shards,
         "shard_jobs": shard_jobs,
     }
@@ -498,6 +536,12 @@ def parser() -> argparse.ArgumentParser:
         help="emit separate test/clippy jobs or one warm combined job per shard",
     )
     result.add_argument(
+        "--deferred-sip-mode",
+        choices=("defer", "separate"),
+        default="defer",
+        help="defer long SIP targets from PRs or run each in its own lane",
+    )
+    result.add_argument(
         "--policy", type=Path, default=Path("scripts/ci/policy.json")
     )
     result.add_argument("--output", type=Path, default=Path("target/ci-plan/plan.json"))
@@ -523,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
             head=args.head,
             candidate=args.candidate,
             job_mode=args.job_mode,
+            deferred_sip_mode=args.deferred_sip_mode,
         )
         for gate in args.specialty_gate:
             if not gate or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in gate):
