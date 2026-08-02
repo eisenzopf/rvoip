@@ -154,6 +154,46 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(aggregate["executor"], "aggregate")
         self.assertEqual(set(aggregate["dependencies"]), scenario_ids)
 
+    def test_remote_preflight_recreates_the_complete_gcp_worker_shape(self) -> None:
+        selected = self.catalog["profiles"]["remote-preflight"]
+        self.assertEqual(len(selected), 17)
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        matrix = gates.matrix_for(
+            [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
+            by_id,
+        )
+        counts = {
+            resource: sum(shard["resource_class"] == resource for shard in matrix)
+            for resource in (
+                "gcp-performance",
+                "gcp-performance-soak",
+                "gcp-interop",
+            )
+        }
+        self.assertEqual(
+            counts,
+            {
+                "gcp-performance": 7,
+                "gcp-performance-soak": 9,
+                "gcp-interop": 1,
+            },
+        )
+        self.assertEqual(len(matrix), 17)
+        self.assertEqual(
+            sum(int(shard["machine_type"].rsplit("-", 1)[1]) for shard in matrix),
+            96,
+        )
+        self.assertTrue(all(not shard["hosted"] for shard in matrix))
+        self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
+        for gate_id in selected:
+            with self.subTest(gate=gate_id):
+                gate = by_id[gate_id]
+                self.assertTrue(gate["always_fresh"])
+                self.assertIn(
+                    "infra/release-runners/release-infrastructure-preflight.sh",
+                    gate["command"],
+                )
+
     def test_remote_release_requires_bridgefu_chromium_dtmf_regression(self) -> None:
         gate_id = "interop.browser-dtmf"
         self.assertIn(gate_id, self.catalog["profiles"]["remote-release"])
