@@ -47,15 +47,38 @@ class RunChecksTests(unittest.TestCase):
             ],
         )
 
-    def test_pr_sip_core_reuses_build_before_clippy(self) -> None:
-        commands = run_checks.sip_pr_core_commands()
-        self.assertEqual(commands[0][0][0:2], ["cargo", "test"])
-        self.assertEqual(commands[1][0][0:2], ["cargo", "clippy"])
-        self.assertIn("--all-targets", commands[1][0])
+    def test_pr_sip_core_and_clippy_are_independent_lanes(self) -> None:
+        core = run_checks.sip_core_commands()
+        clippy = run_checks.sip_clippy_commands()
+        self.assertEqual(len(core), 1)
+        self.assertEqual(core[0][0][0:2], ["cargo", "test"])
+        self.assertEqual(len(clippy), 1)
+        self.assertEqual(clippy[0][0][0:2], ["cargo", "clippy"])
+        self.assertIn("--all-targets", clippy[0][0])
+
+    def test_sip_fixture_lane_prebuilds_examples_in_the_shared_target(self) -> None:
+        root = Path("/workspace")
+        commands = run_checks.sip_fixture_commands(
+            "cancel_integration,blind_transfer_integration",
+            "cancel_bob,cancel_alice",
+            root,
+        )
+        self.assertEqual(commands[0][0][0:2], ["cargo", "build"])
+        self.assertEqual(
+            commands[0][0][-4:],
+            ["--example", "cancel_alice", "--example", "cancel_bob"],
+        )
+        self.assertEqual(commands[1][0][0:2], ["cargo", "test"])
+        self.assertEqual(
+            commands[1][2]["RVOIP_SIP_PREBUILT_EXAMPLE_DIR"],
+            "/workspace/target/debug/examples",
+        )
 
     def test_sip_target_arguments_reject_shell_metacharacters(self) -> None:
         with self.assertRaises(run_checks.CheckError):
             run_checks.sip_integration_commands("safe; touch compromised")
+        with self.assertRaises(run_checks.CheckError):
+            run_checks.sip_fixture_commands("safe", "unsafe;example", Path("/workspace"))
 
     def test_example_smoke_preserves_the_hardware_free_matrix(self) -> None:
         commands = run_checks.specialty_commands("examples-smoke", Path("/workspace"))

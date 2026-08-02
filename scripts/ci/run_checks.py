@@ -59,6 +59,9 @@ def command_record(
         exit_code = 127
     finally:
         print("::endgroup::", flush=True)
+    environment_overrides = {
+        key: value for key, value in (env or {}).items() if os.environ.get(key) != value
+    }
     return {
         "argv": argv,
         "working_directory": (cwd or root).relative_to(root).as_posix()
@@ -67,6 +70,7 @@ def command_record(
         "started_at": started,
         "duration_seconds": round(time.monotonic() - start, 3),
         "exit_code": exit_code,
+        "environment_overrides": environment_overrides,
     }
 
 
@@ -166,10 +170,13 @@ def sip_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | N
     ]
 
 
-def sip_pr_core_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+def sip_clippy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
     return [
-        *sip_core_commands(),
-        (["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"], None, None),
+        (
+            ["cargo", "clippy", "--locked", "-p", "rvoip-sip", "--all-targets"],
+            None,
+            None,
+        )
     ]
 
 
@@ -183,6 +190,36 @@ def sip_integration_commands(
     for target in targets:
         argv.extend(("--test", target))
     return [(argv, None, None)]
+
+
+def sip_fixture_commands(
+    targets_csv: str,
+    examples_csv: str,
+    root: Path,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    targets = sorted(set(filter(None, targets_csv.split(","))))
+    examples = sorted(set(filter(None, examples_csv.split(","))))
+    if not targets or any(not TARGET.fullmatch(target) for target in targets):
+        raise CheckError(f"invalid SIP process-fixture target selection: {targets_csv!r}")
+    if not examples or any(not TARGET.fullmatch(example) for example in examples):
+        raise CheckError(f"invalid SIP process-fixture example selection: {examples_csv!r}")
+
+    target_root = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+    if not target_root.is_absolute():
+        target_root = root / target_root
+    prebuilt_dir = target_root / "debug" / "examples"
+    fixture_env = {
+        **os.environ,
+        "RVOIP_SIP_PREBUILT_EXAMPLE_DIR": str(prebuilt_dir),
+    }
+
+    build = ["cargo", "build", "--locked", "-p", "rvoip-sip"]
+    for example in examples:
+        build.extend(("--example", example))
+    test = ["cargo", "test", "--locked", "-p", "rvoip-sip"]
+    for target in targets:
+        test.extend(("--test", target))
+    return [(build, None, None), (test, None, fixture_env)]
 
 
 def specialty_commands(
@@ -467,14 +504,16 @@ def main(argv: list[str] | None = None) -> int:
             "specialty",
             "doctest",
             "sip-core",
-            "sip-pr-core",
+            "sip-clippy",
             "sip-integration",
+            "sip-fixtures",
         ),
     )
     parser.add_argument("--name", required=True)
     parser.add_argument("--packages", default="")
     parser.add_argument("--gate", default="")
     parser.add_argument("--targets", default="")
+    parser.add_argument("--examples", default="")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[2]
@@ -496,10 +535,12 @@ def main(argv: list[str] | None = None) -> int:
             ]
         elif args.kind == "sip-core":
             commands = sip_core_commands()
-        elif args.kind == "sip-pr-core":
-            commands = sip_pr_core_commands()
+        elif args.kind == "sip-clippy":
+            commands = sip_clippy_commands()
         elif args.kind == "sip-integration":
             commands = sip_integration_commands(args.targets)
+        elif args.kind == "sip-fixtures":
+            commands = sip_fixture_commands(args.targets, args.examples, root)
         else:
             if args.gate == "vcon-postgres":
                 postgres_name = start_postgres(root, records)

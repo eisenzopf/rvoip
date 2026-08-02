@@ -49,11 +49,52 @@
   "pr_deferred_sip_targets": [
     "audio_roundtrip_integration"
   ],
+  "pr_sip_fixture_examples": {
+    "audio_roundtrip_integration": [
+      "stream_peer_audio_alice",
+      "stream_peer_audio_bob"
+    ],
+    "blind_transfer_integration": [
+      "stream_peer_blind_transfer_alice",
+      "stream_peer_blind_transfer_bob",
+      "stream_peer_blind_transfer_charlie"
+    ],
+    "bridge_roundtrip_integration": [
+      "unified_b2bua_bridge_alice",
+      "unified_b2bua_bridge_carol",
+      "unified_b2bua_bridge_peer"
+    ],
+    "cancel_integration": [
+      "regression_cancel_alice",
+      "regression_cancel_bob"
+    ],
+    "endpoint_audio_roundtrip_integration": [
+      "endpoint_audio_roundtrip"
+    ],
+    "glare_retry_integration": [
+      "regression_glare_retry_alice",
+      "regression_glare_retry_bob"
+    ],
+    "notify_send_integration": [
+      "regression_notify_send_alice",
+      "regression_notify_send_bob"
+    ],
+    "prack_integration": [
+      "regression_prack_alice",
+      "regression_prack_bob"
+    ],
+    "session_timer_failure_integration": [
+      "regression_session_timer_failure_alice",
+      "regression_session_timer_failure_bob"
+    ],
+    "session_timer_integration": [
+      "regression_session_timer_alice",
+      "regression_session_timer_bob"
+    ]
+  },
   "pr_sip_target_weights": {
     "endpoint_unified_auth": 90,
-    "blind_transfer_integration": 55,
-    "bridge_roundtrip_integration": 35,
-    "endpoint_audio_roundtrip_integration": 20
+    "invite_planner_retention_qualification": 20
   },
   "specialty_rules": [
     {
