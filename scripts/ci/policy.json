@@ -48,6 +48,13 @@
     "06-attended-transfer",
     "11-ai-harness-demo"
   ],
+  "pr_example_smoke_projects": [
+    "01-quickstart-p2p",
+    "02-softphone-audio",
+    "06-attended-transfer",
+    "07-secure-call-srtp",
+    "10-call-center-b2bua"
+  ],
   "pr_sip_partitions": 3,
   "pr_deferred_sip_targets": [
     "audio_roundtrip_integration"
